@@ -376,3 +376,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: the policy-gated DNS handler uses a placeholder sandbox ID and is not yet part of a full session context; static DNS records still lack config loading.
 - Exact next step: commit policy-gated DNS write-back, then add a session context carrying sandbox ID/broker DNS/resolver/cache so packet handlers do not use placeholder identity.
+
+## 2026-06-22T00:06:35Z
+- Current objective: remove placeholder identity from policy-gated DNS packet handling by carrying session context into runtime DNS handling.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on formatting; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 48 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 19 runtime tests, and 7 setup tests passed. `BrokerDnsRuntime` now carries sandbox ID, resolver, cache, broker DNS addresses, and verification kernel; tests assert audit records use the configured sandbox IDs for allowed and denied DNS packets.
+- Commit hash when committed: pending.
+- Remaining risks: session context currently covers DNS runtime only; broader TUN packet sessions still need policy/audit identity for ICMP, unsupported packets, and future TCP/UDP forwarding.
+- Exact next step: commit DNS session identity, then add policy/audit gating for ICMP echo handling so ping behavior follows `allow_ping`/rules instead of unconditional write-back.

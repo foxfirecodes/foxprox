@@ -236,6 +236,7 @@ pub fn handle_one_tun_packet<R: Read, W: Write>(
 }
 
 pub struct BrokerDnsRuntime<'a, S> {
+    pub sandbox_id: SandboxId,
     pub resolver: &'a StaticDnsResolver,
     pub cache: &'a mut DnsCache,
     pub broker_dns: &'a [IpAddr],
@@ -253,11 +254,8 @@ pub fn handle_one_tun_packet_with_dns_policy<R: Read, W: Write, S: AuditSink>(
     let packet = &buffer[..bytes_read];
     match parse_ip_packet(packet) {
         Ok(ParsedIpPacket::Udpv4Packet(udp)) if udp.destination_port == 53 => {
-            let event = udpv4_packet_to_event_with_broker_dns(
-                SandboxId::new("tun-dns").expect("static sandbox id is valid"),
-                &udp,
-                dns.broker_dns,
-            );
+            let event =
+                udpv4_packet_to_event_with_broker_dns(dns.sandbox_id.clone(), &udp, dns.broker_dns);
             let decision = dns.kernel.decide_and_audit(&event, timestamp_millis);
             if decision.action != DecisionAction::Allow {
                 return Ok(TunPacketOutcome::PolicyDenied { decision });
@@ -585,6 +583,7 @@ mod tests {
             VecAuditSink::bounded(4),
         );
         let mut dns = BrokerDnsRuntime {
+            sandbox_id: SandboxId::new("dns-deny").unwrap(),
             resolver: &resolver,
             cache: &mut cache,
             broker_dns: &[IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
@@ -607,6 +606,10 @@ mod tests {
         ));
         assert!(writer.is_empty());
         assert_eq!(kernel.audit_sink().events().len(), 1);
+        assert_eq!(
+            kernel.audit_sink().events()[0].sandbox_id.as_str(),
+            "dns-deny"
+        );
     }
 
     #[test]
@@ -634,6 +637,7 @@ mod tests {
             VecAuditSink::bounded(4),
         );
         let mut dns = BrokerDnsRuntime {
+            sandbox_id: SandboxId::new("dns-allow").unwrap(),
             resolver: &resolver,
             cache: &mut cache,
             broker_dns: &[IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
@@ -655,6 +659,10 @@ mod tests {
         ));
         assert!(!writer.is_empty());
         assert_eq!(kernel.audit_sink().events().len(), 1);
+        assert_eq!(
+            kernel.audit_sink().events()[0].sandbox_id.as_str(),
+            "dns-allow"
+        );
     }
 
     #[test]
