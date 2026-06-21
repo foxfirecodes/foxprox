@@ -857,6 +857,14 @@ impl PolicyEngine {
             }
         }
 
+        if self.is_default_denied_udp_discovery(event) {
+            return PolicyDecision::Deny {
+                behavior: DenialBehavior::Drop,
+                reason: "udp-multicast-broadcast-denied".to_owned(),
+                rule_id: None,
+            };
+        }
+
         match &self.config.default_policy {
             DefaultPolicy::Allow => PolicyDecision::Allow { rule_id: None },
             DefaultPolicy::Deny(reason) => PolicyDecision::Deny {
@@ -890,6 +898,26 @@ impl PolicyEngine {
             .broker_resolvers
             .iter()
             .any(|resolver| resolver == &destination)
+    }
+
+    fn is_default_denied_udp_discovery(&self, event: &NormalizedEvent) -> bool {
+        if !matches!(
+            event.protocol(),
+            Protocol::Udp | Protocol::Dns | Protocol::QuicCandidate
+        ) {
+            return false;
+        }
+        event
+            .destination()
+            .map(|destination| is_multicast_or_broadcast(destination.ip))
+            .unwrap_or(false)
+    }
+}
+
+fn is_multicast_or_broadcast(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(addr) => addr.is_multicast() || addr.octets() == [255, 255, 255, 255],
+        IpAddr::V6(addr) => addr.is_multicast(),
     }
 }
 
@@ -1194,6 +1222,73 @@ mod tests {
         assert_eq!(
             engine.evaluate(&event).decision,
             PolicyDecision::Allow { rule_id: None }
+        );
+    }
+
+    #[test]
+    fn udp_multicast_and_broadcast_are_denied_before_default_allow() {
+        let engine = PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            dns: DnsPolicy {
+                broker_resolvers: vec![Endpoint::udp(Ipv4Addr::new(10, 0, 0, 1).into(), 53)],
+                deny_direct_external_dns: true,
+            },
+            rules: Vec::new(),
+        });
+        let multicast = NormalizedEvent::UdpFlowAttempt(UdpFlowAttempt {
+            sandbox_id: sandbox_id(),
+            frontend: FrontendKind::Tun,
+            source: Endpoint::udp(Ipv4Addr::new(10, 0, 0, 2).into(), 53530),
+            destination: Endpoint::udp(Ipv4Addr::new(224, 0, 0, 251).into(), 5353),
+            classification: UdpClassification::Generic,
+            attribution: None,
+        });
+        let broadcast = NormalizedEvent::UdpFlowAttempt(UdpFlowAttempt {
+            destination: Endpoint::udp(Ipv4Addr::new(255, 255, 255, 255).into(), 1900),
+            ..match multicast.clone() {
+                NormalizedEvent::UdpFlowAttempt(event) => event,
+                _ => unreachable!(),
+            }
+        });
+
+        for event in [multicast, broadcast] {
+            assert_eq!(
+                engine.evaluate(&event).decision,
+                PolicyDecision::Deny {
+                    behavior: DenialBehavior::Drop,
+                    reason: "udp-multicast-broadcast-denied".to_owned(),
+                    rule_id: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_rule_can_allow_udp_multicast_destination() {
+        let rule = PolicyRule::new("allow-mdns", RuleAction::Allow)
+            .unwrap()
+            .with_protocol(Protocol::Udp)
+            .with_destination_cidr(IpCidr::single(Ipv4Addr::new(224, 0, 0, 251).into()))
+            .with_destination_port(5353);
+        let engine = PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            rules: vec![rule],
+            ..PolicyConfig::default()
+        });
+        let event = NormalizedEvent::UdpFlowAttempt(UdpFlowAttempt {
+            sandbox_id: sandbox_id(),
+            frontend: FrontendKind::Tun,
+            source: Endpoint::udp(Ipv4Addr::new(10, 0, 0, 2).into(), 53530),
+            destination: Endpoint::udp(Ipv4Addr::new(224, 0, 0, 251).into(), 5353),
+            classification: UdpClassification::Generic,
+            attribution: None,
+        });
+
+        assert_eq!(
+            engine.evaluate(&event).decision,
+            PolicyDecision::Allow {
+                rule_id: Some("allow-mdns".to_owned())
+            }
         );
     }
 

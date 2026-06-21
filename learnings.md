@@ -68,3 +68,7 @@ As runtime config grows beyond policy, expose a combined validated config while 
 ## 2026-06-21 — lifecycle audit events need a non-decision state
 
 Flow expiration is observed lifecycle evidence, not an allow/deny decision. Audit schemas should distinguish policy decisions from lifecycle observations to avoid misleading logs.
+
+## 2026-06-21 — default-deny safeguards should run after explicit allow rules
+
+For policy defaults like multicast/broadcast denial, evaluate explicit rules first so narrowly configured opt-ins can work without adding special bypass flags.

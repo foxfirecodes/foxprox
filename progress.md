@@ -373,3 +373,25 @@
 - What failed or surprised the agent: lifecycle audit events need an observed/non-decision audit state; overloading allow/deny/fail-closed would make expiration logs misleading.
 - What remains unproven: runtime scheduling of expiration scans, writing expiration audit to a sink in a live loop, TCP flow close audit, UDP forwarding, and resource-limit enforcement are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — UDP multicast/broadcast default-deny policy slice
+
+- Slice attempted: enforce alpha fail-closed/default-deny behavior for UDP multicast and broadcast destinations even when the global default policy is allow, while preserving explicit allow rules.
+- Why next: UDP flow lifecycle is now tracked, but alpha policy requires LAN discovery/multicast/broadcast to be denied by default unless explicitly enabled.
+- Verification plan: add core policy checks for UDP/DNS/QUIC multicast and IPv4 broadcast destinations after explicit rules but before default policy, verify default-allow denies multicast/broadcast, verify an explicit allow rule can opt in, then run formatting, clippy, focused core tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — UDP multicast/broadcast default-deny policy
+
+- Slice attempted: deny UDP multicast and IPv4 broadcast destinations by default even when global default policy is allow, while permitting explicit opt-in rules.
+- Why next: alpha requires LAN discovery/multicast/broadcast to be denied by default, and UDP flow support made this policy gap more important before forwarding.
+- What changed: `PolicyEngine` now checks UDP/DNS/QUIC destination IPs for IPv4 multicast, IPv4 limited broadcast, and IPv6 multicast after explicit rule matching but before global default policy. Denials use reason `udp-multicast-broadcast-denied`; explicit allow rules can still opt in to specific multicast destinations.
+- Verification:
+  - `cargo fmt --check` passed.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 6 `foxprox-config` tests, 12 `foxprox-core` tests, 5 `foxprox-flow` tests, 18 `foxprox-inspect` tests, 10 `foxprox-packet` tests, and 0 doc tests.
+  - Focused checks passed: `cargo test -p foxprox-core udp_multicast_and_broadcast_are_denied_before_default_allow` and `cargo test -p foxprox-core explicit_rule_can_allow_udp_multicast_destination`.
+  - `cargo fmt --check` passed after focused checks.
+- What failed or surprised the agent: the policy check belongs after explicit rules, not before them, so documented explicit support can be added by configuration without changing core logic.
+- What remains unproven: configurable multicast/broadcast allowances in user-facing examples, IPv4 subnet-directed broadcast detection, live UDP forwarding behavior, and ICMP unreachable synthesis for denied UDP are still absent.
+- Commit: this commit.
