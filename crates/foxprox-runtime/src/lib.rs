@@ -7,9 +7,10 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    parse_ip_packet, synthesize_icmpv4_echo_reply, AuditSink, Decision, DecisionAction, Endpoint,
-    FrontendKind, NormalizedEvent, PacketError, ParsedIpPacket, Protocol, QuicStatus, SandboxId,
-    Udpv4Packet, UnsupportedIpv4Protocol, VerificationKernel,
+    parse_dns_query, parse_ip_packet, synthesize_icmpv4_echo_reply, AuditSink, Decision,
+    DecisionAction, Endpoint, FrontendKind, HostnameAttribution, NormalizedEvent, PacketError,
+    ParsedIpPacket, Protocol, QuicStatus, SandboxId, Udpv4Packet, UnsupportedIpv4Protocol,
+    VerificationKernel,
 };
 use std::io::{self, Read, Write};
 use std::net::IpAddr;
@@ -143,6 +144,7 @@ fn event_to_egress(event: &NormalizedEvent) -> Option<EgressRequest> {
         | NormalizedEvent::DnsPacketAttempt { .. }
         | NormalizedEvent::HttpRequest { .. }
         | NormalizedEvent::IcmpMessage { .. }
+        | NormalizedEvent::MalformedNetworkEvent { .. }
         | NormalizedEvent::UnsupportedNetworkEvent { .. }
         | NormalizedEvent::SocksConnect { .. } => None,
     }
@@ -255,9 +257,33 @@ fn unsupported_or_malformed_outcome(packet: &[u8]) -> io::Result<TunPacketOutcom
 }
 
 pub fn udpv4_packet_to_event(sandbox_id: SandboxId, packet: &Udpv4Packet<'_>) -> NormalizedEvent {
+    udpv4_packet_to_event_with_broker_dns(sandbox_id, packet, &[])
+}
+
+pub fn udpv4_packet_to_event_with_broker_dns(
+    sandbox_id: SandboxId,
+    packet: &Udpv4Packet<'_>,
+    broker_dns: &[IpAddr],
+) -> NormalizedEvent {
     let source = Endpoint::new(IpAddr::V4(packet.source), packet.source_port);
     let destination = Endpoint::new(IpAddr::V4(packet.destination), packet.destination_port);
     if destination.is_dns_port() {
+        if broker_dns.contains(&destination.ip) {
+            return match parse_dns_query(packet.payload) {
+                Ok(question) => NormalizedEvent::DnsQuery {
+                    sandbox_id,
+                    frontend: FrontendKind::Tun,
+                    source,
+                    destination,
+                    query: HostnameAttribution::broker_dns(question.hostname),
+                },
+                Err(_) => NormalizedEvent::MalformedNetworkEvent {
+                    sandbox_id,
+                    frontend: FrontendKind::Tun,
+                    protocol: Protocol::Dns,
+                },
+            };
+        }
         return NormalizedEvent::DnsPacketAttempt {
             sandbox_id,
             frontend: FrontendKind::Tun,
@@ -388,6 +414,49 @@ mod tests {
     }
 
     #[test]
+    fn broker_dns_udp_packet_parses_query_for_audit_policy_event() {
+        let dns_payload = dns_query_payload();
+        let packet = Udpv4Packet {
+            source: Ipv4Addr::new(10, 66, 0, 2),
+            destination: Ipv4Addr::new(10, 66, 0, 1),
+            source_port: 53000,
+            destination_port: 53,
+            payload: &dns_payload,
+        };
+        let event = udpv4_packet_to_event_with_broker_dns(
+            SandboxId::new("udp-policy").unwrap(),
+            &packet,
+            &[IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+        );
+
+        let NormalizedEvent::DnsQuery { query, .. } = event else {
+            panic!("expected parsed DNS query event");
+        };
+        assert_eq!(query.hostname.as_str(), "example.com");
+    }
+
+    #[test]
+    fn malformed_broker_dns_udp_packet_fails_closed_as_malformed() {
+        let packet = Udpv4Packet {
+            source: Ipv4Addr::new(10, 66, 0, 2),
+            destination: Ipv4Addr::new(10, 66, 0, 1),
+            source_port: 53000,
+            destination_port: 53,
+            payload: &[0, 1, 2],
+        };
+        let event = udpv4_packet_to_event_with_broker_dns(
+            SandboxId::new("udp-policy").unwrap(),
+            &packet,
+            &[IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+        );
+
+        let decision =
+            PolicyEngine::new(PolicyConfig::default()).evaluate(&event.to_policy_input());
+        assert_eq!(decision.action, DecisionAction::FailClosed);
+        assert_eq!(decision.reason, DecisionReason::MalformedInput);
+    }
+
+    #[test]
     fn udp_dns_packet_event_triggers_direct_dns_policy_denial() {
         let packet = Udpv4Packet {
             source: Ipv4Addr::new(10, 66, 0, 2),
@@ -502,6 +571,23 @@ mod tests {
         let outcome = runtime.handle_event(&tcp_event(), 1);
         assert!(matches!(outcome, RuntimeOutcome::Denied { .. }));
         assert_eq!(runtime.egress().tcp_attempts, 0);
+    }
+
+    fn dns_query_payload() -> Vec<u8> {
+        let mut packet = vec![0x12, 0x34];
+        packet.extend_from_slice(&0x0100u16.to_be_bytes());
+        packet.extend_from_slice(&1u16.to_be_bytes());
+        packet.extend_from_slice(&0u16.to_be_bytes());
+        packet.extend_from_slice(&0u16.to_be_bytes());
+        packet.extend_from_slice(&0u16.to_be_bytes());
+        packet.push(7);
+        packet.extend_from_slice(b"example");
+        packet.push(3);
+        packet.extend_from_slice(b"com");
+        packet.push(0);
+        packet.extend_from_slice(&1u16.to_be_bytes());
+        packet.extend_from_slice(&1u16.to_be_bytes());
+        packet
     }
 
     fn build_ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {

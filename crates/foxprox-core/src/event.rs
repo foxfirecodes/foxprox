@@ -62,6 +62,11 @@ pub enum NormalizedEvent {
         source: Endpoint,
         destination: Endpoint,
     },
+    MalformedNetworkEvent {
+        sandbox_id: SandboxId,
+        frontend: FrontendKind,
+        protocol: Protocol,
+    },
     UnsupportedNetworkEvent {
         sandbox_id: SandboxId,
         frontend: FrontendKind,
@@ -171,6 +176,15 @@ impl NormalizedEvent {
                 destination,
             } => PolicyInput::new(sandbox_id.clone(), *frontend, Protocol::Icmp)
                 .with_endpoints(source.clone(), destination.clone()),
+            Self::MalformedNetworkEvent {
+                sandbox_id,
+                frontend,
+                protocol,
+            } => {
+                let mut input = PolicyInput::new(sandbox_id.clone(), *frontend, *protocol);
+                input.malformed = true;
+                input
+            }
             Self::UnsupportedNetworkEvent {
                 sandbox_id,
                 frontend,
@@ -302,7 +316,12 @@ impl NormalizedEvent {
             )
             .with_protocol(Protocol::Icmp)
             .with_endpoints(source.clone(), destination.clone()),
-            Self::UnsupportedNetworkEvent {
+            Self::MalformedNetworkEvent {
+                sandbox_id,
+                frontend,
+                protocol,
+            }
+            | Self::UnsupportedNetworkEvent {
                 sandbox_id,
                 frontend,
                 protocol,

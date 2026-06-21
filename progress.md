@@ -280,3 +280,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: DNS parser is intentionally minimal; it does not yet parse DNS response codes, CNAME chains, multiple-question queries, EDNS, TCP DNS, or synthesize/forward DNS responses.
 - Exact next step: commit DNS parser/cache slice, then wire broker-directed UDP/53 packets to parse DNS questions into `DnsQuery` policy/audit events before resolver forwarding exists.
+
+## 2026-06-21T23:10:15Z
+- Current objective: wire broker-directed UDP/53 packets to parsed DNS query policy/audit events.
+- Files changed: `crates/foxprox-core/src/event.rs`, `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on one long runtime assertion line; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 43 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 11 runtime tests, and 7 setup tests passed. New tests prove broker DNS UDP packets parse into `DnsQuery` events with hostname metadata, while malformed broker DNS payloads become malformed network events and fail closed with `MalformedInput`.
+- Commit hash when committed: pending.
+- Remaining risks: DNS responses are parsed/cached only through explicit cache APIs, not yet connected to UDP response handling; resolver forwarding is still absent.
+- Exact next step: commit DNS query event wiring, then add UDP flow table integration for DNS/QUIC/generic packet attempts before adding egress.
