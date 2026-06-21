@@ -220,5 +220,5 @@
   - `cargo test --workspace` — passed, 44 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-config` — config crate depends only on `foxprox-core`.
-- Commit hash after commit: pending.
+- Commit hash after commit: 6ed5a43.
 - Remaining boundary risks: file format deserialization, CLI config paths, config reload audit, and schema compatibility tests remain.
