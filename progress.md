@@ -319,3 +319,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * unsupported versions stay explicit for future policy/audit review.
 * Audit evidence: not applicable in this commit; QUIC metadata feeds future UDP/QUIC inspection and audit events.
 * Residual risk: QUIC varint/token/packet number parsing, TLS CRYPTO frame extraction, SNI/ECH visibility, and UDP flow integration remain future work.
+* Commit hash: 55bad4b parse bounded quic candidate headers.
