@@ -28,6 +28,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "foxprox-inspect"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+]
+
+[[package]]
 name = "foxprox-integrations"
 version = "0.1.0"
 dependencies = [

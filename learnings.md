@@ -11,3 +11,8 @@
 
 - ICMP echo synthesis can be kept completely outside policy: packet code emits `IcmpMessage` plus opaque reply bytes, while policy/audit still see only normalized metadata.
 - Unsupported fragmentation should be normalized immediately at the packet boundary because later flow/policy layers should not need raw IPv4 flags or fragment offsets.
+
+## 2026-06-21 — Transparent inspection boundary
+
+- TLS inspection should normalize ECH as an unsupported event rather than a regular no-SNI ClientHello because default policy treats hidden SNI as policy-sensitive and fail-closed.
+- The QUIC alpha classifier should stay heuristic and payload-local; full QUIC semantics would be a separate parser/inspection boundary.

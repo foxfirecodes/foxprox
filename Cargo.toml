@@ -4,6 +4,7 @@ members = [
     "crates/foxprox-core",
     "crates/foxprox-egress",
     "crates/foxprox-frontends",
+    "crates/foxprox-inspect",
     "crates/foxprox-integrations",
     "crates/foxprox-net",
     "crates/foxprox-packet",

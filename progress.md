@@ -75,3 +75,32 @@
   - `progress.md`
 - Commit hash after commit: 9bcbd63.
 - Remaining boundary risks: IPv6, TCP/UDP parsing, smoltcp handoff, production TUN writes, and ICMP policy response behavior remain to be implemented behind adapter contracts.
+
+## 2026-06-21 — Boundary objective: transparent inspection contracts
+
+- Boundary under work: TLS ClientHello SNI extraction, hidden-SNI/ECH detection, SNI/DNS mismatch normalization, and QUIC candidate payload classification.
+- Allowed dependency direction: inspection code may depend on `foxprox-core`; policy consumes only normalized `TlsClientHello`, `UdpFlowAttempt`, or `UnsupportedNetworkEvent` data and must not import parser types.
+- Dependency-risk assessment: TLS/QUIC metadata parsing can easily widen into a full protocol stack or leak parser internals, so this boundary extracts only alpha policy metadata and fails closed for malformed or hidden-SNI/ECH inputs.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo tree -p foxprox-inspect`.
+- Observed results: pending.
+- Changed files: pending.
+- Commit hash after commit: pending.
+- Remaining boundary risks: production-grade TLS/QUIC parser hardening and fuzzing are still required.
+
+### Results
+
+- Added `foxprox-inspect` as the transparent metadata boundary.
+- Implemented narrow TLS ClientHello SNI extraction, ECH extension fail-closed normalization, SNI/DNS mismatch normalization, and QUIC candidate payload heuristic.
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 34 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-inspect` — inspect crate depends only on `foxprox-core`.
+- Changed files:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `crates/foxprox-inspect/Cargo.toml`
+  - `crates/foxprox-inspect/src/lib.rs`
+  - `progress.md`
+- Commit hash after commit: pending.
+- Remaining boundary risks: fuzzing malformed TLS inputs, production QUIC metadata extraction, and transparent stream reassembly remain to be implemented.
