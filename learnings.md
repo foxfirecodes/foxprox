@@ -29,3 +29,8 @@
 ## 2026-06-21 — HTTP method/path rules
 
 - Plaintext HTTP method and path matching belongs in the shared policy rule contract, not in frontends, so transparent HTTP and proxy HTTP can share enforcement semantics.
+
+## 2026-06-21 — DNS answer attribution boundary
+
+- DNS response parsing should export only hostname/IP/TTL address records; keeping answer offsets, compression pointers, and RR wire details inside `foxprox-dns` lets `foxprox-net` update attribution without giving policy raw DNS parser state.
+- CNAME-aware attribution is a separate contract decision: the current answer boundary handles direct A/AAAA owner names and deliberately leaves alias-chain semantics for a later DNS contract expansion.

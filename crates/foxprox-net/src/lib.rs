@@ -164,6 +164,18 @@ impl DnsAttributionCache {
         }
     }
 
+    /// Ingest normalized DNS address records emitted by `foxprox-dns` without
+    /// exposing DNS wire/parser state to policy or flow code.
+    pub fn observe_address_records(
+        &mut self,
+        records: impl IntoIterator<Item = foxprox_dns::DnsAddressRecord>,
+        now: Instant,
+    ) {
+        for record in records {
+            self.observe(record.hostname, [record.addr], now, record.ttl);
+        }
+    }
+
     pub fn attribution_for(&self, ip: IpAddr, now: Instant) -> Option<HostnameAttribution> {
         let attribution = self.by_ip.get(&ip)?;
         if attribution.expires_at <= now {
@@ -326,6 +338,26 @@ mod tests {
                 now + Duration::from_secs(61)
             )
             .is_none());
+    }
+
+    #[test]
+    fn dns_response_records_feed_attribution_cache_without_wire_types() {
+        let now = Instant::now();
+        let mut cache = DnsAttributionCache::default();
+        cache.observe_address_records(
+            [foxprox_dns::DnsAddressRecord {
+                hostname: Hostname::new("example.com").unwrap(),
+                addr: "203.0.113.10".parse().unwrap(),
+                ttl: Duration::from_secs(30),
+            }],
+            now,
+        );
+
+        let attribution = cache
+            .attribution_for("203.0.113.10".parse().unwrap(), now)
+            .unwrap();
+        assert_eq!(attribution.hostname().as_str(), "example.com");
+        assert_eq!(attribution.confidence(), HostnameConfidence::Medium);
     }
 
     #[test]

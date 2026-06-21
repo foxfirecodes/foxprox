@@ -6,7 +6,8 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::time::Duration;
 
 use foxprox_core::{
     DnsQuery, DnsQueryType, FrontendKind, Hostname, NormalizedEvent, SandboxId,
@@ -67,6 +68,14 @@ pub struct ParsedWireQuery {
     pub hostname: Hostname,
     pub query_type: DnsQueryType,
     question_end: usize,
+}
+
+/// Normalized DNS address answer used for transparent hostname attribution.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DnsAddressRecord {
+    pub hostname: Hostname,
+    pub addr: IpAddr,
+    pub ttl: Duration,
 }
 
 /// Parse one DNS wire query. Only the first question is exposed to alpha policy.
@@ -161,6 +170,84 @@ fn map_qtype(qtype: u16) -> DnsQueryType {
         33 => DnsQueryType::Srv,
         other => DnsQueryType::Other(other),
     }
+}
+
+/// Parse A and AAAA answers from a DNS response into normalized attribution
+/// records. Non-address answers are ignored; malformed responses are rejected.
+pub fn parse_address_records(packet: &[u8]) -> Result<Vec<DnsAddressRecord>, DnsError> {
+    if packet.len() < 12 {
+        return Err(DnsError::Malformed("short DNS header"));
+    }
+    let flags = u16::from_be_bytes([packet[2], packet[3]]);
+    if flags & 0x8000 == 0 {
+        return Err(DnsError::Malformed("DNS message is not a response"));
+    }
+    let qdcount = u16::from_be_bytes([packet[4], packet[5]]);
+    let ancount = u16::from_be_bytes([packet[6], packet[7]]);
+    if qdcount == 0 {
+        return Err(DnsError::Malformed("DNS response has no question"));
+    }
+
+    let mut offset = 12;
+    for _ in 0..qdcount {
+        let (_, after_name) = parse_qname(packet, offset)?;
+        if packet.len() < after_name + 4 {
+            return Err(DnsError::Malformed("short DNS question"));
+        }
+        offset = after_name + 4;
+    }
+
+    let mut records = Vec::new();
+    for _ in 0..ancount {
+        let (hostname, after_name) = parse_qname(packet, offset)?;
+        if packet.len() < after_name + 10 {
+            return Err(DnsError::Malformed("short DNS answer"));
+        }
+        let answer_type = u16::from_be_bytes([packet[after_name], packet[after_name + 1]]);
+        let class = u16::from_be_bytes([packet[after_name + 2], packet[after_name + 3]]);
+        let ttl = u32::from_be_bytes([
+            packet[after_name + 4],
+            packet[after_name + 5],
+            packet[after_name + 6],
+            packet[after_name + 7],
+        ]);
+        let rdlen = usize::from(u16::from_be_bytes([
+            packet[after_name + 8],
+            packet[after_name + 9],
+        ]));
+        let rdata_offset = after_name + 10;
+        let next_offset = rdata_offset + rdlen;
+        if packet.len() < next_offset {
+            return Err(DnsError::Malformed("DNS answer RDATA overruns packet"));
+        }
+
+        if class == 1 {
+            let addr = match (answer_type, rdlen) {
+                (1, 4) => Some(IpAddr::V4(Ipv4Addr::new(
+                    packet[rdata_offset],
+                    packet[rdata_offset + 1],
+                    packet[rdata_offset + 2],
+                    packet[rdata_offset + 3],
+                ))),
+                (28, 16) => {
+                    let mut octets = [0_u8; 16];
+                    octets.copy_from_slice(&packet[rdata_offset..next_offset]);
+                    Some(IpAddr::V6(Ipv6Addr::from(octets)))
+                }
+                _ => None,
+            };
+            if let Some(addr) = addr {
+                records.push(DnsAddressRecord {
+                    hostname,
+                    addr,
+                    ttl: Duration::from_secs(u64::from(ttl)),
+                });
+            }
+        }
+        offset = next_offset;
+    }
+
+    Ok(records)
 }
 
 /// Build a DNS REFUSED response that echoes the original first question.
@@ -271,6 +358,24 @@ mod tests {
         assert_eq!(&response[12..], &packet[12..]);
     }
 
+    #[test]
+    fn parses_address_records_from_response_without_leaking_wire_types() {
+        let response = dns_response_packet(0xbeef, "example.com", 1, 300, &[203, 0, 113, 10]);
+        let records = parse_address_records(&response).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].hostname.as_str(), "example.com");
+        assert_eq!(records[0].addr, "203.0.113.10".parse::<IpAddr>().unwrap());
+        assert_eq!(records[0].ttl, Duration::from_secs(300));
+    }
+
+    #[test]
+    fn malformed_dns_response_is_rejected_for_fail_closed_callers() {
+        let query = dns_query_packet(0xbeef, "example.com", 1);
+        let error = parse_address_records(&query).unwrap_err();
+        assert_eq!(error, DnsError::Malformed("DNS message is not a response"));
+    }
+
     fn dns_query_packet(id: u16, hostname: &str, qtype: u16) -> Vec<u8> {
         let mut packet = Vec::new();
         packet.extend_from_slice(&id.to_be_bytes());
@@ -279,13 +384,30 @@ mod tests {
         packet.extend_from_slice(&0_u16.to_be_bytes());
         packet.extend_from_slice(&0_u16.to_be_bytes());
         packet.extend_from_slice(&0_u16.to_be_bytes());
+        append_qname(&mut packet, hostname);
+        packet.extend_from_slice(&qtype.to_be_bytes());
+        packet.extend_from_slice(&1_u16.to_be_bytes()); // IN
+        packet
+    }
+
+    fn dns_response_packet(id: u16, hostname: &str, qtype: u16, ttl: u32, rdata: &[u8]) -> Vec<u8> {
+        let mut packet = dns_query_packet(id, hostname, qtype);
+        packet[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+        packet[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        packet.extend_from_slice(&[0xc0, 0x0c]); // answer name pointer to question
+        packet.extend_from_slice(&qtype.to_be_bytes());
+        packet.extend_from_slice(&1_u16.to_be_bytes()); // IN
+        packet.extend_from_slice(&ttl.to_be_bytes());
+        packet.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        packet.extend_from_slice(rdata);
+        packet
+    }
+
+    fn append_qname(packet: &mut Vec<u8>, hostname: &str) {
         for label in hostname.split('.') {
             packet.push(label.len() as u8);
             packet.extend_from_slice(label.as_bytes());
         }
         packet.push(0);
-        packet.extend_from_slice(&qtype.to_be_bytes());
-        packet.extend_from_slice(&1_u16.to_be_bytes()); // IN
-        packet
     }
 }

@@ -54,6 +54,7 @@ version = "0.1.0"
 dependencies = [
  "foxprox-audit",
  "foxprox-core",
+ "foxprox-dns",
  "foxprox-egress",
  "foxprox-policy",
 ]

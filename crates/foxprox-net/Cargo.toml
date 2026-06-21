@@ -12,5 +12,6 @@ path = "src/lib.rs"
 [dependencies]
 foxprox-audit = { path = "../foxprox-audit" }
 foxprox-core = { path = "../foxprox-core" }
+foxprox-dns = { path = "../foxprox-dns" }
 foxprox-egress = { path = "../foxprox-egress" }
 foxprox-policy = { path = "../foxprox-policy" }

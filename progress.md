@@ -179,3 +179,25 @@
   - `progress.md`
 - Commit hash after commit: 0ccd827.
 - Remaining boundary risks: header-based policy and real transparent stream reassembly are still pending.
+
+## 2026-06-21 — Boundary objective: DNS response attribution contract
+
+- Boundary under work: DNS response answer normalization and DNS-to-flow attribution cache ingestion.
+- Allowed dependency direction: DNS wire parsing remains in `foxprox-dns` depending only on `foxprox-core`; `foxprox-net` may consume normalized DNS address records for attribution; policy/audit must not consume DNS parser structs or raw response packets.
+- Dependency-risk assessment: DNS answers are policy-sensitive attribution input, so only hostname/IP/TTL records should cross the DNS boundary and malformed responses must remain parser-local errors instead of partial policy events.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo tree -p foxprox-dns`/`cargo tree -p foxprox-net`.
+- Observed results: initial `cargo test --workspace` failed on an ambiguous test parse type; after specifying `IpAddr`, all verification passed.
+- Changed files:
+  - `Cargo.lock`
+  - `crates/foxprox-dns/src/lib.rs`
+  - `crates/foxprox-net/Cargo.toml`
+  - `crates/foxprox-net/src/lib.rs`
+  - `progress.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 42 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-dns` — DNS crate depends only on `foxprox-core`.
+  - `cargo tree -p foxprox-net` — network crate consumes DNS normalized records plus core/policy/audit/egress.
+- Commit hash after commit: 56e0d5e.
+- Remaining boundary risks: upstream DNS IO, DNS response synthesis for allowed queries, TCP DNS, CNAME-to-address attribution, and DoH/DoT detection remain.
