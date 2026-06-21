@@ -74,8 +74,10 @@ pub struct AuditEvent {
     pub protocol: Option<Protocol>,
     /// Source transport endpoint, when applicable.
     pub source: Option<TransportEndpoint>,
-    /// Destination transport endpoint, when applicable.
+    /// Destination transport endpoint, when an IP address is known.
     pub destination: Option<TransportEndpoint>,
+    /// Destination port, when a host authority is known but no IP has been resolved yet.
+    pub destination_port: Option<u16>,
     /// Hostname associated with the event, when available.
     pub hostname: Option<Hostname>,
     /// Hostname attribution metadata, when available.
@@ -115,6 +117,7 @@ impl AuditEvent {
             protocol: None,
             source: None,
             destination: None,
+            destination_port: None,
             hostname: None,
             attribution: None,
             origin: None,
@@ -177,6 +180,10 @@ impl AuditEvent {
     ) -> Self {
         self.source = source;
         self.destination = destination;
+        self.destination_port = match destination {
+            Some(endpoint) => Some(endpoint.port),
+            None => None,
+        };
         self
     }
 }

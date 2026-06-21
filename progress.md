@@ -794,3 +794,76 @@
 - Files changed: `Cargo.lock`, `crates/foxprox-cli/Cargo.toml`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
 - Current git status summary: CLI/progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit CLI proxy proof wiring, then continue Milestone 7 runtime audit/resource-limit integration.
+
+## 2026-06-21T23:29:06Z — CLI proxy proof wiring committed; next objective selected
+
+- Commit created: `7478179` (`wire proxy proofs into cli`).
+- Current objective: integrate audit/backpressure primitives into live explicit proxy proof runtimes.
+- Rationale: explicit HTTP/CONNECT/SOCKS proof paths evaluate shared policy before egress and are now CLI-runnable, but Milestone 6/7 still require shared audit logging/backpressure behavior in runtime paths. The smallest safe next slice is to emit structured `AuditEvent`s for proxy policy decisions through a bounded `AuditBuffer`, failing closed if audit enqueue reports backpressure.
+- Expected commit boundary: proxy proof audit buffer integration and focused tests only; transparent TUN audit integration can follow.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: add bounded audit event emission to `foxprox-proxy` HTTP/CONNECT/SOCKS handlers.
+
+## 2026-06-21T23:34:06Z — proxy audit/backpressure integration pending review
+
+- Current objective: commit bounded audit event emission for live explicit proxy proof runtimes.
+- Changes implemented:
+  - HTTP proxy proof listener now creates one shared `AuditBuffer` and shares it across connection handler threads.
+  - SOCKS5 proof listener now creates one shared `AuditBuffer` and shares it across connection handler threads.
+  - HTTP, CONNECT, and SOCKS policy decisions are converted to structured `AuditEvent`s with kind/protocol/decision and available host/origin/path/destination metadata.
+  - Denied decisions are audited before returning 403/SOCKS policy failure.
+  - Audit enqueue backpressure fails closed before host egress: HTTP returns `503 Service Unavailable`, SOCKS returns general failure.
+  - CLI proxy proof commands expose `--audit-queue-capacity`; capacity zero is rejected before listener startup.
+  - Tests cover HTTP audit metadata, bounded enqueue backpressure, and fail-closed HTTP behavior when the audit queue is full.
+- Subagents/reviews requested: `proxy-audit-backpressure-final` is running.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-proxy -- --nocapture` passed: 18 proxy tests.
+  - `cargo test -p foxprox-cli` passed: CLI 0 tests.
+  - `cargo test --workspace` passed: 49 core tests, 8 device tests, 8 net tests, 18 proxy tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-proxy` shows only `foxprox-core` dependency; `cargo tree -p foxprox-cli` shows expected workspace dependencies.
+- Files changed: `crates/foxprox-proxy/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: proxy/CLI/progress modified; review artifact pending.
+- Next exact action: read proxy audit/backpressure review, fix blockers if any, then commit.
+
+## 2026-06-21T23:39:23Z — proxy audit/backpressure blockers fixed pending rereview
+
+- Current objective: commit bounded audit event emission for live explicit proxy proof runtimes after rereview.
+- Review findings accepted and fixed:
+  - CONNECT and SOCKS host-destination audit records dropped requested destination ports. Fixed by adding `AuditEvent::destination_port` for unresolved host authorities, populating it for HTTP/CONNECT/SOCKS, and adding explicit-proxy attribution for host-based proxy events.
+  - Invalid zero audit capacity was rejected after listener bind. Fixed by constructing/validating the shared audit buffer before TCP listener bind in both HTTP and SOCKS proof listeners, and by validating `--audit-queue-capacity` as non-zero in the CLI.
+- Additional tests added:
+  - CONNECT audit metadata includes host, destination port, protocol/kind, attribution, and decision.
+  - SOCKS host audit metadata includes host, destination port, protocol/kind, attribution, and decision.
+  - Proxy proof listeners reject zero audit capacity before binding, verified by using an occupied address and expecting `InvalidInput` instead of `AddrInUse`.
+- Verification commands and outcomes after fixes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-core` passed: 49 core tests.
+  - `cargo test -p foxprox-proxy -- --nocapture` passed: 21 proxy tests.
+  - `cargo test -p foxprox-cli` passed: CLI 0 tests.
+  - `cargo test --workspace` passed: 49 core tests, 8 device tests, 8 net tests, 21 proxy tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core`, `cargo tree -p foxprox-proxy`, and `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Subagents/reviews requested: `proxy-audit-backpressure-rereview` is running.
+- Files changed: `crates/foxprox-core/src/audit.rs`, `crates/foxprox-proxy/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: core/proxy/CLI/progress modified; review artifacts pending rereview/removal.
+- Next exact action: read proxy audit/backpressure rereview, fix blockers if any, remove `reviews/`, and commit.
+
+## 2026-06-21T23:41:05Z — proxy audit/backpressure rereview passed
+
+- Current objective: commit bounded audit event emission for live explicit proxy proof runtimes.
+- Rereview result: `proxy-audit-backpressure-rereview` found no blockers.
+- Confirmed fixes:
+  - CONNECT and SOCKS host-destination audit events set `destination_port` and `Attribution::explicit_proxy`.
+  - HTTP/SOCKS proof listeners create the audit buffer before `TcpListener::bind`, so zero capacity rejects before opening a listener.
+  - CLI `--audit-queue-capacity 0` fails with `InvalidInput` before listener startup.
+  - No dependency changes beyond existing workspace crates.
+- Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed; proxy tests now cover 21 cases.
+- Files changed: `crates/foxprox-core/src/audit.rs`, `crates/foxprox-proxy/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: core/proxy/CLI/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit proxy audit/backpressure integration, then continue with transparent TUN audit integration.

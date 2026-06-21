@@ -9,13 +9,15 @@
 #![deny(missing_docs)]
 
 use foxprox_core::{
-    Attribution, Decision, EgressContext, Frontend, Hostname, HttpMethod, NetworkEvent, Origin,
-    PolicyEngine, PolicyRuleSet, SandboxId, SocksDestination, TcpEgressRequest, TransportEndpoint,
+    Attribution, AuditBackpressure, AuditBuffer, AuditEvent, AuditEventKind, Decision,
+    EgressContext, Frontend, Hostname, HttpMethod, NetworkEvent, Origin, PolicyEngine,
+    PolicyRuleSet, SandboxId, SocksDestination, TcpEgressRequest, TransportEndpoint,
 };
 use std::io::{self, Read, Write};
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
 };
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -45,6 +47,8 @@ pub struct HttpProxyProofConfig {
     pub request_head_timeout: Duration,
     /// Host TCP connect timeout.
     pub connect_timeout: Duration,
+    /// Maximum queued audit events before policy paths fail closed.
+    pub audit_queue_capacity: usize,
 }
 
 impl HttpProxyProofConfig {
@@ -57,6 +61,7 @@ impl HttpProxyProofConfig {
             request_head_limit: 16 * 1024,
             request_head_timeout: Duration::from_secs(5),
             connect_timeout: Duration::from_secs(5),
+            audit_queue_capacity: 8192,
         }
     }
 }
@@ -74,6 +79,8 @@ pub struct Socks5ProxyProofConfig {
     pub request_timeout: Duration,
     /// Host TCP connect timeout.
     pub connect_timeout: Duration,
+    /// Maximum queued audit events before policy paths fail closed.
+    pub audit_queue_capacity: usize,
 }
 
 impl Socks5ProxyProofConfig {
@@ -85,6 +92,7 @@ impl Socks5ProxyProofConfig {
             policy: PolicyRuleSet::default(),
             request_timeout: Duration::from_secs(5),
             connect_timeout: Duration::from_secs(5),
+            audit_queue_capacity: 8192,
         }
     }
 }
@@ -94,14 +102,17 @@ impl Socks5ProxyProofConfig {
 /// Each accepted connection is handled on a short-lived thread. This is an
 /// alpha proof, not the final async/resource-limited proxy runtime.
 pub fn run_http_proxy_proof(config: HttpProxyProofConfig) -> io::Result<()> {
+    let audit = shared_audit_buffer(config.audit_queue_capacity)?;
     let listener = TcpListener::bind(config.listen_addr)?;
     eprintln!("foxprox-proxy: listening on {}", listener.local_addr()?);
     for accepted in listener.incoming() {
         let config = config.clone();
+        let audit = Arc::clone(&audit);
         match accepted {
             Ok(stream) => {
                 thread::spawn(move || {
-                    if let Err(error) = handle_http_proxy_stream(stream, &config) {
+                    if let Err(error) = handle_http_proxy_stream_with_audit(stream, &config, &audit)
+                    {
                         eprintln!("foxprox-proxy: connection failed: {error}");
                     }
                 });
@@ -114,6 +125,7 @@ pub fn run_http_proxy_proof(config: HttpProxyProofConfig) -> io::Result<()> {
 
 /// Runs the blocking SOCKS5 proof listener forever.
 pub fn run_socks5_proxy_proof(config: Socks5ProxyProofConfig) -> io::Result<()> {
+    let audit = shared_audit_buffer(config.audit_queue_capacity)?;
     let listener = TcpListener::bind(config.listen_addr)?;
     eprintln!(
         "foxprox-proxy: socks5 listening on {}",
@@ -121,10 +133,13 @@ pub fn run_socks5_proxy_proof(config: Socks5ProxyProofConfig) -> io::Result<()> 
     );
     for accepted in listener.incoming() {
         let config = config.clone();
+        let audit = Arc::clone(&audit);
         match accepted {
             Ok(stream) => {
                 thread::spawn(move || {
-                    if let Err(error) = handle_socks5_proxy_stream(stream, &config) {
+                    if let Err(error) =
+                        handle_socks5_proxy_stream_with_audit(stream, &config, &audit)
+                    {
                         eprintln!("foxprox-proxy: socks5 connection failed: {error}");
                     }
                 });
@@ -135,9 +150,111 @@ pub fn run_socks5_proxy_proof(config: Socks5ProxyProofConfig) -> io::Result<()> 
     Ok(())
 }
 
+type SharedAuditBuffer = Arc<Mutex<AuditBuffer>>;
+
+fn shared_audit_buffer(capacity: usize) -> io::Result<SharedAuditBuffer> {
+    if capacity == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "audit queue capacity must be non-zero",
+        ));
+    }
+    Ok(Arc::new(Mutex::new(AuditBuffer::new(capacity))))
+}
+
+fn emit_proxy_audit(
+    audit: &SharedAuditBuffer,
+    event: &NetworkEvent,
+    decision: Decision,
+) -> io::Result<()> {
+    let mut buffer = audit.lock().map_err(|_| {
+        io::Error::other("audit queue lock poisoned while recording proxy decision")
+    })?;
+    let audit_event = proxy_audit_event(event, decision);
+    buffer
+        .try_push(audit_event.clone())
+        .map_err(audit_backpressure_error)?;
+    eprintln!("foxprox-proxy: audit event={audit_event:?}");
+    Ok(())
+}
+
+fn audit_backpressure_error(error: AuditBackpressure) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!("audit queue backpressure: {error:?}"),
+    )
+}
+
+fn proxy_audit_event(event: &NetworkEvent, decision: Decision) -> AuditEvent {
+    let kind = match event {
+        NetworkEvent::HttpRequest { .. } => AuditEventKind::HttpRequest,
+        NetworkEvent::HttpsConnect { .. } => AuditEventKind::HttpsConnect,
+        NetworkEvent::SocksConnect { .. } => AuditEventKind::SocksConnect,
+        _ => AuditEventKind::UnsupportedDenied,
+    };
+    let mut audit = AuditEvent::new(proxy_event_frontend(event), kind).with_decision(decision);
+    if let Some(sandbox_id) = event.sandbox_id() {
+        audit = audit.with_sandbox_id(sandbox_id.clone());
+    }
+    audit.protocol = Some(event.protocol());
+    match event {
+        NetworkEvent::HttpRequest {
+            origin,
+            method,
+            path_and_query,
+            ..
+        } => {
+            audit.hostname = Some(origin.host.clone());
+            audit.destination_port = Some(origin.port);
+            audit.attribution = Some(Attribution::explicit_proxy(origin.host.clone()));
+            audit.origin = Some(origin.clone());
+            audit.http_method = Some(method.clone());
+            audit.path_and_query = Some(path_and_query.clone());
+        }
+        NetworkEvent::HttpsConnect { host, port, .. } => {
+            audit.hostname = Some(host.clone());
+            audit.destination_port = Some(*port);
+            audit.attribution = Some(Attribution::explicit_proxy(host.clone()));
+        }
+        NetworkEvent::SocksConnect { target, .. } => match target {
+            SocksDestination::Host { host, port } => {
+                audit.hostname = Some(host.clone());
+                audit.destination_port = Some(*port);
+                audit.attribution = Some(Attribution::explicit_proxy(host.clone()));
+            }
+            SocksDestination::Ip(endpoint) => {
+                audit.destination = Some(*endpoint);
+                audit.destination_port = Some(endpoint.port);
+                audit.attribution = Some(Attribution::ip_only());
+            }
+        },
+        _ => {}
+    }
+    audit
+}
+
+fn proxy_event_frontend(event: &NetworkEvent) -> Frontend {
+    match event {
+        NetworkEvent::HttpRequest { frontend, .. }
+        | NetworkEvent::HttpsConnect { frontend, .. } => *frontend,
+        NetworkEvent::SocksConnect { .. } => Frontend::Socks5,
+        _ => Frontend::Setup,
+    }
+}
+
+#[cfg(test)]
 fn handle_socks5_proxy_stream(
+    client: TcpStream,
+    config: &Socks5ProxyProofConfig,
+) -> io::Result<()> {
+    let audit = shared_audit_buffer(config.audit_queue_capacity)?;
+    handle_socks5_proxy_stream_with_audit(client, config, &audit)
+}
+
+fn handle_socks5_proxy_stream_with_audit(
     mut client: TcpStream,
     config: &Socks5ProxyProofConfig,
+    audit: &SharedAuditBuffer,
 ) -> io::Result<()> {
     client.set_read_timeout(Some(config.request_timeout))?;
     let request_bytes = read_socks5_greeting_and_request(&mut client)?;
@@ -154,6 +271,10 @@ fn handle_socks5_proxy_stream(
     };
     let decision = PolicyEngine::new(config.policy.clone()).evaluate(&event);
     eprintln!("foxprox-proxy: socks5 policy decision={decision:?} event={event:?}");
+    if let Err(error) = emit_proxy_audit(audit, &event, decision.clone()) {
+        let _ = write_socks5_reply(&mut client, 0x01);
+        return Err(error);
+    }
     if !decision.is_allowed() {
         let _ = write_socks5_reply(&mut client, 0x02);
         return Ok(());
@@ -287,9 +408,16 @@ fn write_socks5_reply(stream: &mut TcpStream, status: u8) -> io::Result<()> {
     stream.write_all(&[0x05, status, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
 }
 
-fn handle_http_proxy_stream(
+#[cfg(test)]
+fn handle_http_proxy_stream(client: TcpStream, config: &HttpProxyProofConfig) -> io::Result<()> {
+    let audit = shared_audit_buffer(config.audit_queue_capacity)?;
+    handle_http_proxy_stream_with_audit(client, config, &audit)
+}
+
+fn handle_http_proxy_stream_with_audit(
     mut client: TcpStream,
     config: &HttpProxyProofConfig,
+    audit: &SharedAuditBuffer,
 ) -> io::Result<()> {
     client.set_read_timeout(Some(config.request_head_timeout))?;
     let buffered = read_proxy_head(&mut client, config.request_head_limit)?;
@@ -299,6 +427,10 @@ fn handle_http_proxy_stream(
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}")))?;
     let decision = PolicyEngine::new(config.policy.clone()).evaluate(&event);
     eprintln!("foxprox-proxy: policy decision={decision:?} event={event:?}");
+    if let Err(error) = emit_proxy_audit(audit, &event, decision.clone()) {
+        let _ = client.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n");
+        return Err(error);
+    }
     if !decision.is_allowed() {
         let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
         return Ok(());
@@ -851,6 +983,129 @@ mod tests {
         .unwrap();
         assert_eq!(http.protocol(), Protocol::Http);
         assert_eq!(connect.protocol(), Protocol::HttpsConnect);
+    }
+
+    #[test]
+    fn proxy_audit_event_records_http_metadata() {
+        let event = parse_http_proxy_request_head(
+            sandbox_id(),
+            b"GET http://example.com/proof?q=1 HTTP/1.1\r\n\r\n",
+        )
+        .unwrap();
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let audit = proxy_audit_event(&event, decision);
+
+        assert_eq!(audit.kind, AuditEventKind::HttpRequest);
+        assert_eq!(audit.protocol, Some(Protocol::Http));
+        assert_eq!(audit.hostname.unwrap().as_str(), "example.com");
+        assert_eq!(audit.destination_port, Some(80));
+        assert_eq!(audit.path_and_query.as_deref(), Some("/proof?q=1"));
+        assert_eq!(
+            audit.attribution.unwrap().hostname.unwrap().as_str(),
+            "example.com"
+        );
+        assert!(audit.decision.is_some());
+    }
+
+    #[test]
+    fn proxy_audit_event_records_connect_port_and_attribution() {
+        let event = parse_http_proxy_request_head(
+            sandbox_id(),
+            b"CONNECT example.com:8443 HTTP/1.1\r\n\r\n",
+        )
+        .unwrap();
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let audit = proxy_audit_event(&event, decision);
+
+        assert_eq!(audit.kind, AuditEventKind::HttpsConnect);
+        assert_eq!(audit.protocol, Some(Protocol::HttpsConnect));
+        assert_eq!(audit.hostname.unwrap().as_str(), "example.com");
+        assert_eq!(audit.destination_port, Some(8443));
+        assert_eq!(
+            audit.attribution.unwrap().hostname.unwrap().as_str(),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn proxy_audit_event_records_socks_host_port_and_attribution() {
+        let mut request = vec![0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x03, 11];
+        request.extend_from_slice(b"example.com");
+        request.extend_from_slice(&1080_u16.to_be_bytes());
+        let event = parse_socks5_connect(sandbox_id(), &request).unwrap();
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let audit = proxy_audit_event(&event, decision);
+
+        assert_eq!(audit.kind, AuditEventKind::SocksConnect);
+        assert_eq!(audit.protocol, Some(Protocol::Socks));
+        assert_eq!(audit.hostname.unwrap().as_str(), "example.com");
+        assert_eq!(audit.destination_port, Some(1080));
+        assert_eq!(
+            audit.attribution.unwrap().hostname.unwrap().as_str(),
+            "example.com"
+        );
+    }
+
+    #[test]
+    fn proxy_proofs_reject_zero_audit_capacity_before_binding() {
+        let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_addr = occupied.local_addr().unwrap();
+        let mut http_config = HttpProxyProofConfig::new(sandbox_id(), occupied_addr);
+        http_config.audit_queue_capacity = 0;
+        let mut socks_config = Socks5ProxyProofConfig::new(sandbox_id(), occupied_addr);
+        socks_config.audit_queue_capacity = 0;
+
+        assert_eq!(
+            run_http_proxy_proof(http_config).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            run_socks5_proxy_proof(socks_config).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn proxy_audit_enqueue_reports_backpressure() {
+        let event = parse_http_proxy_request_head(
+            sandbox_id(),
+            b"GET http://example.com/ HTTP/1.1\r\n\r\n",
+        )
+        .unwrap();
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let audit = shared_audit_buffer(1).unwrap();
+
+        emit_proxy_audit(&audit, &event, decision.clone()).unwrap();
+        let error = emit_proxy_audit(&audit, &event, decision).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn proof_http_proxy_fails_closed_when_audit_queue_is_full() {
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let config = HttpProxyProofConfig::new(sandbox_id(), proxy_addr);
+        let audit = shared_audit_buffer(1).unwrap();
+        let first = parse_http_proxy_request_head(
+            sandbox_id(),
+            b"GET http://example.com/ HTTP/1.1\r\n\r\n",
+        )
+        .unwrap();
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&first);
+        emit_proxy_audit(&audit, &first, decision).unwrap();
+        let proxy_thread = thread::spawn(move || {
+            let (stream, _) = proxy.accept().unwrap();
+            assert!(handle_http_proxy_stream_with_audit(stream, &config, &audit).is_err());
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).unwrap();
+        client
+            .write_all(b"GET http://example.com/ HTTP/1.1\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+        proxy_thread.join().unwrap();
     }
 
     #[test]
