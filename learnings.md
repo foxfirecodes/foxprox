@@ -36,3 +36,7 @@ Port-based DNS classification is enough for direct-bypass denial, but hostname a
 ## 2026-06-21 — DNS attribution should not overwrite stronger metadata
 
 DNS cache correlation is only medium-confidence. The enrichment layer should fill missing transparent flow attribution but preserve higher-confidence metadata from future HTTP Host, TLS SNI, QUIC metadata, or explicit proxy frontends.
+
+## 2026-06-21 — HTTP policy needs audit fields, not just match logic
+
+Adding method/path matching without carrying those fields into structured audit would make policy behavior hard to verify externally. Semantic inspection slices should update both rule evaluation and audit output together.

@@ -95,6 +95,8 @@ struct JsonAuditRecord<'a> {
     destination: Option<JsonEndpoint>,
     hostname: Option<&'a str>,
     hostname_confidence: Option<&'static str>,
+    http_method: Option<&'a str>,
+    http_path_query: Option<&'a str>,
     decision: &'static str,
     denial_behavior: Option<&'static str>,
     rule_id: Option<&'a str>,
@@ -114,6 +116,8 @@ impl<'a> From<&'a AuditRecord> for JsonAuditRecord<'a> {
             destination: record.destination.map(JsonEndpoint::from),
             hostname: record.hostname.as_deref(),
             hostname_confidence: record.hostname_confidence.map(attribution_confidence),
+            http_method: record.http_method.as_deref(),
+            http_path_query: record.http_path_query.as_deref(),
             decision: audit_decision(record.decision),
             denial_behavior: record.denial_behavior.map(denial_behavior),
             rule_id: record.rule_id.as_deref(),
@@ -217,7 +221,8 @@ mod tests {
     use super::*;
     use foxprox_broker::Ipv4PacketBroker;
     use foxprox_core::{
-        FrontendKind, PolicyConfig, PolicyEngine, PolicyRule, Protocol, RuleAction, SandboxId,
+        Endpoint, FrontendKind, HttpRequest, NormalizedEvent, PolicyConfig, PolicyEngine,
+        PolicyRule, Protocol, RuleAction, SandboxId,
     };
     use foxprox_packet::PacketContext;
     use serde_json::Value;
@@ -271,6 +276,38 @@ mod tests {
         assert_eq!(value["rule_id"], "allow-icmp");
         assert_eq!(value["source"]["ip"], "10.0.0.2");
         assert_eq!(value["destination"]["ip"], "203.0.113.10");
+    }
+
+    #[test]
+    fn serializes_http_method_and_path_audit_fields() {
+        let rule = PolicyRule::new("allow-http", RuleAction::Allow)
+            .unwrap()
+            .with_protocol(Protocol::Http)
+            .with_http_method("GET")
+            .with_http_path_prefix("/public");
+        let engine = PolicyEngine::new(PolicyConfig {
+            rules: vec![rule],
+            ..PolicyConfig::default()
+        });
+        let event = NormalizedEvent::HttpRequest(HttpRequest {
+            sandbox_id: SandboxId::new("audit-http-test").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: None,
+            destination: Some(Endpoint::tcp("93.184.216.34".parse().unwrap(), 80)),
+            method: "GET".to_owned(),
+            scheme: "http".to_owned(),
+            host: "example.com".to_owned(),
+            port: 80,
+            path_query: "/public/index.html".to_owned(),
+        });
+        let evaluation = engine.evaluate(&event);
+
+        let line = audit_record_to_json_line(&evaluation.audit).unwrap();
+        let value: Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(value["kind"], "http_request");
+        assert_eq!(value["http_method"], "GET");
+        assert_eq!(value["http_path_query"], "/public/index.html");
     }
 
     #[test]

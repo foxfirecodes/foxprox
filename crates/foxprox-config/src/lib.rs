@@ -125,6 +125,10 @@ struct RawPolicyRule {
     hostnames: Vec<String>,
     #[serde(default)]
     minimum_hostname_confidence: Option<String>,
+    #[serde(default)]
+    http_methods: Vec<String>,
+    #[serde(default)]
+    http_path_prefixes: Vec<String>,
 }
 
 impl TryFrom<RawPolicyRule> for PolicyRule {
@@ -155,6 +159,12 @@ impl TryFrom<RawPolicyRule> for PolicyRule {
         }
         if let Some(confidence) = value.minimum_hostname_confidence {
             rule = rule.with_minimum_hostname_confidence(parse_confidence(&confidence)?);
+        }
+        for method in value.http_methods {
+            rule = rule.with_http_method(method);
+        }
+        for prefix in value.http_path_prefixes {
+            rule = rule.with_http_path_prefix(prefix);
         }
 
         Ok(rule)
@@ -243,7 +253,8 @@ mod tests {
     use super::*;
     use foxprox_broker::Ipv4PacketBroker;
     use foxprox_core::{
-        AuditDecision, FrontendKind, PolicyDecision, PolicyEngine, Protocol, SandboxId,
+        AuditDecision, Endpoint, FrontendKind, HttpRequest, NormalizedEvent, PolicyDecision,
+        PolicyEngine, Protocol, SandboxId,
     };
     use foxprox_packet::PacketContext;
 
@@ -342,6 +353,50 @@ mod tests {
         assert_eq!(result.evaluation.audit.protocol, Protocol::Dns);
         assert_eq!(result.evaluation.audit.decision, AuditDecision::Denied);
         assert!(result.outbound_packets.is_empty());
+    }
+
+    #[test]
+    fn loaded_http_method_and_path_rule_controls_http_request() {
+        let config = policy_config_from_toml(
+            r#"
+            default_policy = "deny"
+
+            [[rules]]
+            id = "allow-public-get"
+            action = "allow"
+            protocol = "http"
+            hostnames = ["example.com"]
+            destination_ports = [80]
+            http_methods = ["GET"]
+            http_path_prefixes = ["/public"]
+            "#,
+        )
+        .unwrap();
+        let event = NormalizedEvent::HttpRequest(HttpRequest {
+            sandbox_id: SandboxId::new("config-http-test").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: None,
+            destination: Some(Endpoint::tcp("93.184.216.34".parse().unwrap(), 80)),
+            method: "GET".to_owned(),
+            scheme: "http".to_owned(),
+            host: "example.com".to_owned(),
+            port: 80,
+            path_query: "/public/index.html".to_owned(),
+        });
+
+        let evaluation = PolicyEngine::new(config).evaluate(&event);
+
+        assert_eq!(
+            evaluation.decision,
+            PolicyDecision::Allow {
+                rule_id: Some("allow-public-get".to_owned())
+            }
+        );
+        assert_eq!(evaluation.audit.http_method.as_deref(), Some("GET"));
+        assert_eq!(
+            evaluation.audit.http_path_query.as_deref(),
+            Some("/public/index.html")
+        );
     }
 
     #[test]

@@ -197,3 +197,25 @@
 - What failed or surprised the agent: the cache needs explicit freshness semantics even in a minimal version; otherwise shared-IP hostname reuse would be misleading. The current proof chooses the newest non-expired answer.
 - What remains unproven: parsing DNS responses into cache records, cache eviction/resource limits, confidence downgrade rules for shared IPs, SNI/DNS mismatch integration with cached attribution, and live DNS resolver forwarding are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — plaintext HTTP bytes → method/path policy/audit slice
+
+- Slice attempted: parse plaintext HTTP request bytes into normalized `HttpRequest` events and enforce/audit host, method, and path-prefix policy.
+- Why next: DNS attribution covers hostname-to-flow correlation, but alpha also requires transparent plaintext HTTP inspection with method/path visibility; this is a narrow frontend-to-core-to-policy/audit slice that does not require TCP forwarding yet.
+- Verification plan: extend core policy/audit to carry HTTP method and path/query, extend config rule schema for methods/path prefixes, add inspect parsing for HTTP request line and Host header, verify allowed and denied method/path cases plus JSON audit fields, then run formatting, clippy, focused tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — plaintext HTTP bytes → method/path policy/audit
+
+- Slice attempted: parse plaintext HTTP request bytes into normalized HTTP events and enforce/audit host, method, and path-prefix policy.
+- Why next: transparent DNS attribution exists, but alpha also requires direct plaintext HTTP Host/method/path inspection; this proves that semantic HTTP metadata can cross inspection, policy, config, and audit boundaries without TCP forwarding yet.
+- What changed: extended `foxprox-core` rules with HTTP method and path-prefix matchers, added HTTP method/path fields to `AuditRecord`, exposed them in JSON audit output, extended TOML rules with `http_methods` and `http_path_prefixes`, and added `foxprox-inspect::parse_plaintext_http_request` for request-line plus Host-header parsing.
+- Verification:
+  - `cargo fmt --check` passed.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 4 `foxprox-config` tests, 10 `foxprox-core` tests, 7 `foxprox-inspect` tests, 10 `foxprox-packet` tests, and 0 doc tests.
+  - Focused checks passed: `cargo test -p foxprox-inspect plaintext_http_request_parses_to_policy_event_and_audit`, `cargo test -p foxprox-inspect plaintext_http_method_or_path_mismatch_denies`, `cargo test -p foxprox-core http_rule_matches_method_host_port_and_path_prefix`, `cargo test -p foxprox-config loaded_http_method_and_path_rule_controls_http_request`, and `cargo test -p foxprox-audit serializes_http_method_and_path_audit_fields`.
+  - `cargo fmt --check` passed after focused checks.
+- What failed or surprised the agent: no runtime/TCP stream integration exists yet, so the HTTP parser is intentionally byte-slice based and does not attempt incremental request buffering.
+- What remains unproven: extracting HTTP bytes from real TCP streams, multiple requests per connection, absolute-form proxy requests, malformed HTTP fail-closed integration, and TCP forwarding are still absent.
+- Commit: this commit.

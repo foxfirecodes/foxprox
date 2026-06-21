@@ -9,7 +9,8 @@ use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
 use foxprox_core::{
-    AttributionConfidence, AttributionSource, HostnameAttribution, NormalizedEvent,
+    AttributionConfidence, AttributionSource, Endpoint, FrontendKind, HostnameAttribution,
+    HttpRequest, NormalizedEvent, SandboxId,
 };
 
 /// Expiring DNS answer cache used for medium-confidence transparent flow
@@ -92,6 +93,96 @@ struct DnsAttributionEntry {
     address: IpAddr,
     attribution: HostnameAttribution,
     expires_at: SystemTime,
+}
+
+/// Plaintext HTTP request parsing errors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HttpInspectError {
+    NotUtf8,
+    MissingRequestLine,
+    MalformedRequestLine,
+    MissingHostHeader,
+    InvalidHostPort,
+}
+
+impl std::fmt::Display for HttpInspectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotUtf8 => f.write_str("http-request-not-utf8"),
+            Self::MissingRequestLine => f.write_str("http-request-line-missing"),
+            Self::MalformedRequestLine => f.write_str("http-request-line-malformed"),
+            Self::MissingHostHeader => f.write_str("http-host-header-missing"),
+            Self::InvalidHostPort => f.write_str("http-host-port-invalid"),
+        }
+    }
+}
+
+impl std::error::Error for HttpInspectError {}
+
+/// Parse one plaintext HTTP request head into a normalized policy event.
+pub fn parse_plaintext_http_request(
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    source: Option<Endpoint>,
+    destination: Option<Endpoint>,
+    bytes: &[u8],
+) -> Result<NormalizedEvent, HttpInspectError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| HttpInspectError::NotUtf8)?;
+    let mut lines = text.lines();
+    let request_line = lines.next().ok_or(HttpInspectError::MissingRequestLine)?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts
+        .next()
+        .ok_or(HttpInspectError::MalformedRequestLine)?
+        .to_ascii_uppercase();
+    let path_query = request_parts
+        .next()
+        .ok_or(HttpInspectError::MalformedRequestLine)?
+        .to_owned();
+    let version = request_parts
+        .next()
+        .ok_or(HttpInspectError::MalformedRequestLine)?;
+    if !version.starts_with("HTTP/") || request_parts.next().is_some() {
+        return Err(HttpInspectError::MalformedRequestLine);
+    }
+
+    let host_header = lines
+        .filter_map(|line| line.split_once(':'))
+        .find(|(name, _)| name.eq_ignore_ascii_case("host"))
+        .map(|(_, value)| value.trim())
+        .ok_or(HttpInspectError::MissingHostHeader)?;
+    let (host, explicit_port) = split_host_port(host_header)?;
+    let port = explicit_port
+        .or_else(|| destination.and_then(|endpoint| endpoint.port))
+        .unwrap_or(80);
+
+    Ok(NormalizedEvent::HttpRequest(HttpRequest {
+        sandbox_id,
+        frontend,
+        source,
+        destination,
+        method,
+        scheme: "http".to_owned(),
+        host,
+        port,
+        path_query,
+    }))
+}
+
+fn split_host_port(value: &str) -> Result<(String, Option<u16>), HttpInspectError> {
+    let value = value.trim().trim_end_matches('.');
+    if value.is_empty() {
+        return Err(HttpInspectError::MissingHostHeader);
+    }
+    if let Some((host, port)) = value.rsplit_once(':') {
+        if !host.contains(':') {
+            let port = port
+                .parse::<u16>()
+                .map_err(|_| HttpInspectError::InvalidHostPort)?;
+            return Ok((host.to_ascii_lowercase(), Some(port)));
+        }
+    }
+    Ok((value.to_ascii_lowercase(), None))
 }
 
 #[cfg(test)]
@@ -239,6 +330,92 @@ mod tests {
             enriched.attribution_confidence(),
             Some(AttributionConfidence::High)
         );
+    }
+
+    #[test]
+    fn plaintext_http_request_parses_to_policy_event_and_audit() {
+        let event = parse_plaintext_http_request(
+            SandboxId::new("http-test").unwrap(),
+            FrontendKind::Tun,
+            Some(Endpoint::tcp(Ipv4Addr::new(10, 0, 0, 2).into(), 49152)),
+            Some(Endpoint::tcp(Ipv4Addr::new(93, 184, 216, 34).into(), 80)),
+            b"GET /allowed/item?debug=1 HTTP/1.1\r\nHost: Example.COM\r\nUser-Agent: test\r\n\r\n",
+        )
+        .unwrap();
+        let rule = PolicyRule::new("allow-http", RuleAction::Allow)
+            .unwrap()
+            .with_protocol(Protocol::Http)
+            .with_hostname(HostnamePattern::new("example.com").unwrap())
+            .with_destination_port(80)
+            .with_http_method("GET")
+            .with_http_path_prefix("/allowed");
+        let engine = PolicyEngine::new(PolicyConfig {
+            rules: vec![rule],
+            ..PolicyConfig::default()
+        });
+
+        let evaluation = engine.evaluate(&event);
+
+        assert_eq!(event.protocol(), Protocol::Http);
+        assert_eq!(event.hostname(), Some("example.com"));
+        assert_eq!(event.http_method(), Some("GET"));
+        assert_eq!(event.http_path_query(), Some("/allowed/item?debug=1"));
+        assert_eq!(
+            evaluation.decision,
+            PolicyDecision::Allow {
+                rule_id: Some("allow-http".to_owned())
+            }
+        );
+        assert_eq!(evaluation.audit.http_method.as_deref(), Some("GET"));
+        assert_eq!(
+            evaluation.audit.http_path_query.as_deref(),
+            Some("/allowed/item?debug=1")
+        );
+    }
+
+    #[test]
+    fn plaintext_http_method_or_path_mismatch_denies() {
+        let rule = PolicyRule::new("allow-get-public", RuleAction::Allow)
+            .unwrap()
+            .with_protocol(Protocol::Http)
+            .with_hostname(HostnamePattern::new("example.com").unwrap())
+            .with_http_method("GET")
+            .with_http_path_prefix("/public");
+        let engine = PolicyEngine::new(PolicyConfig {
+            rules: vec![rule],
+            ..PolicyConfig::default()
+        });
+        let event = parse_plaintext_http_request(
+            SandboxId::new("http-test").unwrap(),
+            FrontendKind::Tun,
+            None,
+            Some(Endpoint::tcp(Ipv4Addr::new(93, 184, 216, 34).into(), 80)),
+            b"POST /private HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            engine.evaluate(&event).decision,
+            PolicyDecision::Deny {
+                behavior: foxprox_core::DenialBehavior::Drop,
+                reason: "default-deny".to_owned(),
+                rule_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn plaintext_http_requires_host_header() {
+        let error = parse_plaintext_http_request(
+            SandboxId::new("http-test").unwrap(),
+            FrontendKind::Tun,
+            None,
+            None,
+            b"GET / HTTP/1.1\r\n\r\n",
+        )
+        .unwrap_err();
+
+        assert_eq!(error, HttpInspectError::MissingHostHeader);
     }
 
     #[test]

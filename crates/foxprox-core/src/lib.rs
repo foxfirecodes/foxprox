@@ -290,6 +290,20 @@ impl NormalizedEvent {
             Self::IcmpMessage(_) | Self::Unsupported(_) => None,
         }
     }
+
+    pub fn http_method(&self) -> Option<&str> {
+        match self {
+            Self::HttpRequest(event) => Some(event.method.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn http_path_query(&self) -> Option<&str> {
+        match self {
+            Self::HttpRequest(event) => Some(event.path_query.as_str()),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -592,6 +606,8 @@ pub struct PolicyRule {
     pub destination_ports: Vec<PortRange>,
     pub hostnames: Vec<HostnamePattern>,
     pub minimum_hostname_confidence: AttributionConfidence,
+    pub http_methods: Vec<String>,
+    pub http_path_prefixes: Vec<String>,
 }
 
 impl PolicyRule {
@@ -608,6 +624,8 @@ impl PolicyRule {
             destination_ports: Vec::new(),
             hostnames: Vec::new(),
             minimum_hostname_confidence: AttributionConfidence::Medium,
+            http_methods: Vec::new(),
+            http_path_prefixes: Vec::new(),
         })
     }
 
@@ -633,6 +651,16 @@ impl PolicyRule {
 
     pub fn with_minimum_hostname_confidence(mut self, confidence: AttributionConfidence) -> Self {
         self.minimum_hostname_confidence = confidence;
+        self
+    }
+
+    pub fn with_http_method(mut self, method: impl Into<String>) -> Self {
+        self.http_methods.push(method.into().to_ascii_uppercase());
+        self
+    }
+
+    pub fn with_http_path_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.http_path_prefixes.push(prefix.into());
         self
     }
 
@@ -684,6 +712,32 @@ impl PolicyRule {
                 .hostnames
                 .iter()
                 .any(|pattern| pattern.matches(hostname))
+            {
+                return false;
+            }
+        }
+
+        if !self.http_methods.is_empty() {
+            let Some(method) = event.http_method() else {
+                return false;
+            };
+            if !self
+                .http_methods
+                .iter()
+                .any(|expected| expected == &method.to_ascii_uppercase())
+            {
+                return false;
+            }
+        }
+
+        if !self.http_path_prefixes.is_empty() {
+            let Some(path_query) = event.http_path_query() else {
+                return false;
+            };
+            if !self
+                .http_path_prefixes
+                .iter()
+                .any(|prefix| path_query.starts_with(prefix))
             {
                 return false;
             }
@@ -874,6 +928,8 @@ pub struct AuditRecord {
     pub destination: Option<Endpoint>,
     pub hostname: Option<String>,
     pub hostname_confidence: Option<AttributionConfidence>,
+    pub http_method: Option<String>,
+    pub http_path_query: Option<String>,
     pub decision: AuditDecision,
     pub denial_behavior: Option<DenialBehavior>,
     pub rule_id: Option<String>,
@@ -912,6 +968,8 @@ impl AuditRecord {
             destination: event.destination(),
             hostname: event.hostname().map(ToOwned::to_owned),
             hostname_confidence: event.attribution_confidence(),
+            http_method: event.http_method().map(ToOwned::to_owned),
+            http_path_query: event.http_path_query().map(ToOwned::to_owned),
             decision: audit_decision,
             denial_behavior,
             rule_id,
@@ -1185,6 +1243,62 @@ mod tests {
             PolicyDecision::Deny {
                 behavior: DenialBehavior::Reset,
                 reason: "tls-sni-dns-mismatch".to_owned(),
+                rule_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn http_rule_matches_method_host_port_and_path_prefix() {
+        let rule = PolicyRule::new("allow-http-api", RuleAction::Allow)
+            .unwrap()
+            .with_protocol(Protocol::Http)
+            .with_hostname(HostnamePattern::new("example.com").unwrap())
+            .with_destination_port(80)
+            .with_http_method("GET")
+            .with_http_path_prefix("/api/");
+        let engine = PolicyEngine::new(PolicyConfig {
+            rules: vec![rule],
+            ..PolicyConfig::default()
+        });
+        let allowed = NormalizedEvent::HttpRequest(HttpRequest {
+            sandbox_id: sandbox_id(),
+            frontend: FrontendKind::Tun,
+            source: Some(Endpoint::tcp(Ipv4Addr::new(10, 0, 0, 2).into(), 49152)),
+            destination: Some(Endpoint::tcp(Ipv4Addr::new(93, 184, 216, 34).into(), 80)),
+            method: "GET".to_owned(),
+            scheme: "http".to_owned(),
+            host: "example.com".to_owned(),
+            port: 80,
+            path_query: "/api/items?limit=1".to_owned(),
+        });
+        let wrong_path = NormalizedEvent::HttpRequest(HttpRequest {
+            path_query: "/admin".to_owned(),
+            ..match allowed.clone() {
+                NormalizedEvent::HttpRequest(event) => event,
+                _ => unreachable!(),
+            }
+        });
+
+        let evaluation = engine.evaluate(&allowed);
+
+        assert_eq!(
+            evaluation.decision,
+            PolicyDecision::Allow {
+                rule_id: Some("allow-http-api".to_owned())
+            }
+        );
+        assert_eq!(evaluation.audit.kind, AuditKind::HttpRequest);
+        assert_eq!(evaluation.audit.http_method.as_deref(), Some("GET"));
+        assert_eq!(
+            evaluation.audit.http_path_query.as_deref(),
+            Some("/api/items?limit=1")
+        );
+        assert_eq!(
+            engine.evaluate(&wrong_path).decision,
+            PolicyDecision::Deny {
+                behavior: DenialBehavior::Drop,
+                reason: "default-deny".to_owned(),
                 rule_id: None,
             }
         );
