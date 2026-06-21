@@ -34,4 +34,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * hidden-SNI/ECH cannot be allowed by domain attribution alone.
 * Audit evidence: audit unit tests assert structured deny behavior/reason/rule fields and bounded queue backpressure.
 * Residual risk: this is platform-independent core policy/audit scaffolding only; packet parsing, actual TUN setup, DNS resolver enforcement, flow correlation, and egress forwarding still need implementation and integration tests.
-* Commit hash: a10b883 core security policy invariants.
+* Commit hash: 25f9249 core security policy invariants.
