@@ -199,5 +199,5 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-dns` — DNS crate depends only on `foxprox-core`.
   - `cargo tree -p foxprox-net` — network crate consumes DNS normalized records plus core/policy/audit/egress.
-- Commit hash after commit: 56e0d5e.
+- Commit hash after commit: 0e9c816.
 - Remaining boundary risks: upstream DNS IO, DNS response synthesis for allowed queries, TCP DNS, CNAME-to-address attribution, and DoH/DoT detection remain.
