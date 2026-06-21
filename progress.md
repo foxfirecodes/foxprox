@@ -412,3 +412,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: unified handler does not yet own a real TUN fd session loop or TCP/smoltcp forwarding; UDP non-DNS allow still only observes flow metadata and does not egress.
 - Exact next step: commit unified TUN policy handler, then introduce an explicit host UDP egress trait/path gated by policy for allowed non-DNS UDP datagrams.
+
+## 2026-06-22T00:27:20Z
+- Current objective: add explicit policy-gated host UDP egress path without sending empty datagrams from generic event handling.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 49 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 26 runtime tests, and 7 setup tests passed. New runtime tests prove denied UDP datagrams never reach host egress, allowed UDP datagrams carry their original payload to host egress, and generic event handling no longer sends empty UDP payloads accidentally.
+- Commit hash when committed: pending.
+- Remaining risks: UDP egress is still trait-backed only; no real host UDP socket implementation or response routing to TUN exists.
+- Exact next step: commit UDP egress gating, then implement a minimal real host UDP socket backend or response-routing abstraction for allowed UDP datagrams.

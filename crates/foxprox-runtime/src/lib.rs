@@ -92,18 +92,41 @@ impl<E: HostEgress, S: AuditSink> BrokerRuntime<E, S> {
                 Ok(()) => RuntimeOutcome::EgressOpened { decision },
                 Err(error) => RuntimeOutcome::EgressFailed { decision, error },
             },
-            Some(EgressRequest::Udp(request)) => match self.egress.send_udp(request) {
-                Ok(()) => RuntimeOutcome::EgressOpened { decision },
-                Err(error) => RuntimeOutcome::EgressFailed { decision, error },
-            },
             None => RuntimeOutcome::NotAnEgressEvent { decision },
+        }
+    }
+
+    pub fn handle_udp_datagram_event(
+        &mut self,
+        event: &NormalizedEvent,
+        bytes: Vec<u8>,
+        timestamp_millis: u128,
+    ) -> RuntimeOutcome {
+        let decision = self.kernel.decide_and_audit(event, timestamp_millis);
+        if decision.action != DecisionAction::Allow {
+            return RuntimeOutcome::Denied { decision };
+        }
+        let NormalizedEvent::UdpFlowAttempt {
+            frontend,
+            destination,
+            ..
+        } = event
+        else {
+            return RuntimeOutcome::NotAnEgressEvent { decision };
+        };
+        match self.egress.send_udp(UdpDatagramRequest {
+            frontend: *frontend,
+            destination: destination.clone(),
+            bytes,
+        }) {
+            Ok(()) => RuntimeOutcome::EgressOpened { decision },
+            Err(error) => RuntimeOutcome::EgressFailed { decision, error },
         }
     }
 }
 
 enum EgressRequest {
     Tcp(TcpConnectRequest),
-    Udp(UdpDatagramRequest),
 }
 
 fn event_to_egress(event: &NormalizedEvent) -> Option<EgressRequest> {
@@ -116,15 +139,7 @@ fn event_to_egress(event: &NormalizedEvent) -> Option<EgressRequest> {
             frontend: *frontend,
             destination: destination.clone(),
         })),
-        NormalizedEvent::UdpFlowAttempt {
-            frontend,
-            destination,
-            ..
-        } => Some(EgressRequest::Udp(UdpDatagramRequest {
-            frontend: *frontend,
-            destination: destination.clone(),
-            bytes: Vec::new(),
-        })),
+        NormalizedEvent::UdpFlowAttempt { .. } => None,
         NormalizedEvent::HttpsConnect { frontend, port, .. } => {
             Some(EgressRequest::Tcp(TcpConnectRequest {
                 frontend: *frontend,
@@ -600,6 +615,7 @@ mod tests {
     struct FakeEgress {
         tcp_attempts: usize,
         udp_attempts: usize,
+        last_udp_payload: Vec<u8>,
     }
 
     impl HostEgress for FakeEgress {
@@ -608,8 +624,9 @@ mod tests {
             Ok(())
         }
 
-        fn send_udp(&mut self, _request: UdpDatagramRequest) -> Result<(), EgressError> {
+        fn send_udp(&mut self, request: UdpDatagramRequest) -> Result<(), EgressError> {
             self.udp_attempts += 1;
+            self.last_udp_payload = request.bytes;
             Ok(())
         }
     }
@@ -633,6 +650,17 @@ mod tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    fn udp_event() -> NormalizedEvent {
+        NormalizedEvent::UdpFlowAttempt {
+            sandbox_id: SandboxId::new("runtime").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            destination: Endpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443),
+            hostname: None,
+            quic_status: QuicStatus::Candidate,
         }
     }
 
@@ -1327,6 +1355,60 @@ mod tests {
             sum = (sum & 0xffff) + (sum >> 16);
         }
         !(sum as u16)
+    }
+
+    #[test]
+    fn denied_udp_datagram_does_not_reach_host_egress() {
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = BrokerRuntime::new(FakeEgress::default(), kernel);
+        let outcome = runtime.handle_udp_datagram_event(&udp_event(), b"payload".to_vec(), 1);
+
+        assert!(matches!(outcome, RuntimeOutcome::Denied { .. }));
+        assert_eq!(runtime.egress().udp_attempts, 0);
+    }
+
+    #[test]
+    fn allowed_udp_datagram_reaches_host_egress_with_payload() {
+        let mut rules = RuleSet::default();
+        let mut rule = PolicyRule::allow("allow-udp");
+        rule.protocol = Some(Protocol::Udp);
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = BrokerRuntime::new(FakeEgress::default(), kernel);
+        let outcome = runtime.handle_udp_datagram_event(&udp_event(), b"payload".to_vec(), 1);
+
+        assert!(matches!(outcome, RuntimeOutcome::EgressOpened { .. }));
+        assert_eq!(runtime.egress().udp_attempts, 1);
+        assert_eq!(runtime.egress().last_udp_payload, b"payload");
+    }
+
+    #[test]
+    fn generic_handle_event_does_not_send_empty_udp_payloads() {
+        let mut rules = RuleSet::default();
+        let mut rule = PolicyRule::allow("allow-udp");
+        rule.protocol = Some(Protocol::Udp);
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = BrokerRuntime::new(FakeEgress::default(), kernel);
+        let outcome = runtime.handle_event(&udp_event(), 1);
+
+        assert!(matches!(outcome, RuntimeOutcome::NotAnEgressEvent { .. }));
+        assert_eq!(runtime.egress().udp_attempts, 0);
     }
 
     #[test]
