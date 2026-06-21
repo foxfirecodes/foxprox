@@ -311,3 +311,20 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: b39a70c.
 - Remaining boundary risks: per-flow storage of timeout override and production expiry scheduling remain.
+
+## 2026-06-21 — Boundary objective: per-flow idle timeout enforcement
+
+- Boundary under work: flow manager storage and expiry using normalized per-flow timeout decisions.
+- Allowed dependency direction: `foxprox-net` may read `AllowDecision.timeout_override` from core policy decisions; it must not parse config or hard-code frontend-specific timeout rules into policy.
+- Dependency-risk assessment: configurable UDP/QUIC timeouts are ineffective unless the flow table stores timeout decisions per flow and expires each flow independently.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: `FlowState` now stores a per-flow idle timeout, flow table expiry can evaluate each flow independently, and timeout overrides fall back to default classification timeouts when absent. All verification passed.
+- Changed files:
+  - `crates/foxprox-net/src/lib.rs`
+  - `progress.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 51 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: production timers, egress handle cleanup, and lifecycle audit emission from the scheduler remain.

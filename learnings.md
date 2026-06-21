@@ -60,3 +60,7 @@
 ## 2026-06-21 — Policy timeout override contract
 
 - Timeout overrides belong in the normalized allow decision, not in flow-manager config string handling; this lets UDP/QUIC expiry policy remain a policy output that flow code can cache per flow.
+
+## 2026-06-21 — Per-flow timeout storage
+
+- Flow timeouts need to be stored on `FlowState` at creation time; recomputing from global UDP classification later would ignore per-rule policy overrides and make QUIC/DNS expiry behavior drift from policy decisions.

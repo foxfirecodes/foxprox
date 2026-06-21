@@ -94,6 +94,7 @@ pub struct FlowState {
     pub hostname: Option<HostnameAttribution>,
     pub created_at: Instant,
     pub last_seen: Instant,
+    pub idle_timeout: Duration,
     pub byte_counts: foxprox_core::ByteCounts,
     pub decision: PolicyDecision,
 }
@@ -113,16 +114,18 @@ impl FlowTable {
     }
 
     pub fn expire_idle(&mut self, now: Instant, idle_after: Duration) -> Vec<FlowState> {
+        self.expire_matching(|state| now.duration_since(state.last_seen) >= idle_after)
+    }
+
+    pub fn expire_by_flow_timeout(&mut self, now: Instant) -> Vec<FlowState> {
+        self.expire_matching(|state| now.duration_since(state.last_seen) >= state.idle_timeout)
+    }
+
+    fn expire_matching(&mut self, should_expire: impl Fn(&FlowState) -> bool) -> Vec<FlowState> {
         let expired_keys: Vec<_> = self
             .flows
             .iter()
-            .filter_map(|(key, state)| {
-                if now.duration_since(state.last_seen) >= idle_after {
-                    Some(key.clone())
-                } else {
-                    None
-                }
-            })
+            .filter_map(|(key, state)| should_expire(state).then_some(key.clone()))
             .collect();
         expired_keys
             .into_iter()
@@ -215,6 +218,15 @@ pub fn udp_timeout(classification: UdpClassification, timeouts: &UdpTimeouts) ->
         UdpClassification::QuicCandidate => timeouts.quic,
         UdpClassification::NtpLike => timeouts.ntp_like,
         UdpClassification::Generic | UdpClassification::MulticastOrBroadcast => timeouts.generic,
+    }
+}
+
+pub fn flow_idle_timeout(decision: &PolicyDecision, fallback: Duration) -> Duration {
+    match decision {
+        PolicyDecision::Allow(allow) => allow.timeout_override.unwrap_or(fallback),
+        PolicyDecision::Deny(_)
+        | PolicyDecision::RequireBrokerDns { .. }
+        | PolicyDecision::FailClosed { .. } => fallback,
     }
 }
 
@@ -395,6 +407,38 @@ mod tests {
     }
 
     #[test]
+    fn flow_table_expires_each_flow_by_stored_timeout() {
+        let now = Instant::now();
+        let mut table = FlowTable::default();
+        let decision = PolicyDecision::Allow(foxprox_core::AllowDecision {
+            rule_id: None,
+            timeout_override: Some(Duration::from_secs(5)),
+            reason: Some("test".into()),
+        });
+        let state = FlowState {
+            key: FlowKey {
+                source: "10.0.0.2:50000".parse().unwrap(),
+                destination: "203.0.113.10:443".parse().unwrap(),
+                protocol: FlowProtocol::Udp,
+            },
+            hostname: None,
+            created_at: now,
+            last_seen: now,
+            idle_timeout: flow_idle_timeout(&decision, Duration::from_secs(60)),
+            byte_counts: foxprox_core::ByteCounts::new(1, 2),
+            decision,
+        };
+        table.upsert(state);
+
+        assert!(table
+            .expire_by_flow_timeout(now + Duration::from_secs(4))
+            .is_empty());
+        let expired = table.expire_by_flow_timeout(now + Duration::from_secs(5));
+        assert_eq!(expired.len(), 1);
+        assert!(table.is_empty());
+    }
+
+    #[test]
     fn flow_closed_records_lifecycle_audit_without_adapter_types() {
         let now = Instant::now();
         let state = FlowState {
@@ -406,6 +450,7 @@ mod tests {
             hostname: None,
             created_at: now,
             last_seen: now + Duration::from_secs(1),
+            idle_timeout: Duration::from_secs(5),
             byte_counts: foxprox_core::ByteCounts::new(100, 200),
             decision: PolicyDecision::Allow(foxprox_core::AllowDecision {
                 rule_id: None,
