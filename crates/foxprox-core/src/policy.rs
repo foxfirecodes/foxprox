@@ -4,6 +4,7 @@ use crate::attribution::{HostAttribution, Hostname};
 use crate::config::{DestinationMatcher, PolicyConfig, PolicyRule, RuleAction};
 use crate::http::{HttpRequestMetadata, HttpsConnectMetadata};
 use crate::socks::{Socks5ConnectMetadata, Socks5Destination};
+use crate::tls::TlsClientHelloMetadata;
 use crate::types::{Endpoint, Frontend, IcmpMessage, Protocol, SandboxId};
 
 /// Exhaustive policy outcome. Callers must handle allow, denial, and fail-closed
@@ -167,6 +168,25 @@ impl PolicyRequest {
             request = request.with_destination(Endpoint::tcp(ip, metadata.port));
         }
         request.requested_port = Some(metadata.port);
+        request
+    }
+
+    pub fn from_tls_client_hello_metadata(
+        frontend: Frontend,
+        destination: Endpoint,
+        metadata: TlsClientHelloMetadata,
+        dns_attribution: Option<Hostname>,
+    ) -> Self {
+        let hidden_sni = metadata.hidden_sni();
+        let presented_hostname = metadata.sni.clone();
+        let mut request = Self::new(Protocol::TlsSni).with_destination(destination);
+        request.frontend = frontend;
+        request.hidden_sni = hidden_sni;
+        request.presented_hostname = presented_hostname;
+        request.dns_attribution = dns_attribution;
+        if let Some(attribution) = metadata.attribution {
+            request.attribution = attribution;
+        }
         request
     }
 
@@ -762,6 +782,70 @@ mod tests {
             Some(Endpoint::tcp(ip([203, 0, 113, 10]), 80))
         );
         assert_eq!(request.attribution, HostAttribution::ip_only());
+    }
+
+    #[test]
+    fn tls_clienthello_metadata_normalizes_hidden_sni_and_mismatch_state() {
+        let destination = Endpoint::tcp(ip([93, 184, 216, 34]), 443);
+        let sni = Hostname::parse("www.example.com").unwrap();
+        let visible = TlsClientHelloMetadata {
+            sni: Some(sni.clone()),
+            attribution: Some(HostAttribution::tls_sni(sni.clone())),
+            ech_present: false,
+        };
+        let request = PolicyRequest::from_tls_client_hello_metadata(
+            Frontend::Tun,
+            destination,
+            visible,
+            Some(sni.clone()),
+        );
+        assert_eq!(request.protocol, Protocol::TlsSni);
+        assert_eq!(request.frontend, Frontend::Tun);
+        assert_eq!(request.requested_port, Some(443));
+        assert!(!request.hidden_sni);
+        assert_eq!(request.presented_hostname.as_ref(), Some(&sni));
+        assert_eq!(request.dns_attribution.as_ref(), Some(&sni));
+        assert_eq!(request.attribution, HostAttribution::tls_sni(sni));
+
+        let mismatch = PolicyRequest::from_tls_client_hello_metadata(
+            Frontend::Tun,
+            destination,
+            TlsClientHelloMetadata {
+                sni: Some(Hostname::parse("evil.example").unwrap()),
+                attribution: Some(HostAttribution::tls_sni(
+                    Hostname::parse("evil.example").unwrap(),
+                )),
+                ech_present: false,
+            },
+            Some(Hostname::parse("www.example.com").unwrap()),
+        );
+        assert_eq!(
+            PolicyEngine::decide(&PolicyConfig::default(), &mismatch).reason(),
+            Some(DenialReason::AttributionMismatch)
+        );
+
+        let hidden = PolicyRequest::from_tls_client_hello_metadata(
+            Frontend::Tun,
+            destination,
+            TlsClientHelloMetadata {
+                sni: None,
+                attribution: None,
+                ech_present: false,
+            },
+            None,
+        );
+        assert_eq!(
+            PolicyEngine::decide(&PolicyConfig::default(), &hidden).reason(),
+            Some(DenialReason::HiddenSni)
+        );
+
+        let mut ip_config = PolicyConfig::default();
+        ip_config.rules.push(PolicyRule::allow_ip(
+            "explicit-ip",
+            Cidr::host(ip([93, 184, 216, 34])),
+            Some(443),
+        ));
+        assert!(PolicyEngine::decide(&ip_config, &hidden).is_allow());
     }
 
     #[test]

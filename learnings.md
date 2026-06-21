@@ -69,3 +69,7 @@ Parser outputs should have first-class conversion paths into normalized policy r
 ## 2026-06-21 - Requested port is audit-relevant metadata
 
 After separating requested authority ports from IP destination endpoints, audit records need the requested-port field too. Otherwise explicit proxy decisions are not independently reviewable when no destination IP endpoint exists yet.
+
+## 2026-06-21 - TLS metadata normalization must carry hidden-SNI state
+
+TLS parser output should normalize into policy with both presented hostname and hidden-SNI/ECH state. If callers only pass attribution when SNI exists, missing SNI can be mistaken for ordinary IP-only traffic instead of receiving the documented hidden-SNI denial behavior.

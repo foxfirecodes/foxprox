@@ -409,3 +409,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: unit tests assert requested-port preservation in policy-derived audit events.
 * Residual risk: audit serialization/sinks and DNS/flow-specific audit builder coverage remain future work.
 * Commit hash: 3477db0 preserve requested port in audit context.
+
+## 2026-06-21 - TLS ClientHello policy normalization
+
+* Invariant under work: parsed transparent TLS ClientHello metadata must enter policy with explicit TLS-SNI protocol class, destination/requested port, presented hostname, DNS attribution when available, and hidden-SNI state.
+* Threat or failure mode addressed: callers hand-building TLS policy requests could omit hidden-SNI/ECH flags or mismatch metadata, allowing domain rules to bypass documented hidden-SNI and SNI/DNS mismatch denial behavior.
+* Planned verification: add normalization tests for visible SNI attribution, SNI/DNS mismatch denial, missing SNI hidden-state denial, and explicit IP-rule exemption for hidden SNI; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - TLS ClientHello policy normalization results
+
+* Tests added/updated:
+  * visible TLS SNI metadata normalizes into `Protocol::TlsSni` requests with destination/requested port, high-confidence attribution, presented hostname, and DNS attribution.
+  * SNI/DNS mismatch on normalized TLS requests is denied with `AttributionMismatch`.
+  * missing SNI normalizes to hidden-SNI state and is denied by default.
+  * explicit IP/CIDR allow rules can still exempt hidden-SNI traffic as documented.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 80 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * TLS parser outputs can now enter policy without losing hidden-SNI/ECH or presented-hostname semantics.
+  * mismatch and hidden-SNI protections apply to normalized TLS metadata by default.
+* Audit evidence: not applicable in this commit; normalized TLS requests feed existing audit context builders.
+* Residual risk: transparent stream reassembly before TLS parsing, fragmented ClientHello handling, and QUIC TLS metadata normalization remain future work.
