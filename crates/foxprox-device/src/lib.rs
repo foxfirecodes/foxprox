@@ -12,6 +12,13 @@ use std::fmt;
 use std::io;
 use std::process::Command;
 
+#[cfg(unix)]
+use std::fs::File;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeviceError {
     InvalidConfig(IntegrationError),
@@ -27,6 +34,33 @@ pub enum DeviceError {
         stderr: String,
     },
     UnsupportedPlatform,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct SetupControlSocket {
+    broker: UnixStream,
+    helper: UnixStream,
+}
+
+#[cfg(unix)]
+impl SetupControlSocket {
+    pub fn pair() -> Result<Self, DeviceError> {
+        let (broker, helper) = UnixStream::pair()
+            .map_err(|error| io_error("create setup control socket pair", error))?;
+        Ok(Self { broker, helper })
+    }
+
+    pub fn helper_fd(&self) -> RawFd {
+        self.helper.as_raw_fd()
+    }
+
+    pub fn receive_file(&self) -> Result<File, DeviceError> {
+        let fd = unix_fd_receive::recv_fd(self.broker.as_raw_fd())
+            .map_err(|error| io_error("receive TUN fd over setup control socket", error))?;
+        // SAFETY: `recv_fd` returns a new descriptor owned by this process.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
 }
 
 impl From<IntegrationError> for DeviceError {
@@ -273,6 +307,153 @@ pub fn create_tun(_name: &str) -> Result<TunDevice, DeviceError> {
     Err(DeviceError::UnsupportedPlatform)
 }
 
+#[cfg(unix)]
+mod unix_fd_receive {
+    use std::io;
+    use std::mem::{size_of, zeroed};
+    use std::os::fd::RawFd;
+    use std::os::raw::{c_int, c_void};
+    use std::ptr;
+
+    const SOL_SOCKET: c_int = 1;
+    const SCM_RIGHTS: c_int = 1;
+
+    #[repr(C)]
+    struct Iovec {
+        iov_base: *mut c_void,
+        iov_len: usize,
+    }
+
+    #[repr(C)]
+    struct Msghdr {
+        msg_name: *mut c_void,
+        msg_namelen: u32,
+        msg_iov: *mut Iovec,
+        msg_iovlen: usize,
+        msg_control: *mut c_void,
+        msg_controllen: usize,
+        msg_flags: c_int,
+    }
+
+    #[repr(C)]
+    struct Cmsghdr {
+        cmsg_len: usize,
+        cmsg_level: c_int,
+        cmsg_type: c_int,
+    }
+
+    unsafe extern "C" {
+        fn recvmsg(fd: c_int, msg: *mut Msghdr, flags: c_int) -> isize;
+        #[cfg(test)]
+        fn sendmsg(fd: c_int, msg: *const Msghdr, flags: c_int) -> isize;
+    }
+
+    const fn cmsg_align(len: usize) -> usize {
+        let align = size_of::<usize>();
+        (len + align - 1) & !(align - 1)
+    }
+
+    const fn cmsg_len(data_len: usize) -> usize {
+        cmsg_align(size_of::<Cmsghdr>()) + data_len
+    }
+
+    const fn cmsg_space(data_len: usize) -> usize {
+        cmsg_align(size_of::<Cmsghdr>()) + cmsg_align(data_len)
+    }
+
+    pub fn recv_fd(socket_fd: RawFd) -> io::Result<RawFd> {
+        let mut byte = [0u8];
+        let mut iov = Iovec {
+            iov_base: byte.as_mut_ptr().cast::<c_void>(),
+            iov_len: byte.len(),
+        };
+        let control_len = cmsg_space(size_of::<RawFd>());
+        let mut control = vec![0usize; control_len.div_ceil(size_of::<usize>())];
+        let control_ptr = control.as_mut_ptr().cast::<u8>();
+
+        // SAFETY: zeroed `msghdr` is immediately populated with valid pointers
+        // to stack-owned buffers that outlive the `recvmsg` call.
+        let mut message: Msghdr = unsafe { zeroed() };
+        message.msg_iov = &mut iov;
+        message.msg_iovlen = 1;
+        message.msg_control = control_ptr.cast::<c_void>();
+        message.msg_controllen = control_len;
+
+        // SAFETY: `message` points to initialized receive buffers above. If the
+        // socket fd is invalid, the kernel reports an error.
+        let received = unsafe { recvmsg(socket_fd, &mut message, 0) };
+        if received < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // SAFETY: `recvmsg` initialized the aligned control buffer; validation
+        // checks for an SCM_RIGHTS RawFd before reading it.
+        unsafe {
+            let header = control_ptr.cast::<Cmsghdr>();
+            if (*header).cmsg_level != SOL_SOCKET || (*header).cmsg_type != SCM_RIGHTS {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "missing SCM_RIGHTS control message",
+                ));
+            }
+            if (*header).cmsg_len < cmsg_len(size_of::<RawFd>()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "truncated SCM_RIGHTS control message",
+                ));
+            }
+            let data = control_ptr
+                .add(cmsg_align(size_of::<Cmsghdr>()))
+                .cast::<RawFd>();
+            Ok(ptr::read(data))
+        }
+    }
+
+    #[cfg(test)]
+    pub fn send_fd_for_test(socket_fd: RawFd, fd_to_send: RawFd) -> io::Result<()> {
+        let mut byte = [0u8];
+        let mut iov = Iovec {
+            iov_base: byte.as_mut_ptr().cast::<c_void>(),
+            iov_len: byte.len(),
+        };
+        let control_len = cmsg_space(size_of::<RawFd>());
+        let mut control = vec![0usize; control_len.div_ceil(size_of::<usize>())];
+        let control_ptr = control.as_mut_ptr().cast::<u8>();
+
+        // SAFETY: `control` is aligned and large enough for one RawFd message.
+        unsafe {
+            let header = control_ptr.cast::<Cmsghdr>();
+            ptr::write(
+                header,
+                Cmsghdr {
+                    cmsg_len: cmsg_len(size_of::<RawFd>()),
+                    cmsg_level: SOL_SOCKET,
+                    cmsg_type: SCM_RIGHTS,
+                },
+            );
+            let data = control_ptr
+                .add(cmsg_align(size_of::<Cmsghdr>()))
+                .cast::<RawFd>();
+            ptr::write(data, fd_to_send);
+        }
+
+        // SAFETY: zeroed `msghdr` is immediately populated with valid pointers
+        // to stack-owned buffers that outlive the `sendmsg` call.
+        let mut message: Msghdr = unsafe { zeroed() };
+        message.msg_iov = &mut iov;
+        message.msg_iovlen = 1;
+        message.msg_control = control_ptr.cast::<c_void>();
+        message.msg_controllen = control_len;
+
+        // SAFETY: `message` points to initialized send buffers above.
+        let sent = unsafe { sendmsg(socket_fd, &message, 0) };
+        if sent < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
 impl fmt::Display for DeviceError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{self:?}")
@@ -286,6 +467,13 @@ mod tests {
     use super::*;
     use foxprox_integrations::TunDeviceConfig;
     use std::net::{IpAddr, Ipv4Addr};
+
+    #[cfg(unix)]
+    use std::io::{Read, Write};
+    #[cfg(unix)]
+    use std::os::fd::AsRawFd;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream;
 
     #[derive(Default)]
     struct FakeRunner {
@@ -313,6 +501,21 @@ mod tests {
             broker_ip: IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1)),
             mtu: 1500,
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_control_socket_receives_handed_off_fd() {
+        let control = SetupControlSocket::pair().unwrap();
+        let (payload_tx, mut payload_rx) = UnixStream::pair().unwrap();
+
+        unix_fd_receive::send_fd_for_test(control.helper_fd(), payload_tx.as_raw_fd()).unwrap();
+        let mut received = control.receive_file().unwrap();
+        received.write_all(b"ok").unwrap();
+
+        let mut buf = [0u8; 2];
+        payload_rx.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"ok");
     }
 
     #[test]

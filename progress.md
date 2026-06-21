@@ -187,3 +187,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: capability drop is compiled and bit-tested but not exercised with real elevated capabilities in this worktree; bwrap invocation and inherited control socket are still not smoke-tested end-to-end.
 - Exact next step: commit setup hardening, then implement host-side setup control socket receiving the TUN fd so the broker side can pair with `foxproxsetup` handoff.
+
+## 2026-06-21T23:25:10Z
+- Current objective: add host-side setup control socket support so the broker side can receive the TUN fd handed off by `foxproxsetup`.
+- Files changed: `crates/foxprox-device/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 35 core tests, 6 device tests, 3 integration tests, 2 runtime tests, and 7 setup tests passed. New device test proves a setup control socket pair can receive an fd via `SCM_RIGHTS` and use the received descriptor to write bytes through the original peer.
+- Commit hash when committed: pending.
+- Remaining risks: host-side bwrap launch does not yet keep/pass the helper fd through process creation, and the received fd is not yet connected to a packet log or ICMP echo loop.
+- Exact next step: commit setup control socket support, then add a minimal broker-side TUN packet loop that reads handed-off IP packets and writes synthetic ICMP echo replies through the existing packet kernel.
