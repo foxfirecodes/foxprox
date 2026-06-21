@@ -104,3 +104,15 @@
 - Commit hash when committed: previous runtime boundary slice committed as `e94aa21`; integration planning commit pending.
 - Remaining risks: the integration crate only plans command/setup shape; it does not execute bwrap, create/configure TUN, pass file descriptors, drop capabilities, or validate kernel features.
 - Exact next step: commit integration planning, then add an audit file sink or CLI-facing smoke entry point to make verification outputs durable outside tests.
+
+## 2026-06-21T17:13:00Z
+- Current objective: add durable line-oriented audit sink support while preserving fail-closed behavior on write failure.
+- Files changed: `crates/foxprox-core/src/lib.rs`, `crates/foxprox-core/src/audit.rs`, `crates/foxprox-core/src/kernel.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 35 core tests, 3 integration tests, and 2 runtime tests passed. New test proves line audit sink writes appendable structured records with timestamp, event kind, decision, and rule ID; kernel maps write failure to fail-closed audit backpressure.
+- Commit hash when committed: previous integration planning slice committed as `3e817e5`; line audit commit pending.
+- Remaining risks: audit line format is intentionally simple and not yet a stable JSON schema; no rotating file writer or async backpressure strategy is implemented.
+- Exact next step: commit audit sink slice, then run final workspace verification and summarize remaining alpha gaps.

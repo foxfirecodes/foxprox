@@ -2,6 +2,7 @@ use crate::types::{
     AttributionConfidence, Decision, Endpoint, FrontendKind, Hostname, Protocol, SandboxId,
 };
 use std::collections::VecDeque;
+use std::io::Write;
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -118,6 +119,7 @@ pub trait AuditSink {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuditError {
     Backpressure { capacity: usize },
+    WriteFailed,
 }
 
 #[derive(Clone, Debug)]
@@ -155,6 +157,82 @@ impl AuditSink for VecAuditSink {
     }
 }
 
+#[derive(Debug)]
+pub struct LineAuditSink<W> {
+    writer: W,
+}
+
+impl<W> LineAuditSink<W> {
+    pub fn new(writer: W) -> Self {
+        Self { writer }
+    }
+
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
+impl<W: Write> AuditSink for LineAuditSink<W> {
+    fn emit(&mut self, event: AuditEvent) -> Result<(), AuditError> {
+        let line = format_audit_line(&event);
+        self.writer
+            .write_all(line.as_bytes())
+            .and_then(|_| self.writer.write_all(b"\n"))
+            .map_err(|_| AuditError::WriteFailed)
+    }
+}
+
+pub fn format_audit_line(event: &AuditEvent) -> String {
+    let mut fields = vec![
+        ("ts", event.timestamp_millis.to_string()),
+        ("kind", format!("{:?}", event.kind)),
+        ("sandbox", event.sandbox_id.to_string()),
+        ("frontend", format!("{:?}", event.frontend)),
+        ("bytes_in", event.bytes_in.to_string()),
+        ("bytes_out", event.bytes_out.to_string()),
+    ];
+    if let Some(protocol) = event.protocol {
+        fields.push(("protocol", format!("{:?}", protocol)));
+    }
+    if let Some(source) = &event.source {
+        fields.push(("src", format!("{}:{}", source.ip, source.port)));
+    }
+    if let Some(destination) = &event.destination {
+        fields.push(("dst", format!("{}:{}", destination.ip, destination.port)));
+    }
+    if let Some(hostname) = &event.hostname {
+        fields.push(("host", hostname.to_string()));
+    }
+    if let Some(confidence) = event.hostname_confidence {
+        fields.push(("host_confidence", format!("{:?}", confidence)));
+    }
+    if let Some(decision) = &event.decision {
+        fields.push(("decision", format!("{:?}", decision.action)));
+        fields.push(("decision_reason", format!("{:?}", decision.reason)));
+    }
+    if let Some(rule_id) = &event.rule_id {
+        fields.push(("rule", rule_id.clone()));
+    }
+    if let Some(reason) = &event.reason {
+        fields.push(("reason", reason.clone()));
+    }
+    fields
+        .into_iter()
+        .map(|(key, value)| format!("{}={}", key, escape_value(&value)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn escape_value(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| match ch {
+            ' ' | '\\' | '=' => ['\\', ch].into_iter().collect::<Vec<_>>(),
+            _ => [ch].into_iter().collect(),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,5 +257,23 @@ mod tests {
             ))
             .unwrap_err();
         assert_eq!(err, AuditError::Backpressure { capacity: 1 });
+    }
+
+    #[test]
+    fn line_audit_sink_writes_structured_appendable_line() {
+        let sandbox = SandboxId::new("s").unwrap();
+        let mut sink = LineAuditSink::new(Vec::new());
+        sink.emit(
+            AuditEvent::new(7, AuditEventKind::TcpConnect, sandbox, FrontendKind::Tun)
+                .with_protocol(Protocol::Tcp)
+                .with_decision(Decision::allow(Some("rule-1".to_string()))),
+        )
+        .unwrap();
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+        assert!(output.contains("ts=7"));
+        assert!(output.contains("kind=TcpConnect"));
+        assert!(output.contains("decision=Allow"));
+        assert!(output.contains("rule=rule-1"));
+        assert!(output.ends_with('\n'));
     }
 }

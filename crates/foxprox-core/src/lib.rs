@@ -20,7 +20,10 @@ pub mod packet;
 pub mod policy;
 pub mod types;
 
-pub use audit::{AuditError, AuditEvent, AuditEventKind, AuditSink, VecAuditSink};
+pub use audit::{
+    format_audit_line, AuditError, AuditEvent, AuditEventKind, AuditSink, LineAuditSink,
+    VecAuditSink,
+};
 pub use config::{validate_policy_config, ConfigError};
 pub use dns::{DnsCache, DnsObservation};
 pub use event::{explicit_proxy_attribution, NormalizedEvent};

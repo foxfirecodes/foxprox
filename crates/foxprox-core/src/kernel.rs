@@ -39,7 +39,7 @@ impl<S: AuditSink> VerificationKernel<S> {
             .with_decision(decision.clone());
         match self.audit_sink.emit(audit_event) {
             Ok(()) => decision,
-            Err(AuditError::Backpressure { .. }) => Decision::denied(
+            Err(AuditError::Backpressure { .. } | AuditError::WriteFailed) => Decision::denied(
                 DecisionAction::FailClosed,
                 DecisionReason::AuditBackpressure,
             ),
