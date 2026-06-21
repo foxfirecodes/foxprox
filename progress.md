@@ -63,3 +63,42 @@ The alpha core now exposes decision-relevant behavior through structured audit r
 - `7b462c2` — observable alpha broker core foundation.
 - `7227fce` — reviewer fixes for packet validation, timestamps, ICMP defaults, flow audit semantics, setup fd modeling, and backpressure evidence.
 - `5d1aa6d` — DNS query parser and refused-response foundation.
+
+## 2026-06-21 — Explicit proxy parser observability cycle
+
+### Behavior under work
+Add platform-independent HTTP proxy and SOCKS5 CONNECT request parsing that emits normalized `PolicyRequest` values using the shared policy/audit backend, including malformed proxy requests that fail closed with structured denial evidence.
+
+### Expected evidence
+- HTTP absolute-form and `CONNECT` proxy requests produce `http_request_decision` / `https_connect_decision` audit records with explicit proxy hostname attribution, origin, method, and path/authority details.
+- SOCKS5 TCP CONNECT requests for domain and IP destinations produce `socks_connect_decision` audit records with destination host attribution or endpoint IP/port.
+- Malformed/unsupported proxy requests produce `unsupported_denied` audit records with `reason=proxy_malformed` and `frontend` set to the proxy that observed them.
+
+### Commands run
+- `cargo fmt --check` — initially failed because new `proxy.rs` needed formatting.
+- `cargo fmt` — applied formatting.
+- `cargo test --all-targets --all-features` — passed, 42 unit tests.
+- `cargo fmt --check` — passed after formatting.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `proxy::tests::http_proxy_absolute_form_emits_origin_aware_policy_request ... ok`
+- `proxy::tests::http_connect_emits_https_connect_decision ... ok`
+- `proxy::tests::socks5_domain_connect_emits_socks_decision_with_attribution ... ok`
+- `proxy::tests::socks5_ip_connect_keeps_endpoint_visible ... ok`
+- `proxy::tests::malformed_proxy_request_fails_closed_with_structured_detail ... ok`
+
+### Interpretation
+Explicit proxy parsing is now represented as a first-class platform-independent frontend contract instead of only hand-built policy requests. HTTP proxy and SOCKS5 CONNECT metadata normalize into shared `PolicyRequest` paths, and malformed proxy input carries a bounded `proxy_parse_error` detail through the shared structured audit ledger.
+
+### Changed files
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-core/src/policy.rs`
+- `crates/foxprox-core/src/proxy.rs`
+- `progress.md`
+
+### Remaining blind spots
+- The parser/harness does not yet accept sockets or bridge traffic; listener/runtime work remains for explicit proxy frontend execution.
+
+### Commit
+- `37d676b` — observable explicit HTTP/SOCKS proxy parsing.

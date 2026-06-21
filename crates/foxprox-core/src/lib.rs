@@ -15,6 +15,7 @@ pub mod flow;
 pub mod inspect;
 pub mod packet;
 pub mod policy;
+pub mod proxy;
 pub mod setup;
 pub mod types;
 
@@ -26,6 +27,10 @@ pub use dns::{
 pub use flow::{DnsCache, FlowKey, FlowProtocol, UdpFlowManager};
 pub use packet::{IpParseError, ParsedIpPacket};
 pub use policy::{Cidr, PolicyConfig, PolicyDecision, PolicyEngine, PolicyRequest, PolicyRule};
+pub use proxy::{
+    malformed_proxy_request, parse_http_proxy_request, parse_socks5_connect_request,
+    HttpProxyRequestMetadata, ProxyParseError, SocksConnectMetadata,
+};
 pub use setup::{BwrapSetupPlan, NetworkSetupConfig, ProxyEnvironment};
 pub use types::*;
 

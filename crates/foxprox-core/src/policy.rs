@@ -5,6 +5,7 @@ use crate::types::{
     SandboxIdentity,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +264,7 @@ pub struct PolicyRequest {
     pub unsupported_reason: Option<DenialReason>,
     pub icmp_type: Option<u8>,
     pub icmp_code: Option<u8>,
+    pub details: BTreeMap<String, String>,
 }
 
 impl PolicyRequest {
@@ -285,6 +287,7 @@ impl PolicyRequest {
             unsupported_reason: None,
             icmp_type: None,
             icmp_code: None,
+            details: BTreeMap::new(),
         }
     }
 
@@ -368,6 +371,11 @@ impl PolicyRequest {
 
     pub fn with_dns_correlated_hostname(mut self, hostname: impl Into<String>) -> Self {
         self.dns_correlated_hostname = Some(normalize_hostname(&hostname.into()));
+        self
+    }
+
+    pub fn with_detail(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.details.insert(key.into(), value.into());
         self
     }
 
@@ -579,6 +587,9 @@ impl PolicyEngine {
         }
         if let Some(icmp_code) = request.icmp_code {
             audit = audit.with_detail("icmp_code", icmp_code.to_string());
+        }
+        for (key, value) in &request.details {
+            audit = audit.with_detail(key, value);
         }
         (decision, audit)
     }
