@@ -29,3 +29,7 @@
 ## 2026-06-21 — Transparent UDP runtime boundary
 
 - Keep Linux fd handoff/read/write code in the CLI or future device crate, but keep packet parsing, policy-before-egress, audit generation, and UDP reply synthesis in platform-independent core runtime code. This makes environment smokes smaller and gives deterministic tests for allow/deny behavior before involving bwrap.
+
+## 2026-06-21 — DNS smoke pattern
+
+- A minimal raw DNS A query from sandbox Python is sufficient to prove broker-local DNS response and cache attribution over the handed-off TUN fd. This avoids depending on `/etc/resolv.conf` mutation or external upstream DNS while still exercising real UDP packets through the sandbox route.

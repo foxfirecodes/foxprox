@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use std::os::unix::net::UnixListener;
 
 use foxprox_core::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
+use foxprox_core::dns::{parse_dns_query, synthesize_a_response, DnsCache};
 use foxprox_core::egress::{EgressBackend, EgressOutcome, EgressRequest};
 use foxprox_core::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule, RuleAction};
 use foxprox_core::runtime::TransparentUdpRuntime;
@@ -45,6 +46,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("writeback-smoke");
             println!("udp-forward-smoke");
             println!("udp-deny-smoke");
+            println!("dns-smoke");
             Ok(())
         }
         [cmd, scenario] if cmd == "run" => run_named_scenario(scenario),
@@ -70,6 +72,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         udp_forward_smoke_records()
     } else if scenario == "udp-deny-smoke" {
         udp_deny_smoke_records()
+    } else if scenario == "dns-smoke" {
+        dns_smoke_records()
     } else {
         run_scenario(ScenarioName::parse(scenario)?)
     };
@@ -81,7 +85,7 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke>",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke>",
         ScenarioName::list().join("|")
     );
 }
@@ -798,6 +802,209 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
             record = record.with_metadata("rule_id", rule_id);
         }
     }
+    if !stdout.is_empty() {
+        record = record.with_metadata("stdout", stdout);
+    }
+    if !stderr.is_empty() {
+        record = record.with_metadata("stderr", stderr);
+    }
+    Ok(record)
+}
+
+#[cfg(unix)]
+fn dns_smoke_records() -> Vec<AuditRecord> {
+    match run_dns_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => {
+            vec![
+                AuditRecord::new(EventKind::DnsQuery, "dns-smoke", Decision::FailClosed, err)
+                    .with_frontend(Frontend::Harness)
+                    .with_protocol(Protocol::Dns),
+            ]
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn dns_smoke_records() -> Vec<AuditRecord> {
+    vec![AuditRecord::new(
+        EventKind::DnsQuery,
+        "dns-smoke",
+        Decision::FailClosed,
+        "DNS smoke is only supported on Unix",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Dns)]
+}
+
+#[cfg(unix)]
+fn run_dns_smoke() -> Result<AuditRecord, String> {
+    let helper = setup_helper_path()?;
+    let target_dir = helper
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| {
+            format!(
+                "could not derive target directory from {}",
+                helper.display()
+            )
+        })?
+        .to_path_buf();
+    let socket_dir = target_dir.join(format!("foxprox-dns-smoke-{}", std::process::id()));
+    let socket_path = socket_dir.join("setup.sock");
+    let _ = std::fs::remove_file(&socket_path);
+    std::fs::create_dir_all(&socket_dir)
+        .map_err(|err| format!("failed to create DNS smoke socket dir: {err}"))?;
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|err| format!("failed to bind DNS smoke socket: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make DNS listener nonblocking: {err}"))?;
+
+    let mut child = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--ro-bind",
+        ])
+        .arg(&target_dir)
+        .arg(&target_dir)
+        .args(["--bind"])
+        .arg(&socket_dir)
+        .arg(&socket_dir)
+        .args(["--proc", "/proc", "--"])
+        .env("FOXPROX_SETUP_SOCKET", &socket_path)
+        .arg(&helper)
+        .args([
+            "--",
+            "/usr/bin/python3",
+            "-c",
+            "import socket,sys; q=b'\\x12\\x34\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00' + b'\\x03lab\\x07example\\x00' + b'\\x00\\x01\\x00\\x01'; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(3); s.sendto(q,('10.0.2.1',53)); data,_=s.recvfrom(512); sys.exit(0 if data[:2]==b'\\x12\\x34' and b'\\xcb\\x00\\x71\\x4d' in data else 3)",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn bwrap DNS smoke: {err}"))?;
+
+    let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
+    fd_handoff::set_nonblocking(fd)?;
+    let answer_ip = "203.0.113.77"
+        .parse()
+        .map_err(|err| format!("invalid DNS smoke answer IP: {err}"))?;
+    let mut cache = DnsCache::new();
+    let mut buf = [0_u8; 2048];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut packets_read = 0_u64;
+    let mut query_name = None;
+    while Instant::now() < deadline {
+        match fd_handoff::read_fd(fd, &mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                packets_read += 1;
+                let packet = &buf[..n];
+                let parsed = match foxprox_core::packet::parse_ipv4(packet) {
+                    Ok(parsed) => parsed,
+                    Err(_) => continue,
+                };
+                if parsed.protocol_number != 17 {
+                    continue;
+                }
+                let udp = match foxprox_core::packet::parse_udp(parsed.payload) {
+                    Ok(udp) => udp,
+                    Err(_) => continue,
+                };
+                if udp.destination_port != 53 {
+                    continue;
+                }
+                let query = parse_dns_query(udp.payload)?;
+                let dns_response = synthesize_a_response(udp.payload, answer_ip, 60)?;
+                let reply = foxprox_core::packet::synthesize_udp_reply(packet, &dns_response)?;
+                fd_handoff::write_all_fd(fd, &reply)?;
+                cache.observe_response(
+                    &query.hostname,
+                    [std::net::IpAddr::V4(answer_ip)],
+                    1,
+                    60,
+                )?;
+                query_name = Some(query.hostname);
+                break;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(format!("failed to read TUN fd during DNS smoke: {err}")),
+        }
+        if child
+            .try_wait()
+            .map_err(|err| format!("failed to poll bwrap DNS smoke: {err}"))?
+            .is_some()
+        {
+            let output = child
+                .wait_with_output()
+                .map_err(|err| format!("failed to collect early DNS output: {err}"))?;
+            return Err(format!(
+                "DNS target exited before reply: {}; stdout={:?}; stderr={:?}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let Some(hostname) = query_name else {
+        return Err("timed out waiting for DNS query on handed-off TUN fd".to_string());
+    };
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for bwrap DNS smoke: {err}"))?;
+    fd_handoff::close_fd(fd);
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir(&socket_dir);
+    let attribution = cache.attribution_for(std::net::IpAddr::V4(answer_ip), 2);
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut record = AuditRecord::new(
+        EventKind::DnsQuery,
+        "dns-smoke",
+        if output.status.success() {
+            Decision::Allow
+        } else {
+            Decision::FailClosed
+        },
+        if output.status.success() {
+            "sandbox DNS A query was answered locally and cached for attribution"
+        } else {
+            "DNS response was written but sandbox query command failed"
+        },
+    )
+    .with_frontend(Frontend::Tun)
+    .with_protocol(Protocol::Dns)
+    .with_hostname(
+        Some(hostname),
+        foxprox_core::audit::AttributionSource::DnsCache,
+        foxprox_core::audit::AttributionConfidence::Medium,
+    )
+    .with_metadata("status", output.status.to_string())
+    .with_metadata("packets_read", packets_read.to_string())
+    .with_metadata("answer", answer_ip.to_string())
+    .with_metadata("attribution_cached", attribution.is_some().to_string());
     if !stdout.is_empty() {
         record = record.with_metadata("stdout", stdout);
     }

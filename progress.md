@@ -227,3 +227,27 @@
 - Interpretation: the environment harness now proves both positive and negative UDP behavior over the bwrap-created TUN fd with the same core runtime: allowed traffic reaches host egress, denied traffic does not.
 - Next verification gap: DNS broker foundation on the transparent UDP runtime path: handle sandbox UDP/53 locally, audit DNS query, and cache/attribute returned addresses without host egress.
 - Commit hash after commit: pending.
+
+## 2026-06-21T15:55:00Z — Denied UDP smoke commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs progress.md && git commit -m "Add denied UDP environment smoke"`
+- Environment assumptions: denied UDP smoke and existing allow UDP smoke were verified before commit.
+- Expected result: commit captures negative environment proof for default-deny UDP behavior over TUN.
+- Observed result: commit `87fc161` created with 3 files changed.
+- Relevant output excerpt: `[harness-lab 87fc161] Add denied UDP environment smoke`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: negative UDP environment checkpoint is preserved.
+- Next verification gap: transparent DNS broker foundation using the UDP runtime path.
+- Commit hash after commit: 87fc161.
+
+## 2026-06-21T16:25:00Z — Transparent DNS smoke foundation
+
+- Command executed: `cargo fmt --all && cargo test --all`; `cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run dns-smoke`
+- Environment assumptions: sandbox Python can send a raw DNS UDP query to the broker address `10.0.2.1:53`; host harness owns the handed-off TUN fd and can synthesize a minimal DNS A response locally without external DNS.
+- Expected result: deterministic DNS wire parser/synthesizer tests pass; `dns-smoke` observes a sandbox DNS A query over TUN, writes a local A response, updates DNS cache attribution, and the sandbox target validates the answer.
+- Observed result: pass. `foxprox-core` increased to 35 tests; `foxprox-cli` ran 2 tests; `foxproxsetup` ran 7 tests. `dns-smoke` emitted `decision":"allow"`, `hostname":"lab.example"`, and `attribution_cached":"true"`.
+- Relevant output excerpt: `dns::tests::parses_and_synthesizes_a_query_wire ... ok`; `"reason":"sandbox DNS A query was answered locally and cached for attribution"`; `"answer":"203.0.113.77"`.
+- Changed files: `crates/foxprox-core/src/dns.rs`, `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: the harness now has a local DNS broker proof on the same bwrap/TUN fd path: DNS can be answered without external network access and results can feed attribution cache state.
+- Next verification gap: use the DNS cache result to attribute a subsequent transparent UDP/TCP flow in an environment smoke, or begin TCP stack/forwarding proof scaffolding.
+- Commit hash after commit: pending.
