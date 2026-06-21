@@ -344,3 +344,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; transaction outcomes feed future DNS audit events.
 * Residual risk: DNS handler wiring to cache insertion, response-code audit mapping, upstream retry behavior, and response synthesis remain future work.
 * Commit hash: 16ce278 correlate dns responses before attribution.
+
+## 2026-06-21 - Domain policy port binding for explicit proxy origins
+
+* Invariant under work: hostname/domain allow rules with a port constraint must require the explicit requested port from proxy-origin metadata when no destination IP endpoint exists, and must not treat missing destination endpoints as port matches.
+* Threat or failure mode addressed: explicit HTTPS CONNECT or SOCKS domain requests could otherwise satisfy `example.com:443` rules while requesting a different port if policy evaluation only checked hostname attribution and ignored parser-provided authority port.
+* Planned verification: add policy tests showing requested-port matches allow, requested-port mismatch denies, missing port metadata denies port-scoped domain rules, and existing transparent destination-port matching still works; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Domain policy port binding for explicit proxy origins results
+
+* Tests added/updated:
+  * explicit proxy hostname requests with requested port 443 satisfy a host rule scoped to port 443.
+  * explicit proxy hostname requests with requested port 22, or missing requested-port metadata, do not satisfy the port-scoped host rule and default-deny.
+  * transparent destination endpoints still populate requested-port metadata and continue to match host rules by destination port.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 77 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * domain rules now bind to `PolicyRequest::requested_port` instead of treating absent IP endpoints as a port match.
+  * packet-derived policy requests copy destination port into requested-port metadata.
+  * explicit proxy events must carry parser-derived authority/destination port to satisfy port-scoped domain rules.
+* Audit evidence: not applicable in this commit; requested port should be added to expanded audit context in a later audit schema cycle.
+* Residual risk: parser-to-policy conversion helpers for CONNECT/SOCKS/HTTP and requested-port audit fields remain future work.

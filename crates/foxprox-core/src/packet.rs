@@ -28,6 +28,7 @@ impl PacketSummary {
             protocol: self.protocol,
             source: Some(self.source_endpoint()),
             destination: Some(self.destination_endpoint()),
+            requested_port: self.destination_port,
             icmp: self.icmp,
             ..PolicyRequest::new(self.protocol)
         }

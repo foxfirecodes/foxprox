@@ -57,3 +57,7 @@ QUIC candidate parsing should be explicit about what is known: header form, pack
 ## 2026-06-21 - DNS responses need transaction correlation before caching
 
 Strict DNS response parsing is not sufficient for safe attribution. Address answers should only enter the attribution cache after matching a recent pending query by client, upstream, transaction ID, hostname, and query type; mismatched responses should fail closed and not poison or reuse pending state.
+
+## 2026-06-21 - Domain allow rules must bind proxy authority ports
+
+Host/domain policy rules with ports cannot rely only on IP destination endpoints. Explicit proxy requests may have no resolved IP yet, so policy needs a separate requested-port field populated from CONNECT/SOCKS/HTTP authority metadata; missing requested-port must not match port-scoped host rules.

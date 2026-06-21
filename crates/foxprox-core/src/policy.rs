@@ -64,6 +64,7 @@ pub struct PolicyRequest {
     pub protocol: Protocol,
     pub source: Option<Endpoint>,
     pub destination: Option<Endpoint>,
+    pub requested_port: Option<u16>,
     pub attribution: HostAttribution,
     pub dns_attribution: Option<Hostname>,
     pub presented_hostname: Option<Hostname>,
@@ -82,6 +83,7 @@ impl PolicyRequest {
             protocol,
             source: None,
             destination: None,
+            requested_port: None,
             attribution: HostAttribution::none(),
             dns_attribution: None,
             presented_hostname: None,
@@ -94,7 +96,13 @@ impl PolicyRequest {
     }
 
     pub fn with_destination(mut self, destination: Endpoint) -> Self {
+        self.requested_port = destination.port;
         self.destination = Some(destination);
+        self
+    }
+
+    pub fn with_requested_port(mut self, port: u16) -> Self {
+        self.requested_port = Some(port);
         self
     }
 
@@ -217,9 +225,7 @@ fn destination_matches(rule: &PolicyRule, request: &PolicyRequest) -> bool {
         }),
         DestinationMatcher::Host { host, port } => {
             request.attribution.is_sufficient_for_domain_rules()
-                && request
-                    .destination
-                    .map_or(true, |destination| port_matches(*port, destination.port))
+                && port_matches(*port, request.requested_port)
                 && request
                     .attribution
                     .hostname
@@ -614,6 +620,43 @@ mod tests {
                 rule_id: Some("deny-first".into()),
             }
         );
+    }
+
+    #[test]
+    fn domain_port_rules_use_explicit_requested_port_without_ip_endpoint() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(PolicyRule::allow_domain(
+            "allow-connect-443",
+            HostMatcher::exact("example.com").unwrap(),
+            Some(443),
+        ));
+        let attribution = HostAttribution::explicit_proxy(Hostname::parse("example.com").unwrap());
+
+        let allowed = PolicyRequest::new(Protocol::HttpsConnect)
+            .with_attribution(attribution.clone())
+            .with_requested_port(443);
+        assert!(PolicyEngine::decide(&config, &allowed).is_allow());
+
+        let wrong_port = PolicyRequest::new(Protocol::HttpsConnect)
+            .with_attribution(attribution.clone())
+            .with_requested_port(22);
+        assert_eq!(
+            PolicyEngine::decide(&config, &wrong_port).reason(),
+            Some(DenialReason::DefaultDeny)
+        );
+
+        let missing_port = PolicyRequest::new(Protocol::HttpsConnect).with_attribution(attribution);
+        assert_eq!(
+            PolicyEngine::decide(&config, &missing_port).reason(),
+            Some(DenialReason::DefaultDeny)
+        );
+
+        let transparent = PolicyRequest::new(Protocol::Tcp)
+            .with_destination(Endpoint::tcp(ip([93, 184, 216, 34]), 443))
+            .with_attribution(HostAttribution::dns(
+                Hostname::parse("example.com").unwrap(),
+            ));
+        assert!(PolicyEngine::decide(&config, &transparent).is_allow());
     }
 
     #[test]
