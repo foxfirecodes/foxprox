@@ -184,3 +184,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * domain-based policy can only use validated SOCKS domain destinations, not IP-only requests.
 * Audit evidence: not applicable in this commit; SOCKS metadata feeds future proxy frontend policy/audit events.
 * Residual risk: actual SOCKS accept loop, reply synthesis, stream forwarding, and shared egress integration remain future proxy frontend work.
+* Commit hash: 73f6f2f strict socks5 connect parsing.
