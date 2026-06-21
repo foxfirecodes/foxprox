@@ -36,6 +36,17 @@ impl BrokerCore {
         self.audit
     }
 
+    pub fn append_audit_for(
+        &mut self,
+        request: &PolicyRequest,
+        record: AuditRecord,
+    ) -> Result<u64, PolicyDecision> {
+        match self.audit.append(record) {
+            Ok(sequence) => Ok(sequence),
+            Err(error) => Err(self.fail_closed_for_audit_backpressure(request, error)),
+        }
+    }
+
     fn fail_closed_for_audit_backpressure(
         &mut self,
         request: &PolicyRequest,

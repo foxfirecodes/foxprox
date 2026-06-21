@@ -11,6 +11,7 @@
 pub mod audit;
 pub mod broker;
 pub mod dns;
+pub mod dns_handler;
 pub mod flow;
 pub mod inspect;
 pub mod packet;
@@ -23,6 +24,10 @@ pub use audit::{AuditError, AuditRecord, BoundedAuditLedger};
 pub use broker::BrokerCore;
 pub use dns::{
     build_refused_response, parse_dns_query, DnsParseError, DnsQueryMetadata, DnsQueryType,
+};
+pub use dns_handler::{
+    parse_dns_response_addresses, DnsAnswerSummary, DnsBrokerHandler, DnsHandlerResult,
+    DnsUpstream, DnsUpstreamError,
 };
 pub use flow::{DnsCache, FlowKey, FlowProtocol, UdpFlowManager};
 pub use packet::{IpParseError, ParsedIpPacket};

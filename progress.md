@@ -102,3 +102,40 @@ Explicit proxy parsing is now represented as a first-class platform-independent 
 
 ### Commit
 - `37d676b` — observable explicit HTTP/SOCKS proxy parsing.
+
+## 2026-06-21 — DNS handler observability cycle
+
+### Behavior under work
+Add a platform-independent DNS broker handler that receives UDP/53 payload bytes, parses DNS questions, evaluates them through `BrokerCore`, returns REFUSED on denied/malformed paths, forwards allowed questions through a mockable upstream interface, and records returned address observations into the DNS attribution cache and audit ledger before responses are released.
+
+### Expected evidence
+- Allowed broker-DNS queries call the upstream, return the upstream response, and produce structured `dns_query_decision` records with hostname/qtype and returned addresses.
+- Denied DNS policy decisions return bounded REFUSED responses without contacting upstream.
+- Malformed DNS payloads fail closed with structured parse-error audit details.
+- DNS observation audit backpressure prevents releasing upstream responses and leaves observable `audit_backpressure` evidence.
+
+### Commands run
+- `cargo fmt` — applied formatting for `dns_handler.rs`.
+- `cargo test --all-targets --all-features` — passed, 47 unit tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `dns_handler::tests::allowed_query_returns_upstream_response_and_observes_addresses ... ok`
+- `dns_handler::tests::denied_query_returns_refused_without_upstream ... ok`
+- `dns_handler::tests::malformed_query_fails_closed_with_parse_detail ... ok`
+- `dns_handler::tests::address_observation_backpressure_blocks_upstream_response_release ... ok`
+- `dns_handler::tests::response_address_parser_extracts_a_answers_and_ttl ... ok`
+
+### Interpretation
+The DNS broker path is now observable as a composed behavior rather than isolated parser/cache primitives. Allowed queries must record both the policy decision and returned-address observation before the upstream response is released; denied or malformed inputs produce REFUSED/no-response behavior with structured audit reasons. Address-observation backpressure is treated as fail-closed to avoid invisible hostname attribution state.
+
+### Changed files
+- `crates/foxprox-core/src/broker.rs`
+- `crates/foxprox-core/src/dns_handler.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `progress.md`
+- `learnings.md`
+
+### Remaining blind spots
+- DNS upstream exchange is still a mockable trait rather than an async socket implementation. Runtime UDP listener and real upstream resolver integration remain later alpha work.
