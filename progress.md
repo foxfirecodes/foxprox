@@ -177,5 +177,5 @@
   - `crates/foxprox-core/src/lib.rs`
   - `crates/foxprox-policy/src/lib.rs`
   - `progress.md`
-- Commit hash after commit: pending.
+- Commit hash after commit: 0ccd827.
 - Remaining boundary risks: header-based policy and real transparent stream reassembly are still pending.
