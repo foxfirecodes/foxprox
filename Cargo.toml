@@ -2,6 +2,7 @@
 members = [
     "crates/foxprox-core",
     "crates/foxprox-device",
+    "crates/foxprox-net",
     "crates/foxprox-setup",
     "crates/foxprox-cli",
 ]

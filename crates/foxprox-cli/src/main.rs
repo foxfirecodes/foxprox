@@ -1,7 +1,9 @@
+use foxprox_core::SandboxId;
 use foxprox_device::{
     parse_icmpv4_metadata, parse_ipv4_metadata, synthesize_icmpv4_echo_reply,
     unsupported_event_for_drop,
 };
+use foxprox_net::{run_tcp_proof_with_ready, TcpProofConfig};
 use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
 use std::env;
 use std::fs::{self, File};
@@ -22,6 +24,7 @@ fn run() -> io::Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
         Some("proof-icmp") => proof_icmp(args),
+        Some("proof-tcp") => proof_tcp(args),
         Some("--help" | "-h") | None => Err(io::Error::new(io::ErrorKind::InvalidInput, usage())),
         Some(other) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -31,7 +34,7 @@ fn run() -> io::Result<()> {
 }
 
 fn usage() -> &'static str {
-    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1]"
+    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80]"
 }
 
 fn proof_icmp<I>(mut args: I) -> io::Result<()>
@@ -113,6 +116,64 @@ where
             }
         }
     }
+}
+
+fn proof_tcp<I>(mut args: I) -> io::Result<()>
+where
+    I: Iterator<Item = String>,
+{
+    let mut setup_socket = env::var("FOXPROX_SETUP_SOCKET").ok();
+    let mut config = TcpProofConfig::new(SandboxId::new("proof-tcp").map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid sandbox id: {error}"),
+        )
+    })?);
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--setup-socket" => setup_socket = Some(required_value(&mut args, "--setup-socket")?),
+            "--broker-ip" => {
+                config.broker_ip = parse_value(&required_value(&mut args, "--broker-ip")?)?
+            }
+            "--prefix-len" => {
+                config.prefix_len = parse_value(&required_value(&mut args, "--prefix-len")?)?
+            }
+            "--mtu" => config.mtu = parse_value(&required_value(&mut args, "--mtu")?)?,
+            "--tcp-port" => {
+                config.tcp_port = parse_value(&required_value(&mut args, "--tcp-port")?)?
+            }
+            "--help" | "-h" => return Err(io::Error::new(io::ErrorKind::InvalidInput, usage())),
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unexpected argument {other:?}\n{}", usage()),
+                ));
+            }
+        }
+    }
+
+    let setup_socket = setup_socket.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "missing --setup-socket or FOXPROX_SETUP_SOCKET\n{}",
+                usage()
+            ),
+        )
+    })?;
+
+    let listener = UnixListener::bind(&setup_socket)?;
+    fs::set_permissions(&setup_socket, fs::Permissions::from_mode(0o600))?;
+    eprintln!("foxprox: waiting for foxproxsetup on {setup_socket}");
+    let (mut stream, _) = listener.accept()?;
+    verify_peer_credentials(&stream)?;
+    let tun_fd = recv_fd(stream.as_raw_fd())?;
+    eprintln!(
+        "foxprox: received TUN fd; starting TCP proof on port {}",
+        config.tcp_port
+    );
+    run_tcp_proof_with_ready(tun_fd, config, || stream.write_all(b"ready\n"))
 }
 
 fn required_value<I>(args: &mut I, flag: &str) -> io::Result<String>

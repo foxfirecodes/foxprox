@@ -139,3 +139,70 @@
 - Files changed: `Cargo.toml`, `Cargo.lock`, `crates/foxprox-setup`, `crates/foxprox-cli`, `progress.md`.
 - Current git status summary: uncommitted setup/broker proof and progress update; review artifacts removed.
 - Next exact action: commit setup/broker proof, then continue toward alpha Milestone 2 smoltcp TCP forwarding gate.
+
+## 2026-06-21T17:29:00Z — Milestone 2 smoltcp TCP proof implemented pending review
+
+- Current objective: verify and commit Milestone 2 smoltcp TCP forwarding gate.
+- Context used: `context-build/smoltcp-gate.md` recommended smoltcp `0.12.0` for MSRV 1.80, a separate `foxprox-net` crate, `Medium::Ip`, nonblocking TUN fd, AnyIP, and TCP validation with curl `--resolve` to avoid the DNS/UDP gap.
+- Changes implemented:
+  - Added workspace crate `crates/foxprox-net` with smoltcp `=0.12.0` and features `std`, `medium-ip`, `phy-tuntap_interface`, `proto-ipv4`, `socket-tcp`.
+  - Added `TcpProofConfig` and `run_tcp_proof()` that consumes a received TUN fd, sets it nonblocking, wraps it with `smoltcp::phy::TunTapInterface::from_fd(..., Medium::Ip, mtu)`, configures broker IP, AnyIP, and a default IPv4 route.
+  - Added a narrow TCP bridge proof for one configured destination port (default 80): a smoltcp listening TCP socket accepts sandbox connections, logs a normalized `TcpConnectAttempt`, opens a host `TcpStream` to the original destination, and bridges bytes in both directions with bounded pending buffers.
+  - Added `foxprox proof-tcp` CLI command reusing the setup-socket peer credential check, exact-one-fd receive, and broker-ready ack before handing the fd to `foxprox-net`.
+- Verification commands and outcomes so far:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - Live validation passed: with broker `foxprox proof-tcp --setup-socket $sock --tcp-port 80`, bwrap+`foxproxsetup`, and sandbox `/usr/bin/curl --noproxy '*' --max-time 10 -v --resolve example.com:80:<resolved-ip> http://example.com/`, curl received an HTTP 200 response. Broker logged TCP connect from `10.255.0.2:<port>` to `<resolved-ip>:80` and an allow `TcpConnectAttempt`.
+- Subagents/reviews requested: parallel smoltcp proof blocker review and security/correctness review are running.
+- Current limitations intentionally accepted for proof: only one configured TCP port/listening socket; DNS/UDP is not implemented, so validation uses pre-resolved curl `--resolve`; connect is blocking with timeout; full arbitrary-port transparent forwarding is deferred.
+- Files changed: `Cargo.toml`, `Cargo.lock`, `crates/foxprox-net`, `crates/foxprox-cli`, `progress.md`; `context-build/smoltcp-gate.md` is an untracked subagent artifact to remove before commit.
+- Current git status summary: uncommitted smoltcp proof plus context/review artifacts.
+- Next exact action: read reviewer blockers, apply required fixes, re-run validation, remove artifacts, and commit Milestone 2 proof.
+
+## 2026-06-21T17:37:55Z — smoltcp proof blocker fixes applied
+
+- Current objective: finish review/commit for the smoltcp TCP forwarding proof.
+- Review findings accepted and fixed:
+  - Listener/ready race: `foxprox-net` now installs the smoltcp TCP listener before the first `iface.poll()`, and `foxprox proof-tcp` sends broker `ready\n` through a callback only after stack/listener initialization succeeds.
+  - Flow I/O errors killing broker: per-flow pump/connect errors are now logged, the smoltcp socket is aborted, the flow is dropped, and the broker resumes listening instead of returning from `run_tcp_proof`.
+  - Blocking host connect: host `TcpStream::connect_timeout` now runs in a connector worker while the main loop continues polling smoltcp; sandbox bytes received while connecting are buffered up to the configured cap.
+  - Idle/half-close pinning: active flows now track `last_activity`, enforce `idle_timeout`, and propagate sandbox receive-half close to host with `shutdown(Write)` once pending sandbox->host bytes are drained.
+  - Negative validation gap: added a `foxprox-net` config unit test and ran a live negative port smoke where broker listened on port 80 and sandbox curl to resolved example.com:81 failed (curl status 7) with no forwarded connection logged.
+- Verification commands and outcomes after fixes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 23 core tests, 8 device tests, 1 net test.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core` still shows only `foxprox-core`.
+  - `cargo tree -p foxprox-net -e features` confirms smoltcp 0.12.0 with `medium-ip`, `phy-tuntap_interface`, `proto-ipv4`, and `socket-tcp`.
+  - Positive live validation re-run passed: sandbox curl with `--resolve example.com:80:<ip>` received a 559-byte HTTP response; broker logged host connected and flow closed with byte counts.
+  - Negative live validation passed: sandbox curl to `example.com:81` while proof listens on 80 failed with curl status 7 and no forwarded connection.
+- Remaining known limitation: literal `curl http://example.com` still depends on UDP/DNS support and is deferred to Milestone 4; this commit is the TCP forwarding gate, not the DNS foundation.
+- Files changed: `Cargo.toml`, `Cargo.lock`, `crates/foxprox-net`, `crates/foxprox-cli`, `progress.md`; review/context artifacts still untracked pending final blocker review.
+- Next exact action: read final blocker review, apply any remaining required fix, remove artifacts, and commit.
+
+## 2026-06-21T17:48:30Z — Milestone 2 smoltcp TCP proof verified
+
+- Current objective: commit Milestone 2 smoltcp TCP forwarding gate.
+- Final blocker review: found one remaining blocker where host connect failures still propagated via `connecting.try_finish()?` and could terminate `run_tcp_proof`.
+- Accepted finding and fix: host connect errors are now caught in the connecting-flow state, logged as `host connect failed`, the smoltcp socket is aborted, the flow is cleared, and the listener resumes without terminating the broker.
+- Additional validation after final fix:
+  - Positive TCP forwarding: sandbox curl with `--resolve example.com:80:<ip>` returned a 559-byte HTTP response through `foxprox proof-tcp`; broker logged host connected and flow closed with byte counts.
+  - Non-configured port negative: broker listening on 80 did not forward sandbox curl to `example.com:81`.
+  - Configured-port host-connect failure recovery: sandbox first tried `http://10.255.0.1/` on configured port 80, broker logged `host connect failed: connection timed out`, resumed listening, then a second sandbox curl to resolved `example.com:80` succeeded with a 559-byte response.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 23 core tests, 8 device tests, 1 net test.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core` still shows no smoltcp dependency.
+  - `cargo tree -p foxprox-net -e features` confirms smoltcp 0.12.0 with `medium-ip`, `phy-tuntap_interface`, `proto-ipv4`, and `socket-tcp`.
+- Commit scope: `foxprox-net` smoltcp TCP proof, `foxprox proof-tcp` CLI, workspace dependency updates, and this progress ledger.
+- Known limitation: this is the TCP forwarding gate with pre-resolved addresses. Literal `curl http://example.com` remains deferred until UDP/DNS foundation work.
+- Current git status summary: uncommitted Milestone 2 proof; context/review artifacts removed.
+- Next exact action: commit, then begin Milestone 3 minimal broker core / Milestone 4 UDP-DNS foundation planning depending on safest serial order.
