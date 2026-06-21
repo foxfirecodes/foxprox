@@ -430,3 +430,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * mismatch and hidden-SNI protections apply to normalized TLS metadata by default.
 * Audit evidence: not applicable in this commit; normalized TLS requests feed existing audit context builders.
 * Residual risk: transparent stream reassembly before TLS parsing, fragmented ClientHello handling, and QUIC TLS metadata normalization remain future work.
+* Commit hash: 987bdad normalize tls clienthello metadata for policy.
