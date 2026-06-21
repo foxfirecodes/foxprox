@@ -259,3 +259,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: DNS payload parsing, DNS cache population, UDP pseudo-flow state, and actual UDP egress are still not implemented.
 - Exact next step: commit UDP policy event wiring, then add minimal DNS query parsing/caching for broker-directed DNS packets.
+
+## 2026-06-21T22:53:56Z
+- Current objective: continue autonomous verification-kernel cycles from the UDP policy event wiring checkpoint.
+- Git status summary: clean worktree at session start.
+- Intended slice: add minimal broker-directed DNS packet parsing/caching so DNS observations can feed hostname attribution before UDP egress is introduced.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`; record any parser misconceptions in `learnings.md`.
+- Files expected to change: `crates/foxprox-core/src/dns.rs`, runtime/core exports as needed, and ledgers.
+- Remaining risks: DNS parsing must stay minimal and fail closed; no UDP forwarding should be added until DNS policy/audit behavior is verified.
+- Exact next step: implement deterministic DNS query parsing for one-question UDP DNS packets and cache broker-observed A/AAAA answers only when structurally valid.
+
+## 2026-06-21T23:02:50Z
+- Current objective: add minimal broker-directed DNS parsing and cache population for hostname attribution.
+- Files changed: `crates/foxprox-core/src/dns.rs`, `crates/foxprox-core/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on formatting in the expanded DNS parser; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 43 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 9 runtime tests, and 7 setup tests passed. New DNS tests prove one-question query parsing, query/response distinction, A/AAAA response observation with minimum TTL, cache record/lookup for DNS attribution, and fail-closed truncation handling.
+- Commit hash when committed: pending.
+- Remaining risks: DNS parser is intentionally minimal; it does not yet parse DNS response codes, CNAME chains, multiple-question queries, EDNS, TCP DNS, or synthesize/forward DNS responses.
+- Exact next step: commit DNS parser/cache slice, then wire broker-directed UDP/53 packets to parse DNS questions into `DnsQuery` policy/audit events before resolver forwarding exists.

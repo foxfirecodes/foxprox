@@ -11,3 +11,6 @@
 
 ## 2026-06-21T23:53:25Z
 - IPv4 UDP parsing must validate nonzero UDP checksums before exposing packet metadata; zero remains accepted because IPv4 permits omitted UDP checksums, but invalid present checksums fail closed.
+
+## 2026-06-21T23:02:50Z
+- Minimal DNS response caching should use the minimum TTL among accepted A/AAAA records for a hostname so attribution cannot outlive the shortest observed address binding.

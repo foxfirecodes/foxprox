@@ -25,7 +25,10 @@ pub use audit::{
     VecAuditSink,
 };
 pub use config::{validate_policy_config, ConfigError};
-pub use dns::{DnsCache, DnsObservation};
+pub use dns::{
+    parse_dns_query, parse_dns_response_observation, DnsCache, DnsObservation, DnsParseError,
+    DnsQuestion, DnsRecordType,
+};
 pub use event::{explicit_proxy_attribution, NormalizedEvent};
 pub use flow::{FlowTable, UdpClass, UdpFlow, UdpTimeouts};
 pub use frontend::{
