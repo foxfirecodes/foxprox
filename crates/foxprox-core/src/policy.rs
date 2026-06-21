@@ -1,7 +1,7 @@
 //! Deterministic platform-independent policy model.
 
 use crate::event::{
-    AttributionConfidence, Hostname, NetworkEvent, Origin, Protocol, SocksDestination,
+    AttributionConfidence, Hostname, HttpMethod, NetworkEvent, Origin, Protocol, SocksDestination,
     TransportEndpoint,
 };
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -209,6 +209,12 @@ pub struct PolicyRule {
     pub hostname: Option<Hostname>,
     /// Optional domain suffix match.
     pub domain_suffix: Option<Hostname>,
+    /// Optional origin scheme match, such as `http` or `https`.
+    pub origin_scheme: Option<String>,
+    /// Optional HTTP method allow-list match.
+    pub http_methods: Vec<HttpMethod>,
+    /// Optional HTTP request path/query prefix match.
+    pub http_path_prefix: Option<String>,
     /// Minimum hostname attribution confidence required for hostname/domain rules.
     pub min_attribution: AttributionConfidence,
 }
@@ -224,6 +230,9 @@ impl PolicyRule {
             destination_ports: None,
             hostname: None,
             domain_suffix: None,
+            origin_scheme: None,
+            http_methods: Vec::new(),
+            http_path_prefix: None,
             min_attribution: AttributionConfidence::Low,
         }
     }
@@ -257,6 +266,24 @@ impl PolicyRule {
     pub fn with_domain_suffix(mut self, domain_suffix: Hostname) -> Self {
         self.domain_suffix = Some(domain_suffix);
         self.min_attribution = AttributionConfidence::Medium;
+        self
+    }
+
+    /// Returns a copy matching an origin scheme.
+    pub fn with_origin_scheme(mut self, scheme: impl Into<String>) -> Self {
+        self.origin_scheme = Some(scheme.into().to_ascii_lowercase());
+        self
+    }
+
+    /// Returns a copy matching an HTTP method.
+    pub fn with_http_method(mut self, method: HttpMethod) -> Self {
+        self.http_methods.push(method);
+        self
+    }
+
+    /// Returns a copy matching a plaintext HTTP path/query prefix.
+    pub fn with_http_path_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.http_path_prefix = Some(prefix.into());
         self
     }
 
@@ -316,6 +343,41 @@ impl PolicyRule {
                 .domain_suffix
                 .as_ref()
                 .is_some_and(|expected| !hostname.matches_domain_suffix(expected))
+            {
+                return false;
+            }
+        }
+
+        if self.origin_scheme.is_some() {
+            let Some(scheme) = event_origin_scheme(event) else {
+                return false;
+            };
+            if self
+                .origin_scheme
+                .as_ref()
+                .is_some_and(|expected| !scheme.eq_ignore_ascii_case(expected))
+            {
+                return false;
+            }
+        }
+
+        if !self.http_methods.is_empty() {
+            let Some(method) = event_http_method(event) else {
+                return false;
+            };
+            if !self.http_methods.iter().any(|expected| expected == method) {
+                return false;
+            }
+        }
+
+        if self.http_path_prefix.is_some() {
+            let Some(path) = event_http_path(event) else {
+                return false;
+            };
+            if self
+                .http_path_prefix
+                .as_ref()
+                .is_some_and(|prefix| !path.starts_with(prefix))
             {
                 return false;
             }
@@ -439,10 +501,12 @@ fn fail_closed_precheck(event: &NetworkEvent, rules: &PolicyRuleSet) -> Option<D
             })
         }
         NetworkEvent::TlsClientHello {
-            sni: None,
+            sni,
+            ech_present,
             destination,
             ..
         } if rules.deny_hidden_sni
+            && (sni.is_none() || *ech_present)
             && !has_explicit_ip_allow(rules, *destination, Protocol::Tls) =>
         {
             Some(Decision {
@@ -527,6 +591,28 @@ fn event_hostname(event: &NetworkEvent) -> Option<(&Hostname, AttributionConfide
     }
 }
 
+fn event_origin_scheme(event: &NetworkEvent) -> Option<&str> {
+    match event {
+        NetworkEvent::HttpRequest { origin, .. } => Some(origin.scheme.as_str()),
+        NetworkEvent::HttpsConnect { .. } => Some("https"),
+        _ => None,
+    }
+}
+
+fn event_http_method(event: &NetworkEvent) -> Option<&HttpMethod> {
+    match event {
+        NetworkEvent::HttpRequest { method, .. } => Some(method),
+        _ => None,
+    }
+}
+
+fn event_http_path(event: &NetworkEvent) -> Option<&str> {
+    match event {
+        NetworkEvent::HttpRequest { path_and_query, .. } => Some(path_and_query.as_str()),
+        _ => None,
+    }
+}
+
 fn tls_names_mismatch(
     sni: Option<&Hostname>,
     dns_hostname: Option<&Hostname>,
@@ -544,6 +630,9 @@ fn has_explicit_ip_allow(
         rule.effect == RuleEffect::Allow
             && rule.hostname.is_none()
             && rule.domain_suffix.is_none()
+            && rule.origin_scheme.is_none()
+            && rule.http_methods.is_empty()
+            && rule.http_path_prefix.is_none()
             && rule
                 .protocol
                 .map_or(true, |rule_protocol| rule_protocol == protocol)
@@ -622,6 +711,7 @@ mod tests {
         let rules = PolicyRuleSet {
             rules: vec![PolicyRule::new("allow-http-origin", RuleEffect::Allow)
                 .with_protocol(Protocol::Http)
+                .with_origin_scheme("http")
                 .with_domain_suffix(Hostname::parse("example.com").unwrap())
                 .with_destination_ports(PortRange::single(8080))],
             ..PolicyRuleSet::default()
@@ -639,6 +729,63 @@ mod tests {
         };
         let decision = PolicyEngine::new(rules).evaluate(&event);
         assert!(decision.is_allowed());
+    }
+
+    #[test]
+    fn http_method_and_path_prefix_rules_match_plaintext_requests() {
+        let rules = PolicyRuleSet {
+            rules: vec![PolicyRule::new("allow-public-get", RuleEffect::Allow)
+                .with_protocol(Protocol::Http)
+                .with_hostname(Hostname::parse("api.example.com").unwrap())
+                .with_http_method(HttpMethod::parse("GET").unwrap())
+                .with_http_path_prefix("/public/")],
+            ..PolicyRuleSet::default()
+        };
+        let engine = PolicyEngine::new(rules);
+        let allowed = NetworkEvent::HttpRequest {
+            sandbox_id: sandbox_id(),
+            frontend: Frontend::Tun,
+            method: HttpMethod::parse("GET").unwrap(),
+            origin: Origin {
+                scheme: "http".to_string(),
+                host: Hostname::parse("api.example.com").unwrap(),
+                port: 80,
+            },
+            path_and_query: "/public/items?limit=1".to_string(),
+        };
+        assert!(engine.evaluate(&allowed).is_allowed());
+
+        let wrong_method = NetworkEvent::HttpRequest {
+            sandbox_id: sandbox_id(),
+            frontend: Frontend::Tun,
+            method: HttpMethod::parse("POST").unwrap(),
+            origin: Origin {
+                scheme: "http".to_string(),
+                host: Hostname::parse("api.example.com").unwrap(),
+                port: 80,
+            },
+            path_and_query: "/public/items?limit=1".to_string(),
+        };
+        assert_eq!(
+            engine.evaluate(&wrong_method).reason,
+            Some(DenialReason::DefaultDeny)
+        );
+
+        let wrong_path = NetworkEvent::HttpRequest {
+            sandbox_id: sandbox_id(),
+            frontend: Frontend::Tun,
+            method: HttpMethod::parse("GET").unwrap(),
+            origin: Origin {
+                scheme: "http".to_string(),
+                host: Hostname::parse("api.example.com").unwrap(),
+                port: 80,
+            },
+            path_and_query: "/private/items".to_string(),
+        };
+        assert_eq!(
+            engine.evaluate(&wrong_path).reason,
+            Some(DenialReason::DefaultDeny)
+        );
     }
 
     #[test]
@@ -766,6 +913,7 @@ mod tests {
             frontend: Frontend::Tun,
             destination: TransportEndpoint::new(IpAddr::from([93, 184, 216, 34]), 443),
             sni: Some(Hostname::parse("evil.example").unwrap()),
+            ech_present: false,
             dns_hostname: Some(Hostname::parse("example.com").unwrap()),
             mismatch: true,
         };
@@ -781,6 +929,7 @@ mod tests {
             frontend: Frontend::Tun,
             destination: TransportEndpoint::new(IpAddr::from([93, 184, 216, 34]), 443),
             sni: Some(Hostname::parse("evil.example").unwrap()),
+            ech_present: false,
             dns_hostname: Some(Hostname::parse("example.com").unwrap()),
             mismatch: false,
         };
@@ -797,6 +946,7 @@ mod tests {
             frontend: Frontend::Tun,
             destination,
             sni: None,
+            ech_present: false,
             dns_hostname: Some(Hostname::parse("example.com").unwrap()),
             mismatch: false,
         };
@@ -811,6 +961,104 @@ mod tests {
                 .with_destination_cidr(Cidr::v4(Ipv4Addr::new(93, 184, 216, 0), 24).unwrap())
                 .with_destination_ports(PortRange::single(443))],
             ..PolicyRuleSet::default()
+        };
+        assert!(PolicyEngine::new(rules).evaluate(&event).is_allowed());
+    }
+
+    #[test]
+    fn ech_presence_is_hidden_sni_even_when_sni_is_visible() {
+        let event = NetworkEvent::TlsClientHello {
+            sandbox_id: sandbox_id(),
+            frontend: Frontend::Tun,
+            destination: TransportEndpoint::new(IpAddr::from([93, 184, 216, 34]), 443),
+            sni: Some(Hostname::parse("example.com").unwrap()),
+            ech_present: true,
+            dns_hostname: Some(Hostname::parse("example.com").unwrap()),
+            mismatch: false,
+        };
+        let decision = PolicyEngine::default().evaluate(&event);
+        assert_eq!(decision.action, DecisionAction::FailClosed);
+        assert_eq!(decision.reason, Some(DenialReason::HiddenSni));
+
+        let explicit_ip_allow = PolicyRuleSet {
+            rules: vec![PolicyRule::new("allow-ech-ip", RuleEffect::Allow)
+                .with_protocol(Protocol::Tls)
+                .with_destination_cidr(Cidr::v4(Ipv4Addr::new(93, 184, 216, 0), 24).unwrap())
+                .with_destination_ports(PortRange::single(443))],
+            ..PolicyRuleSet::default()
+        };
+        assert!(PolicyEngine::new(explicit_ip_allow)
+            .evaluate(&event)
+            .is_allowed());
+    }
+
+    #[test]
+    fn http_constrained_ip_allow_does_not_bypass_hidden_sni() {
+        let rules = PolicyRuleSet {
+            rules: vec![
+                PolicyRule::new("allow-ip-but-only-http-origin", RuleEffect::Allow)
+                    .with_protocol(Protocol::Tls)
+                    .with_destination_cidr(Cidr::v4(Ipv4Addr::new(93, 184, 216, 0), 24).unwrap())
+                    .with_destination_ports(PortRange::single(443))
+                    .with_origin_scheme("https"),
+            ],
+            ..PolicyRuleSet::default()
+        };
+        let event = NetworkEvent::TlsClientHello {
+            sandbox_id: sandbox_id(),
+            frontend: Frontend::Tun,
+            destination: TransportEndpoint::new(IpAddr::from([93, 184, 216, 34]), 443),
+            sni: None,
+            ech_present: false,
+            dns_hostname: None,
+            mismatch: false,
+        };
+        let decision = PolicyEngine::new(rules).evaluate(&event);
+        assert_eq!(decision.action, DecisionAction::FailClosed);
+        assert_eq!(decision.reason, Some(DenialReason::HiddenSni));
+    }
+
+    #[test]
+    fn tls_sni_domain_rule_allows_visible_matching_sni() {
+        let rules = PolicyRuleSet {
+            rules: vec![PolicyRule::new("allow-visible-sni", RuleEffect::Allow)
+                .with_protocol(Protocol::Tls)
+                .with_domain_suffix(Hostname::parse("example.com").unwrap())
+                .with_destination_ports(PortRange::single(443))],
+            ..PolicyRuleSet::default()
+        };
+        let event = NetworkEvent::TlsClientHello {
+            sandbox_id: sandbox_id(),
+            frontend: Frontend::Tun,
+            destination: TransportEndpoint::new(IpAddr::from([93, 184, 216, 34]), 443),
+            sni: Some(Hostname::parse("www.example.com").unwrap()),
+            ech_present: false,
+            dns_hostname: Some(Hostname::parse("www.example.com").unwrap()),
+            mismatch: false,
+        };
+        assert!(PolicyEngine::new(rules).evaluate(&event).is_allowed());
+    }
+
+    #[test]
+    fn quic_domain_rule_uses_dns_attribution_and_protocol_class() {
+        let rules = PolicyRuleSet {
+            rules: vec![PolicyRule::new("allow-quic-example", RuleEffect::Allow)
+                .with_protocol(Protocol::Quic)
+                .with_domain_suffix(Hostname::parse("example.com").unwrap())
+                .with_destination_ports(PortRange::single(443))],
+            ..PolicyRuleSet::default()
+        };
+        let event = NetworkEvent::UdpFlowAttempt {
+            sandbox_id: sandbox_id(),
+            frontend: Frontend::Tun,
+            source: TransportEndpoint::new(IpAddr::from([10, 255, 0, 2]), 44_444),
+            destination: TransportEndpoint::new(IpAddr::from([93, 184, 216, 34]), 443),
+            attribution: Attribution {
+                hostname: Some(Hostname::parse("video.example.com").unwrap()),
+                source: crate::event::AttributionSource::DnsCache,
+                confidence: AttributionConfidence::Medium,
+            },
+            classification: Protocol::Quic,
         };
         assert!(PolicyEngine::new(rules).evaluate(&event).is_allowed());
     }

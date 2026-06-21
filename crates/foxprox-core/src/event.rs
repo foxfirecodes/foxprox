@@ -474,6 +474,8 @@ pub enum NetworkEvent {
         destination: TransportEndpoint,
         /// SNI when visible.
         sni: Option<Hostname>,
+        /// Whether an Encrypted ClientHello extension was present.
+        ech_present: bool,
         /// DNS-correlated hostname when available.
         dns_hostname: Option<Hostname>,
         /// Whether SNI and DNS attribution disagree.

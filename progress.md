@@ -353,3 +353,46 @@
   - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
   - `cargo tree -p foxprox-core` still shows only `foxprox-core`, confirming no dependency creep.
 - Commit boundary: core transparent inspection helpers only; no dataplane integration yet.
+
+## 2026-06-21T22:20:17Z — Session continuation
+
+- Current objective: continue autonomous alpha implementation after committed transparent inspection helpers, starting with the next Milestone 5/6-safe core boundary before deeper dataplane/proxy work.
+- Source docs/steering read: `docs/implementation-approach-autonomous-crew.md`, `docs/arch.md`, `docs/initial-impl.md`, `docs/bubblewrap-fork.md`, `progress.md`, and `learnings.md`.
+- Current state: git status is clean on branch `autonomous-crew`; latest commits include UDP/DNS proof and transparent inspection helpers. Implemented milestone coverage includes core policy/audit/config/events, TUN setup/ICMP proof, smoltcp TCP proof, UDP/DNS proof, DNS cache/parser, and standalone HTTP/TLS/QUIC inspection helpers.
+- Active objective for this slice: add missing policy expressiveness for HTTP method/path/origin matching and TLS/QUIC attribution decisions so Milestone 5 policy can evaluate metadata that inspection already extracts.
+- Verification plan: focused unit tests for HTTP method/path/origin policy, SNI/domain rules, and QUIC classification rules; then run `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`, and `cargo tree -p foxprox-core`.
+- Expected commit boundary: dependency-free `foxprox-core` policy/config improvements only; no Linux/TUN/smoltcp/proxy dataplane changes in this slice.
+- Subagents/reviews requested: async read-only `context-builder` (`context-build/alpha-gap-next-slice.md`) and `reviewer` (`reviews/m5-m6-gap-review.md`) to validate remaining alpha gaps and next slice.
+- Commands run and outcomes: `git status --short --branch` showed clean `autonomous-crew`; source files in `crates/foxprox-core`, `foxprox-net`, and `foxprox-cli` inspected.
+- Files changed: `progress.md` updated for session continuation.
+- Current git status summary: clean before this ledger update.
+- Next exact action: implement the core policy metadata match fields and tests while read-only subagents run.
+
+## 2026-06-21T22:26:48Z — core policy metadata slice verified
+
+- Current objective: commit the Milestone 5 policy metadata vocabulary slice before wiring dataplane inspection.
+- Changes implemented:
+  - Added `ech_present` to `NetworkEvent::TlsClientHello` so ECH is represented explicitly in normalized TLS metadata.
+  - Extended `PolicyRule` with origin scheme, HTTP method allow-list, and HTTP path/query prefix match fields plus builder methods.
+  - Policy matching now evaluates HTTP origin scheme, method, and path prefix in addition to existing host/domain/port/protocol rules.
+  - Hidden-SNI fail-closed precheck now treats either missing SNI or ECH-present TLS as hidden unless an explicit unconstrained IP/CIDR/port TLS allow rule exists.
+  - Added regression coverage for HTTP method/path matching, visible SNI domain allow, QUIC domain attribution rule matching, ECH fail-closed and explicit-IP allow override, and an HTTP-constrained IP allow not bypassing hidden-SNI.
+- Subagents/reviews requested and findings:
+  - `context-builder` wrote `context-build/alpha-gap-next-slice.md`; recommendation matched the selected policy metadata slice and identified UDP/DNS attribution + QUIC classification as the next likely slice after commit.
+  - `m5-m6-gap-review` found initial WIP compile/test gaps from the new `ech_present` field and broader remaining M5/M6 dataplane/proxy gaps. The compile/test blocker was fixed by updating all TLS test initializers and adding ECH regression coverage. Runtime policy/DNS/proxy gaps are accepted as follow-on slices.
+  - `core-policy-metadata-final` found a blocker where HTTP/origin-constrained IP allow rules could incorrectly suppress hidden-SNI/ECH fail-closed. Fixed `has_explicit_ip_allow` to require no hostname/domain/origin/method/path constraints and added a regression test.
+- Accepted findings and fixes: all concrete blockers from reviewers were accepted and fixed in this slice.
+- Rejected/deferred findings: transparent runtime policy enforcement, DNS-to-flow attribution, HTTP/TLS dataplane inspection, QUIC dataplane classification, explicit proxy networking, and concrete std egress wrappers are deferred to subsequent milestone slices because this commit is dependency-free core policy vocabulary only.
+- Verification commands and outcomes:
+  - `cargo fmt --all` applied formatting; `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-core policy::tests -- --nocapture` passed: 18 policy tests.
+  - `cargo test --workspace` passed: 45 core tests, 8 device tests, 2 net tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core` still showed only `foxprox-core`, confirming no dependency creep.
+  - `cargo +1.80.0 check -p foxprox-core` passed.
+- Files changed: `crates/foxprox-core/src/event.rs`, `crates/foxprox-core/src/policy.rs`, `progress.md`, `learnings.md`.
+- Learning ledger updated: recorded the fail-closed bypass-helper review lesson for future policy slices.
+- Current git status summary: source and ledgers modified; review/context artifacts summarized and ready for removal before commit.
+- Next exact action: remove transient `context-build/` and `reviews/` artifacts, commit core policy metadata slice, then start UDP/DNS attribution + QUIC classification in the UDP proof.

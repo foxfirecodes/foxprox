@@ -16,3 +16,8 @@
 - For goal-mode work such as “complete alpha scope,” a verified commit is only a checkpoint. Do not treat clean git status, a passing validation suite, or completion of one milestone slice as a reason to stop.
 - After each commit, immediately compare current behavior against the remaining source-doc requirements, select the next smallest coherent implementation slice, and continue unless alpha is complete, blocked, or explicitly paused/stopped by the user.
 - User checkpoint/status questions should be answered briefly without cancelling the active implementation loop.
+
+## 2026-06-21T22:26:48Z — Policy metadata review lesson
+
+- When adding new policy rule dimensions, update helper bypass paths as well as normal rule matching; final review caught that hidden-SNI explicit-IP allow detection ignored new HTTP/origin constraints.
+- For core policy slices, include a regression where a rule with irrelevant extra constraints must not satisfy a fail-closed bypass helper.
