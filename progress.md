@@ -151,3 +151,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: no `foxproxsetup` executable, fd handoff, namespace execution, DNS file configuration, or real ping/TUN smoke exists yet; TUN creation requires capabilities unavailable in this session.
 - Exact next step: commit the device setup boundary, then add a `foxproxsetup` CLI/helper crate that parses the bwrap-planned arguments, creates/configures the TUN through `foxprox-device`, and fails before target exec on setup errors.
+
+## 2026-06-21T23:01:35Z
+- Current objective: add a bwrap-compatible `foxproxsetup` helper path that fails before target exec unless setup completes.
+- Files changed: `Cargo.toml`, `Cargo.lock`, `crates/foxprox-integrations/src/lib.rs`, `crates/foxprox-setup/Cargo.toml`, `crates/foxprox-setup/src/lib.rs`, `crates/foxprox-setup/src/main.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on formatting in the new setup crate; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings` (initially failed on an unused import; fixed)
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 35 core tests, 5 device tests, 3 integration tests, 2 runtime tests, and 4 setup tests passed. The bwrap command plan now passes `--handoff-fd`; `foxproxsetup` parses planned arguments, validates a `SetupPlan`, sequences TUN create/configure/fd handoff before target exec, and tests that handoff failure prevents exec.
+- Commit hash when committed: pending.
+- Remaining risks: fd handoff uses a small Linux/Unix `sendmsg(SCM_RIGHTS)` boundary but does not yet have a receiver-side round-trip test; setup does not yet drop `CAP_NET_ADMIN`, write resolver config, or perform an end-to-end bwrap smoke.
+- Exact next step: commit the setup helper slice, then add deterministic fd-handoff verification and/or setup privilege-drop behavior before attempting namespace smoke tests.

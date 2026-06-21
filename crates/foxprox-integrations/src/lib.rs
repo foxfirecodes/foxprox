@@ -38,6 +38,7 @@ pub struct SetupPlan {
     pub tun: TunDeviceConfig,
     pub dns_resolver: IpAddr,
     pub proxy_listener: Option<ProxyListenerConfig>,
+    pub tun_handoff_fd: u32,
 }
 
 impl SetupPlan {
@@ -106,6 +107,8 @@ impl BwrapSetupCommand {
             plan.tun.mtu.to_string(),
             "--dns".to_string(),
             plan.dns_resolver.to_string(),
+            "--handoff-fd".to_string(),
+            plan.tun_handoff_fd.to_string(),
         ];
         if let Some(proxy) = &plan.proxy_listener {
             args.push("--proxy-ip".to_string());
@@ -170,6 +173,7 @@ mod tests {
                 http_port: Some(3128),
                 socks_port: Some(1080),
             }),
+            tun_handoff_fd: 3,
         }
     }
 
@@ -179,6 +183,10 @@ mod tests {
         assert_eq!(command.program, "bwrap");
         assert!(command.contains_required_network_isolation());
         assert!(command.args.iter().any(|arg| arg == "foxproxsetup"));
+        assert!(command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--handoff-fd", "3"]));
         assert_eq!(command.args.last().map(String::as_str), Some("curl"));
     }
 
