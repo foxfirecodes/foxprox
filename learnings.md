@@ -15,3 +15,7 @@ UDP and QUIC lifecycle records are useful observability, but they should not enc
 ## 2026-06-21 — DNS returned-address observations are audit-critical
 
 DNS policy allow evidence alone is not enough for transparent hostname attribution. The handler must also record returned addresses before releasing an upstream response; otherwise later DNS-to-flow decisions could rely on invisible cache state. When the observation audit cannot be appended, the DNS path now fails closed and returns REFUSED with audit-backpressure evidence instead of silently allowing an untraceable attribution update.
+
+## 2026-06-21 — Packet write-back must be audit-gated before bytes leave
+
+The ICMP write-back proof is only externally debuggable if outbound packet synthesis is recorded before the reply is written to the device. The in-memory TUN harness now appends `packet_observed` with `direction=to_sandbox` and `write_back=icmp_echo_reply` before writing bytes; audit backpressure prevents the write and leaves `audit_backpressure` evidence.

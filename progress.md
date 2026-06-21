@@ -139,3 +139,40 @@ The DNS broker path is now observable as a composed behavior rather than isolate
 
 ### Remaining blind spots
 - DNS upstream exchange is still a mockable trait rather than an async socket implementation. Runtime UDP listener and real upstream resolver integration remain later alpha work.
+
+### Commit
+- `d1e3181` — observable DNS broker handler.
+
+## 2026-06-21 — TUN packet harness observability cycle
+
+### Behavior under work
+Add a platform-independent TUN/device harness boundary that reads inbound IP packet bytes from a replaceable source, emits `packet_observed`/malformed structured audit records, routes ICMP echo requests through the existing write-back proof, and records outbound packet write evidence without requiring privileged TUN setup.
+
+### Expected evidence
+- Valid inbound IPv4 UDP packets produce `packet_observed` audit records with source/destination endpoints, protocol, frontend, byte length, and IP version.
+- Malformed or unsupported packet bytes produce fail-closed structured audit records without writing responses.
+- ICMP echo requests produce validated outbound reply bytes and a bounded write-back audit detail.
+
+### Commands run
+- `cargo fmt` — applied formatting for `tun.rs`.
+- `cargo test --all-targets --all-features` — passed, 51 unit tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tun::tests::valid_ipv4_udp_packet_emits_structured_packet_observed_audit ... ok`
+- `tun::tests::malformed_packet_fails_closed_without_write ... ok`
+- `tun::tests::icmp_echo_request_writes_reply_after_write_back_audit ... ok`
+- `tun::tests::write_back_audit_backpressure_prevents_unobserved_reply ... ok`
+
+### Interpretation
+The TUN-facing boundary now has a deterministic in-memory harness that proves packet read/write behavior and structured observability without requiring privileges. Inbound packet observation and outbound ICMP write-back are both audit-gated; if the write-back audit cannot be recorded, the harness fails closed and does not emit an unobservable reply packet.
+
+### Changed files
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-core/src/tun.rs`
+- `progress.md`
+- `learnings.md`
+
+### Remaining blind spots
+- The harness does not open Linux `/dev/net/tun` or configure namespaces. It defines the bounded observable contract that a privileged Linux frontend can implement next.

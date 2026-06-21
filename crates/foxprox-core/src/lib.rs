@@ -18,6 +18,7 @@ pub mod packet;
 pub mod policy;
 pub mod proxy;
 pub mod setup;
+pub mod tun;
 pub mod types;
 
 pub use audit::{AuditError, AuditRecord, BoundedAuditLedger};
@@ -37,6 +38,7 @@ pub use proxy::{
     HttpProxyRequestMetadata, ProxyParseError, SocksConnectMetadata,
 };
 pub use setup::{BwrapSetupPlan, NetworkSetupConfig, ProxyEnvironment};
+pub use tun::{DeviceIoError, InMemoryPacketDevice, PacketDevice, TunPacketHarness};
 pub use types::*;
 
 /// Stable crate marker used by scaffold tests and downstream workspace checks.
