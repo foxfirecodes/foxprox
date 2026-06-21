@@ -111,4 +111,4 @@ Use concise commit messages that name the verified behavior or invariant.
 
 Continue without asking for permission when the next step is consistent with `docs/arch.md`, `docs/initial-impl.md`, and the current verified state.
 
-Pause only when a decision would change documented scope, weaken fail-closed behavior, introduce TLS MITM/custom CA behavior, bind broker core to a specific sandbox backend, or require accepting a known correctness gap.
+Autonomy means proceed by default. Pause only for decisions that are scope-changing, security-sensitive, hard to reverse, or explicitly outside the source docs. For ordinary implementation choices, choose the safest documented option, record the assumption in `progress.md`, and continue.

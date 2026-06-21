@@ -102,4 +102,6 @@ A boundary commit should not mix unrelated feature expansion with contract resha
 
 ## Autonomy Rules
 
-Continue autonomously by selecting the most fragile or security-important boundary next. Prefer enforcing architecture with code over documenting intent. Pause only if a requested shortcut would violate the source architecture or permanently collapse replaceable components into one layer.
+Continue autonomously by selecting the most fragile or security-important boundary next. Prefer enforcing architecture with code over documenting intent.
+
+Autonomy means proceed by default. Pause only for decisions that are scope-changing, security-sensitive, hard to reverse, or explicitly outside the source docs. For ordinary implementation choices, choose the safest documented option, record the assumption in `progress.md`, and continue.

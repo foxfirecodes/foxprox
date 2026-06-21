@@ -104,4 +104,6 @@ Commit after a harness-backed behavior works or after a harness exposes a valuab
 
 ## Autonomy Rules
 
-Keep going by turning unknowns into runnable checks. When blocked, reduce the problem to the smallest harness command that distinguishes environment failure, dependency limitation, implementation bug, or architecture mismatch. Pause only if the source docs need a scope decision or the required verification cannot be performed in the available environment.
+Keep going by turning unknowns into runnable checks. When blocked, reduce the problem to the smallest harness command that distinguishes environment failure, dependency limitation, implementation bug, or architecture mismatch.
+
+Autonomy means proceed by default. Pause only for decisions that are scope-changing, security-sensitive, hard to reverse, or explicitly outside the source docs. For ordinary implementation choices, choose the safest documented option, record the assumption in `progress.md`, and continue.

@@ -100,4 +100,6 @@ Commit only when behavior and observability land together, unless a commit inten
 
 ## Autonomy Rules
 
-Keep working by finding high-risk code paths that are not yet observable. Improve visibility first, then behavior. Pause only when the desired audit content would conflict with documented privacy, scope, or security expectations.
+Keep working by finding high-risk code paths that are not yet observable. Improve visibility first, then behavior.
+
+Autonomy means proceed by default. Pause only for decisions that are scope-changing, security-sensitive, hard to reverse, or explicitly outside the source docs. For ordinary implementation choices, choose the safest documented option, record the assumption in `progress.md`, and continue.

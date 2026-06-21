@@ -115,4 +115,6 @@ Do not batch unrelated slices into one commit. Do not commit failing checks unle
 
 ## Autonomy Rules
 
-The agent should keep moving by choosing the next smallest evidence slice that reduces uncertainty. Prefer direct runtime or test evidence over discussion. Pause only for scope changes, security posture changes, or architecture decisions that contradict the source documents.
+The agent should keep moving by choosing the next smallest evidence slice that reduces uncertainty. Prefer direct runtime or test evidence over discussion.
+
+Autonomy means proceed by default. Pause only for decisions that are scope-changing, security-sensitive, hard to reverse, or explicitly outside the source docs. For ordinary implementation choices, choose the safest documented option, record the assumption in `progress.md`, and continue.

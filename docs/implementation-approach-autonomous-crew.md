@@ -106,4 +106,6 @@ Commit after coherent verified changes and after progress history is updated. If
 
 ## Autonomy Rules
 
-Keep the crew moving without user input. Use reviews to reduce risk, not to stall. Pause only if reviewers identify a scope conflict with source docs, a security exception requiring approval, or an architecture decision that cannot be resolved from the documented design.
+Keep the crew moving without user input. Use reviews to reduce risk, not to stall.
+
+Autonomy means proceed by default. Pause only for decisions that are scope-changing, security-sensitive, hard to reverse, or explicitly outside the source docs. For ordinary implementation choices, choose the safest documented option, record the assumption in `progress.md`, and continue.

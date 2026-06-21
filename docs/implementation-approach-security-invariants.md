@@ -107,4 +107,6 @@ Commit only verified invariant-preserving changes. Avoid bundling unrelated func
 
 ## Autonomy Rules
 
-Continue autonomously by selecting the most severe unverified invariant, especially those related to bypass, malformed input, attribution, and resource exhaustion. Pause only for a decision that would weaken documented security behavior or add an explicit exception to a default-deny rule.
+Continue autonomously by selecting the most severe unverified invariant, especially those related to bypass, malformed input, attribution, and resource exhaustion.
+
+Autonomy means proceed by default. Pause only for decisions that are scope-changing, security-sensitive, hard to reverse, or explicitly outside the source docs. For ordinary implementation choices, choose the safest documented option, record the assumption in `progress.md`, and continue.
