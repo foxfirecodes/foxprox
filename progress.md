@@ -252,3 +252,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * invalid HTTP request matchers produce `InvalidConfig` fail-closed policy behavior through config validation.
 * Audit evidence: not applicable in this commit; policy decisions continue to feed structured audit events, but audit schema does not yet include HTTP method/path fields.
 * Residual risk: HTTP audit method/path fields, proxy/transparent stream integration, request body handling, and richer origin tuple policy remain future work.
+* Commit hash: b1ccf62 add http method path policy matching.
