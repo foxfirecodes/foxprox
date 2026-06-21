@@ -20,6 +20,7 @@ pub mod proxy;
 pub mod setup;
 pub mod tun;
 pub mod types;
+pub mod udp;
 
 pub use audit::{AuditError, AuditRecord, BoundedAuditLedger};
 pub use broker::BrokerCore;
@@ -30,7 +31,7 @@ pub use dns_handler::{
     parse_dns_response_addresses, DnsAnswerSummary, DnsBrokerHandler, DnsHandlerResult,
     DnsUpstream, DnsUpstreamError,
 };
-pub use flow::{DnsCache, FlowKey, FlowProtocol, UdpFlowManager};
+pub use flow::{DnsCache, FlowKey, FlowProtocol, UdpFlowManager, UdpTimeoutConfig};
 pub use packet::{IpParseError, ParsedIpPacket};
 pub use policy::{Cidr, PolicyConfig, PolicyDecision, PolicyEngine, PolicyRequest, PolicyRule};
 pub use proxy::{
@@ -40,6 +41,7 @@ pub use proxy::{
 pub use setup::{BwrapSetupPlan, NetworkSetupConfig, ProxyEnvironment};
 pub use tun::{DeviceIoError, InMemoryPacketDevice, PacketDevice, TunPacketHarness};
 pub use types::*;
+pub use udp::{InMemoryUdpEgress, UdpEgress, UdpEgressError, UdpForwardResult, UdpForwarder};
 
 /// Stable crate marker used by scaffold tests and downstream workspace checks.
 pub const CRATE_NAME: &str = "foxprox-core";

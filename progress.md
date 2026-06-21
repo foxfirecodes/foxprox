@@ -176,3 +176,42 @@ The TUN-facing boundary now has a deterministic in-memory harness that proves pa
 
 ### Remaining blind spots
 - The harness does not open Linux `/dev/net/tun` or configure namespaces. It defines the bounded observable contract that a privileged Linux frontend can implement next.
+
+### Commit
+- `84a5f10` — observable TUN packet harness.
+
+## 2026-06-21 — UDP forwarding harness observability cycle
+
+### Behavior under work
+Add a mockable UDP forwarding proof that evaluates outbound datagrams through the shared policy/audit core, records UDP/QUIC flow lifecycle evidence, sends allowed datagrams through a replaceable egress sink, routes reply byte counts back into flow state, and suppresses egress for denied or audit-backpressured paths.
+
+### Expected evidence
+- Allowed UDP datagrams produce `udp_packet_decision`, `udp_flow_created`, and fake egress send evidence.
+- Denied multicast/direct-DNS paths produce structured denial audit and no egress sends.
+- QUIC candidate UDP/443 flows produce `quic_candidate_flow_created` and use the longer QUIC timeout.
+- Flow lifecycle audit backpressure prevents unobservable egress sends.
+
+### Commands run
+- `cargo fmt` — applied formatting for `udp.rs`.
+- `cargo test --all-targets --all-features` — passed, 56 unit tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `udp::tests::allowed_udp_datagram_records_decision_flow_and_fake_egress ... ok`
+- `udp::tests::denied_multicast_udp_does_not_send ... ok`
+- `udp::tests::direct_external_dns_udp_does_not_send ... ok`
+- `udp::tests::quic_candidate_records_lifecycle_and_uses_quic_timeout ... ok`
+- `udp::tests::flow_lifecycle_backpressure_prevents_unobservable_send ... ok`
+
+### Interpretation
+UDP forwarding now has a mockable egress proof connected to shared policy/audit and UDP flow lifecycle state. Allowed datagrams are sent only after policy and lifecycle audit records are appended; denied multicast/direct-DNS paths do not reach egress; QUIC candidates get visible classification and timeout evidence.
+
+### Changed files
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-core/src/udp.rs`
+- `progress.md`
+- `learnings.md`
+
+### Remaining blind spots
+- UDP egress is still in-memory rather than host sockets, and inbound replies update byte counts but do not yet synthesize/write packets back through a real TUN stack.

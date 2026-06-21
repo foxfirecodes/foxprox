@@ -19,3 +19,7 @@ DNS policy allow evidence alone is not enough for transparent hostname attributi
 ## 2026-06-21 — Packet write-back must be audit-gated before bytes leave
 
 The ICMP write-back proof is only externally debuggable if outbound packet synthesis is recorded before the reply is written to the device. The in-memory TUN harness now appends `packet_observed` with `direction=to_sandbox` and `write_back=icmp_echo_reply` before writing bytes; audit backpressure prevents the write and leaves `audit_backpressure` evidence.
+
+## 2026-06-21 — UDP egress must wait for lifecycle audit, not just policy audit
+
+For UDP, an allow decision without `udp_flow_created` evidence is insufficient because later expiration and byte-count accounting depend on flow state. The UDP forwarding harness now appends lifecycle records before fake egress sends; if lifecycle audit backpressures, no datagram is sent.
