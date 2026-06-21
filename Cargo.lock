@@ -21,6 +21,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "foxprox-launcher"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+ "foxprox-device",
+ "foxprox-integrations",
+]
+
+[[package]]
 name = "foxprox-runtime"
 version = "0.1.0"
 dependencies = [

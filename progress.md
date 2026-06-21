@@ -211,3 +211,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: the proof loop operates on generic `Read`/`Write` and is not yet wired to a received real TUN fd; TCP/UDP/smoltcp forwarding still absent.
 - Exact next step: commit the ICMP proof loop, then add a host launcher/control abstraction that pairs bwrap command construction, setup control socket creation, and received TUN fd handoff into one fail-early setup flow.
+
+## 2026-06-21T23:38:35Z
+- Current objective: pair host-side bwrap launch preparation with setup control socket creation and live handoff fd injection.
+- Files changed: `Cargo.toml`, `Cargo.lock`, `crates/foxprox-launcher/Cargo.toml`, `crates/foxprox-launcher/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on formatting in launcher tests; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 35 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 5 runtime tests, and 7 setup tests passed. New launcher tests prove bwrap command preparation injects the live helper fd from a setup control socket, preserves required network isolation arguments, and rejects invalid plans before command construction.
+- Commit hash when committed: pending.
+- Remaining risks: the launcher still does not spawn bwrap with fd-preservation semantics, and the received TUN file is not yet connected to the ICMP proof loop.
+- Exact next step: commit launcher preparation, then add a broker session type that accepts a received TUN file and runs the ICMP proof loop for one packet with deterministic IO tests.

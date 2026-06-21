@@ -1,0 +1,15 @@
+[package]
+name = "foxprox-launcher"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+foxprox-core = { path = "../foxprox-core" }
+foxprox-device = { path = "../foxprox-device" }
+foxprox-integrations = { path = "../foxprox-integrations" }
