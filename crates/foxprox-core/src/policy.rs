@@ -389,6 +389,14 @@ impl PolicyEngine {
         if input.quic_status != QuicStatus::NotQuic && !self.config.quic_enabled {
             return Decision::denied(DecisionAction::DenyDrop, DecisionReason::QuicDisabled);
         }
+        if input.protocol == Protocol::Icmp && self.config.allow_ping {
+            return Decision {
+                action: DecisionAction::Allow,
+                reason: DecisionReason::DefaultAllow,
+                rule_id: None,
+                timeout_override: None,
+            };
+        }
 
         for rule in self.config.rules.iter() {
             if rule.matches(input) {
@@ -441,6 +449,25 @@ mod tests {
         ));
         assert_eq!(decision.action, DecisionAction::DenyDrop);
         assert_eq!(decision.reason, DecisionReason::DefaultDeny);
+    }
+
+    #[test]
+    fn ping_can_be_enabled_by_default_config() {
+        let input = PolicyInput::new(
+            SandboxId::new("policy-test").unwrap(),
+            FrontendKind::Tun,
+            Protocol::Icmp,
+        );
+        let denied = PolicyEngine::new(PolicyConfig::default()).evaluate(&input);
+        assert_eq!(denied.action, DecisionAction::DenyDrop);
+
+        let allowed = PolicyEngine::new(PolicyConfig {
+            allow_ping: true,
+            ..PolicyConfig::default()
+        })
+        .evaluate(&input);
+        assert_eq!(allowed.action, DecisionAction::Allow);
+        assert_eq!(allowed.reason, DecisionReason::DefaultAllow);
     }
 
     #[test]

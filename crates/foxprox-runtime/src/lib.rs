@@ -243,6 +243,44 @@ pub struct BrokerDnsRuntime<'a, S> {
     pub kernel: &'a mut VerificationKernel<S>,
 }
 
+pub fn handle_one_tun_packet_with_icmp_policy<R: Read, W: Write, S: AuditSink>(
+    reader: &mut R,
+    writer: &mut W,
+    buffer: &mut [u8],
+    sandbox_id: SandboxId,
+    kernel: &mut VerificationKernel<S>,
+    timestamp_millis: u128,
+) -> io::Result<TunPacketOutcome> {
+    let bytes_read = reader.read(buffer)?;
+    let packet = &buffer[..bytes_read];
+    match parse_ip_packet(packet) {
+        Ok(ParsedIpPacket::Icmpv4EchoRequest(request)) => {
+            let event = NormalizedEvent::IcmpMessage {
+                sandbox_id,
+                frontend: FrontendKind::Tun,
+                source: Endpoint::new(IpAddr::V4(request.source), 0),
+                destination: Endpoint::new(IpAddr::V4(request.destination), 0),
+            };
+            let decision = kernel.decide_and_audit(&event, timestamp_millis);
+            if decision.action != DecisionAction::Allow {
+                return Ok(TunPacketOutcome::PolicyDenied { decision });
+            }
+            let reply = synthesize_icmpv4_echo_reply(&request);
+            writer.write_all(&reply)?;
+            Ok(TunPacketOutcome::EchoReplyWritten { bytes: reply.len() })
+        }
+        Ok(ParsedIpPacket::Udpv4Packet(udp)) => Ok(TunPacketOutcome::UdpObserved {
+            source: IpAddr::V4(udp.source),
+            destination: IpAddr::V4(udp.destination),
+            source_port: udp.source_port,
+            destination_port: udp.destination_port,
+            payload_len: udp.payload.len(),
+        }),
+        Ok(ParsedIpPacket::UnsupportedIpv4Protocol(_)) => unsupported_or_malformed_outcome(packet),
+        Err(error) => Ok(TunPacketOutcome::DroppedMalformed { error }),
+    }
+}
+
 pub fn handle_one_tun_packet_with_dns_policy<R: Read, W: Write, S: AuditSink>(
     reader: &mut R,
     writer: &mut W,
@@ -565,6 +603,71 @@ mod tests {
         assert_eq!(&writer[28..], b"ok");
         assert_eq!(checksum(&writer[..20]), 0);
         assert_eq!(checksum(&writer[20..]), 0);
+    }
+
+    #[test]
+    fn icmp_policy_gate_denies_ping_before_writeback_by_default() {
+        let request = build_ipv4_packet(1, &[8, 0, 0, 0, 0x12, 0x34, 0, 7]);
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(4),
+        );
+
+        let outcome = handle_one_tun_packet_with_icmp_policy(
+            &mut reader,
+            &mut writer,
+            &mut buffer,
+            SandboxId::new("icmp-deny").unwrap(),
+            &mut kernel,
+            100,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            TunPacketOutcome::PolicyDenied { decision }
+                if decision.action == DecisionAction::DenyDrop
+        ));
+        assert!(writer.is_empty());
+        assert_eq!(
+            kernel.audit_sink().events()[0].sandbox_id.as_str(),
+            "icmp-deny"
+        );
+    }
+
+    #[test]
+    fn icmp_policy_gate_allows_ping_when_configured() {
+        let request = build_ipv4_packet(1, &[8, 0, 0, 0, 0x12, 0x34, 0, 7]);
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                allow_ping: true,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(4),
+        );
+
+        let outcome = handle_one_tun_packet_with_icmp_policy(
+            &mut reader,
+            &mut writer,
+            &mut buffer,
+            SandboxId::new("icmp-allow").unwrap(),
+            &mut kernel,
+            100,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, TunPacketOutcome::EchoReplyWritten { bytes: 28 });
+        assert_eq!(writer[20], 0);
+        assert_eq!(
+            kernel.audit_sink().events()[0].sandbox_id.as_str(),
+            "icmp-allow"
+        );
     }
 
     #[test]

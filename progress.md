@@ -388,3 +388,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: session context currently covers DNS runtime only; broader TUN packet sessions still need policy/audit identity for ICMP, unsupported packets, and future TCP/UDP forwarding.
 - Exact next step: commit DNS session identity, then add policy/audit gating for ICMP echo handling so ping behavior follows `allow_ping`/rules instead of unconditional write-back.
+
+## 2026-06-22T00:13:40Z
+- Current objective: gate ICMP echo write-back through policy/audit instead of unconditional ping replies.
+- Files changed: `crates/foxprox-core/src/policy.rs`, `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on formatting; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 49 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 21 runtime tests, and 7 setup tests passed. New tests prove ping is denied/audited by default, `allow_ping` permits ICMP echo replies, and audit records carry the configured sandbox identity.
+- Commit hash when committed: pending.
+- Remaining risks: ICMP handling is still echo-only; essential ICMP errors, unusual ICMP denial classification, and a unified policy-gated TUN session remain to be implemented.
+- Exact next step: commit ICMP policy gating, then add unified packet handling that routes ICMP, broker DNS, unsupported packets, and malformed packets through one session context.
