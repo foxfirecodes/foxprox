@@ -9,10 +9,15 @@
 #![deny(missing_docs)]
 
 use foxprox_core::{
-    Frontend, Hostname, HttpMethod, NetworkEvent, Origin, SandboxId, SocksDestination,
-    TransportEndpoint,
+    Attribution, Decision, EgressContext, Frontend, Hostname, HttpMethod, NetworkEvent, Origin,
+    PolicyEngine, PolicyRuleSet, SandboxId, SocksDestination, TcpEgressRequest, TransportEndpoint,
 };
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::io::{self, Read, Write};
+use std::net::{
+    IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
+};
+use std::thread;
+use std::time::Duration;
 
 /// Explicit proxy parse error.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -23,6 +28,236 @@ pub enum ProxyParseError {
     Malformed(String),
     /// The request uses an unsupported proxy feature.
     Unsupported(String),
+}
+
+/// Configuration for the blocking std HTTP proxy proof listener.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HttpProxyProofConfig {
+    /// Sandbox/session identifier used in normalized events.
+    pub sandbox_id: SandboxId,
+    /// Address for the explicit proxy proof listener.
+    pub listen_addr: SocketAddr,
+    /// Policy evaluated before host TCP egress.
+    pub policy: PolicyRuleSet,
+    /// Maximum proxy request head bytes buffered before failing closed.
+    pub request_head_limit: usize,
+    /// Request-head read timeout.
+    pub request_head_timeout: Duration,
+    /// Host TCP connect timeout.
+    pub connect_timeout: Duration,
+}
+
+impl HttpProxyProofConfig {
+    /// Creates a proof config with deny-by-default policy.
+    pub fn new(sandbox_id: SandboxId, listen_addr: SocketAddr) -> Self {
+        Self {
+            sandbox_id,
+            listen_addr,
+            policy: PolicyRuleSet::default(),
+            request_head_limit: 16 * 1024,
+            request_head_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(5),
+        }
+    }
+}
+
+/// Runs the blocking HTTP proxy proof listener forever.
+///
+/// Each accepted connection is handled on a short-lived thread. This is an
+/// alpha proof, not the final async/resource-limited proxy runtime.
+pub fn run_http_proxy_proof(config: HttpProxyProofConfig) -> io::Result<()> {
+    let listener = TcpListener::bind(config.listen_addr)?;
+    eprintln!("foxprox-proxy: listening on {}", listener.local_addr()?);
+    for accepted in listener.incoming() {
+        let config = config.clone();
+        match accepted {
+            Ok(stream) => {
+                thread::spawn(move || {
+                    if let Err(error) = handle_http_proxy_stream(stream, &config) {
+                        eprintln!("foxprox-proxy: connection failed: {error}");
+                    }
+                });
+            }
+            Err(error) => eprintln!("foxprox-proxy: accept failed: {error}"),
+        }
+    }
+    Ok(())
+}
+
+fn handle_http_proxy_stream(
+    mut client: TcpStream,
+    config: &HttpProxyProofConfig,
+) -> io::Result<()> {
+    client.set_read_timeout(Some(config.request_head_timeout))?;
+    let buffered = read_proxy_head(&mut client, config.request_head_limit)?;
+    client.set_read_timeout(None)?;
+    let (head, tail) = split_proxy_head(&buffered)?;
+    let event = parse_http_proxy_request_head(config.sandbox_id.clone(), head)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("{error:?}")))?;
+    let decision = PolicyEngine::new(config.policy.clone()).evaluate(&event);
+    eprintln!("foxprox-proxy: policy decision={decision:?} event={event:?}");
+    if !decision.is_allowed() {
+        let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+        return Ok(());
+    }
+    match event {
+        NetworkEvent::HttpRequest { ref origin, .. } => {
+            let destination = resolve_host_port(&origin.host, origin.port, config.connect_timeout)?;
+            let mut upstream = connect_allowed_tcp(&event, &decision, destination, config)?;
+            let rewritten = rewrite_http_request_for_origin(head)?;
+            upstream.write_all(&rewritten)?;
+            upstream.write_all(tail)?;
+            tunnel_bidirectional(client, upstream)
+        }
+        NetworkEvent::HttpsConnect { ref host, port, .. } => {
+            let destination = resolve_host_port(host, port, config.connect_timeout)?;
+            let mut upstream = connect_allowed_tcp(&event, &decision, destination, config)?;
+            client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
+            upstream.write_all(tail)?;
+            tunnel_bidirectional(client, upstream)
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected proxy event type",
+        )),
+    }
+}
+
+fn read_proxy_head(stream: &mut TcpStream, limit: usize) -> io::Result<Vec<u8>> {
+    let mut buffer = Vec::new();
+    let mut chunk = [0_u8; 1024];
+    loop {
+        if buffer.len() >= limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "proxy request head exceeded limit",
+            ));
+        }
+        let read_len = stream.read(&mut chunk)?;
+        if read_len == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "client closed before proxy request head",
+            ));
+        }
+        buffer.extend_from_slice(&chunk[..read_len]);
+        if buffer.len() > limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "proxy request head exceeded limit",
+            ));
+        }
+        if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(buffer);
+        }
+    }
+}
+
+fn split_proxy_head(buffered: &[u8]) -> io::Result<(&[u8], &[u8])> {
+    let Some(head_end) = buffered.windows(4).position(|window| window == b"\r\n\r\n") else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "proxy request head delimiter missing",
+        ));
+    };
+    let split_at = head_end + 4;
+    Ok((&buffered[..split_at], &buffered[split_at..]))
+}
+
+fn connect_allowed_tcp(
+    event: &NetworkEvent,
+    decision: &Decision,
+    destination: SocketAddr,
+    config: &HttpProxyProofConfig,
+) -> io::Result<TcpStream> {
+    let request = TcpEgressRequest {
+        context: EgressContext {
+            sandbox_id: config.sandbox_id.clone(),
+            frontend: Frontend::HttpProxy,
+            decision: decision.clone(),
+            attribution: event_attribution(event),
+        },
+        source: None,
+        destination: TransportEndpoint::from(destination),
+        connect_timeout: Some(config.connect_timeout),
+    };
+    if !request.context.is_allowed() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "policy denied host egress",
+        ));
+    }
+    TcpStream::connect_timeout(&destination, config.connect_timeout)
+}
+
+fn event_attribution(event: &NetworkEvent) -> Attribution {
+    match event {
+        NetworkEvent::HttpRequest { origin, .. } => {
+            Attribution::explicit_proxy(origin.host.clone())
+        }
+        NetworkEvent::HttpsConnect { host, .. } => Attribution::explicit_proxy(host.clone()),
+        NetworkEvent::SocksConnect { target, .. } => target
+            .host()
+            .cloned()
+            .map(Attribution::explicit_proxy)
+            .unwrap_or_else(Attribution::ip_only),
+        _ => Attribution::ip_only(),
+    }
+}
+
+fn resolve_host_port(host: &Hostname, port: u16, timeout: Duration) -> io::Result<SocketAddr> {
+    let _ = timeout;
+    let mut addrs: Vec<_> = (host.as_str(), port).to_socket_addrs()?.collect();
+    addrs.sort_by_key(|addr| !addr.is_ipv4());
+    addrs
+        .into_iter()
+        .next()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "host did not resolve"))
+}
+
+fn rewrite_http_request_for_origin(head: &[u8]) -> io::Result<Vec<u8>> {
+    let text = std::str::from_utf8(head)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "HTTP head is not UTF-8"))?;
+    let line_end = text
+        .find("\r\n")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "missing request line"))?;
+    let request_line = &text[..line_end];
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let target = parts.next().unwrap_or_default();
+    let version = parts.next().unwrap_or_default();
+    let path = absolute_http_path(target)?;
+    let mut rewritten = Vec::new();
+    rewritten.extend_from_slice(format!("{method} {path} {version}").as_bytes());
+    rewritten.extend_from_slice(&text.as_bytes()[line_end..]);
+    Ok(rewritten)
+}
+
+fn absolute_http_path(target: &str) -> io::Result<&str> {
+    let without_scheme = target
+        .strip_prefix("http://")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "not absolute http target"))?;
+    Ok(match without_scheme.find('/') {
+        Some(index) => &without_scheme[index..],
+        None => "/",
+    })
+}
+
+fn tunnel_bidirectional(mut client: TcpStream, upstream: TcpStream) -> io::Result<()> {
+    let mut client_read = client.try_clone()?;
+    let mut upstream_read = upstream.try_clone()?;
+    let mut upstream_write = upstream;
+    let client_to_upstream = thread::spawn(move || {
+        let result = io::copy(&mut client_read, &mut upstream_write);
+        let _ = upstream_write.shutdown(Shutdown::Write);
+        result
+    });
+    let upstream_to_client = io::copy(&mut upstream_read, &mut client);
+    let _ = client.shutdown(Shutdown::Both);
+    match client_to_upstream.join() {
+        Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {}
+    }
+    upstream_to_client.map(|_| ())
 }
 
 /// Parses an HTTP proxy request head into a normalized HTTP or CONNECT event.
@@ -232,10 +467,19 @@ fn parse_socks_address(request: &[u8]) -> Result<(SocksDestination, usize), Prox
 #[cfg(test)]
 mod tests {
     use super::*;
-    use foxprox_core::{Protocol, SocksDestination};
+    use foxprox_core::{PolicyRule, PortRange, Protocol, RuleEffect, SocksDestination};
+    use std::io::{Read, Write};
+    use std::net::{Shutdown, TcpListener};
 
     fn sandbox_id() -> SandboxId {
         SandboxId::new("proxy-test").unwrap()
+    }
+
+    fn allow_rule(id: &str, protocol: Protocol, host: &str, port: u16) -> PolicyRule {
+        PolicyRule::new(id, RuleEffect::Allow)
+            .with_protocol(protocol)
+            .with_hostname(Hostname::parse(host).unwrap())
+            .with_destination_ports(PortRange::single(port))
     }
 
     #[test]
@@ -388,5 +632,111 @@ mod tests {
         .unwrap();
         assert_eq!(http.protocol(), Protocol::Http);
         assert_eq!(connect.protocol(), Protocol::HttpsConnect);
+    }
+
+    #[test]
+    fn proof_http_proxy_forwards_absolute_form_request_body_after_policy_allow() {
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let origin_thread = thread::spawn(move || {
+            let (mut stream, _) = origin.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 512];
+            loop {
+                let len = stream.read(&mut chunk).unwrap();
+                if len == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..len]);
+                if request.ends_with(b"hello-body") {
+                    break;
+                }
+            }
+            let text = std::str::from_utf8(&request).unwrap();
+            assert!(text.starts_with("POST /proof HTTP/1.1\r\n"));
+            assert!(text.ends_with("hello-body"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello")
+                .unwrap();
+        });
+
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let mut config = HttpProxyProofConfig::new(sandbox_id(), proxy_addr);
+        config.policy.rules.push(allow_rule(
+            "allow-http-localhost",
+            Protocol::Http,
+            "localhost",
+            origin_addr.port(),
+        ));
+        let proxy_thread = thread::spawn(move || {
+            let (stream, _) = proxy.accept().unwrap();
+            handle_http_proxy_stream(stream, &config).unwrap();
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).unwrap();
+        client
+            .write_all(
+                format!(
+                    "POST http://localhost:{}/proof HTTP/1.1\r\nHost: localhost\r\nContent-Length: 10\r\n\r\nhello-body",
+                    origin_addr.port()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.contains("200 OK"));
+        assert!(response.ends_with("hello"));
+        proxy_thread.join().unwrap();
+        origin_thread.join().unwrap();
+    }
+
+    #[test]
+    fn proof_connect_tunnels_after_policy_allow() {
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let origin_thread = thread::spawn(move || {
+            let (mut stream, _) = origin.accept().unwrap();
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(&request, b"ping");
+            stream.write_all(b"pong").unwrap();
+        });
+
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let mut config = HttpProxyProofConfig::new(sandbox_id(), proxy_addr);
+        config.policy.rules.push(allow_rule(
+            "allow-connect-localhost",
+            Protocol::HttpsConnect,
+            "localhost",
+            origin_addr.port(),
+        ));
+        let proxy_thread = thread::spawn(move || {
+            let (stream, _) = proxy.accept().unwrap();
+            handle_http_proxy_stream(stream, &config).unwrap();
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).unwrap();
+        client
+            .write_all(
+                format!(
+                    "CONNECT localhost:{} HTTP/1.1\r\nHost: localhost\r\n\r\nping",
+                    origin_addr.port()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut response = [0_u8; 39];
+        client.read_exact(&mut response).unwrap();
+        assert_eq!(&response, b"HTTP/1.1 200 Connection Established\r\n\r\n");
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut tunneled = [0_u8; 4];
+        client.read_exact(&mut tunneled).unwrap();
+        assert_eq!(&tunneled, b"pong");
+        proxy_thread.join().unwrap();
+        origin_thread.join().unwrap();
     }
 }

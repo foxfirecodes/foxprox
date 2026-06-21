@@ -571,6 +571,73 @@
 - Current git status summary: proxy crate and workspace files modified; review artifacts pending rereview/removal.
 - Next exact action: read proxy parser rereview, fix any blockers, remove transient `reviews/`, commit parser foundation, then start live explicit proxy listener/egress proof slice.
 
+## 2026-06-21T22:59:37Z — proxy parser foundation committed; next objective selected
+
+- Commit created: `a3ebc58` (`add explicit proxy parser foundation`).
+- Current objective: add a live explicit HTTP/HTTPS proxy listener proof using the parser foundation, shared policy evaluation, and host TCP egress.
+- Rationale: Milestone 6 requires HTTP proxy frontend, HTTPS CONNECT support, shared policy engine integration, shared audit logging, and origin-aware allow/deny rules. Parser normalization is complete; the next smallest live slice is an HTTP proxy/CONNECT proof listener with policy-gated host TCP forwarding.
+- Verification plan: implement a std-threaded proof listener in `foxprox-proxy` for absolute-form HTTP and CONNECT, resolve proxy hostnames through host DNS for proof egress, evaluate `PolicyEngine` before connect, fail closed by default, add local loopback tests with a tiny origin server, run full workspace fmt/check/test/clippy/doc, and then commit.
+- Expected commit boundary: HTTP proxy and HTTPS CONNECT live proof only; SOCKS5 live listener remains a follow-on slice.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: extend `foxprox-proxy` with a policy-gated std TCP listener proof for HTTP proxy and CONNECT.
+
+## 2026-06-21T23:04:12Z — live HTTP proxy/CONNECT proof implemented pending review
+
+- Current objective: verify and commit Milestone 6 live HTTP proxy/CONNECT proof.
+- Changes implemented:
+  - Added `HttpProxyProofConfig` and `run_http_proxy_proof`, a std-threaded explicit proxy proof listener.
+  - Proxy proof reads bounded request heads, parses with the existing HTTP proxy parser, evaluates `PolicyEngine`, and fails closed with `403` for non-allow decisions before host connect.
+  - Added host TCP connect through a `TcpEgressRequest`/`EgressContext` proof boundary that refuses non-allowed decisions before opening a socket.
+  - Plain HTTP proxy requests are rewritten from absolute-form to origin-form before forwarding to the host.
+  - HTTPS CONNECT requests receive `200 Connection Established` only after policy allow and successful host connect, then tunnel bytes bidirectionally.
+  - Added local loopback tests proving policy-allowed absolute-form HTTP GET forwarding and CONNECT tunneling.
+- Subagents/reviews requested: `proxy-live-final` is running as a read-only blocker review.
+- Verification commands and outcomes so far:
+  - `cargo fmt --all -- --check` passed after formatting.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-proxy -- --nocapture` passed: 11 tests.
+  - `cargo test --workspace` passed: 45 core tests, 8 device tests, 8 net tests, 11 proxy tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed after fixing `sliced_string_as_bytes`.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-proxy` showed only `foxprox-core` as a dependency.
+- Known proof limitations: blocking/thread-per-connection proof only; no SOCKS live listener yet; no audit sink/backpressure beyond structured decision logs; HTTP request body streaming is minimal proof behavior.
+- Files changed: `crates/foxprox-proxy/src/lib.rs`, `progress.md`.
+- Current git status summary: proxy proof source and progress modified; no commit yet pending final review.
+- Next exact action: read proxy live review, fix blockers if any, then commit.
+
+## 2026-06-21T23:09:50Z — live HTTP proxy/CONNECT blocker fixes verified pending rereview
+
+- Current objective: commit live HTTP proxy/CONNECT proof after rereview.
+- Review findings accepted and fixed:
+  - Buffered bytes after `\r\n\r\n` were not preserved safely. Fixed by splitting the initial read buffer into header and tail; parsing/rewriting only the header; forwarding tail to upstream for both HTTP and CONNECT.
+  - Plain HTTP forwarded only upstream-to-client after the initial rewritten request. Fixed by using the bidirectional tunnel after sending the rewritten header and buffered tail, allowing request bodies to continue from client to upstream.
+  - Incomplete request heads could pin handler threads indefinitely. Fixed by adding `request_head_timeout` to `HttpProxyProofConfig` and setting a client read timeout before the bounded header read.
+  - CONNECT tunnel teardown could hang on join when upstream closed first. Reworked tunnel copy to half-close upstream write after client->upstream finishes and shut down the client socket after upstream->client finishes to wake the other copy path.
+- Additional tests added/updated:
+  - Plain HTTP proxy proof now uses a coalesced POST body and verifies the origin receives `POST /proof` with `hello-body`.
+  - CONNECT proof now coalesces `ping` immediately after the CONNECT header and verifies it reaches the upstream after the proxy sends `200 Connection Established`.
+- Verification commands and outcomes after fixes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-proxy -- --nocapture` passed: 11 tests.
+  - `cargo test --workspace` passed: 45 core tests, 8 device tests, 8 net tests, 11 proxy tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-proxy` showed only `foxprox-core` as a dependency.
+- Subagents/reviews requested: `proxy-live-rereview` is running to confirm blocker fixes.
+- Files changed: `crates/foxprox-proxy/src/lib.rs`, `progress.md`.
+- Current git status summary: proxy proof source and progress modified; review artifacts pending rereview/removal.
+- Next exact action: read proxy live rereview, fix any blockers, remove `reviews/`, and commit live proxy proof.
+
+## 2026-06-21T23:10:44Z — live HTTP proxy/CONNECT rereview passed
+
+- Current objective: commit the live explicit HTTP proxy/CONNECT proof.
+- Rereview result: `proxy-live-rereview` found no blockers after the buffered-tail, HTTP body forwarding, read-timeout, and CONNECT tunnel teardown fixes.
+- Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed and `foxprox-proxy` has 11 tests including live loopback HTTP POST/body forwarding and CONNECT coalesced-tail tunneling.
+- Files changed: `crates/foxprox-proxy/src/lib.rs`, `progress.md`.
+- Current git status summary: proxy proof source and progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit live HTTP proxy/CONNECT proof, then start SOCKS5 live CONNECT proof or audit/backpressure slice based on remaining alpha scope.
+
 ## 2026-06-21T22:58:44Z — explicit proxy parser foundation rereview passed
 
 - Current objective: commit Milestone 6 explicit proxy parsing/normalization foundation.
