@@ -14,6 +14,7 @@ pub mod event;
 pub mod flow;
 pub mod frontend;
 pub mod inspect;
+pub mod kernel;
 pub mod origin;
 pub mod packet;
 pub mod policy;
@@ -30,6 +31,7 @@ pub use frontend::{
     SocksDestination, SocksGreeting,
 };
 pub use inspect::{parse_http_request, parse_tls_client_hello_sni, InspectError, TlsClientHello};
+pub use kernel::VerificationKernel;
 pub use origin::{parse_connect_target, parse_http_origin, OriginError};
 pub use packet::{
     packet_addrs, parse_ip_packet, synthesize_icmpv4_echo_reply, Icmpv4EchoRequest, PacketError,

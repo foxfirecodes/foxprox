@@ -68,3 +68,15 @@
 - Commit hash when committed: previous config validation slice committed as `02adb85`; normalized event commit pending.
 - Remaining risks: normalized events are in-memory only; packet adapters, proxy listener loops, audit sinks beyond bounded memory, and host egress runtime are still pending.
 - Exact next step: commit normalized event slice, then add egress/frontend abstraction types and a minimal CLI/config-facing crate boundary for future runtime wiring.
+
+## 2026-06-21T17:04:35Z
+- Current objective: enforce the verification-kernel invariant that every policy decision is appended to bounded audit history or fails closed.
+- Files changed: `crates/foxprox-core/src/lib.rs`, `crates/foxprox-core/src/kernel.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially identified formatting in the new kernel module; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 34 unit tests passed. New tests prove decisions are recorded in audit events and audit backpressure turns an otherwise allowed decision into fail-closed `AuditBackpressure`.
+- Commit hash when committed: previous normalized event slice committed as `99add43`; verification kernel commit pending.
+- Remaining risks: only in-memory audit sink exists; durable append-only audit sinks, runtime forwarding, and process lifecycle events are not yet implemented.
+- Exact next step: commit kernel slice, then scaffold the runtime crate boundaries for device/integration/egress code without leaking those types into core policy.
