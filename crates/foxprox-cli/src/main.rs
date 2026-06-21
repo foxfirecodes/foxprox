@@ -162,6 +162,12 @@ where
         .policy
         .rules
         .push(allow_tcp_forward_rule(config.tcp_port));
+    if config.tcp_port == 80 {
+        config
+            .policy
+            .rules
+            .push(allow_http_forward_rule(config.tcp_port));
+    }
 
     let setup_socket = setup_socket.ok_or_else(|| {
         io::Error::new(
@@ -253,6 +259,12 @@ where
 fn allow_tcp_forward_rule(port: u16) -> PolicyRule {
     PolicyRule::new(format!("proof-allow-tcp-{port}"), RuleEffect::Allow)
         .with_protocol(Protocol::Tcp)
+        .with_destination_ports(PortRange::single(port))
+}
+
+fn allow_http_forward_rule(port: u16) -> PolicyRule {
+    PolicyRule::new(format!("proof-allow-http-{port}"), RuleEffect::Allow)
+        .with_protocol(Protocol::Http)
         .with_destination_ports(PortRange::single(port))
 }
 

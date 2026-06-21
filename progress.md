@@ -469,3 +469,36 @@
 - Files changed: `crates/foxprox-net/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
 - Current git status summary: source and progress ledger modified; review artifact directory summarized and ready for removal before commit.
 - Next exact action: remove transient `reviews/`, commit TCP proof policy gate, then select the next Milestone 5 slice (DNS-to-TCP attribution or transparent HTTP/TLS first-byte inspection).
+
+## 2026-06-21T22:42:21Z — TCP policy gate committed; next objective selected
+
+- Commit created: `0fa8c0d` (`gate tcp proof with policy`).
+- Current objective: begin transparent TCP first-bytes inspection planning/implementation for plaintext HTTP before host connect.
+- Rationale: TCP proof now has a policy gate for connect attempts, but Milestone 5 still requires transparent plaintext HTTP Host/method/path inspection. DNS-to-TCP attribution requires a combined TCP+DNS runtime, while HTTP first-byte inspection can be added locally to the TCP proof path.
+- Verification plan: add bounded HTTP request-head inspection before host connect on configured TCP port 80, evaluate `HttpRequest` policy before forwarding buffered bytes, preserve proof CLI behavior with an explicit HTTP allow rule for proof port 80, add focused tests for HTTP inspection policy decisions, run full workspace verification and live bwrap/TUN HTTP smoke.
+- Expected commit boundary: TCP proof plaintext HTTP inspection gate only; TLS ClientHello inspection and combined DNS attribution remain follow-on slices.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: inspect `ConnectingFlow` and refactor TCP proof to buffer/evaluate HTTP request metadata before host connect.
+
+## 2026-06-21T22:46:46Z — transparent HTTP inspection proof verified
+
+- Current objective: commit the transparent plaintext HTTP inspection gate for the TCP proof.
+- Changes implemented:
+  - TCP proof now routes allowed port-80 TCP connects through an `InspectingHttpFlow` state before opening the host socket.
+  - The inspection state buffers sandbox bytes up to the existing pending buffer limit, parses a complete HTTP request head with `parse_http_request_head`, evaluates a normalized `HttpRequest` with `PolicyEngine`, and only then creates `ConnectingFlow` with the buffered request bytes preserved for host forwarding.
+  - Malformed, unsupported, missing-Host, denied, timed-out, or closed inspection cases abort the smoltcp socket before host connect.
+  - `foxprox proof-tcp` now installs an explicit `Protocol::Http` proof allow rule for `--tcp-port 80` in addition to the TCP connect proof allow rule.
+  - Added focused test coverage that transparent HTTP inspection is limited to default HTTP port 80.
+- Subagents/reviews requested and findings:
+  - `http-inspection-final` found no blockers and confirmed the diff buffers first bytes before host connect, aborts malformed/missing-Host cases through parser errors, installs the proof CLI HTTP allow rule, and keeps buffers/timeouts bounded.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed after formatting.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-net` passed: 7 tests.
+  - `cargo test --workspace` passed: 45 core tests, 8 device tests, 7 net tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - Live bwrap/TUN HTTP smoke passed with sandbox Python client to resolved `example.com:80`; broker logged both `tcp policy decision=Decision { action: Allow, rule_id: Some("proof-allow-tcp-80"), reason: None }` and `transparent HTTP policy decision=Decision { action: Allow, rule_id: Some("proof-allow-http-80"), reason: None }` before host connect; response started `HTTP/1.1 200 OK`.
+- Files changed: `crates/foxprox-net/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: source and progress ledger modified; review artifact directory summarized and ready for removal before commit.
+- Next exact action: remove transient `reviews/`, commit transparent HTTP inspection proof, then start the next alpha slice: TLS ClientHello inspection on transparent TCP port 443 or explicit proxy frontend planning.

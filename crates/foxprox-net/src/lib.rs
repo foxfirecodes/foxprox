@@ -12,7 +12,8 @@ mod udp;
 pub use udp::{run_udp_dns_proof, run_udp_dns_proof_with_ready, UdpDnsProofConfig};
 
 use foxprox_core::{
-    Attribution, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, SandboxId, TransportEndpoint,
+    parse_http_request_head, Attribution, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet,
+    SandboxId, TransportEndpoint,
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, TunTapInterface};
@@ -156,11 +157,15 @@ where
                     let decision = PolicyEngine::new(config.policy.clone()).evaluate(&event);
                     eprintln!("foxprox-net: tcp policy decision={decision:?} event={event:?}");
                     if decision.is_allowed() {
-                        flow = Some(FlowState::Connecting(ConnectingFlow::new(
-                            source,
-                            destination,
-                            config.connect_timeout,
-                        )));
+                        flow = Some(if should_inspect_http(destination.port()) {
+                            FlowState::InspectingHttp(InspectingHttpFlow::new(source, destination))
+                        } else {
+                            FlowState::Connecting(ConnectingFlow::new(
+                                source,
+                                destination,
+                                config.connect_timeout,
+                            ))
+                        });
                     } else {
                         socket.abort();
                     }
@@ -172,6 +177,32 @@ where
         if let Some(state) = flow.as_mut() {
             let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
             match state {
+                FlowState::InspectingHttp(inspecting) => {
+                    match inspecting.pump(
+                        socket,
+                        &config.sandbox_id,
+                        &config.policy,
+                        config.pending_buffer_limit,
+                        config.connect_timeout,
+                    ) {
+                        Ok(Some(connecting)) => *state = FlowState::Connecting(connecting),
+                        Ok(None) => {
+                            if inspecting.is_expired(config.connect_timeout) || !socket.is_active()
+                            {
+                                eprintln!(
+                                    "foxprox-net: HTTP inspection timed out or socket closed"
+                                );
+                                socket.abort();
+                                clear_flow = true;
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("foxprox-net: HTTP inspection denied/failed: {error}");
+                            socket.abort();
+                            clear_flow = true;
+                        }
+                    }
+                }
                 FlowState::Connecting(connecting) => {
                     let mut connected = None;
                     if let Err(error) = connecting.pump(socket, config.pending_buffer_limit) {
@@ -232,8 +263,78 @@ where
 }
 
 enum FlowState {
+    InspectingHttp(InspectingHttpFlow),
     Connecting(ConnectingFlow),
     Active(ActiveFlow),
+}
+
+struct InspectingHttpFlow {
+    source: TransportEndpoint,
+    destination: SocketAddr,
+    pending_to_host: Vec<u8>,
+    started_at: StdInstant,
+    last_activity: StdInstant,
+}
+
+impl InspectingHttpFlow {
+    fn new(source: TransportEndpoint, destination: SocketAddr) -> Self {
+        let now = StdInstant::now();
+        Self {
+            source,
+            destination,
+            pending_to_host: Vec::new(),
+            started_at: now,
+            last_activity: now,
+        }
+    }
+
+    fn pump(
+        &mut self,
+        socket: &mut tcp::Socket<'_>,
+        sandbox_id: &SandboxId,
+        policy: &PolicyRuleSet,
+        pending_limit: usize,
+        connect_timeout: Duration,
+    ) -> io::Result<Option<ConnectingFlow>> {
+        recv_socket_to_vec(
+            socket,
+            &mut self.pending_to_host,
+            pending_limit,
+            &mut self.last_activity,
+        )?;
+        let inspection =
+            match parse_http_request_head(&self.pending_to_host, self.destination.port()) {
+                Ok(inspection) => inspection,
+                Err(foxprox_core::InspectionError::Truncated) => return Ok(None),
+                Err(error) => {
+                    return Err(io::Error::other(format!(
+                        "malformed or unsupported HTTP request head: {error:?}"
+                    )))
+                }
+            };
+        let event = NetworkEvent::HttpRequest {
+            sandbox_id: sandbox_id.clone(),
+            frontend: Frontend::Tun,
+            method: inspection.method,
+            origin: inspection.origin,
+            path_and_query: inspection.path_and_query,
+        };
+        let decision = PolicyEngine::new(policy.clone()).evaluate(&event);
+        eprintln!("foxprox-net: transparent HTTP policy decision={decision:?} event={event:?}");
+        if !decision.is_allowed() {
+            return Err(io::Error::other("transparent HTTP policy denied request"));
+        }
+        Ok(Some(ConnectingFlow::new_with_pending(
+            self.source,
+            self.destination,
+            connect_timeout,
+            std::mem::take(&mut self.pending_to_host),
+        )))
+    }
+
+    fn is_expired(&self, timeout: Duration) -> bool {
+        self.started_at.elapsed() > timeout
+    }
 }
 
 struct ConnectingFlow {
@@ -247,6 +348,15 @@ struct ConnectingFlow {
 
 impl ConnectingFlow {
     fn new(source: TransportEndpoint, destination: SocketAddr, timeout: Duration) -> Self {
+        Self::new_with_pending(source, destination, timeout, Vec::new())
+    }
+
+    fn new_with_pending(
+        source: TransportEndpoint,
+        destination: SocketAddr,
+        timeout: Duration,
+        pending_to_host: Vec<u8>,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
             let result = TcpStream::connect_timeout(&destination, timeout).and_then(|stream| {
@@ -260,7 +370,7 @@ impl ConnectingFlow {
             source,
             destination,
             receiver,
-            pending_to_host: Vec::new(),
+            pending_to_host,
             started_at: now,
             last_activity: now,
         }
@@ -433,6 +543,10 @@ fn recv_socket_to_vec(
     Ok(())
 }
 
+fn should_inspect_http(port: u16) -> bool {
+    port == 80
+}
+
 fn endpoint_to_socket_addr(endpoint: smoltcp::wire::IpEndpoint) -> io::Result<SocketAddr> {
     Ok(SocketAddr::new(ip_to_std(endpoint.addr)?, endpoint.port))
 }
@@ -478,6 +592,12 @@ mod tests {
         assert!(config.connect_timeout <= Duration::from_secs(5));
         assert!(config.idle_timeout <= Duration::from_secs(30));
         assert_eq!(config.pending_buffer_limit, 256 * 1024);
+    }
+
+    #[test]
+    fn transparent_http_inspection_is_limited_to_default_http_port() {
+        assert!(should_inspect_http(80));
+        assert!(!should_inspect_http(443));
     }
 
     #[test]
