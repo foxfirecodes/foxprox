@@ -48,3 +48,7 @@
 ## 2026-06-21 — Hidden-SNI policy guard
 
 - Default-allow cannot apply blindly to transparent TLS when SNI/hostname attribution is unavailable; policy needs a pre-default guard while still permitting explicit IP/port allow rules for intentional hidden-SNI cases.
+
+## 2026-06-21 — ICMP policy defaults
+
+- ICMP needs explicit policy defaults independent of the broad default allow/deny switch: essential error messages are broker mechanics, ping is user-configurable, and unusual ICMP should fail closed.

@@ -63,9 +63,28 @@ impl PolicyEngine {
 
         if let NormalizedEvent::IcmpMessage(icmp) = event {
             let is_echo = icmp.icmp_type == 8 || icmp.icmp_type == 128;
-            if is_echo && !self.config.allow_ping {
+            if is_echo {
+                if self.config.allow_ping {
+                    return PolicyDecision::Allow(AllowDecision {
+                        rule_id: None,
+                        timeout_override: None,
+                        reason: Some("ICMP echo enabled by policy".into()),
+                    });
+                }
                 return deny(DenialAction::Drop, None, "ICMP echo is disabled by policy");
             }
+            if is_essential_icmp(icmp) {
+                return PolicyDecision::Allow(AllowDecision {
+                    rule_id: None,
+                    timeout_override: None,
+                    reason: Some("essential ICMP error allowed by default".into()),
+                });
+            }
+            return deny(
+                DenialAction::Drop,
+                None,
+                "unsupported ICMP type denied by default",
+            );
         }
 
         if let NormalizedEvent::TlsClientHello(tls) = event {
@@ -173,6 +192,16 @@ fn request_metadata_matches(rule: &PolicyRule, event: &NormalizedEvent) -> bool 
     method_matches && path_matches
 }
 
+fn is_essential_icmp(icmp: &foxprox_core::IcmpMessage) -> bool {
+    if icmp.source.is_ipv4() && icmp.destination.is_ipv4() {
+        matches!(icmp.icmp_type, 3 | 11 | 12)
+    } else if icmp.source.is_ipv6() && icmp.destination.is_ipv6() {
+        matches!(icmp.icmp_type, 1..=4)
+    } else {
+        false
+    }
+}
+
 fn hostname_matches(
     event: &NormalizedEvent,
     minimum_confidence: HostnameConfidence,
@@ -222,7 +251,7 @@ mod tests {
     use foxprox_core::{
         DestinationHost, DnsQuery, DnsQueryType, DomainSuffix, FrontendKind, Hostname,
         HostnameAttribution, HostnameAttributionSource, HttpMethod, HttpRequest, HttpScheme,
-        IpCidr, RuleId, SandboxId, TcpConnectAttempt, TlsClientHello, UdpFlowAttempt,
+        IcmpMessage, IpCidr, RuleId, SandboxId, TcpConnectAttempt, TlsClientHello, UdpFlowAttempt,
         UnsupportedNetworkEvent, UnsupportedReason,
     };
 
@@ -370,6 +399,48 @@ mod tests {
 
         assert_eq!(event.protocol(), Protocol::HttpsConnect);
         assert_eq!(event.explicit_hostname().unwrap().as_str(), "example.com");
+    }
+
+    #[test]
+    fn icmp_defaults_allow_essential_errors_and_gate_ping() {
+        let essential = NormalizedEvent::IcmpMessage(IcmpMessage {
+            sandbox_id: sandbox(),
+            frontend: FrontendKind::Tun,
+            icmp_type: 3,
+            icmp_code: 1,
+            source: "203.0.113.10".parse().unwrap(),
+            destination: "10.0.0.2".parse().unwrap(),
+        });
+        assert!(PolicyEngine::new(RuntimeConfig::deny_by_default())
+            .decide(&essential)
+            .is_allowed());
+
+        let ping = NormalizedEvent::IcmpMessage(IcmpMessage {
+            sandbox_id: sandbox(),
+            frontend: FrontendKind::Tun,
+            icmp_type: 8,
+            icmp_code: 0,
+            source: "10.0.0.2".parse().unwrap(),
+            destination: "203.0.113.10".parse().unwrap(),
+        });
+        assert!(!PolicyEngine::new(RuntimeConfig::allow_by_default())
+            .decide(&ping)
+            .is_allowed());
+        let mut config = RuntimeConfig::deny_by_default();
+        config.allow_ping = true;
+        assert!(PolicyEngine::new(config).decide(&ping).is_allowed());
+
+        let unusual = NormalizedEvent::IcmpMessage(IcmpMessage {
+            sandbox_id: sandbox(),
+            frontend: FrontendKind::Tun,
+            icmp_type: 13,
+            icmp_code: 0,
+            source: "10.0.0.2".parse().unwrap(),
+            destination: "203.0.113.10".parse().unwrap(),
+        });
+        assert!(!PolicyEngine::new(RuntimeConfig::allow_by_default())
+            .decide(&unusual)
+            .is_allowed());
     }
 
     #[test]

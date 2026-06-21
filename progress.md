@@ -257,3 +257,20 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: a1ee0ce.
 - Remaining boundary risks: production stream reassembly, ECH detection hardening, and richer TLS parser fuzzing remain.
+
+## 2026-06-21 — Boundary objective: ICMP default policy contract
+
+- Boundary under work: normalized ICMP policy defaults for essential errors, ping, and unusual ICMP denial.
+- Allowed dependency direction: packet code emits normalized `IcmpMessage`; policy decides using only type/code metadata and does not import raw packet buffers.
+- Dependency-risk assessment: ICMP defaults were ambiguous under default allow/deny; essential errors should not require broad allow rules, while unusual ICMP and ping must remain explicit/default-safe.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: essential IPv4/IPv6 ICMP errors are allowed before default-deny, ping is allowed only when `allow_ping` is true, and unusual ICMP is denied before default-allow. All verification passed.
+- Changed files:
+  - `crates/foxprox-policy/src/lib.rs`
+  - `progress.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 47 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: ICMPv6 packet normalization, synthesized unreachable responses for denied UDP, and path-MTU integration remain.
