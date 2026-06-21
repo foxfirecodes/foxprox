@@ -107,3 +107,27 @@
 - Interpretation: the setup helper no longer relies on the previously failing child-process path for TUN setup. It now has direct Linux ioctl coverage plus a reusable harness smoke. The helper also parses the launch-plan `--handoff-env` option, sends the TUN fd over that socket when provided, drops `CAP_NET_ADMIN` before target exec, and fails closed before target exec if no fd handoff socket is provided.
 - Next verification gap: add a broker-side handoff harness that receives the TUN fd over a Unix socket and proves the fd remains usable after `foxproxsetup` exits, then use that fd for packet write-back from outside the sandbox namespace.
 - Commit hash after commit: pending.
+
+## 2026-06-21T13:25:00Z — Direct setup commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs crates/foxprox-setup/src/main.rs learnings.md progress.md && git commit -m "Implement direct foxproxsetup TUN configuration"`
+- Environment assumptions: direct helper setup and test output above were verified before commit.
+- Expected result: commit captures direct ioctl TUN setup, setup-smoke harness, fd handoff send path, and capability drop before target exec.
+- Observed result: commit `02069d7` created with 5 files changed.
+- Relevant output excerpt: `[harness-lab 02069d7] Implement direct foxproxsetup TUN configuration`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: Milestone 0 setup-helper behavior is closer to product shape; the shell-based `tun-smoke` remains as a comparison harness, while `setup-smoke` exercises the Rust helper path.
+- Next verification gap: broker-side handoff harness that receives the TUN fd and proves it remains usable after helper exit.
+- Commit hash after commit: 02069d7.
+
+## 2026-06-21T13:45:00Z — TUN fd handoff smoke harness
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run handoff-smoke`
+- Environment assumptions: host harness can create a Unix socket under `target/`; bwrap can bind that socket directory into the sandbox; `foxproxsetup` receives `FOXPROX_SETUP_SOCKET`, creates/configures the sandbox TUN, sends the fd with `SCM_RIGHTS`, drops `CAP_NET_ADMIN`, closes its local fd, and execs `/usr/bin/true`.
+- Expected result: deterministic tests remain green; `handoff-smoke` receives a live TUN fd, waits for the helper/target to exit, and confirms the received fd remains valid on the host side.
+- Observed result: pass. `foxprox-core` ran 30 tests, `foxprox-cli` ran 2 tests, `foxproxsetup` ran 7 tests, and `handoff-smoke` emitted `decision":"allow"`.
+- Relevant output excerpt: `"reason":"foxproxsetup handed off a live TUN fd and target exited"`; `"fd_valid_after_helper_exit":"true"`; `"status":"exit status: 0"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`, `learnings.md`.
+- Interpretation: the bwrap-compatible setup helper now has a reproducible host-side fd handoff proof. This closes the previous gap between configure-only TUN setup and the broker-owned fd model required by the architecture.
+- Next verification gap: use the received TUN fd for an external packet write-back proof, ideally by running a sandbox ping target and having the host harness synthesize ICMP echo replies through the handed-off fd.
+- Commit hash after commit: pending.

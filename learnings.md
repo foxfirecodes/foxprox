@@ -17,3 +17,7 @@
 
 - Direct ioctl-based TUN setup from the Rust `foxproxsetup` process succeeds inside the same `bwrap --unshare-user --unshare-net --cap-add CAP_NET_ADMIN` environment where spawning `/bin/sh` from the helper failed. Prefer direct `/dev/net/tun`, `TUNSETIFF`, `SIOCSIF*`, and route ioctls for setup-helper behavior; keep shell/IP-based smoke only as an independent environment comparison.
 - A non-persistent TUN created with `TUNSETIFF` is tied to the open fd, so target execution must be gated on successful fd handoff to the host-side broker. `foxproxsetup` should fail closed rather than exec a target without `FOXPROX_SETUP_SOCKET`/`--handoff-env` being available.
+
+## 2026-06-21 — Host-side setup fd handoff
+
+- A bwrap-contained `foxproxsetup` can connect to a host Unix socket when the socket directory is explicitly bind-mounted into the sandbox and passed through `FOXPROX_SETUP_SOCKET`. `SCM_RIGHTS` fd passing preserves the non-persistent TUN device after the helper closes its local fd and execs/exits the target.
