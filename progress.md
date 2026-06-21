@@ -136,4 +136,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * malformed ClientHello data returns structured parse errors rather than falling back to IP-only domain authorization.
 * Audit evidence: not applicable in this commit; TLS metadata feeds future transparent HTTPS policy/audit events.
 * Residual risk: parser handles single-record ClientHello only; GREASE nuances, fragmented TLS records, QUIC TLS metadata, and stream reassembly remain future frontend/inspection work.
-* Commit hash: pending.
+* Commit hash: a41c021 strict tls clienthello sni parsing.
