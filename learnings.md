@@ -53,3 +53,7 @@ UDP pseudo-flow tracking needs both capacity limits and protocol-class timeouts.
 ## 2026-06-21 - QUIC metadata must not imply HTTP/3 visibility
 
 QUIC candidate parsing should be explicit about what is known: header form, packet type, version, and connection ID lengths. It must not imply hostname or HTTP/3 request visibility unless future TLS/QUIC parsing safely extracts that metadata.
+
+## 2026-06-21 - DNS responses need transaction correlation before caching
+
+Strict DNS response parsing is not sufficient for safe attribution. Address answers should only enter the attribution cache after matching a recent pending query by client, upstream, transaction ID, hostname, and query type; mismatched responses should fail closed and not poison or reuse pending state.

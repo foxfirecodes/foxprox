@@ -25,7 +25,9 @@ pub use audit::{
 pub use config::{Cidr, ConfigError, HostMatcher, PolicyConfig, PolicyRule, RuleAction};
 pub use dns::{
     parse_dns_address_response, parse_dns_query, DnsAddressResponseMetadata, DnsAttributionCache,
-    DnsAttributionEntry, DnsParseError, DnsQueryMetadata, DnsQueryType, ObserveOutcome,
+    DnsAttributionEntry, DnsParseError, DnsQueryMetadata, DnsQueryType, DnsTransactionError,
+    ObserveOutcome, PendingDnsObserveOutcome, PendingDnsObserveStatus, PendingDnsQuery,
+    PendingDnsQueryTable,
 };
 pub use flow::{
     UdpFlowClass, UdpFlowEntry, UdpFlowKey, UdpFlowObserveOutcome, UdpFlowObserveStatus,

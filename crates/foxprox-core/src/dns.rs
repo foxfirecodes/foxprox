@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::attribution::{HostAttribution, Hostname, HostnameError};
+use crate::types::Endpoint;
 
 /// Bounded DNS observation cache for transparent hostname attribution.
 ///
@@ -175,6 +176,157 @@ pub enum DnsParseError {
     OwnerNameMismatch,
     UnsupportedAnswerType,
     InvalidRecordLength,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingDnsQueryTable {
+    max_entries: usize,
+    timeout_millis: u64,
+    entries: VecDeque<PendingDnsQuery>,
+}
+
+impl PendingDnsQueryTable {
+    pub fn new(max_entries: usize, timeout_millis: u64) -> Self {
+        Self {
+            max_entries,
+            timeout_millis,
+            entries: VecDeque::with_capacity(max_entries),
+        }
+    }
+
+    pub fn observe_query(
+        &mut self,
+        client: Endpoint,
+        upstream: Endpoint,
+        query: &DnsQueryMetadata,
+        now_millis: u64,
+    ) -> PendingDnsObserveOutcome {
+        let expired = self.expire(now_millis);
+        let replaced = self.remove_exact(client, upstream, query.transaction_id) > 0;
+
+        if self.max_entries == 0 || self.timeout_millis == 0 {
+            return PendingDnsObserveOutcome {
+                status: PendingDnsObserveStatus::RejectedNoCapacity,
+                evicted: 0,
+                expired,
+                replaced,
+            };
+        }
+
+        let mut evicted = 0;
+        while self.entries.len() >= self.max_entries {
+            self.entries.pop_front();
+            evicted += 1;
+        }
+
+        self.entries.push_back(PendingDnsQuery {
+            client,
+            upstream,
+            transaction_id: query.transaction_id,
+            hostname: query.hostname.clone(),
+            query_type: query.query_type,
+            observed_at_millis: now_millis,
+            expires_at_millis: now_millis.saturating_add(self.timeout_millis),
+        });
+
+        PendingDnsObserveOutcome {
+            status: PendingDnsObserveStatus::Stored,
+            evicted,
+            expired,
+            replaced,
+        }
+    }
+
+    pub fn validate_response(
+        &mut self,
+        client: Endpoint,
+        upstream: Endpoint,
+        response: &DnsAddressResponseMetadata,
+        now_millis: u64,
+    ) -> Result<PendingDnsQuery, DnsTransactionError> {
+        self.expire(now_millis);
+        let Some(index) = self.entries.iter().position(|entry| {
+            entry.client == client
+                && entry.upstream == upstream
+                && entry.transaction_id == response.transaction_id
+        }) else {
+            return Err(DnsTransactionError::UnmatchedResponse);
+        };
+        let pending = self
+            .entries
+            .remove(index)
+            .expect("position came from entries");
+
+        if pending.hostname != response.hostname {
+            return Err(DnsTransactionError::HostnameMismatch);
+        }
+        if pending.query_type != response.query_type {
+            return Err(DnsTransactionError::QueryTypeMismatch);
+        }
+
+        Ok(pending)
+    }
+
+    pub fn expire(&mut self, now_millis: u64) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|entry| entry.expires_at_millis > now_millis);
+        before - self.entries.len()
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.max_entries
+    }
+
+    fn remove_exact(&mut self, client: Endpoint, upstream: Endpoint, transaction_id: u16) -> usize {
+        let before = self.entries.len();
+        self.entries.retain(|entry| {
+            entry.client != client
+                || entry.upstream != upstream
+                || entry.transaction_id != transaction_id
+        });
+        before - self.entries.len()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingDnsQuery {
+    pub client: Endpoint,
+    pub upstream: Endpoint,
+    pub transaction_id: u16,
+    pub hostname: Hostname,
+    pub query_type: DnsQueryType,
+    pub observed_at_millis: u64,
+    pub expires_at_millis: u64,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PendingDnsObserveStatus {
+    Stored,
+    RejectedNoCapacity,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PendingDnsObserveOutcome {
+    pub status: PendingDnsObserveStatus,
+    pub evicted: usize,
+    pub expired: usize,
+    pub replaced: bool,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DnsTransactionError {
+    UnmatchedResponse,
+    HostnameMismatch,
+    QueryTypeMismatch,
 }
 
 pub fn parse_dns_query(
@@ -415,12 +567,16 @@ fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, DnsParseError> {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    use crate::types::{HostnameConfidence, HostnameSource};
+    use crate::types::{Endpoint, HostnameConfidence, HostnameSource};
 
     use super::*;
 
     fn ip(octets: [u8; 4]) -> IpAddr {
         IpAddr::V4(Ipv4Addr::from(octets))
+    }
+
+    fn udp_endpoint(octets: [u8; 4], port: u16) -> Endpoint {
+        Endpoint::udp(ip(octets), port)
     }
 
     #[test]
@@ -791,5 +947,127 @@ mod tests {
             parse_dns_address_response(&trailing, 512, 8),
             Err(DnsParseError::TrailingBytes)
         );
+    }
+
+    #[test]
+    fn pending_dns_transactions_match_and_are_removed() {
+        let client = udp_endpoint([10, 0, 0, 2], 40000);
+        let upstream = udp_endpoint([8, 8, 8, 8], 53);
+        let query = parse_dns_query(&dns_query("example.com", 1), 512).unwrap();
+        let response = parse_dns_address_response(
+            &dns_response("example.com", 1, &[("@", 1, 60, vec![93, 184, 216, 34])]),
+            512,
+            8,
+        )
+        .unwrap();
+        let mut pending = PendingDnsQueryTable::new(8, 5_000);
+
+        let outcome = pending.observe_query(client, upstream, &query, 1_000);
+        assert_eq!(outcome.status, PendingDnsObserveStatus::Stored);
+        assert_eq!(pending.len(), 1);
+
+        let matched = pending
+            .validate_response(client, upstream, &response, 1_100)
+            .unwrap();
+        assert_eq!(matched.hostname.as_str(), "example.com");
+        assert_eq!(matched.query_type, DnsQueryType::A);
+        assert!(pending.is_empty());
+        assert_eq!(
+            pending.validate_response(client, upstream, &response, 1_101),
+            Err(DnsTransactionError::UnmatchedResponse)
+        );
+    }
+
+    #[test]
+    fn pending_dns_transactions_reject_mismatched_responses() {
+        let client = udp_endpoint([10, 0, 0, 2], 40000);
+        let other_client = udp_endpoint([10, 0, 0, 3], 40000);
+        let upstream = udp_endpoint([8, 8, 8, 8], 53);
+        let other_upstream = udp_endpoint([1, 1, 1, 1], 53);
+        let query = parse_dns_query(&dns_query("example.com", 1), 512).unwrap();
+        let matching_response = parse_dns_address_response(
+            &dns_response("example.com", 1, &[("@", 1, 60, vec![93, 184, 216, 34])]),
+            512,
+            8,
+        )
+        .unwrap();
+
+        let mut pending = PendingDnsQueryTable::new(8, 5_000);
+        pending.observe_query(client, upstream, &query, 0);
+        assert_eq!(
+            pending.validate_response(other_client, upstream, &matching_response, 1),
+            Err(DnsTransactionError::UnmatchedResponse)
+        );
+        assert_eq!(
+            pending.validate_response(client, other_upstream, &matching_response, 1),
+            Err(DnsTransactionError::UnmatchedResponse)
+        );
+
+        let wrong_name = parse_dns_address_response(
+            &dns_response("evil.example", 1, &[("@", 1, 60, vec![127, 0, 0, 1])]),
+            512,
+            8,
+        )
+        .unwrap();
+        assert_eq!(
+            pending.validate_response(client, upstream, &wrong_name, 1),
+            Err(DnsTransactionError::HostnameMismatch)
+        );
+        assert!(pending.is_empty());
+
+        pending.observe_query(client, upstream, &query, 2);
+        let wrong_type =
+            parse_dns_address_response(&dns_response("example.com", 28, &[]), 512, 8).unwrap();
+        assert_eq!(
+            pending.validate_response(client, upstream, &wrong_type, 3),
+            Err(DnsTransactionError::QueryTypeMismatch)
+        );
+    }
+
+    #[test]
+    fn pending_dns_transactions_are_ttl_and_capacity_bounded() {
+        let client = udp_endpoint([10, 0, 0, 2], 40000);
+        let upstream = udp_endpoint([8, 8, 8, 8], 53);
+        let first = parse_dns_query(&dns_query("one.example", 1), 512).unwrap();
+        let mut second_wire = dns_query("two.example", 1);
+        second_wire[1] = 0x35;
+        let second = parse_dns_query(&second_wire, 512).unwrap();
+        let mut pending = PendingDnsQueryTable::new(1, 10);
+
+        pending.observe_query(client, upstream, &first, 0);
+        let outcome = pending.observe_query(client, upstream, &second, 1);
+        assert_eq!(outcome.evicted, 1);
+        assert_eq!(pending.len(), 1);
+
+        assert_eq!(pending.expire(10), 0);
+        assert_eq!(pending.expire(11), 1);
+        assert!(pending.is_empty());
+
+        let mut none = PendingDnsQueryTable::new(0, 10);
+        let outcome = none.observe_query(client, upstream, &first, 0);
+        assert_eq!(outcome.status, PendingDnsObserveStatus::RejectedNoCapacity);
+        assert!(none.is_empty());
+
+        let mut zero_ttl = PendingDnsQueryTable::new(8, 0);
+        let outcome = zero_ttl.observe_query(client, upstream, &first, 0);
+        assert_eq!(outcome.status, PendingDnsObserveStatus::RejectedNoCapacity);
+        assert!(zero_ttl.is_empty());
+    }
+
+    #[test]
+    fn pending_dns_transactions_replace_reused_ids_for_same_path() {
+        let client = udp_endpoint([10, 0, 0, 2], 40000);
+        let upstream = udp_endpoint([8, 8, 8, 8], 53);
+        let first = parse_dns_query(&dns_query("one.example", 1), 512).unwrap();
+        let mut second = dns_query("two.example", 1);
+        second[0] = 0x12;
+        second[1] = 0x34;
+        let second = parse_dns_query(&second, 512).unwrap();
+        let mut pending = PendingDnsQueryTable::new(8, 5_000);
+
+        pending.observe_query(client, upstream, &first, 0);
+        let outcome = pending.observe_query(client, upstream, &second, 1);
+        assert!(outcome.replaced);
+        assert_eq!(pending.len(), 1);
     }
 }

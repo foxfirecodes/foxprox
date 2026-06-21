@@ -320,3 +320,26 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; QUIC metadata feeds future UDP/QUIC inspection and audit events.
 * Residual risk: QUIC varint/token/packet number parsing, TLS CRYPTO frame extraction, SNI/ECH visibility, and UDP flow integration remain future work.
 * Commit hash: 55bad4b parse bounded quic candidate headers.
+
+## 2026-06-21 - DNS response transaction correlation foundation
+
+* Invariant under work: DNS responses must update hostname attribution only when they match a recent broker-observed DNS query for the same client, upstream, transaction ID, hostname, and query type, with pending state capacity- and TTL-bounded.
+* Threat or failure mode addressed: unsolicited, replayed, cross-client, or mismatched DNS responses could poison hostname attribution if parsed address answers were cached without transaction correlation.
+* Planned verification: add pending DNS transaction tests for matching query/response removal, transaction ID/hostname/type/client/upstream mismatch rejection, expiry, capacity eviction, zero-capacity rejection, and bounded pending length; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - DNS response transaction correlation foundation results
+
+* Tests added/updated:
+  * pending DNS responses match only after a stored query with the same client endpoint, upstream endpoint, transaction ID, hostname, and query type.
+  * matched pending queries are removed so replayed responses cannot be reused.
+  * cross-client, cross-upstream, hostname-mismatched, and query-type-mismatched responses are rejected.
+  * pending query state expires by TTL, evicts oldest entries at capacity, rejects zero-capacity/zero-timeout storage, and replaces reused transaction IDs on the same path.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` found a test that accidentally reused the same DNS transaction ID when exercising capacity eviction.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 76 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * parsed DNS address responses cannot update attribution unless correlated to a pending broker-observed query.
+  * mismatched responses fail closed and do not leave ambiguous pending state behind.
+  * pending transaction memory remains bounded by both capacity and timeout.
+* Audit evidence: not applicable in this commit; transaction outcomes feed future DNS audit events.
+* Residual risk: DNS handler wiring to cache insertion, response-code audit mapping, upstream retry behavior, and response synthesis remain future work.
