@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use crate::attribution::{HostAttribution, Hostname};
 use crate::config::{DestinationMatcher, PolicyConfig, PolicyRule, RuleAction};
 use crate::http::{HttpRequestMetadata, HttpsConnectMetadata};
+use crate::quic::QuicPacketMetadata;
 use crate::socks::{Socks5ConnectMetadata, Socks5Destination};
 use crate::tls::TlsClientHelloMetadata;
 use crate::types::{Endpoint, Frontend, IcmpMessage, Protocol, SandboxId};
@@ -186,6 +187,21 @@ impl PolicyRequest {
         request.dns_attribution = dns_attribution;
         if let Some(attribution) = metadata.attribution {
             request.attribution = attribution;
+        }
+        request
+    }
+
+    pub fn from_quic_candidate_metadata(
+        frontend: Frontend,
+        destination: Endpoint,
+        _metadata: QuicPacketMetadata,
+        dns_attribution: Option<Hostname>,
+    ) -> Self {
+        let mut request = Self::new(Protocol::QuicCandidate).with_destination(destination);
+        request.frontend = frontend;
+        if let Some(hostname) = dns_attribution {
+            request.dns_attribution = Some(hostname.clone());
+            request.attribution = HostAttribution::dns(hostname);
         }
         request
     }
@@ -846,6 +862,59 @@ mod tests {
             Some(443),
         ));
         assert!(PolicyEngine::decide(&ip_config, &hidden).is_allow());
+    }
+
+    #[test]
+    fn quic_candidate_metadata_normalizes_without_fabricated_hostname() {
+        let destination = Endpoint::udp(ip([203, 0, 113, 10]), 443);
+        let metadata = QuicPacketMetadata {
+            header_form: crate::quic::QuicHeaderForm::Short,
+            long_packet_type: None,
+            version: None,
+            version_supported: false,
+            destination_connection_id_len: None,
+            source_connection_id_len: None,
+        };
+        let mut config = PolicyConfig::default();
+        config.rules.push(PolicyRule::allow_domain(
+            "allow-quic-domain",
+            HostMatcher::suffix("example.com").unwrap(),
+            Some(443),
+        ));
+
+        let unattributed = PolicyRequest::from_quic_candidate_metadata(
+            Frontend::Tun,
+            destination,
+            metadata.clone(),
+            None,
+        );
+        assert_eq!(unattributed.protocol, Protocol::QuicCandidate);
+        assert_eq!(unattributed.requested_port, Some(443));
+        assert_eq!(unattributed.attribution, HostAttribution::none());
+        assert_eq!(
+            PolicyEngine::decide(&config, &unattributed).reason(),
+            Some(DenialReason::DefaultDeny)
+        );
+
+        let attributed = PolicyRequest::from_quic_candidate_metadata(
+            Frontend::Tun,
+            destination,
+            metadata,
+            Some(Hostname::parse("video.example.com").unwrap()),
+        );
+        assert_eq!(
+            attributed.attribution,
+            HostAttribution::dns(Hostname::parse("video.example.com").unwrap())
+        );
+        assert!(PolicyEngine::decide(&config, &attributed).is_allow());
+
+        let mut ip_config = PolicyConfig::default();
+        ip_config.rules.push(PolicyRule::allow_ip(
+            "allow-quic-ip",
+            Cidr::host(ip([203, 0, 113, 10])),
+            Some(443),
+        ));
+        assert!(PolicyEngine::decide(&ip_config, &unattributed).is_allow());
     }
 
     #[test]

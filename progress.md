@@ -431,3 +431,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; normalized TLS requests feed existing audit context builders.
 * Residual risk: transparent stream reassembly before TLS parsing, fragmented ClientHello handling, and QUIC TLS metadata normalization remain future work.
 * Commit hash: 987bdad normalize tls clienthello metadata for policy.
+
+## 2026-06-21 - QUIC candidate policy normalization
+
+* Invariant under work: QUIC candidate metadata must normalize into UDP/QUIC policy requests with destination/requested port and optional medium-confidence DNS attribution, without inventing hostname attribution from QUIC headers.
+* Threat or failure mode addressed: UDP/443 traffic could be evaluated as generic UDP or receive fabricated hostname confidence if QUIC parser metadata is not normalized through an explicit policy path.
+* Planned verification: add tests for normalized QUIC candidate protocol/frontend/port, DNS-attributed domain allow, no-attribution default deny for domain rules, and explicit IP allow behavior; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - QUIC candidate policy normalization results
+
+* Tests added/updated:
+  * QUIC parser metadata normalizes into `Protocol::QuicCandidate` requests with frontend, destination, and requested port.
+  * QUIC candidate headers do not fabricate hostname attribution; domain rules default-deny without DNS attribution.
+  * medium-confidence DNS attribution can satisfy port-scoped domain rules for QUIC candidates.
+  * explicit IP/CIDR allow rules can allow unattributed QUIC candidates by destination IP/port.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 81 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * QUIC metadata enters policy as QUIC-specific traffic rather than generic UDP.
+  * domain authorization still requires DNS or other explicit hostname attribution; QUIC headers alone do not provide it.
+* Audit evidence: not applicable in this commit; normalized QUIC requests feed existing audit context builders.
+* Residual risk: QUIC version/type audit fields, visible QUIC TLS SNI/ECH parsing, and UDP frontend integration remain future work.

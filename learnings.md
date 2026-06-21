@@ -73,3 +73,7 @@ After separating requested authority ports from IP destination endpoints, audit 
 ## 2026-06-21 - TLS metadata normalization must carry hidden-SNI state
 
 TLS parser output should normalize into policy with both presented hostname and hidden-SNI/ECH state. If callers only pass attribution when SNI exists, missing SNI can be mistaken for ordinary IP-only traffic instead of receiving the documented hidden-SNI denial behavior.
+
+## 2026-06-21 - QUIC policy normalization must not invent attribution
+
+QUIC header metadata is useful for classifying UDP/443 and timeout/policy defaults, but it is not hostname evidence. Domain authorization for QUIC should come from DNS correlation or future safe QUIC/TLS metadata parsing, not from merely recognizing a QUIC-shaped packet.
