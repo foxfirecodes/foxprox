@@ -263,3 +263,25 @@
 - What failed or surprised the agent: the existing port matcher only looked at IP endpoints, so explicit proxy host-only events could not use port rules until core exposed an event-level destination port.
 - What remains unproven: HTTP proxy forwarding, plaintext absolute-form HTTP proxy requests, CONNECT tunnel establishment, proxy error responses, and SOCKS5 CONNECT parsing are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — SOCKS5 CONNECT bytes → proxy policy/audit slice
+
+- Slice attempted: parse SOCKS5 TCP CONNECT request bytes into normalized `SocksConnect` events and prove shared host/port policy and audit behavior.
+- Why next: HTTPS CONNECT proxy metadata is covered; alpha explicit proxy networking also requires SOCKS5 TCP CONNECT support before forwarding is added.
+- Verification plan: add SOCKS5 CONNECT request parsing for domain, IPv4, and IPv6 address forms, reject unsupported commands/address types, verify domain allow and IP audit behavior, then run formatting, clippy, focused tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — SOCKS5 CONNECT bytes → proxy policy/audit
+
+- Slice attempted: parse SOCKS5 TCP CONNECT request bytes into normalized SOCKS events and evaluate shared policy/audit behavior.
+- Why next: HTTPS CONNECT covered one explicit proxy mode; alpha also requires SOCKS5 TCP CONNECT support and rejects SOCKS UDP ASSOCIATE as out of scope.
+- What changed: added `parse_socks5_connect_request` to `foxprox-inspect`, supports domain, IPv4, and IPv6 address forms, normalizes domain hosts, exposes destination IP where present, parses destination ports, and rejects unsupported versions, commands, reserved bytes, and address types.
+- Verification:
+  - `cargo fmt` was run for the new SOCKS parser/tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 4 `foxprox-config` tests, 10 `foxprox-core` tests, 16 `foxprox-inspect` tests, 10 `foxprox-packet` tests, and 0 doc tests.
+  - Focused checks passed: `cargo test -p foxprox-inspect socks5_domain_connect_parses_to_policy_event`, `cargo test -p foxprox-inspect socks5_ipv4_connect_exposes_destination_ip_for_audit`, and `cargo test -p foxprox-inspect socks5_rejects_udp_associate_command`.
+  - `cargo fmt --check` passed after focused checks.
+- What failed or surprised the agent: SOCKS5 IP-address requests can still provide a host string for audit, but domain policy should rely on domain-form requests or later DNS attribution rather than treating IP strings as domain evidence.
+- What remains unproven: SOCKS greeting negotiation, TCP stream forwarding, proxy response generation, authentication rejection, resource limits, and malformed request integration with a live proxy listener are still absent.
+- Commit: this commit.

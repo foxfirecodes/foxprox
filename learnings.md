@@ -48,3 +48,7 @@ Even a minimal SNI-only ClientHello parser has multiple nested length fields. Ke
 ## 2026-06-21 — host-only proxy events still need port matching
 
 Policy port rules cannot depend solely on IP endpoints. Explicit proxy events may know host and port before DNS resolution, so core matching should use an event-level destination port abstraction.
+
+## 2026-06-21 — SOCKS5 CONNECT parsing should expose both host string and IP when available
+
+Domain-form SOCKS requests feed hostname policy directly, while IP-form requests should preserve destination IP for audit/IP policy. Do not infer domain attribution from IP-form requests.

@@ -5,12 +5,13 @@
 
 #![forbid(unsafe_code)]
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, SystemTime};
 
 use foxprox_core::{
     AttributionConfidence, AttributionSource, Endpoint, FrontendKind, HostnameAttribution,
-    HttpRequest, HttpsConnect, NormalizedEvent, SandboxId, SniDnsMismatch, TlsClientHello,
+    HttpRequest, HttpsConnect, NormalizedEvent, SandboxId, SniDnsMismatch, SocksConnect,
+    TlsClientHello,
 };
 
 /// Expiring DNS answer cache used for medium-confidence transparent flow
@@ -380,6 +381,111 @@ fn normalize_host_for_compare(hostname: &str) -> String {
     hostname.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
+/// SOCKS5 request parsing errors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SocksInspectError {
+    TooShort,
+    UnsupportedVersion { version: u8 },
+    UnsupportedCommand { command: u8 },
+    InvalidReserved { reserved: u8 },
+    UnsupportedAddressType { atyp: u8 },
+    DomainNameTruncated,
+    AddressTruncated,
+}
+
+impl std::fmt::Display for SocksInspectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooShort => f.write_str("socks5-request-too-short"),
+            Self::UnsupportedVersion { version } => {
+                write!(f, "socks5-version-unsupported: {version}")
+            }
+            Self::UnsupportedCommand { command } => {
+                write!(f, "socks5-command-unsupported: {command}")
+            }
+            Self::InvalidReserved { reserved } => write!(f, "socks5-rsv-invalid: {reserved}"),
+            Self::UnsupportedAddressType { atyp } => {
+                write!(f, "socks5-atyp-unsupported: {atyp}")
+            }
+            Self::DomainNameTruncated => f.write_str("socks5-domain-name-truncated"),
+            Self::AddressTruncated => f.write_str("socks5-address-truncated"),
+        }
+    }
+}
+
+impl std::error::Error for SocksInspectError {}
+
+/// Parse a SOCKS5 request message after method negotiation.
+pub fn parse_socks5_connect_request(
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    bytes: &[u8],
+) -> Result<NormalizedEvent, SocksInspectError> {
+    if bytes.len() < 7 {
+        return Err(SocksInspectError::TooShort);
+    }
+    if bytes[0] != 5 {
+        return Err(SocksInspectError::UnsupportedVersion { version: bytes[0] });
+    }
+    if bytes[1] != 1 {
+        return Err(SocksInspectError::UnsupportedCommand { command: bytes[1] });
+    }
+    if bytes[2] != 0 {
+        return Err(SocksInspectError::InvalidReserved { reserved: bytes[2] });
+    }
+
+    let atyp = bytes[3];
+    let mut offset = 4;
+    let (host, destination_ip) = match atyp {
+        1 => {
+            if bytes.len() < offset + 4 + 2 {
+                return Err(SocksInspectError::AddressTruncated);
+            }
+            let ip = Ipv4Addr::new(
+                bytes[offset],
+                bytes[offset + 1],
+                bytes[offset + 2],
+                bytes[offset + 3],
+            );
+            offset += 4;
+            (ip.to_string(), Some(IpAddr::V4(ip)))
+        }
+        3 => {
+            let length = usize::from(bytes[offset]);
+            offset += 1;
+            if bytes.len() < offset + length + 2 {
+                return Err(SocksInspectError::DomainNameTruncated);
+            }
+            let host = std::str::from_utf8(&bytes[offset..offset + length])
+                .map_err(|_| SocksInspectError::DomainNameTruncated)?
+                .trim_end_matches('.')
+                .to_ascii_lowercase();
+            offset += length;
+            (host, None)
+        }
+        4 => {
+            if bytes.len() < offset + 16 + 2 {
+                return Err(SocksInspectError::AddressTruncated);
+            }
+            let mut octets = [0_u8; 16];
+            octets.copy_from_slice(&bytes[offset..offset + 16]);
+            let ip = Ipv6Addr::from(octets);
+            offset += 16;
+            (ip.to_string(), Some(IpAddr::V6(ip)))
+        }
+        _ => return Err(SocksInspectError::UnsupportedAddressType { atyp }),
+    };
+
+    let port = u16::from_be_bytes([bytes[offset], bytes[offset + 1]]);
+    Ok(NormalizedEvent::SocksConnect(SocksConnect {
+        sandbox_id,
+        frontend,
+        host,
+        destination_ip,
+        port,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,6 +761,75 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, HttpInspectError::MissingHostHeader);
+    }
+
+    #[test]
+    fn socks5_domain_connect_parses_to_policy_event() {
+        let mut request = vec![5, 1, 0, 3, 11];
+        request.extend_from_slice(b"Example.COM");
+        request.extend_from_slice(&443_u16.to_be_bytes());
+        let event = parse_socks5_connect_request(
+            SandboxId::new("socks-test").unwrap(),
+            FrontendKind::Socks5,
+            &request,
+        )
+        .unwrap();
+        let rule = PolicyRule::new("allow-socks", RuleAction::Allow)
+            .unwrap()
+            .with_protocol(Protocol::Socks)
+            .with_hostname(HostnamePattern::new("example.com").unwrap())
+            .with_destination_port(443);
+        let evaluation = PolicyEngine::new(PolicyConfig {
+            rules: vec![rule],
+            ..PolicyConfig::default()
+        })
+        .evaluate(&event);
+
+        assert_eq!(event.protocol(), Protocol::Socks);
+        assert_eq!(event.hostname(), Some("example.com"));
+        assert_eq!(event.destination_port(), Some(443));
+        assert_eq!(
+            evaluation.decision,
+            PolicyDecision::Allow {
+                rule_id: Some("allow-socks".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn socks5_ipv4_connect_exposes_destination_ip_for_audit() {
+        let request = [5, 1, 0, 1, 203, 0, 113, 10, 0, 80];
+        let event = parse_socks5_connect_request(
+            SandboxId::new("socks-test").unwrap(),
+            FrontendKind::Socks5,
+            &request,
+        )
+        .unwrap();
+        let evaluation = PolicyEngine::new(PolicyConfig {
+            default_policy: foxprox_core::DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        })
+        .evaluate(&event);
+
+        assert_eq!(event.hostname(), Some("203.0.113.10"));
+        assert_eq!(
+            event.destination(),
+            Some(Endpoint::tcp(Ipv4Addr::new(203, 0, 113, 10).into(), 80))
+        );
+        assert_eq!(evaluation.audit.frontend, FrontendKind::Socks5);
+        assert_eq!(evaluation.audit.destination, event.destination());
+    }
+
+    #[test]
+    fn socks5_rejects_udp_associate_command() {
+        let error = parse_socks5_connect_request(
+            SandboxId::new("socks-test").unwrap(),
+            FrontendKind::Socks5,
+            &[5, 3, 0, 1, 127, 0, 0, 1, 0, 53],
+        )
+        .unwrap_err();
+
+        assert_eq!(error, SocksInspectError::UnsupportedCommand { command: 3 });
     }
 
     #[test]
