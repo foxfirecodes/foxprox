@@ -235,3 +235,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: session is still tested against fake IO, not a real received TUN fd; forwarding beyond ICMP proof is still absent.
 - Exact next step: commit the session wrapper, then add minimal IPv4 UDP parsing/classification in the packet/runtime path to start Milestone 4 without bypassing policy.
+
+## 2026-06-21T23:53:25Z
+- Current objective: start UDP foundation by adding verified IPv4 UDP packet parsing/classification without enabling forwarding bypass.
+- Files changed: `crates/foxprox-core/src/lib.rs`, `crates/foxprox-core/src/packet.rs`, `crates/foxprox-runtime/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 38 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 7 runtime tests, and 7 setup tests passed. New tests prove IPv4 UDP packets expose source/destination ports and payload, invalid UDP lengths fail closed, nonzero invalid UDP checksums fail closed, and runtime observes UDP packets without writing a response or forwarding until policy/forwarder wiring exists.
+- Commit hash when committed: pending.
+- Remaining risks: UDP forwarding, DNS resolver behavior, pseudo-flow tracking integration, and direct-DNS denial at packet runtime are still absent.
+- Exact next step: commit UDP parsing/classification, then wire UDP observations into normalized policy events so DNS/direct-DNS decisions can be audited before any UDP egress is introduced.

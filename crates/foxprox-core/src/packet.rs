@@ -12,11 +12,14 @@ pub enum PacketError {
     InvalidChecksum,
     TruncatedIcmp,
     UnsupportedIcmpType { type_: u8, code: u8 },
+    TruncatedUdp,
+    InvalidUdpLength { udp_len: usize, actual_len: usize },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParsedIpPacket<'a> {
     Icmpv4EchoRequest(Icmpv4EchoRequest<'a>),
+    Udpv4Packet(Udpv4Packet<'a>),
     UnsupportedIpv4Protocol(UnsupportedIpv4Protocol<'a>),
 }
 
@@ -34,6 +37,15 @@ pub struct Icmpv4EchoRequest<'a> {
     pub destination: Ipv4Addr,
     pub identifier: u16,
     pub sequence: u16,
+    pub payload: &'a [u8],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Udpv4Packet<'a> {
+    pub source: Ipv4Addr,
+    pub destination: Ipv4Addr,
+    pub source_port: u16,
+    pub destination_port: u16,
     pub payload: &'a [u8],
 }
 
@@ -82,6 +94,7 @@ fn parse_ipv4_packet(bytes: &[u8]) -> Result<ParsedIpPacket<'_>, PacketError> {
     let payload = &bytes[ihl_bytes..total_len];
     match protocol {
         1 => parse_icmpv4(source, destination, payload),
+        17 => parse_udpv4(source, destination, payload),
         other => Ok(ParsedIpPacket::UnsupportedIpv4Protocol(
             UnsupportedIpv4Protocol {
                 source,
@@ -118,6 +131,35 @@ fn parse_icmpv4<'a>(
     }
 }
 
+fn parse_udpv4<'a>(
+    source: Ipv4Addr,
+    destination: Ipv4Addr,
+    payload: &'a [u8],
+) -> Result<ParsedIpPacket<'a>, PacketError> {
+    if payload.len() < 8 {
+        return Err(PacketError::TruncatedUdp);
+    }
+    let udp_len = u16::from_be_bytes([payload[4], payload[5]]) as usize;
+    if udp_len < 8 || udp_len > payload.len() {
+        return Err(PacketError::InvalidUdpLength {
+            udp_len,
+            actual_len: payload.len(),
+        });
+    }
+    let udp_payload = &payload[..udp_len];
+    let udp_checksum = u16::from_be_bytes([payload[6], payload[7]]);
+    if udp_checksum != 0 && ipv4_pseudo_checksum(source, destination, 17, udp_payload) != 0 {
+        return Err(PacketError::InvalidChecksum);
+    }
+    Ok(ParsedIpPacket::Udpv4Packet(Udpv4Packet {
+        source,
+        destination,
+        source_port: u16::from_be_bytes([payload[0], payload[1]]),
+        destination_port: u16::from_be_bytes([payload[2], payload[3]]),
+        payload: &payload[8..udp_len],
+    }))
+}
+
 pub fn synthesize_icmpv4_echo_reply(request: &Icmpv4EchoRequest<'_>) -> Vec<u8> {
     let icmp_len = 8 + request.payload.len();
     let total_len = 20 + icmp_len;
@@ -150,14 +192,35 @@ pub fn packet_addrs(packet: &ParsedIpPacket<'_>) -> (IpAddr, IpAddr) {
         ParsedIpPacket::Icmpv4EchoRequest(echo) => {
             (IpAddr::V4(echo.source), IpAddr::V4(echo.destination))
         }
+        ParsedIpPacket::Udpv4Packet(packet) => {
+            (IpAddr::V4(packet.source), IpAddr::V4(packet.destination))
+        }
         ParsedIpPacket::UnsupportedIpv4Protocol(packet) => {
             (IpAddr::V4(packet.source), IpAddr::V4(packet.destination))
         }
     }
 }
 
-fn checksum(bytes: &[u8]) -> u16 {
+fn ipv4_pseudo_checksum(
+    source: Ipv4Addr,
+    destination: Ipv4Addr,
+    protocol: u8,
+    payload: &[u8],
+) -> u16 {
     let mut sum = 0u32;
+    sum = add_checksum_bytes(sum, &source.octets());
+    sum = add_checksum_bytes(sum, &destination.octets());
+    sum = add_checksum_bytes(sum, &[0, protocol]);
+    sum = add_checksum_bytes(sum, &(payload.len() as u16).to_be_bytes());
+    sum = add_checksum_bytes(sum, payload);
+    finish_checksum(sum)
+}
+
+fn checksum(bytes: &[u8]) -> u16 {
+    finish_checksum(add_checksum_bytes(0, bytes))
+}
+
+fn add_checksum_bytes(mut sum: u32, bytes: &[u8]) -> u32 {
     let mut chunks = bytes.chunks_exact(2);
     for chunk in &mut chunks {
         sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
@@ -165,6 +228,10 @@ fn checksum(bytes: &[u8]) -> u16 {
     if let Some(&remaining) = chunks.remainder().first() {
         sum += (remaining as u32) << 8;
     }
+    sum
+}
+
+fn finish_checksum(mut sum: u32) -> u16 {
     while (sum >> 16) != 0 {
         sum = (sum & 0xffff) + (sum >> 16);
     }
@@ -193,6 +260,48 @@ mod tests {
         assert_eq!(reply_echo.identifier, 0x1234);
         assert_eq!(reply_echo.sequence, 7);
         assert_eq!(reply_echo.payload, b"hello");
+    }
+
+    #[test]
+    fn parses_udp_packet_ports_and_payload() {
+        let packet = build_udp_packet(b"dns?");
+        let parsed = parse_ip_packet(&packet).unwrap();
+        let ParsedIpPacket::Udpv4Packet(udp) = parsed else {
+            panic!("expected udp packet");
+        };
+        assert_eq!(udp.source, Ipv4Addr::new(10, 0, 0, 2));
+        assert_eq!(udp.destination, Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(udp.source_port, 53000);
+        assert_eq!(udp.destination_port, 53);
+        assert_eq!(udp.payload, b"dns?");
+    }
+
+    #[test]
+    fn invalid_udp_length_fails_closed() {
+        let mut packet = build_udp_packet(b"dns?");
+        packet[24] = 0;
+        packet[25] = 7;
+        packet[10] = 0;
+        packet[11] = 0;
+        let sum = checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&sum.to_be_bytes());
+
+        assert_eq!(
+            parse_ip_packet(&packet),
+            Err(PacketError::InvalidUdpLength {
+                udp_len: 7,
+                actual_len: 12,
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_udp_checksum_fails_closed_when_present() {
+        let mut packet = build_udp_packet(b"dns?");
+        packet[26] = 0x12;
+        packet[27] = 0x34;
+
+        assert_eq!(parse_ip_packet(&packet), Err(PacketError::InvalidChecksum));
     }
 
     #[test]
@@ -239,6 +348,26 @@ mod tests {
             sequence: u16::from_be_bytes([icmp[6], icmp[7]]),
             payload: icmp[8..].to_vec(),
         }
+    }
+
+    fn build_udp_packet(payload: &[u8]) -> Vec<u8> {
+        let udp_len = 8 + payload.len();
+        let total_len = 20 + udp_len;
+        let mut packet = vec![0u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[10, 0, 0, 2]);
+        packet[16..20].copy_from_slice(&[10, 0, 0, 1]);
+        packet[20..22].copy_from_slice(&53000u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&53u16.to_be_bytes());
+        packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[26..28].copy_from_slice(&0u16.to_be_bytes());
+        packet[28..].copy_from_slice(payload);
+        let ip_checksum = checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+        packet
     }
 
     fn build_echo_request(source: Ipv4Addr, destination: Ipv4Addr) -> Vec<u8> {

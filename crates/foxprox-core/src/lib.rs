@@ -38,7 +38,7 @@ pub use kernel::VerificationKernel;
 pub use origin::{parse_connect_target, parse_http_origin, OriginError};
 pub use packet::{
     packet_addrs, parse_ip_packet, synthesize_icmpv4_echo_reply, Icmpv4EchoRequest, PacketError,
-    ParsedIpPacket, UnsupportedIpv4Protocol,
+    ParsedIpPacket, Udpv4Packet, UnsupportedIpv4Protocol,
 };
 pub use policy::{IpCidr, IpMatcher, PolicyConfig, PolicyEngine, PolicyRule, PortMatcher, RuleSet};
 pub use types::*;

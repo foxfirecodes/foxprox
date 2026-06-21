@@ -8,3 +8,6 @@
 
 ## 2026-06-21T23:01:35Z
 - The bwrap command plan needed an explicit inherited handoff fd; without it, a setup helper could configure the sandbox interface but would have no safe path to transfer the TUN fd back to the host broker before target exec.
+
+## 2026-06-21T23:53:25Z
+- IPv4 UDP parsing must validate nonzero UDP checksums before exposing packet metadata; zero remains accepted because IPv4 permits omitted UDP checksums, but invalid present checksums fail closed.

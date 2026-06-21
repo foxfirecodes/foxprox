@@ -8,8 +8,8 @@
 
 use foxprox_core::{
     parse_ip_packet, synthesize_icmpv4_echo_reply, AuditSink, Decision, DecisionAction, Endpoint,
-    FrontendKind, NormalizedEvent, PacketError, ParsedIpPacket, Protocol, UnsupportedIpv4Protocol,
-    VerificationKernel,
+    FrontendKind, NormalizedEvent, PacketError, ParsedIpPacket, Protocol, Udpv4Packet,
+    UnsupportedIpv4Protocol, VerificationKernel,
 };
 use std::io::{self, Read, Write};
 use std::net::IpAddr;
@@ -197,6 +197,13 @@ pub enum TunPacketOutcome {
         destination: IpAddr,
         protocol: u8,
     },
+    UdpObserved {
+        source: IpAddr,
+        destination: IpAddr,
+        source_port: u16,
+        destination_port: u16,
+        payload_len: usize,
+    },
 }
 
 pub fn handle_one_tun_packet<R: Read, W: Write>(
@@ -218,6 +225,19 @@ pub fn handle_one_tun_packet<R: Read, W: Write>(
 
 fn unsupported_or_malformed_outcome(packet: &[u8]) -> io::Result<TunPacketOutcome> {
     match parse_ip_packet(packet) {
+        Ok(ParsedIpPacket::Udpv4Packet(Udpv4Packet {
+            source,
+            destination,
+            source_port,
+            destination_port,
+            payload,
+        })) => Ok(TunPacketOutcome::UdpObserved {
+            source: IpAddr::V4(source),
+            destination: IpAddr::V4(destination),
+            source_port,
+            destination_port,
+            payload_len: payload.len(),
+        }),
         Ok(ParsedIpPacket::UnsupportedIpv4Protocol(UnsupportedIpv4Protocol {
             source,
             destination,
@@ -238,7 +258,7 @@ fn tun_packet_reply(packet: &[u8]) -> Result<Option<Vec<u8>>, PacketError> {
         ParsedIpPacket::Icmpv4EchoRequest(request) => {
             Ok(Some(synthesize_icmpv4_echo_reply(&request)))
         }
-        ParsedIpPacket::UnsupportedIpv4Protocol(_) => Ok(None),
+        ParsedIpPacket::Udpv4Packet(_) | ParsedIpPacket::UnsupportedIpv4Protocol(_) => Ok(None),
     }
 }
 
@@ -338,6 +358,34 @@ mod tests {
         assert_eq!(&writer[28..], b"ok");
         assert_eq!(checksum(&writer[..20]), 0);
         assert_eq!(checksum(&writer[20..]), 0);
+    }
+
+    #[test]
+    fn tun_udp_packet_is_observed_without_writeback_until_forwarder_exists() {
+        let mut udp_payload = Vec::new();
+        udp_payload.extend_from_slice(&53000u16.to_be_bytes());
+        udp_payload.extend_from_slice(&53u16.to_be_bytes());
+        udp_payload.extend_from_slice(&12u16.to_be_bytes());
+        udp_payload.extend_from_slice(&0u16.to_be_bytes());
+        udp_payload.extend_from_slice(b"dns?");
+        let request = build_ipv4_packet(17, &udp_payload);
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+
+        let outcome = handle_one_tun_packet(&mut reader, &mut writer, &mut buffer).unwrap();
+
+        assert_eq!(
+            outcome,
+            TunPacketOutcome::UdpObserved {
+                source: IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)),
+                destination: IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1)),
+                source_port: 53000,
+                destination_port: 53,
+                payload_len: 4,
+            }
+        );
+        assert!(writer.is_empty());
     }
 
     #[test]
