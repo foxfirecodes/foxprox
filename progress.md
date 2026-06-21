@@ -35,3 +35,29 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: audit unit tests assert structured deny behavior/reason/rule fields and bounded queue backpressure.
 * Residual risk: this is platform-independent core policy/audit scaffolding only; packet parsing, actual TUN setup, DNS resolver enforcement, flow correlation, and egress forwarding still need implementation and integration tests.
 * Commit hash: 25f9249 core security policy invariants.
+
+## 2026-06-21 - Packet parsing fail-closed foundation
+
+* Invariant under work: malformed packet and unsupported network protocol inputs fail closed before they can reach policy or forwarding, with normalized protocol/source/destination metadata only for validated IPv4/IPv6 TCP, UDP, and ICMP surfaces.
+* Threat or failure mode addressed: truncated IP/TCP/UDP/ICMP headers, unsupported fragmentation/extension headers, invalid lengths, or unknown protocol numbers could otherwise be interpreted permissively or bypass policy classification.
+* Planned verification: add table-driven parser tests for valid IPv4/IPv6 TCP/UDP/ICMP metadata extraction and negative tests for malformed lengths, unsupported protocol numbers, IPv4 fragmentation, and IPv6 extension headers; run `cargo test` and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Packet parsing fail-closed foundation results
+
+* Tests added/updated:
+  * valid IPv4 TCP metadata extraction for source/destination IPs and ports.
+  * UDP/53 classification as DNS and UDP/443 classification as QUIC candidate.
+  * valid IPv6 ICMPv6 metadata extraction.
+  * fail-closed errors for empty packets, truncated IP headers, invalid IPv4 total length, invalid TCP header length, and invalid UDP length.
+  * fail-closed errors for unsupported IP protocol numbers, IPv4 fragmentation, and IPv6 extension headers.
+  * conversion from validated packet summaries to normalized policy requests.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` found ambiguous test parse type annotations.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 23 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * parser returns structured errors for malformed/unsupported packet inputs rather than inventing permissive metadata.
+  * IPv4 fragmentation and IPv6 extension headers are not accepted in the alpha parser.
+  * only validated TCP, UDP, DNS-classified, QUIC-candidate, and ICMP metadata is converted into policy requests.
+* Audit evidence: not applicable in this commit; parser output feeds policy/audit layers but does not emit audit directly.
+* Residual risk: packet checksums are not validated yet; TCP flags/state, IPv4 options semantics, IPv6 extension handling, and MTU/error synthesis remain future packet-core work.
+* Commit hash: pending.

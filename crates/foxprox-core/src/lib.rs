@@ -8,6 +8,7 @@
 pub mod attribution;
 pub mod audit;
 pub mod config;
+pub mod packet;
 pub mod policy;
 pub mod types;
 
@@ -16,6 +17,7 @@ pub use audit::{
     AuditDecision, AuditEvent, AuditEventKind, AuditPolicyContext, BoundedAuditBuffer, PushOutcome,
 };
 pub use config::{Cidr, ConfigError, HostMatcher, PolicyConfig, PolicyRule, RuleAction};
+pub use packet::{parse_ip_packet, PacketParseError, PacketSummary};
 pub use policy::{Decision, DenialReason, DenyBehavior, PolicyEngine, PolicyRequest};
 pub use types::{
     Endpoint, Frontend, HostnameConfidence, HostnameSource, IcmpMessage, Protocol, SandboxId,
