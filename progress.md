@@ -60,4 +60,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * only validated TCP, UDP, DNS-classified, QUIC-candidate, and ICMP metadata is converted into policy requests.
 * Audit evidence: not applicable in this commit; parser output feeds policy/audit layers but does not emit audit directly.
 * Residual risk: packet checksums are not validated yet; TCP flags/state, IPv4 options semantics, IPv6 extension handling, and MTU/error synthesis remain future packet-core work.
-* Commit hash: pending.
+* Commit hash: e75b509 fail closed packet metadata parsing.
