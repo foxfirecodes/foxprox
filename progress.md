@@ -199,3 +199,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: host-side bwrap launch does not yet keep/pass the helper fd through process creation, and the received fd is not yet connected to a packet log or ICMP echo loop.
 - Exact next step: commit setup control socket support, then add a minimal broker-side TUN packet loop that reads handed-off IP packets and writes synthetic ICMP echo replies through the existing packet kernel.
+
+## 2026-06-21T23:32:50Z
+- Current objective: add a minimal broker-side TUN packet proof loop using the existing packet kernel.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on formatting for the new runtime outcome enum; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 35 core tests, 6 device tests, 3 integration tests, 5 runtime tests, and 7 setup tests passed. New runtime tests prove one TUN packet read can synthesize/write an ICMP echo reply with valid checksums, while unsupported IPv4 protocols and malformed packets are dropped without write-back.
+- Commit hash when committed: pending.
+- Remaining risks: the proof loop operates on generic `Read`/`Write` and is not yet wired to a received real TUN fd; TCP/UDP/smoltcp forwarding still absent.
+- Exact next step: commit the ICMP proof loop, then add a host launcher/control abstraction that pairs bwrap command construction, setup control socket creation, and received TUN fd handoff into one fail-early setup flow.

@@ -7,9 +7,12 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    AuditSink, Decision, DecisionAction, Endpoint, FrontendKind, NormalizedEvent, Protocol,
+    parse_ip_packet, synthesize_icmpv4_echo_reply, AuditSink, Decision, DecisionAction, Endpoint,
+    FrontendKind, NormalizedEvent, PacketError, ParsedIpPacket, Protocol, UnsupportedIpv4Protocol,
     VerificationKernel,
 };
+use std::io::{self, Read, Write};
+use std::net::IpAddr;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TcpConnectRequest {
@@ -148,6 +151,62 @@ pub fn event_protocol(event: &NormalizedEvent) -> Protocol {
     event.to_policy_input().protocol
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TunPacketOutcome {
+    EchoReplyWritten {
+        bytes: usize,
+    },
+    DroppedMalformed {
+        error: PacketError,
+    },
+    DroppedUnsupportedIpv4 {
+        source: IpAddr,
+        destination: IpAddr,
+        protocol: u8,
+    },
+}
+
+pub fn handle_one_tun_packet<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    buffer: &mut [u8],
+) -> io::Result<TunPacketOutcome> {
+    let bytes_read = reader.read(buffer)?;
+    let packet = &buffer[..bytes_read];
+    match tun_packet_reply(packet) {
+        Ok(Some(reply)) => {
+            writer.write_all(&reply)?;
+            Ok(TunPacketOutcome::EchoReplyWritten { bytes: reply.len() })
+        }
+        Ok(None) => match parse_ip_packet(packet) {
+            Ok(ParsedIpPacket::UnsupportedIpv4Protocol(UnsupportedIpv4Protocol {
+                source,
+                destination,
+                protocol,
+                ..
+            })) => Ok(TunPacketOutcome::DroppedUnsupportedIpv4 {
+                source: IpAddr::V4(source),
+                destination: IpAddr::V4(destination),
+                protocol,
+            }),
+            Ok(ParsedIpPacket::Icmpv4EchoRequest(_)) => {
+                unreachable!("echo requests produce replies")
+            }
+            Err(error) => Ok(TunPacketOutcome::DroppedMalformed { error }),
+        },
+        Err(error) => Ok(TunPacketOutcome::DroppedMalformed { error }),
+    }
+}
+
+fn tun_packet_reply(packet: &[u8]) -> Result<Option<Vec<u8>>, PacketError> {
+    match parse_ip_packet(packet)? {
+        ParsedIpPacket::Icmpv4EchoRequest(request) => {
+            Ok(Some(synthesize_icmpv4_echo_reply(&request)))
+        }
+        ParsedIpPacket::UnsupportedIpv4Protocol(_) => Ok(None),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,6 +246,65 @@ mod tests {
     }
 
     #[test]
+    fn tun_echo_packet_writes_synthetic_reply() {
+        let request = build_ipv4_packet(1, &[8, 0, 0, 0, 0x12, 0x34, 0, 7, b'o', b'k']);
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+
+        let outcome = handle_one_tun_packet(&mut reader, &mut writer, &mut buffer).unwrap();
+
+        assert_eq!(outcome, TunPacketOutcome::EchoReplyWritten { bytes: 30 });
+        assert_eq!(writer[9], 1);
+        assert_eq!(&writer[12..16], &[10, 66, 0, 1]);
+        assert_eq!(&writer[16..20], &[10, 66, 0, 2]);
+        assert_eq!(writer[20], 0);
+        assert_eq!(&writer[24..28], &[0x12, 0x34, 0, 7]);
+        assert_eq!(&writer[28..], b"ok");
+        assert_eq!(checksum(&writer[..20]), 0);
+        assert_eq!(checksum(&writer[20..]), 0);
+    }
+
+    #[test]
+    fn tun_unsupported_protocol_is_dropped_without_writeback() {
+        let request = build_ipv4_packet(6, b"tcp-ish");
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+
+        let outcome = handle_one_tun_packet(&mut reader, &mut writer, &mut buffer).unwrap();
+
+        assert_eq!(
+            outcome,
+            TunPacketOutcome::DroppedUnsupportedIpv4 {
+                source: IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)),
+                destination: IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1)),
+                protocol: 6,
+            }
+        );
+        assert!(writer.is_empty());
+    }
+
+    #[test]
+    fn tun_malformed_packet_is_dropped_without_writeback() {
+        let mut request = build_ipv4_packet(1, &[8, 0, 0, 0, 0x12, 0x34, 0, 7]);
+        request[10] = 0xff;
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+
+        let outcome = handle_one_tun_packet(&mut reader, &mut writer, &mut buffer).unwrap();
+
+        assert!(matches!(
+            outcome,
+            TunPacketOutcome::DroppedMalformed {
+                error: PacketError::InvalidChecksum
+            }
+        ));
+        assert!(writer.is_empty());
+    }
+
+    #[test]
     fn denied_events_do_not_reach_host_egress() {
         let kernel = VerificationKernel::new(
             PolicyEngine::new(PolicyConfig::default()),
@@ -196,6 +314,40 @@ mod tests {
         let outcome = runtime.handle_event(&tcp_event(), 1);
         assert!(matches!(outcome, RuntimeOutcome::Denied { .. }));
         assert_eq!(runtime.egress().tcp_attempts, 0);
+    }
+
+    fn build_ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
+        let total_len = 20 + payload.len();
+        let mut packet = vec![0u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = protocol;
+        packet[12..16].copy_from_slice(&[10, 66, 0, 2]);
+        packet[16..20].copy_from_slice(&[10, 66, 0, 1]);
+        packet[20..].copy_from_slice(payload);
+        if protocol == 1 {
+            let icmp_checksum = checksum(&packet[20..]);
+            packet[22..24].copy_from_slice(&icmp_checksum.to_be_bytes());
+        }
+        let ip_checksum = checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+        packet
+    }
+
+    fn checksum(bytes: &[u8]) -> u16 {
+        let mut sum = 0u32;
+        let mut chunks = bytes.chunks_exact(2);
+        for chunk in &mut chunks {
+            sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+        }
+        if let Some(&remaining) = chunks.remainder().first() {
+            sum += (remaining as u32) << 8;
+        }
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+        !(sum as u16)
     }
 
     #[test]
