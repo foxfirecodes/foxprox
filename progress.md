@@ -35,3 +35,15 @@
 - Interpretation: the harness has a reproducible CLI proof path suitable for future comparison fixtures.
 - Next verification gap: make privileged namespace/TUN setup a separate smoke command once the setup helper exists.
 - Commit hash after commit: pending.
+
+## 2026-06-21T00:14:00Z — Commit recorded
+
+- Command executed: `git add Cargo.lock Cargo.toml README.md crates progress.md learnings.md && git commit -m "Build deterministic alpha harness foundation"`
+- Environment assumptions: harness-backed behavior was verified before commit.
+- Expected result: commit includes harness foundation and ledgers.
+- Observed result: commit `9f0a657` created with 17 files changed.
+- Relevant output excerpt: `[harness-lab 9f0a657] Build deterministic alpha harness foundation`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: the foundation checkpoint is preserved; this follow-up ledger note records the actual commit hash.
+- Next verification gap: real namespace/TUN setup helper and smoltcp-backed forwarding proof.
+- Commit hash after commit: 9f0a657.
