@@ -160,6 +160,29 @@ fn parse_udpv4<'a>(
     }))
 }
 
+pub fn synthesize_udpv4_response(request: &Udpv4Packet<'_>, payload: &[u8]) -> Vec<u8> {
+    let udp_len = 8 + payload.len();
+    let total_len = 20 + udp_len;
+    let mut packet = vec![0u8; total_len];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 17;
+    packet[12..16].copy_from_slice(&request.destination.octets());
+    packet[16..20].copy_from_slice(&request.source.octets());
+    let ip_checksum = checksum(&packet[..20]);
+    packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+
+    let udp = &mut packet[20..];
+    udp[0..2].copy_from_slice(&request.destination_port.to_be_bytes());
+    udp[2..4].copy_from_slice(&request.source_port.to_be_bytes());
+    udp[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    udp[8..].copy_from_slice(payload);
+    let udp_checksum = ipv4_pseudo_checksum(request.destination, request.source, 17, udp);
+    udp[6..8].copy_from_slice(&udp_checksum.to_be_bytes());
+    packet
+}
+
 pub fn synthesize_icmpv4_echo_reply(request: &Icmpv4EchoRequest<'_>) -> Vec<u8> {
     let icmp_len = 8 + request.payload.len();
     let total_len = 20 + icmp_len;
@@ -274,6 +297,26 @@ mod tests {
         assert_eq!(udp.source_port, 53000);
         assert_eq!(udp.destination_port, 53);
         assert_eq!(udp.payload, b"dns?");
+    }
+
+    #[test]
+    fn synthesizes_reversed_udp_response_with_checksum() {
+        let packet = build_udp_packet(b"query");
+        let ParsedIpPacket::Udpv4Packet(request) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected udp packet");
+        };
+
+        let response = synthesize_udpv4_response(&request, b"answer");
+        let ParsedIpPacket::Udpv4Packet(parsed) = parse_ip_packet(&response).unwrap() else {
+            panic!("expected udp response");
+        };
+
+        assert_eq!(parsed.source, Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(parsed.destination, Ipv4Addr::new(10, 0, 0, 2));
+        assert_eq!(parsed.source_port, 53);
+        assert_eq!(parsed.destination_port, 53000);
+        assert_eq!(parsed.payload, b"answer");
+        assert_ne!(u16::from_be_bytes([response[26], response[27]]), 0);
     }
 
     #[test]

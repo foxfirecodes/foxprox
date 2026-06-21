@@ -328,3 +328,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: static resolver records are in-memory only; DNS response packets are not yet wrapped in UDP/IPv4 and written back through the TUN session.
 - Exact next step: commit static DNS resolver, then add IPv4 UDP response synthesis so broker DNS answers can be written back through TUN with valid IP/UDP checksums.
+
+## 2026-06-21T23:37:40Z
+- Current objective: add IPv4 UDP response synthesis so broker DNS answers can eventually be written back through TUN.
+- Files changed: `crates/foxprox-core/src/packet.rs`, `crates/foxprox-core/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 48 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 13 runtime tests, and 7 setup tests passed. New packet test proves synthesized UDP responses reverse IPv4 addresses and UDP ports, preserve payload, and include a nonzero UDP checksum that the packet parser validates.
+- Commit hash when committed: pending.
+- Remaining risks: DNS response synthesis and UDP packet synthesis are not yet joined in runtime; no continuous TUN write-back for DNS exists.
+- Exact next step: commit UDP response synthesis, then wire broker DNS query handling to synthesize a DNS UDP response packet in runtime without host egress.
