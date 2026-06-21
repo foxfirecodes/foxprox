@@ -166,7 +166,7 @@ mod tests {
             result.evaluation.decision,
             PolicyDecision::Deny {
                 behavior: DenialBehavior::Drop,
-                reason: "default-deny".to_owned(),
+                reason: "icmp-default-deny".to_owned(),
                 rule_id: None,
             }
         );

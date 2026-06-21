@@ -251,7 +251,7 @@ mod tests {
         let audit: Value = serde_json::from_str(&summary.audit_json_line).unwrap();
 
         assert_eq!(audit["decision"], "denied");
-        assert_eq!(audit["reason"], "default-deny");
+        assert_eq!(audit["reason"], "icmp-default-deny");
         assert_eq!(summary.outbound_packet_count, 0);
         assert_eq!(summary.outbound_byte_count, 0);
         assert!(outbound.is_empty());

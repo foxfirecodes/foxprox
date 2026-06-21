@@ -12,8 +12,8 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use foxprox_core::{
-    AttributionConfidence, DefaultPolicy, DenialBehavior, DenyReason, DnsPolicy, Endpoint, IpCidr,
-    PolicyConfig, PolicyRule, PortRange, Protocol, RuleAction,
+    AttributionConfidence, DefaultPolicy, DenialBehavior, DenyReason, DnsPolicy, Endpoint,
+    IcmpPolicy, IpCidr, PolicyConfig, PolicyRule, PortRange, Protocol, RuleAction,
 };
 use foxprox_flow::UdpFlowTimeouts;
 use serde::Deserialize;
@@ -81,6 +81,8 @@ struct RawPolicyConfig {
     #[serde(default)]
     dns: RawDnsPolicy,
     #[serde(default)]
+    icmp: RawIcmpPolicy,
+    #[serde(default)]
     udp_timeouts: RawUdpFlowTimeouts,
     #[serde(default)]
     rules: Vec<RawPolicyRule>,
@@ -109,9 +111,14 @@ impl TryFrom<RawPolicyConfig> for FoxproxConfig {
             .map(PolicyRule::try_from)
             .collect::<Result<Vec<_>, _>>()?;
 
+        let icmp = IcmpPolicy {
+            allow_echo: value.icmp.allow_echo.unwrap_or(false),
+            allow_essential_errors: value.icmp.allow_essential_errors.unwrap_or(true),
+        };
         let policy = PolicyConfig {
             default_policy,
             dns,
+            icmp,
             rules,
         };
         let udp_flow_timeouts = parse_udp_flow_timeouts(value.udp_timeouts)?;
@@ -130,6 +137,15 @@ struct RawDnsPolicy {
     broker_resolvers: Vec<String>,
     #[serde(default)]
     deny_direct_external_dns: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawIcmpPolicy {
+    #[serde(default)]
+    allow_echo: Option<bool>,
+    #[serde(default)]
+    allow_essential_errors: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -461,6 +477,30 @@ mod tests {
         assert_eq!(
             evaluation.audit.http_path_query.as_deref(),
             Some("/public/index.html")
+        );
+    }
+
+    #[test]
+    fn loaded_icmp_echo_policy_allows_ping() {
+        let config = config_from_toml(
+            r#"
+            [icmp]
+            allow_echo = true
+            "#,
+        )
+        .unwrap();
+        let event = NormalizedEvent::IcmpMessage(foxprox_core::IcmpMessage {
+            sandbox_id: SandboxId::new("config-icmp-test").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: Endpoint::new("10.0.0.2".parse().unwrap(), None),
+            destination: Endpoint::new("203.0.113.10".parse().unwrap(), None),
+            icmp_type: 8,
+            icmp_code: 0,
+        });
+
+        assert_eq!(
+            PolicyEngine::new(config.policy).evaluate(&event).decision,
+            PolicyDecision::Allow { rule_id: None }
         );
     }
 

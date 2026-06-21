@@ -72,3 +72,7 @@ Flow expiration is observed lifecycle evidence, not an allow/deny decision. Audi
 ## 2026-06-21 — default-deny safeguards should run after explicit allow rules
 
 For policy defaults like multicast/broadcast denial, evaluate explicit rules first so narrowly configured opt-ins can work without adding special bypass flags.
+
+## 2026-06-21 — protocol-specific defaults should produce protocol-specific denial reasons
+
+When a protocol has documented defaults, audit reasons should identify that layer (for example `icmp-default-deny`) rather than falling through to global `default-deny`.

@@ -395,3 +395,25 @@
 - What failed or surprised the agent: the policy check belongs after explicit rules, not before them, so documented explicit support can be added by configuration without changing core logic.
 - What remains unproven: configurable multicast/broadcast allowances in user-facing examples, IPv4 subnet-directed broadcast detection, live UDP forwarding behavior, and ICMP unreachable synthesis for denied UDP are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — ICMP default policy/config slice
+
+- Slice attempted: add explicit ICMP defaults for essential errors and configurable ping, with unusual ICMP denied even under global default allow.
+- Why next: packet ICMP parsing and echo replies exist, but alpha ICMP policy requires essential errors allowed, ping configurable, and unsupported/unusual ICMP denied by default.
+- Verification plan: add `IcmpPolicy` to core/config, enforce rules after explicit policy rules and before global default, update default echo denial expectations, verify essential error allow, configured echo allow, unusual default-allow denial, TOML `icmp.allow_echo`, then run formatting, clippy, focused tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — ICMP default policy/config
+
+- Slice attempted: explicit ICMP default policy for essential errors, configurable echo, and unusual ICMP denial.
+- Why next: ICMP packets and echo replies were parse/synthesis tested, but alpha policy requires essential ICMP errors allowed, ping configurable, and unusual ICMP denied by default.
+- What changed: added `IcmpPolicy` to `PolicyConfig`, applied ICMP defaults after explicit rules and before global default policy, allowed essential ICMPv4 error types 3/11/12 by default, denied echo/unusual ICMP by default with reason `icmp-default-deny`, added TOML `[icmp] allow_echo` and `allow_essential_errors`, and updated broker/CLI expectations for default ping denial.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting; `cargo fmt` was run.
+  - `cargo clippy --workspace --all-targets -- -D warnings` initially exposed missing `icmp` fields in explicit test `PolicyConfig` literals; fixed those, then clippy passed.
+  - `cargo test --workspace` initially failed because the CLI default-deny ICMP assertion still expected `default-deny`; updated it to `icmp-default-deny`, then workspace tests passed: 3 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 7 `foxprox-config` tests, 14 `foxprox-core` tests, 5 `foxprox-flow` tests, 18 `foxprox-inspect` tests, 10 `foxprox-packet` tests, and 0 doc tests.
+  - Focused checks passed: `cargo test -p foxprox-core icmp_defaults_allow_essential_errors_but_not_echo_or_unusual_types`, `cargo test -p foxprox-core configured_icmp_echo_allows_ping_without_broad_icmp_allow`, `cargo test -p foxprox-config loaded_icmp_echo_policy_allows_ping`, and `cargo test -p foxprox-broker denied_icmp_echo_request_is_audited_without_reply`.
+  - `cargo fmt --check` passed after focused checks.
+- What failed or surprised the agent: adding protocol-specific defaults changes the reason observed by generic packet/CLI paths; tests that asserted global default-deny needed to assert the more specific ICMP denial instead.
+- What remains unproven: ICMPv6 distinctions, ICMP unreachable synthesis for denied UDP/TCP, path-MTU handling, ping runtime through TUN, and user-facing config examples are still absent.
+- Commit: this commit.

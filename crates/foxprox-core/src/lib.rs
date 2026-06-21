@@ -769,6 +769,22 @@ impl Default for DnsPolicy {
     }
 }
 
+/// ICMP defaults applied after explicit rules and before global defaults.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IcmpPolicy {
+    pub allow_echo: bool,
+    pub allow_essential_errors: bool,
+}
+
+impl Default for IcmpPolicy {
+    fn default() -> Self {
+        Self {
+            allow_echo: false,
+            allow_essential_errors: true,
+        }
+    }
+}
+
 /// Default policy when no rule matches.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DefaultPolicy {
@@ -787,6 +803,7 @@ impl Default for DefaultPolicy {
 pub struct PolicyConfig {
     pub default_policy: DefaultPolicy,
     pub dns: DnsPolicy,
+    pub icmp: IcmpPolicy,
     pub rules: Vec<PolicyRule>,
 }
 
@@ -865,6 +882,10 @@ impl PolicyEngine {
             };
         }
 
+        if let Some(decision) = self.default_icmp_decision(event) {
+            return decision;
+        }
+
         match &self.config.default_policy {
             DefaultPolicy::Allow => PolicyDecision::Allow { rule_id: None },
             DefaultPolicy::Deny(reason) => PolicyDecision::Deny {
@@ -912,6 +933,27 @@ impl PolicyEngine {
             .map(|destination| is_multicast_or_broadcast(destination.ip))
             .unwrap_or(false)
     }
+
+    fn default_icmp_decision(&self, event: &NormalizedEvent) -> Option<PolicyDecision> {
+        let NormalizedEvent::IcmpMessage(message) = event else {
+            return None;
+        };
+        if self.config.icmp.allow_essential_errors && is_essential_icmp_error(message) {
+            return Some(PolicyDecision::Allow { rule_id: None });
+        }
+        if self.config.icmp.allow_echo && message.icmp_type == 8 && message.icmp_code == 0 {
+            return Some(PolicyDecision::Allow { rule_id: None });
+        }
+        Some(PolicyDecision::Deny {
+            behavior: DenialBehavior::Drop,
+            reason: "icmp-default-deny".to_owned(),
+            rule_id: None,
+        })
+    }
+}
+
+fn is_essential_icmp_error(message: &IcmpMessage) -> bool {
+    matches!(message.icmp_type, 3 | 11 | 12)
 }
 
 fn is_multicast_or_broadcast(ip: IpAddr) -> bool {
@@ -1174,6 +1216,7 @@ mod tests {
                 broker_resolvers: vec![broker_resolver],
                 deny_direct_external_dns: true,
             },
+            icmp: IcmpPolicy::default(),
             rules: Vec::new(),
         });
         let event = NormalizedEvent::UdpFlowAttempt(UdpFlowAttempt {
@@ -1208,6 +1251,7 @@ mod tests {
                 broker_resolvers: vec![broker_resolver],
                 deny_direct_external_dns: true,
             },
+            icmp: IcmpPolicy::default(),
             rules: Vec::new(),
         });
         let event = NormalizedEvent::UdpFlowAttempt(UdpFlowAttempt {
@@ -1226,6 +1270,77 @@ mod tests {
     }
 
     #[test]
+    fn icmp_defaults_allow_essential_errors_but_not_echo_or_unusual_types() {
+        let engine = PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        });
+        let destination_unreachable = NormalizedEvent::IcmpMessage(IcmpMessage {
+            sandbox_id: sandbox_id(),
+            frontend: FrontendKind::Tun,
+            source: Endpoint::new(Ipv4Addr::new(10, 0, 0, 2).into(), None),
+            destination: Endpoint::new(Ipv4Addr::new(203, 0, 113, 10).into(), None),
+            icmp_type: 3,
+            icmp_code: 0,
+        });
+        let echo = NormalizedEvent::IcmpMessage(IcmpMessage {
+            icmp_type: 8,
+            icmp_code: 0,
+            ..match destination_unreachable.clone() {
+                NormalizedEvent::IcmpMessage(event) => event,
+                _ => unreachable!(),
+            }
+        });
+        let timestamp = NormalizedEvent::IcmpMessage(IcmpMessage {
+            icmp_type: 13,
+            icmp_code: 0,
+            ..match destination_unreachable.clone() {
+                NormalizedEvent::IcmpMessage(event) => event,
+                _ => unreachable!(),
+            }
+        });
+
+        assert_eq!(
+            engine.evaluate(&destination_unreachable).decision,
+            PolicyDecision::Allow { rule_id: None }
+        );
+        for event in [echo, timestamp] {
+            assert_eq!(
+                engine.evaluate(&event).decision,
+                PolicyDecision::Deny {
+                    behavior: DenialBehavior::Drop,
+                    reason: "icmp-default-deny".to_owned(),
+                    rule_id: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn configured_icmp_echo_allows_ping_without_broad_icmp_allow() {
+        let engine = PolicyEngine::new(PolicyConfig {
+            icmp: IcmpPolicy {
+                allow_echo: true,
+                allow_essential_errors: true,
+            },
+            ..PolicyConfig::default()
+        });
+        let echo = NormalizedEvent::IcmpMessage(IcmpMessage {
+            sandbox_id: sandbox_id(),
+            frontend: FrontendKind::Tun,
+            source: Endpoint::new(Ipv4Addr::new(10, 0, 0, 2).into(), None),
+            destination: Endpoint::new(Ipv4Addr::new(203, 0, 113, 10).into(), None),
+            icmp_type: 8,
+            icmp_code: 0,
+        });
+
+        assert_eq!(
+            engine.evaluate(&echo).decision,
+            PolicyDecision::Allow { rule_id: None }
+        );
+    }
+
+    #[test]
     fn udp_multicast_and_broadcast_are_denied_before_default_allow() {
         let engine = PolicyEngine::new(PolicyConfig {
             default_policy: DefaultPolicy::Allow,
@@ -1233,6 +1348,7 @@ mod tests {
                 broker_resolvers: vec![Endpoint::udp(Ipv4Addr::new(10, 0, 0, 1).into(), 53)],
                 deny_direct_external_dns: true,
             },
+            icmp: IcmpPolicy::default(),
             rules: Vec::new(),
         });
         let multicast = NormalizedEvent::UdpFlowAttempt(UdpFlowAttempt {

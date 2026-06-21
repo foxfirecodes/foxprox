@@ -666,6 +666,7 @@ mod tests {
                 deny_direct_external_dns: true,
             },
             rules: Vec::new(),
+            ..PolicyConfig::default()
         });
 
         let evaluation = engine.evaluate(&event);
