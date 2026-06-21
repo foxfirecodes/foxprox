@@ -208,3 +208,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; DNS query metadata feeds future DNS handler policy/audit events.
 * Residual risk: DNS response parsing, EDNS(0), CNAME answer handling, upstream forwarding, DNS response synthesis, and DNS query audit emission remain future DNS-handler work.
 * Commit hash: bdcc7be strict dns query parsing.
+
+## 2026-06-21 - DNS address response parser attribution foundation
+
+* Invariant under work: DNS hostname-to-address attribution must come only from strict, bounded DNS responses whose answer owner names match the validated question, with TTLs captured for cache expiry and malformed/unsupported response shapes rejected.
+* Threat or failure mode addressed: permissive DNS response parsing could attribute unrelated owner names, accept poisoned answer sections, miss truncation/trailing data, or store stale/unbounded address observations.
+* Planned verification: add DNS response parser tests for valid compressed and uncompressed A/AAAA answers, empty successful/error responses without attribution, answer count bounds, owner-name mismatch rejection, unsupported class/type rejection, malformed RDLENGTH/trailing data rejection, response/opcode/question validation, and min-TTL extraction; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - DNS address response parser attribution foundation results
+
+* Tests added/updated:
+  * valid DNS responses with compressed and uncompressed owner names extract A/AAAA addresses and minimum answer TTL.
+  * NXDOMAIN/error responses with no answers parse without attribution addresses.
+  * answer count bounds, owner-name mismatch, invalid compression pointers, unsupported answer types/classes, invalid A/AAAA record lengths, trailing bytes, and oversized messages are rejected.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 58 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * address attribution is produced only for response answers owned by the validated question hostname.
+  * DNS response compression is accepted only for a direct pointer back to the validated question name.
+  * unsupported CNAME/other answer semantics fail closed instead of attributing addresses across unimplemented alias chains.
+* Audit evidence: not applicable in this commit; parsed DNS responses feed future DNS handler cache/audit events.
+* Residual risk: CNAME chain handling, EDNS(0), additional records, response-code audit mapping, upstream forwarding, and DNS response synthesis remain future DNS-handler work.

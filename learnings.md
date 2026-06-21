@@ -33,3 +33,7 @@ SOCKS5 support should treat only TCP CONNECT as alpha scope. BIND, UDP ASSOCIATE
 ## 2026-06-21 - DNS query parser strictness
 
 The first DNS wire parser is intentionally single-question, IN-class, no-extra-records, and no-compression for query names. That avoids ambiguous hostname attribution, but EDNS(0) and compressed question support will need explicit semantics before enabling for compatibility.
+
+## 2026-06-21 - DNS response attribution owner checks
+
+DNS address attribution should require every stored A/AAAA answer owner to match the validated question hostname. Compression can be handled narrowly for the common pointer-to-question case; CNAME chains and additional records need explicit semantics before they can safely contribute to attribution.

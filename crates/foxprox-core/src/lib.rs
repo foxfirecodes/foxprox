@@ -22,8 +22,8 @@ pub use audit::{
 };
 pub use config::{Cidr, ConfigError, HostMatcher, PolicyConfig, PolicyRule, RuleAction};
 pub use dns::{
-    parse_dns_query, DnsAttributionCache, DnsAttributionEntry, DnsParseError, DnsQueryMetadata,
-    DnsQueryType, ObserveOutcome,
+    parse_dns_address_response, parse_dns_query, DnsAddressResponseMetadata, DnsAttributionCache,
+    DnsAttributionEntry, DnsParseError, DnsQueryMetadata, DnsQueryType, ObserveOutcome,
 };
 pub use http::{
     parse_http_request_head, parse_https_connect_head, HttpParseError, HttpRequestMetadata,
