@@ -934,3 +934,44 @@
 - Files changed: `crates/foxprox-net/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
 - Current git status summary: net/CLI/progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit transparent TCP audit/backpressure integration, then continue with UDP/DNS audit integration.
+
+## 2026-06-21T23:53:35Z — UDP/DNS audit/backpressure pending review
+
+- Commit created: `fdcda6a` (`audit transparent tcp decisions`).
+- Current objective: commit bounded audit event emission for UDP/DNS proof decisions.
+- Changes implemented:
+  - Added `audit_queue_capacity` to `UdpDnsProofConfig`, defaulting to 8192 queued events.
+  - `run_udp_dns_proof_with_ready` now creates a bounded `AuditBuffer` before TUN/smoltcp setup and rejects zero capacity with `InvalidInput`.
+  - Broker DNS queries emit structured `DnsQuery` audit events before upstream DNS egress.
+  - Direct external DNS bypass attempts evaluate policy and emit denied `UdpPacketDenied` audit events before dropping.
+  - UDP/QUIC forwarding decisions emit structured audit events before host UDP egress; backpressure returns `WouldBlock` and prevents forwarding.
+  - CLI `proof-udp-dns` exposes `--audit-queue-capacity` and validates it as non-zero before proof startup.
+  - Tests cover UDP/QUIC flow audit metadata, DNS query audit metadata, enqueue backpressure, and zero-capacity rejection.
+- Subagents/reviews requested: `udp-audit-backpressure-final` is running.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-net -- --nocapture` passed: 18 net tests.
+  - `cargo test --workspace` passed: 49 core tests, 8 device tests, 18 net tests, 21 proxy tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` initially found an 8-argument helper after adding audit; fixed by grouping datagram inputs, then passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net` and `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-net/src/udp.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: UDP net/CLI/progress modified; review artifact pending.
+- Next exact action: read UDP/DNS audit/backpressure review, fix blockers if any, then commit.
+
+## 2026-06-21T23:55:37Z — UDP/DNS audit/backpressure review passed
+
+- Current objective: commit bounded audit event emission for UDP/DNS proof decisions.
+- Review result: `udp-audit-backpressure-final` found no blockers.
+- Confirmed behavior:
+  - `proof-udp-dns --audit-queue-capacity` is documented and parsed with non-zero validation.
+  - UDP/DNS proof constructs the audit buffer before TUN/socket setup and rejects zero capacity.
+  - Broker DNS, direct DNS bypass, UDP, and QUIC forwarding paths emit audit before upstream/host egress or drop.
+  - UDP/QUIC forwarding returns on audit backpressure before recording/sending host UDP.
+  - Audit metadata maps DNS/UDP/QUIC kinds and protocol/attribution/endpoints.
+  - Tests cover UDP audit metadata, backpressure, and zero-capacity rejection.
+- Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed; net tests now cover 18 cases.
+- Files changed: `crates/foxprox-net/src/udp.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: UDP net/CLI/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit UDP/DNS audit/backpressure integration, then compare remaining alpha robustness gaps.

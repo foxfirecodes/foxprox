@@ -5,9 +5,10 @@
 //! and configured generic UDP forwarding proof ports.
 
 use foxprox_core::{
-    classify_udp_candidate, parse_dns_query, parse_dns_response, Attribution, DnsCache,
-    DnsCacheEntry, FlowKey, FlowTimeoutClass, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet,
-    Protocol, SandboxId, TransportEndpoint, UdpFlowTable,
+    classify_udp_candidate, parse_dns_query, parse_dns_response, Attribution, AuditBackpressure,
+    AuditBuffer, AuditEvent, AuditEventKind, Decision, DnsCache, DnsCacheEntry, FlowKey,
+    FlowTimeoutClass, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, Protocol, SandboxId,
+    TransportEndpoint, UdpFlowTable,
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, PacketMeta, TunTapInterface};
@@ -47,12 +48,20 @@ pub struct UdpDnsProofConfig {
     pub udp_forward_timeout: Duration,
     /// Policy used before host UDP forwarding in the proof runtime.
     pub policy: PolicyRuleSet,
+    /// Maximum queued audit events before UDP proof paths fail closed.
+    pub audit_queue_capacity: usize,
 }
 
 #[derive(Clone, Copy)]
 struct UdpForwardSocket {
     port: u16,
     handle: smoltcp::iface::SocketHandle,
+}
+
+struct UdpForwardDatagram {
+    socket: UdpForwardSocket,
+    payload: Vec<u8>,
+    metadata: udp::UdpMetadata,
 }
 
 enum UdpWorkerResult {
@@ -88,6 +97,7 @@ impl UdpDnsProofConfig {
             udp_forward_ports: Vec::new(),
             udp_forward_timeout: Duration::from_secs(3),
             policy: PolicyRuleSet::default(),
+            audit_queue_capacity: 8192,
         }
     }
 }
@@ -106,6 +116,7 @@ pub fn run_udp_dns_proof_with_ready<F>(
 where
     F: FnOnce() -> io::Result<()>,
 {
+    let mut audit = audit_buffer(config.audit_queue_capacity)?;
     set_nonblocking(tun_fd.as_raw_fd())?;
     let raw_fd = tun_fd.into_raw_fd();
     let mut device = TunTapInterface::from_fd(raw_fd, Medium::Ip, config.mtu).map_err(|error| {
@@ -181,7 +192,9 @@ where
             }
         }
         for (payload, metadata) in received {
-            if let Err(error) = handle_dns_datagram(&config, worker_tx.clone(), payload, metadata) {
+            if let Err(error) =
+                handle_dns_datagram(&config, &mut audit, worker_tx.clone(), payload, metadata)
+            {
                 eprintln!("foxprox-net: dns datagram handling failed: {error}");
             }
         }
@@ -206,10 +219,13 @@ where
                 &config,
                 &cache,
                 &mut udp_flows,
+                &mut audit,
                 worker_tx.clone(),
-                forward_socket,
-                payload,
-                metadata,
+                UdpForwardDatagram {
+                    socket: forward_socket,
+                    payload,
+                    metadata,
+                },
             ) {
                 eprintln!("foxprox-net: udp datagram handling failed: {error}");
             }
@@ -349,6 +365,7 @@ fn handle_worker_results(
 
 fn handle_dns_datagram(
     config: &UdpDnsProofConfig,
+    audit: &mut AuditBuffer,
     worker_tx: Sender<UdpWorkerResult>,
     payload: Vec<u8>,
     metadata: udp::UdpMetadata,
@@ -370,6 +387,8 @@ fn handle_dns_datagram(
             attribution: Attribution::ip_only(),
             classification: foxprox_core::Protocol::Dns,
         };
+        let decision = PolicyEngine::new(config.policy.clone()).evaluate(&event);
+        emit_udp_audit(audit, &event, decision)?;
         eprintln!("foxprox-net: deny direct DNS bypass {event:?}");
         return Ok(());
     }
@@ -398,6 +417,7 @@ fn handle_dns_datagram(
         question.query_type.as_str(),
         event
     );
+    emit_udp_audit(audit, &event, Decision::allow("broker-dns"))?;
 
     let upstream = config.upstream_dns;
     let timeout = config.upstream_timeout;
@@ -426,18 +446,18 @@ fn handle_udp_forward_datagram(
     config: &UdpDnsProofConfig,
     cache: &DnsCache,
     flows: &mut UdpFlowTable,
+    audit: &mut AuditBuffer,
     worker_tx: Sender<UdpWorkerResult>,
-    forward_socket: UdpForwardSocket,
-    payload: Vec<u8>,
-    metadata: udp::UdpMetadata,
+    datagram: UdpForwardDatagram,
 ) -> io::Result<()> {
-    let destination_ip = metadata
+    let destination_ip = datagram
+        .metadata
         .local_address
         .map(ip_to_std)
         .transpose()?
         .ok_or_else(|| io::Error::other("udp metadata missing local destination"))?;
-    let source = endpoint_to_transport(metadata.endpoint)?;
-    let destination = TransportEndpoint::new(destination_ip, forward_socket.port);
+    let source = endpoint_to_transport(datagram.metadata.endpoint)?;
+    let destination = TransportEndpoint::new(destination_ip, datagram.socket.port);
     let key = FlowKey::udp(source.ip, source.port, destination.ip, destination.port);
     let (classification, timeout_class) = udp_classification_for_port(destination.port);
     let now = SystemTime::now();
@@ -464,25 +484,26 @@ fn handle_udp_forward_datagram(
         destination.ip,
         destination.port,
         classification,
-        payload.len(),
+        datagram.payload.len(),
         decision,
         event
     );
+    emit_udp_audit(audit, &event, decision.clone())?;
     if !decision.is_allowed() {
         return Ok(());
     }
-    flows.record_sandbox_datagram(key, timeout_class, attribution, payload.len(), now);
+    flows.record_sandbox_datagram(key, timeout_class, attribution, datagram.payload.len(), now);
 
     let timeout = config.udp_forward_timeout;
     std::thread::spawn(move || {
         let response = forward_udp_datagram(
-            &payload,
+            &datagram.payload,
             SocketAddr::new(destination.ip, destination.port),
             timeout,
         );
         let _ = worker_tx.send(UdpWorkerResult::Forward {
-            handle: forward_socket.handle,
-            metadata,
+            handle: datagram.socket.handle,
+            metadata: datagram.metadata,
             source,
             destination,
             key,
@@ -490,6 +511,79 @@ fn handle_udp_forward_datagram(
         });
     });
     Ok(())
+}
+
+fn audit_buffer(capacity: usize) -> io::Result<AuditBuffer> {
+    if capacity == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "audit queue capacity must be non-zero",
+        ));
+    }
+    Ok(AuditBuffer::new(capacity))
+}
+
+fn emit_udp_audit(
+    audit: &mut AuditBuffer,
+    event: &NetworkEvent,
+    decision: Decision,
+) -> io::Result<()> {
+    let audit_event = udp_audit_event(event, decision);
+    audit
+        .try_push(audit_event.clone())
+        .map_err(audit_backpressure_error)?;
+    eprintln!("foxprox-net: udp audit event={audit_event:?}");
+    Ok(())
+}
+
+fn audit_backpressure_error(error: AuditBackpressure) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!("audit queue backpressure: {error:?}"),
+    )
+}
+
+fn udp_audit_event(event: &NetworkEvent, decision: Decision) -> AuditEvent {
+    let kind = match event {
+        NetworkEvent::DnsQuery { .. } => AuditEventKind::DnsQuery,
+        NetworkEvent::UdpFlowAttempt { classification, .. }
+            if *classification == Protocol::Quic && decision.is_allowed() =>
+        {
+            AuditEventKind::QuicCandidateFlowCreated
+        }
+        NetworkEvent::UdpFlowAttempt { .. } if decision.is_allowed() => {
+            AuditEventKind::UdpFlowCreated
+        }
+        NetworkEvent::UdpFlowAttempt { .. } => AuditEventKind::UdpPacketDenied,
+        _ => AuditEventKind::UnsupportedDenied,
+    };
+    let mut audit = AuditEvent::new(Frontend::Tun, kind).with_decision(decision);
+    if let Some(sandbox_id) = event.sandbox_id() {
+        audit = audit.with_sandbox_id(sandbox_id.clone());
+    }
+    audit.protocol = Some(event.protocol());
+    match event {
+        NetworkEvent::DnsQuery {
+            hostname,
+            query_type,
+            ..
+        } => {
+            audit.hostname = Some(hostname.clone());
+            audit.dns_query_type = Some(query_type.clone());
+        }
+        NetworkEvent::UdpFlowAttempt {
+            source,
+            destination,
+            attribution,
+            ..
+        } => {
+            audit = audit.with_endpoints(Some(*source), Some(*destination));
+            audit.attribution = Some(attribution.clone());
+            audit.hostname = attribution.hostname.clone();
+        }
+        _ => {}
+    }
+    audit
 }
 
 fn udp_classification_for_port(port: u16) -> (Protocol, FlowTimeoutClass) {
@@ -637,6 +731,7 @@ mod tests {
         assert!(config.udp_payload_capacity >= 1500);
         assert!(config.upstream_timeout <= Duration::from_secs(5));
         assert!(config.udp_forward_timeout <= Duration::from_secs(3));
+        assert!(config.audit_queue_capacity > 0);
     }
 
     #[test]
@@ -665,6 +760,69 @@ mod tests {
         assert!(!PolicyEngine::new(config.policy)
             .evaluate(&event)
             .is_allowed());
+    }
+
+    #[test]
+    fn udp_audit_event_records_flow_metadata() {
+        let event = NetworkEvent::UdpFlowAttempt {
+            sandbox_id: SandboxId::new("test").unwrap(),
+            frontend: Frontend::Tun,
+            source: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)), 44_444),
+            destination: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443),
+            attribution: Attribution::ip_only(),
+            classification: Protocol::Quic,
+        };
+        let audit = udp_audit_event(&event, Decision::allow("allow-quic"));
+
+        assert_eq!(audit.kind, AuditEventKind::QuicCandidateFlowCreated);
+        assert_eq!(audit.protocol, Some(Protocol::Quic));
+        assert_eq!(audit.source.unwrap().port, 44_444);
+        assert_eq!(audit.destination.unwrap().port, 443);
+        assert_eq!(audit.destination_port, Some(443));
+        assert!(audit.decision.unwrap().is_allowed());
+    }
+
+    #[test]
+    fn dns_audit_event_records_query_metadata() {
+        let event = NetworkEvent::DnsQuery {
+            sandbox_id: SandboxId::new("test").unwrap(),
+            hostname: Hostname::parse("example.com").unwrap(),
+            query_type: "A".to_string(),
+            frontend: Frontend::Tun,
+        };
+        let audit = udp_audit_event(&event, Decision::allow("broker-dns"));
+
+        assert_eq!(audit.kind, AuditEventKind::DnsQuery);
+        assert_eq!(audit.protocol, Some(Protocol::Dns));
+        assert_eq!(audit.hostname.unwrap().as_str(), "example.com");
+        assert_eq!(audit.dns_query_type.as_deref(), Some("A"));
+        assert!(audit.decision.unwrap().is_allowed());
+    }
+
+    #[test]
+    fn udp_audit_enqueue_reports_backpressure() {
+        let event = NetworkEvent::UdpFlowAttempt {
+            sandbox_id: SandboxId::new("test").unwrap(),
+            frontend: Frontend::Tun,
+            source: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)), 44_444),
+            destination: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 53),
+            attribution: Attribution::ip_only(),
+            classification: Protocol::Dns,
+        };
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let mut audit = audit_buffer(1).unwrap();
+
+        emit_udp_audit(&mut audit, &event, decision.clone()).unwrap();
+        let error = emit_udp_audit(&mut audit, &event, decision).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn udp_audit_rejects_zero_capacity() {
+        assert_eq!(
+            audit_buffer(0).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]
