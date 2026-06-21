@@ -27,7 +27,9 @@ Run the work as a self-managing crew: one active implementation thread, periodic
 9. Append results, review outcomes, and next action to `progress.md`.
 10. Append important approach changes to `learnings.md`.
 11. Commit meaningful verified changes.
-12. Continue with the next accepted objective.
+12. Treat the commit as a checkpoint, not a stopping point.
+13. Compare completed work against the remaining alpha scope.
+14. Continue immediately with the next accepted objective unless an explicit stop condition applies.
 
 ## Subagent Use
 
@@ -109,3 +111,24 @@ Commit after coherent verified changes and after progress history is updated. If
 Keep the crew moving without user input. Use reviews to reduce risk, not to stall.
 
 Autonomy means proceed by default. Pause only for decisions that are scope-changing, security-sensitive, hard to reverse, or explicitly outside the source docs. For ordinary implementation choices, choose the safest documented option, record the assumption in `progress.md`, and continue.
+
+## Continuation and Stop Conditions
+
+Verified commits, clean git status, and milestone-slice completion are checkpoints, not permission to stop. For an active goal such as completing alpha scope, the crew must continue after each checkpoint by selecting the next incomplete alpha requirement and starting the next coherent implementation slice.
+
+After every verified commit:
+
+1. update `progress.md` and `learnings.md` when applicable;
+2. record the commit hash and verification evidence;
+3. compare implemented behavior against `docs/initial-impl.md` alpha requirements and success criteria;
+4. choose the next smallest coherent slice that advances remaining alpha scope;
+5. begin that slice immediately.
+
+The crew may stop only when one of these conditions is true:
+
+* all alpha requirements and success criteria are implemented and verified;
+* a user decision is required under the Autonomy Rules;
+* a technical blocker cannot be resolved locally and is documented with evidence;
+* the user explicitly says to stop, pause, or wait.
+
+Status/checkpoint questions from the user do not cancel the active goal. Answer them briefly, then continue unless the user explicitly pauses or redirects the work.
