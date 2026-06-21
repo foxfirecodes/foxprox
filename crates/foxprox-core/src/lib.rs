@@ -775,6 +775,8 @@ pub struct PolicyRule {
     pub protocol: ProtocolMatcher,
     pub destination: DestinationMatcher,
     pub port: PortMatcher,
+    pub http_method: HttpMethodMatcher,
+    pub http_path: HttpPathMatcher,
     pub minimum_hostname_confidence: HostnameConfidence,
 }
 
@@ -786,6 +788,8 @@ impl PolicyRule {
             protocol: ProtocolMatcher::Any,
             destination: DestinationMatcher::Any,
             port: PortMatcher::Any,
+            http_method: HttpMethodMatcher::Any,
+            http_path: HttpPathMatcher::Any,
             minimum_hostname_confidence: HostnameConfidence::Unknown,
         }
     }
@@ -824,6 +828,21 @@ pub enum PortMatcher {
     Any,
     Exact(u16),
     Range { start: u16, end: u16 },
+}
+
+/// HTTP method matcher for plaintext HTTP policy.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum HttpMethodMatcher {
+    Any,
+    Exact(HttpMethod),
+}
+
+/// HTTP path/query matcher for plaintext HTTP policy.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum HttpPathMatcher {
+    Any,
+    Exact(String),
+    Prefix(String),
 }
 
 impl PortMatcher {

@@ -7,8 +7,9 @@
 
 use foxprox_core::{
     AllowDecision, DefaultPolicy, DenialAction, DenyDecision, DestinationMatcher, DirectDnsPolicy,
-    HostnameConfidence, HostnameMismatch, NormalizedEvent, PolicyDecision, PolicyRule, Protocol,
-    ProtocolMatcher, QuicPolicy, RuleAction, RuntimeConfig, UdpClassification,
+    HostnameConfidence, HostnameMismatch, HttpMethodMatcher, HttpPathMatcher, NormalizedEvent,
+    PolicyDecision, PolicyRule, Protocol, ProtocolMatcher, QuicPolicy, RuleAction, RuntimeConfig,
+    UdpClassification,
 };
 
 /// Policy engine with a typed, normalized runtime configuration.
@@ -113,6 +114,7 @@ fn rule_matches(rule: &PolicyRule, event: &NormalizedEvent) -> bool {
     protocol_matches(rule.protocol, event.protocol())
         && destination_matches(rule, event)
         && rule.port.matches(event.destination_port())
+        && request_metadata_matches(rule, event)
 }
 
 fn protocol_matches(matcher: ProtocolMatcher, protocol: Protocol) -> bool {
@@ -137,6 +139,28 @@ fn destination_matches(rule: &PolicyRule, event: &NormalizedEvent) -> bool {
                 .is_some_and(|hostname| hostname.is_subdomain_of(suffix))
         }
     }
+}
+
+fn request_metadata_matches(rule: &PolicyRule, event: &NormalizedEvent) -> bool {
+    let method_matches = match &rule.http_method {
+        HttpMethodMatcher::Any => true,
+        HttpMethodMatcher::Exact(expected) => match event {
+            NormalizedEvent::HttpRequest(request) => &request.method == expected,
+            _ => false,
+        },
+    };
+    let path_matches = match &rule.http_path {
+        HttpPathMatcher::Any => true,
+        HttpPathMatcher::Exact(expected) => match event {
+            NormalizedEvent::HttpRequest(request) => &request.path_query == expected,
+            _ => false,
+        },
+        HttpPathMatcher::Prefix(prefix) => match event {
+            NormalizedEvent::HttpRequest(request) => request.path_query.starts_with(prefix),
+            _ => false,
+        },
+    };
+    method_matches && path_matches
 }
 
 fn hostname_matches(
@@ -290,6 +314,39 @@ mod tests {
         });
 
         assert!(PolicyEngine::new(config).decide(&event).is_allowed());
+    }
+
+    #[test]
+    fn http_method_and_path_matchers_are_enforced() {
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut rule = PolicyRule::allow(RuleId::new("http-api").unwrap());
+        rule.protocol = ProtocolMatcher::Exact(Protocol::Http);
+        rule.http_method = HttpMethodMatcher::Exact(HttpMethod::Get);
+        rule.http_path = HttpPathMatcher::Prefix("/api/".to_string());
+        config.rules.push(rule);
+
+        let allowed = NormalizedEvent::HttpRequest(HttpRequest {
+            sandbox_id: sandbox(),
+            frontend: FrontendKind::Tun,
+            method: HttpMethod::Get,
+            scheme: HttpScheme::Http,
+            host: DestinationHost::Hostname(Hostname::new("example.com").unwrap()),
+            port: 80,
+            path_query: "/api/items".to_string(),
+        });
+        let denied = NormalizedEvent::HttpRequest(HttpRequest {
+            sandbox_id: sandbox(),
+            frontend: FrontendKind::Tun,
+            method: HttpMethod::Post,
+            scheme: HttpScheme::Http,
+            host: DestinationHost::Hostname(Hostname::new("example.com").unwrap()),
+            port: 80,
+            path_query: "/api/items".to_string(),
+        });
+        let engine = PolicyEngine::new(config);
+
+        assert!(engine.decide(&allowed).is_allowed());
+        assert!(!engine.decide(&denied).is_allowed());
     }
 
     #[test]

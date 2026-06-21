@@ -25,3 +25,7 @@
 ## 2026-06-21 — HTTP origin contract widened
 
 - The first `HttpRequest` contract was too narrow because it required `Hostname`; explicit and transparent HTTP requests can target IP literals, so the normalized contract now uses `DestinationHost` to preserve IP/port policy support without frontend leakage.
+
+## 2026-06-21 — HTTP method/path rules
+
+- Plaintext HTTP method and path matching belongs in the shared policy rule contract, not in frontends, so transparent HTTP and proxy HTTP can share enforcement semantics.

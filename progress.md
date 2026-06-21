@@ -152,3 +152,30 @@
   - `learnings.md`
 - Commit hash after commit: f05915d.
 - Remaining boundary risks: HTTP path/method matching is still not represented in rule matchers and should be added before relying on path-aware policy.
+
+## 2026-06-21 — Boundary objective: HTTP method/path policy contract
+
+- Boundary under work: normalized plaintext HTTP method/path rule matching.
+- Allowed dependency direction: HTTP parser/frontends emit normalized `HttpRequest`; policy matches typed method and path-prefix contracts without importing parser/request types.
+- Dependency-risk assessment: origin-aware HTTP policy is alpha scope, but adding it directly to frontend parsing would bypass the shared policy engine. The rule contract must stay in core and policy-only.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: pending.
+- Changed files: pending.
+- Commit hash after commit: pending.
+- Remaining boundary risks: richer HTTP header matching and explicit proxy forwarding are still outside this rule matcher.
+
+### Results
+
+- Added `HttpMethodMatcher` and `HttpPathMatcher` to the core rule contract.
+- Updated `foxprox-policy` to enforce method and exact/prefix path matchers only against normalized `HttpRequest` events.
+- Added a policy test proving GET `/api/` is allowed while POST to the same path is denied under the same rule set.
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 39 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Changed files:
+  - `crates/foxprox-core/src/lib.rs`
+  - `crates/foxprox-policy/src/lib.rs`
+  - `progress.md`
+- Commit hash after commit: pending.
+- Remaining boundary risks: header-based policy and real transparent stream reassembly are still pending.
