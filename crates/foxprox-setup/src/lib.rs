@@ -301,6 +301,8 @@ mod unix_fd_handoff {
 
     unsafe extern "C" {
         fn sendmsg(fd: c_int, msg: *const Msghdr, flags: c_int) -> isize;
+        #[cfg(test)]
+        fn recvmsg(fd: c_int, msg: *mut Msghdr, flags: c_int) -> isize;
     }
 
     const fn cmsg_align(len: usize) -> usize {
@@ -322,12 +324,14 @@ mod unix_fd_handoff {
             iov_base: byte.as_mut_ptr().cast::<c_void>(),
             iov_len: byte.len(),
         };
-        let mut control = [0u8; cmsg_space(size_of::<RawFd>())];
+        let control_len = cmsg_space(size_of::<RawFd>());
+        let mut control = vec![0usize; control_len.div_ceil(size_of::<usize>())];
+        let control_ptr = control.as_mut_ptr().cast::<u8>();
 
-        // SAFETY: `control` is large enough for one `cmsghdr` plus one RawFd,
-        // and is aligned before the kernel reads it through sendmsg.
+        // SAFETY: `control` is usize-aligned and large enough for one
+        // `cmsghdr` plus one RawFd before the kernel reads it through sendmsg.
         unsafe {
-            let header = control.as_mut_ptr().cast::<Cmsghdr>();
+            let header = control_ptr.cast::<Cmsghdr>();
             ptr::write(
                 header,
                 Cmsghdr {
@@ -336,8 +340,7 @@ mod unix_fd_handoff {
                     cmsg_type: SCM_RIGHTS,
                 },
             );
-            let data = control
-                .as_mut_ptr()
+            let data = control_ptr
                 .add(cmsg_align(size_of::<Cmsghdr>()))
                 .cast::<RawFd>();
             ptr::write(data, fd_to_send);
@@ -348,8 +351,8 @@ mod unix_fd_handoff {
         let mut message: Msghdr = unsafe { zeroed() };
         message.msg_iov = &mut iov;
         message.msg_iovlen = 1;
-        message.msg_control = control.as_mut_ptr().cast::<c_void>();
-        message.msg_controllen = control.len();
+        message.msg_control = control_ptr.cast::<c_void>();
+        message.msg_controllen = control_len;
 
         // SAFETY: `socket_fd` is provided by the launcher as an inherited Unix
         // domain socket, and `message` points to initialized buffers above. If
@@ -359,6 +362,81 @@ mod unix_fd_handoff {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn recv_fd(socket_fd: RawFd) -> io::Result<RawFd> {
+        let mut byte = [0u8];
+        let mut iov = Iovec {
+            iov_base: byte.as_mut_ptr().cast::<c_void>(),
+            iov_len: byte.len(),
+        };
+        let control_len = cmsg_space(size_of::<RawFd>());
+        let mut control = vec![0usize; control_len.div_ceil(size_of::<usize>())];
+        let control_ptr = control.as_mut_ptr().cast::<u8>();
+
+        // SAFETY: zeroed `msghdr` is immediately populated with valid pointers
+        // to stack-owned buffers that outlive the `recvmsg` call.
+        let mut message: Msghdr = unsafe { zeroed() };
+        message.msg_iov = &mut iov;
+        message.msg_iovlen = 1;
+        message.msg_control = control_ptr.cast::<c_void>();
+        message.msg_controllen = control_len;
+
+        // SAFETY: `message` points to initialized receive buffers above. If the
+        // socket fd is invalid, the kernel reports an error.
+        let received = unsafe { recvmsg(socket_fd, &mut message, 0) };
+        if received < 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        // SAFETY: `recvmsg` initialized the control buffer; validation below
+        // checks that it contains a single SCM_RIGHTS RawFd before reading it.
+        unsafe {
+            let header = control_ptr.cast::<Cmsghdr>();
+            if (*header).cmsg_level != SOL_SOCKET || (*header).cmsg_type != SCM_RIGHTS {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "missing SCM_RIGHTS control message",
+                ));
+            }
+            if (*header).cmsg_len < cmsg_len(size_of::<RawFd>()) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "truncated SCM_RIGHTS control message",
+                ));
+            }
+            let data = control_ptr
+                .add(cmsg_align(size_of::<Cmsghdr>()))
+                .cast::<RawFd>();
+            Ok(ptr::read(data))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{recv_fd, send_fd};
+        use std::io::{Read, Write};
+        use std::os::fd::{AsRawFd, FromRawFd};
+        use std::os::unix::net::UnixStream;
+
+        #[test]
+        fn fd_handoff_round_trips_over_unix_socket() {
+            let (control_tx, control_rx) = UnixStream::pair().unwrap();
+            let (payload_tx, mut payload_rx) = UnixStream::pair().unwrap();
+
+            send_fd(control_tx.as_raw_fd(), payload_tx.as_raw_fd()).unwrap();
+            let received_fd = recv_fd(control_rx.as_raw_fd()).unwrap();
+
+            // SAFETY: `received_fd` is a fresh descriptor returned by recvmsg
+            // and is owned by this test from this point forward.
+            let mut received_stream = unsafe { UnixStream::from_raw_fd(received_fd) };
+            received_stream.write_all(b"ok").unwrap();
+
+            let mut buf = [0u8; 2];
+            payload_rx.read_exact(&mut buf).unwrap();
+            assert_eq!(&buf, b"ok");
+        }
     }
 }
 

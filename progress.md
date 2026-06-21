@@ -163,3 +163,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: fd handoff uses a small Linux/Unix `sendmsg(SCM_RIGHTS)` boundary but does not yet have a receiver-side round-trip test; setup does not yet drop `CAP_NET_ADMIN`, write resolver config, or perform an end-to-end bwrap smoke.
 - Exact next step: commit the setup helper slice, then add deterministic fd-handoff verification and/or setup privilege-drop behavior before attempting namespace smoke tests.
+
+## 2026-06-21T23:07:20Z
+- Current objective: verify the Unix fd-handoff boundary used by `foxproxsetup` before relying on it for TUN transfer.
+- Files changed: `crates/foxprox-setup/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 35 core tests, 5 device tests, 3 integration tests, 2 runtime tests, and 5 setup tests passed. New setup test proves `sendmsg(SCM_RIGHTS)` fd handoff round-trips over a Unix socket by sending one UnixStream fd and writing through the received descriptor.
+- Commit hash when committed: pending.
+- Remaining risks: fd handoff is verified in-process but not yet through an inherited bwrap control socket; `foxproxsetup` still does not drop setup capabilities or write DNS resolver configuration.
+- Exact next step: commit fd-handoff verification, then add fail-closed capability-drop/resolver setup sequencing in `foxproxsetup` before target exec.
