@@ -23,3 +23,7 @@ The ICMP write-back proof is only externally debuggable if outbound packet synth
 ## 2026-06-21 — UDP egress must wait for lifecycle audit, not just policy audit
 
 For UDP, an allow decision without `udp_flow_created` evidence is insufficient because later expiration and byte-count accounting depend on flow state. The UDP forwarding harness now appends lifecycle records before fake egress sends; if lifecycle audit backpressures, no datagram is sent.
+
+## 2026-06-21 — TCP close evidence is a separate lifecycle contract from connect policy
+
+A TCP connect allow audit proves host egress was authorized, but it does not prove what bytes crossed or how the flow ended. The TCP forwarding harness now emits `tcp_flow_closed` with byte counts and duration. Close audit backpressure is visible, but real async stream integration must preserve this boundary even when close/error happens after bytes have already moved.

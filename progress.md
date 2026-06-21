@@ -215,3 +215,40 @@ UDP forwarding now has a mockable egress proof connected to shared policy/audit 
 
 ### Remaining blind spots
 - UDP egress is still in-memory rather than host sockets, and inbound replies update byte counts but do not yet synthesize/write packets back through a real TUN stack.
+
+### Commit
+- `e111714` — observable UDP forwarding harness.
+
+## 2026-06-21 — TCP forwarding harness observability cycle
+
+### Behavior under work
+Add a mockable TCP forwarding proof that evaluates connect attempts through the shared policy/audit core before opening host egress, bridges deterministic byte chunks in both directions through a replaceable egress stream, and emits `tcp_flow_closed` audit evidence with byte counts and duration.
+
+### Expected evidence
+- Allowed TCP connect attempts append `tcp_connect_decision`, open fake egress exactly once, bridge sandbox/host bytes, and append `tcp_flow_closed` with byte counts.
+- Denied TCP connect attempts emit structured denial audit and never open host egress.
+- Audit backpressure before connect or close prevents unobservable egress/open or close accounting.
+
+### Commands run
+- `cargo fmt` — applied formatting for `tcp.rs` and `flow.rs`.
+- `cargo test --all-targets --all-features` — passed, 59 unit tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tcp::tests::allowed_tcp_connect_opens_egress_bridges_bytes_and_logs_close ... ok`
+- `tcp::tests::denied_tcp_connect_does_not_open_egress ... ok`
+- `tcp::tests::close_audit_backpressure_is_visible ... ok`
+
+### Interpretation
+TCP forwarding now has a deterministic host-egress proof behind a replaceable trait. Policy/audit evaluation gates host connect attempts, denied connects never open egress, and close events include byte counts and duration. Close-audit backpressure is visible through `audit_backpressure`; real runtime stream code will need the same lifecycle accounting boundary around asynchronous close/error paths.
+
+### Changed files
+- `crates/foxprox-core/src/flow.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-core/src/tcp.rs`
+- `progress.md`
+- `learnings.md`
+
+### Remaining blind spots
+- This is not a `smoltcp` adapter or host socket runtime yet. It establishes the shared connect/bridge/close evidence contract that smoltcp/async socket integration must satisfy.

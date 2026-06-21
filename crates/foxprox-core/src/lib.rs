@@ -18,6 +18,7 @@ pub mod packet;
 pub mod policy;
 pub mod proxy;
 pub mod setup;
+pub mod tcp;
 pub mod tun;
 pub mod types;
 pub mod udp;
@@ -39,6 +40,7 @@ pub use proxy::{
     HttpProxyRequestMetadata, ProxyParseError, SocksConnectMetadata,
 };
 pub use setup::{BwrapSetupPlan, NetworkSetupConfig, ProxyEnvironment};
+pub use tcp::{InMemoryTcpEgress, TcpEgress, TcpEgressError, TcpForwardResult, TcpForwarder};
 pub use tun::{DeviceIoError, InMemoryPacketDevice, PacketDevice, TunPacketHarness};
 pub use types::*;
 pub use udp::{InMemoryUdpEgress, UdpEgress, UdpEgressError, UdpForwardResult, UdpForwarder};

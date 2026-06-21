@@ -30,12 +30,43 @@ impl FlowKey {
         destination_ip: IpAddr,
         destination_port: u16,
     ) -> Self {
+        Self::new(
+            source_ip,
+            source_port,
+            destination_ip,
+            destination_port,
+            FlowProtocol::Udp,
+        )
+    }
+
+    pub fn tcp(
+        source_ip: IpAddr,
+        source_port: u16,
+        destination_ip: IpAddr,
+        destination_port: u16,
+    ) -> Self {
+        Self::new(
+            source_ip,
+            source_port,
+            destination_ip,
+            destination_port,
+            FlowProtocol::Tcp,
+        )
+    }
+
+    pub fn new(
+        source_ip: IpAddr,
+        source_port: u16,
+        destination_ip: IpAddr,
+        destination_port: u16,
+        protocol: FlowProtocol,
+    ) -> Self {
         Self {
             source_ip,
             source_port,
             destination_ip,
             destination_port,
-            protocol: FlowProtocol::Udp,
+            protocol,
         }
     }
 
