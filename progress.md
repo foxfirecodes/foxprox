@@ -638,6 +638,68 @@
 - Current git status summary: proxy proof source and progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit live HTTP proxy/CONNECT proof, then start SOCKS5 live CONNECT proof or audit/backpressure slice based on remaining alpha scope.
 
+## 2026-06-21T23:11:33Z — live HTTP proxy committed; next objective selected
+
+- Commit created: `6365a25` (`add live http proxy proof`).
+- Current objective: add live SOCKS5 TCP CONNECT proof using the existing SOCKS parser, policy evaluation, and host TCP egress boundary.
+- Rationale: Milestone 6 requires SOCKS5 TCP CONNECT support in addition to HTTP proxy and HTTPS CONNECT. Parser support exists; the next smallest slice is a live no-auth SOCKS5 CONNECT proof listener with policy-before-egress.
+- Verification plan: implement SOCKS5 no-auth greeting/request handling, evaluate `SocksConnect` before host connect, return SOCKS failure on deny/error, tunnel bytes on allow, add loopback tests for allowed host CONNECT and denied/default policy, then run full workspace fmt/check/test/clippy/doc.
+- Expected commit boundary: SOCKS5 TCP CONNECT live proof only; SOCKS UDP ASSOCIATE remains out of alpha scope.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: extend `foxprox-proxy` with `Socks5ProxyProofConfig` and `run_socks5_proxy_proof`.
+
+## 2026-06-21T23:14:24Z — live SOCKS5 CONNECT proof implemented pending review
+
+- Current objective: verify and commit Milestone 6 live SOCKS5 TCP CONNECT proof.
+- Changes implemented:
+  - Added `Socks5ProxyProofConfig` and `run_socks5_proxy_proof`, a blocking std/threaded SOCKS5 proof listener.
+  - Live SOCKS path handles no-auth method negotiation, rejects unsupported methods, reads CONNECT requests for IPv4/IPv6/domain destinations, reuses parser normalization, evaluates `PolicyEngine`, and only opens host TCP egress after allow.
+  - Denied SOCKS requests receive a SOCKS failure reply before close; allowed requests receive success reply then tunnel bytes bidirectionally through the same half-close-aware tunnel helper.
+  - Added loopback tests proving allowed SOCKS5 hostname CONNECT tunneling and default-deny SOCKS failure behavior.
+- Subagents/reviews requested: `socks-live-final` is running as read-only blocker review.
+- Verification commands and outcomes so far:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-proxy -- --nocapture` passed: 13 tests.
+  - `cargo test --workspace` passed: 45 core tests, 8 device tests, 8 net tests, 13 proxy tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-proxy` showed only `foxprox-core` as dependency.
+- Known proof limitations: thread-per-connection and no final audit sink/backpressure; SOCKS UDP ASSOCIATE remains explicitly unsupported.
+- Files changed: `crates/foxprox-proxy/src/lib.rs`, `progress.md`.
+- Current git status summary: proxy source and progress modified; no commit yet pending final review.
+- Next exact action: read SOCKS live review, fix blockers if any, then commit.
+
+## 2026-06-21T23:17:52Z — SOCKS5 failure replies fixed pending rereview
+
+- Current objective: commit live SOCKS5 TCP CONNECT proof after rereview.
+- Review findings accepted and fixed:
+  - Unsupported SOCKS commands/address types after no-auth method selection could close without a SOCKS failure reply. Fixed by mapping parser/request errors to SOCKS reply statuses (`0x07` unsupported command, `0x08` unsupported address type, `0x01` general failure) before returning.
+  - Policy-allowed but resolution/connect-failed destinations could close without a SOCKS failure reply. Fixed by wrapping resolution/connect errors and sending host-unreachable/connection-refused/general failure replies before returning.
+- Additional tests added:
+  - Live SOCKS UDP ASSOCIATE request receives unsupported command reply `0x07`.
+  - Policy-allowed but unreachable loopback CONNECT receives a non-success SOCKS failure reply.
+- Verification commands and outcomes after fixes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-proxy -- --nocapture` passed: 15 tests.
+  - `cargo test --workspace` passed: 45 core tests, 8 device tests, 8 net tests, 15 proxy tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+- Subagents/reviews requested: `socks-live-rereview` is running to confirm blocker fixes.
+- Files changed: `crates/foxprox-proxy/src/lib.rs`, `progress.md`.
+- Current git status summary: source and progress modified; review artifacts pending rereview/removal.
+- Next exact action: read SOCKS rereview, fix any blockers, remove `reviews/`, and commit.
+
+## 2026-06-21T23:18:42Z — live SOCKS5 rereview passed
+
+- Current objective: commit live SOCKS5 TCP CONNECT proof.
+- Rereview result: `socks-live-rereview` found no blockers after SOCKS failure reply fixes.
+- Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed and `foxprox-proxy` has 15 focused tests including default-deny, allowed CONNECT tunneling, unsupported UDP ASSOCIATE reply, and allowed-but-unreachable failure reply.
+- Files changed: `crates/foxprox-proxy/src/lib.rs`, `progress.md`.
+- Current git status summary: source and progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit live SOCKS5 proof, then compare remaining alpha scope and start robustness/audit/backpressure work.
+
 ## 2026-06-21T22:58:44Z — explicit proxy parser foundation rereview passed
 
 - Current objective: commit Milestone 6 explicit proxy parsing/normalization foundation.

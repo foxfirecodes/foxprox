@@ -61,6 +61,34 @@ impl HttpProxyProofConfig {
     }
 }
 
+/// Configuration for the blocking std SOCKS5 proxy proof listener.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Socks5ProxyProofConfig {
+    /// Sandbox/session identifier used in normalized events.
+    pub sandbox_id: SandboxId,
+    /// Address for the SOCKS5 proof listener.
+    pub listen_addr: SocketAddr,
+    /// Policy evaluated before host TCP egress.
+    pub policy: PolicyRuleSet,
+    /// Handshake/request read timeout.
+    pub request_timeout: Duration,
+    /// Host TCP connect timeout.
+    pub connect_timeout: Duration,
+}
+
+impl Socks5ProxyProofConfig {
+    /// Creates a SOCKS5 proof config with deny-by-default policy.
+    pub fn new(sandbox_id: SandboxId, listen_addr: SocketAddr) -> Self {
+        Self {
+            sandbox_id,
+            listen_addr,
+            policy: PolicyRuleSet::default(),
+            request_timeout: Duration::from_secs(5),
+            connect_timeout: Duration::from_secs(5),
+        }
+    }
+}
+
 /// Runs the blocking HTTP proxy proof listener forever.
 ///
 /// Each accepted connection is handled on a short-lived thread. This is an
@@ -84,6 +112,181 @@ pub fn run_http_proxy_proof(config: HttpProxyProofConfig) -> io::Result<()> {
     Ok(())
 }
 
+/// Runs the blocking SOCKS5 proof listener forever.
+pub fn run_socks5_proxy_proof(config: Socks5ProxyProofConfig) -> io::Result<()> {
+    let listener = TcpListener::bind(config.listen_addr)?;
+    eprintln!(
+        "foxprox-proxy: socks5 listening on {}",
+        listener.local_addr()?
+    );
+    for accepted in listener.incoming() {
+        let config = config.clone();
+        match accepted {
+            Ok(stream) => {
+                thread::spawn(move || {
+                    if let Err(error) = handle_socks5_proxy_stream(stream, &config) {
+                        eprintln!("foxprox-proxy: socks5 connection failed: {error}");
+                    }
+                });
+            }
+            Err(error) => eprintln!("foxprox-proxy: socks5 accept failed: {error}"),
+        }
+    }
+    Ok(())
+}
+
+fn handle_socks5_proxy_stream(
+    mut client: TcpStream,
+    config: &Socks5ProxyProofConfig,
+) -> io::Result<()> {
+    client.set_read_timeout(Some(config.request_timeout))?;
+    let request_bytes = read_socks5_greeting_and_request(&mut client)?;
+    client.set_read_timeout(None)?;
+    let event = match parse_socks5_connect(config.sandbox_id.clone(), &request_bytes) {
+        Ok(event) => event,
+        Err(error) => {
+            let _ = write_socks5_reply(&mut client, socks_status_for_parse_error(&request_bytes));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{error:?}"),
+            ));
+        }
+    };
+    let decision = PolicyEngine::new(config.policy.clone()).evaluate(&event);
+    eprintln!("foxprox-proxy: socks5 policy decision={decision:?} event={event:?}");
+    if !decision.is_allowed() {
+        let _ = write_socks5_reply(&mut client, 0x02);
+        return Ok(());
+    }
+    let destination = match socks_destination_socket_addr(&event, config.connect_timeout) {
+        Ok(destination) => destination,
+        Err(error) => {
+            let _ = write_socks5_reply(&mut client, 0x04);
+            return Err(error);
+        }
+    };
+    let upstream = match connect_allowed_tcp(
+        &event,
+        &decision,
+        destination,
+        config.connect_timeout,
+        Frontend::Socks5,
+        config.sandbox_id.clone(),
+    ) {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            let _ = write_socks5_reply(&mut client, socks_status_for_io_error(&error));
+            return Err(error);
+        }
+    };
+    write_socks5_reply(&mut client, 0x00)?;
+    tunnel_bidirectional(client, upstream)
+}
+
+fn read_socks5_greeting_and_request(stream: &mut TcpStream) -> io::Result<Vec<u8>> {
+    let mut greeting_prefix = [0_u8; 2];
+    stream.read_exact(&mut greeting_prefix)?;
+    if greeting_prefix[0] != 0x05 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "not SOCKS5"));
+    }
+    let method_count = greeting_prefix[1] as usize;
+    let mut methods = vec![0_u8; method_count];
+    stream.read_exact(&mut methods)?;
+    if !methods.contains(&0x00) {
+        stream.write_all(&[0x05, 0xff])?;
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "SOCKS5 no-auth method not offered",
+        ));
+    }
+    stream.write_all(&[0x05, 0x00])?;
+
+    let mut request_head = [0_u8; 4];
+    stream.read_exact(&mut request_head)?;
+    let extra_len = match request_head[3] {
+        0x01 => 6,
+        0x03 => {
+            let mut len = [0_u8; 1];
+            stream.read_exact(&mut len)?;
+            let mut out = Vec::with_capacity(2 + method_count + 5 + len[0] as usize + 2);
+            out.extend_from_slice(&greeting_prefix);
+            out.extend_from_slice(&methods);
+            out.extend_from_slice(&request_head);
+            out.push(len[0]);
+            let mut rest = vec![0_u8; len[0] as usize + 2];
+            stream.read_exact(&mut rest)?;
+            out.extend_from_slice(&rest);
+            return Ok(out);
+        }
+        0x04 => 18,
+        _ => {
+            let _ = write_socks5_reply(stream, 0x08);
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported SOCKS5 address type",
+            ));
+        }
+    };
+    let mut out = Vec::with_capacity(2 + method_count + 4 + extra_len);
+    out.extend_from_slice(&greeting_prefix);
+    out.extend_from_slice(&methods);
+    out.extend_from_slice(&request_head);
+    let mut rest = vec![0_u8; extra_len];
+    stream.read_exact(&mut rest)?;
+    out.extend_from_slice(&rest);
+    Ok(out)
+}
+
+fn socks_destination_socket_addr(
+    event: &NetworkEvent,
+    timeout: Duration,
+) -> io::Result<SocketAddr> {
+    match event {
+        NetworkEvent::SocksConnect {
+            target: SocksDestination::Host { host, port },
+            ..
+        } => resolve_host_port(host, *port, timeout),
+        NetworkEvent::SocksConnect {
+            target: SocksDestination::Ip(endpoint),
+            ..
+        } => Ok(SocketAddr::new(endpoint.ip, endpoint.port)),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a SOCKS event",
+        )),
+    }
+}
+
+fn socks_status_for_parse_error(request_bytes: &[u8]) -> u8 {
+    if request_bytes.len() >= 2 {
+        let request_offset = 2 + request_bytes[1] as usize;
+        if request_bytes.len() > request_offset + 3 {
+            let command = request_bytes[request_offset + 1];
+            let address_type = request_bytes[request_offset + 3];
+            if command != 0x01 {
+                return 0x07;
+            }
+            if !matches!(address_type, 0x01 | 0x03 | 0x04) {
+                return 0x08;
+            }
+        }
+    }
+    0x01
+}
+
+fn socks_status_for_io_error(error: &io::Error) -> u8 {
+    match error.kind() {
+        io::ErrorKind::ConnectionRefused => 0x05,
+        io::ErrorKind::TimedOut => 0x04,
+        io::ErrorKind::AddrNotAvailable | io::ErrorKind::NotFound => 0x04,
+        _ => 0x01,
+    }
+}
+
+fn write_socks5_reply(stream: &mut TcpStream, status: u8) -> io::Result<()> {
+    stream.write_all(&[0x05, status, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+}
+
 fn handle_http_proxy_stream(
     mut client: TcpStream,
     config: &HttpProxyProofConfig,
@@ -103,7 +306,14 @@ fn handle_http_proxy_stream(
     match event {
         NetworkEvent::HttpRequest { ref origin, .. } => {
             let destination = resolve_host_port(&origin.host, origin.port, config.connect_timeout)?;
-            let mut upstream = connect_allowed_tcp(&event, &decision, destination, config)?;
+            let mut upstream = connect_allowed_tcp(
+                &event,
+                &decision,
+                destination,
+                config.connect_timeout,
+                Frontend::HttpProxy,
+                config.sandbox_id.clone(),
+            )?;
             let rewritten = rewrite_http_request_for_origin(head)?;
             upstream.write_all(&rewritten)?;
             upstream.write_all(tail)?;
@@ -111,7 +321,14 @@ fn handle_http_proxy_stream(
         }
         NetworkEvent::HttpsConnect { ref host, port, .. } => {
             let destination = resolve_host_port(host, port, config.connect_timeout)?;
-            let mut upstream = connect_allowed_tcp(&event, &decision, destination, config)?;
+            let mut upstream = connect_allowed_tcp(
+                &event,
+                &decision,
+                destination,
+                config.connect_timeout,
+                Frontend::HttpProxy,
+                config.sandbox_id.clone(),
+            )?;
             client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
             upstream.write_all(tail)?;
             tunnel_bidirectional(client, upstream)
@@ -168,18 +385,20 @@ fn connect_allowed_tcp(
     event: &NetworkEvent,
     decision: &Decision,
     destination: SocketAddr,
-    config: &HttpProxyProofConfig,
+    connect_timeout: Duration,
+    frontend: Frontend,
+    sandbox_id: SandboxId,
 ) -> io::Result<TcpStream> {
     let request = TcpEgressRequest {
         context: EgressContext {
-            sandbox_id: config.sandbox_id.clone(),
-            frontend: Frontend::HttpProxy,
+            sandbox_id,
+            frontend,
             decision: decision.clone(),
             attribution: event_attribution(event),
         },
         source: None,
         destination: TransportEndpoint::from(destination),
-        connect_timeout: Some(config.connect_timeout),
+        connect_timeout: Some(connect_timeout),
     };
     if !request.context.is_allowed() {
         return Err(io::Error::new(
@@ -187,7 +406,7 @@ fn connect_allowed_tcp(
             "policy denied host egress",
         ));
     }
-    TcpStream::connect_timeout(&destination, config.connect_timeout)
+    TcpStream::connect_timeout(&destination, connect_timeout)
 }
 
 fn event_attribution(event: &NetworkEvent) -> Attribution {
@@ -467,7 +686,7 @@ fn parse_socks_address(request: &[u8]) -> Result<(SocksDestination, usize), Prox
 #[cfg(test)]
 mod tests {
     use super::*;
-    use foxprox_core::{PolicyRule, PortRange, Protocol, RuleEffect, SocksDestination};
+    use foxprox_core::{Cidr, PolicyRule, PortRange, Protocol, RuleEffect, SocksDestination};
     use std::io::{Read, Write};
     use std::net::{Shutdown, TcpListener};
 
@@ -691,6 +910,147 @@ mod tests {
         assert!(response.ends_with("hello"));
         proxy_thread.join().unwrap();
         origin_thread.join().unwrap();
+    }
+
+    #[test]
+    fn proof_socks5_connect_tunnels_after_policy_allow() {
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin_addr = origin.local_addr().unwrap();
+        let origin_thread = thread::spawn(move || {
+            let (mut stream, _) = origin.accept().unwrap();
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(&request, b"ping");
+            stream.write_all(b"pong").unwrap();
+        });
+
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let mut config = Socks5ProxyProofConfig::new(sandbox_id(), proxy_addr);
+        config.policy.rules.push(allow_rule(
+            "allow-socks-localhost",
+            Protocol::Socks,
+            "localhost",
+            origin_addr.port(),
+        ));
+        let proxy_thread = thread::spawn(move || {
+            let (stream, _) = proxy.accept().unwrap();
+            handle_socks5_proxy_stream(stream, &config).unwrap();
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).unwrap();
+        client.write_all(&[0x05, 0x01, 0x00]).unwrap();
+        let mut method = [0_u8; 2];
+        client.read_exact(&mut method).unwrap();
+        assert_eq!(method, [0x05, 0x00]);
+        let mut connect = vec![0x05, 0x01, 0x00, 0x03, 9];
+        connect.extend_from_slice(b"localhost");
+        connect.extend_from_slice(&origin_addr.port().to_be_bytes());
+        client.write_all(&connect).unwrap();
+        let mut reply = [0_u8; 10];
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(reply[1], 0x00);
+        client.write_all(b"ping").unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut tunneled = [0_u8; 4];
+        client.read_exact(&mut tunneled).unwrap();
+        assert_eq!(&tunneled, b"pong");
+        proxy_thread.join().unwrap();
+        origin_thread.join().unwrap();
+    }
+
+    #[test]
+    fn proof_socks5_connect_denies_by_default() {
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let config = Socks5ProxyProofConfig::new(sandbox_id(), proxy_addr);
+        let proxy_thread = thread::spawn(move || {
+            let (stream, _) = proxy.accept().unwrap();
+            handle_socks5_proxy_stream(stream, &config).unwrap();
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).unwrap();
+        client.write_all(&[0x05, 0x01, 0x00]).unwrap();
+        let mut method = [0_u8; 2];
+        client.read_exact(&mut method).unwrap();
+        assert_eq!(method, [0x05, 0x00]);
+        let mut connect = vec![0x05, 0x01, 0x00, 0x03, 9];
+        connect.extend_from_slice(b"localhost");
+        connect.extend_from_slice(&443_u16.to_be_bytes());
+        client.write_all(&connect).unwrap();
+        let mut reply = [0_u8; 10];
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(reply[1], 0x02);
+        proxy_thread.join().unwrap();
+    }
+
+    #[test]
+    fn proof_socks5_udp_associate_returns_unsupported_command() {
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let config = Socks5ProxyProofConfig::new(sandbox_id(), proxy_addr);
+        let proxy_thread = thread::spawn(move || {
+            let (stream, _) = proxy.accept().unwrap();
+            assert!(handle_socks5_proxy_stream(stream, &config).is_err());
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).unwrap();
+        client.write_all(&[0x05, 0x01, 0x00]).unwrap();
+        let mut method = [0_u8; 2];
+        client.read_exact(&mut method).unwrap();
+        assert_eq!(method, [0x05, 0x00]);
+        client
+            .write_all(&[0x05, 0x03, 0x00, 0x01, 127, 0, 0, 1, 0, 53])
+            .unwrap();
+        let mut reply = [0_u8; 10];
+        client.read_exact(&mut reply).unwrap();
+        assert_eq!(reply[1], 0x07);
+        proxy_thread.join().unwrap();
+    }
+
+    #[test]
+    fn proof_socks5_allowed_but_unreachable_returns_failure() {
+        let unused = TcpListener::bind("127.0.0.1:0").unwrap();
+        let unused_port = unused.local_addr().unwrap().port();
+        drop(unused);
+
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let mut config = Socks5ProxyProofConfig::new(sandbox_id(), proxy_addr);
+        config.policy.rules.push(
+            PolicyRule::new("allow-unused-loopback", RuleEffect::Allow)
+                .with_protocol(Protocol::Socks)
+                .with_destination_cidr(Cidr::v4(Ipv4Addr::new(127, 0, 0, 1), 32).unwrap())
+                .with_destination_ports(PortRange::single(unused_port)),
+        );
+        let proxy_thread = thread::spawn(move || {
+            let (stream, _) = proxy.accept().unwrap();
+            assert!(handle_socks5_proxy_stream(stream, &config).is_err());
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).unwrap();
+        client.write_all(&[0x05, 0x01, 0x00]).unwrap();
+        let mut method = [0_u8; 2];
+        client.read_exact(&mut method).unwrap();
+        assert_eq!(method, [0x05, 0x00]);
+        client
+            .write_all(&[
+                0x05,
+                0x01,
+                0x00,
+                0x01,
+                127,
+                0,
+                0,
+                1,
+                (unused_port >> 8) as u8,
+                unused_port as u8,
+            ])
+            .unwrap();
+        let mut reply = [0_u8; 10];
+        client.read_exact(&mut reply).unwrap();
+        assert_ne!(reply[1], 0x00);
+        proxy_thread.join().unwrap();
     }
 
     #[test]
