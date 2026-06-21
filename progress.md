@@ -343,3 +343,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * pending transaction memory remains bounded by both capacity and timeout.
 * Audit evidence: not applicable in this commit; transaction outcomes feed future DNS audit events.
 * Residual risk: DNS handler wiring to cache insertion, response-code audit mapping, upstream retry behavior, and response synthesis remain future work.
+* Commit hash: 16ce278 correlate dns responses before attribution.
