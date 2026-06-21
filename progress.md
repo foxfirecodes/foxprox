@@ -59,3 +59,15 @@
 - Interpretation: Milestone 0 environment capability is now reproducible by a local harness command, although it uses shell/ip as the setup action rather than the future `foxproxsetup` binary and does not perform fd handoff.
 - Next verification gap: implement a real setup-helper binary or integration crate that performs TUN setup and fd handoff without shelling out to `ip`.
 - Commit hash after commit: pending.
+
+## 2026-06-21T00:27:00Z — TUN smoke commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs progress.md && git commit -m "Add bwrap TUN smoke harness command"`
+- Environment assumptions: smoke command and test output above were verified before commit.
+- Expected result: commit captures the environment-dependent smoke command.
+- Observed result: commit `5307d0d` created with 3 files changed.
+- Relevant output excerpt: `[harness-lab 5307d0d] Add bwrap TUN smoke harness command`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: the bwrap/TUN smoke checkpoint is preserved.
+- Next verification gap: real setup helper and TUN fd handoff.
+- Commit hash after commit: 5307d0d.
