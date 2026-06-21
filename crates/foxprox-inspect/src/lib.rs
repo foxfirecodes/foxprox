@@ -50,6 +50,27 @@ impl DnsAttributionCache {
         }
     }
 
+    /// Parse a DNS response message and record A/AAAA answer addresses for
+    /// later transparent flow attribution. Returns the number of recorded
+    /// address answers.
+    pub fn record_response(
+        &mut self,
+        response: &[u8],
+        observed_at: SystemTime,
+    ) -> Result<usize, DnsResponseError> {
+        let records = parse_dns_response_records(response)?;
+        let count = records.len();
+        for record in records {
+            self.record_answer(
+                record.hostname,
+                [record.address],
+                observed_at,
+                Duration::from_secs(u64::from(record.ttl_seconds)),
+            );
+        }
+        Ok(count)
+    }
+
     /// Enrich TCP/UDP flow attempts with DNS hostname attribution when the
     /// destination IP has a non-expired DNS answer. Existing attribution is not
     /// overwritten because HTTP Host, TLS SNI, and explicit proxy metadata have
@@ -94,6 +115,163 @@ struct DnsAttributionEntry {
     address: IpAddr,
     attribution: HostnameAttribution,
     expires_at: SystemTime,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DnsResponseRecord {
+    hostname: String,
+    address: IpAddr,
+    ttl_seconds: u32,
+}
+
+/// DNS response parse failures. Callers should treat these as fail-closed for
+/// attribution-sensitive policy.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DnsResponseError {
+    HeaderTooShort { actual: usize },
+    NotAResponse,
+    Truncated,
+    CompressionPointerLoop,
+    InvalidName,
+    InvalidQuestion,
+    InvalidAnswer,
+}
+
+impl std::fmt::Display for DnsResponseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HeaderTooShort { actual } => write!(f, "dns-response-header-too-short: {actual}"),
+            Self::NotAResponse => f.write_str("dns-message-is-not-response"),
+            Self::Truncated => f.write_str("dns-response-truncated"),
+            Self::CompressionPointerLoop => f.write_str("dns-compression-pointer-loop"),
+            Self::InvalidName => f.write_str("dns-name-invalid"),
+            Self::InvalidQuestion => f.write_str("dns-question-invalid"),
+            Self::InvalidAnswer => f.write_str("dns-answer-invalid"),
+        }
+    }
+}
+
+impl std::error::Error for DnsResponseError {}
+
+fn parse_dns_response_records(response: &[u8]) -> Result<Vec<DnsResponseRecord>, DnsResponseError> {
+    if response.len() < 12 {
+        return Err(DnsResponseError::HeaderTooShort {
+            actual: response.len(),
+        });
+    }
+    let flags = u16::from_be_bytes([response[2], response[3]]);
+    if flags & 0x8000 == 0 {
+        return Err(DnsResponseError::NotAResponse);
+    }
+
+    let question_count = usize::from(u16::from_be_bytes([response[4], response[5]]));
+    let answer_count = usize::from(u16::from_be_bytes([response[6], response[7]]));
+    let mut offset = 12;
+
+    for _ in 0..question_count {
+        let (_, next_offset) = parse_dns_name(response, offset)?;
+        if next_offset + 4 > response.len() {
+            return Err(DnsResponseError::InvalidQuestion);
+        }
+        offset = next_offset + 4;
+    }
+
+    let mut records = Vec::new();
+    for _ in 0..answer_count {
+        let (hostname, next_offset) = parse_dns_name(response, offset)?;
+        if next_offset + 10 > response.len() {
+            return Err(DnsResponseError::InvalidAnswer);
+        }
+        let record_type = u16::from_be_bytes([response[next_offset], response[next_offset + 1]]);
+        let record_class =
+            u16::from_be_bytes([response[next_offset + 2], response[next_offset + 3]]);
+        let ttl_seconds = u32::from_be_bytes([
+            response[next_offset + 4],
+            response[next_offset + 5],
+            response[next_offset + 6],
+            response[next_offset + 7],
+        ]);
+        let rdata_len = usize::from(u16::from_be_bytes([
+            response[next_offset + 8],
+            response[next_offset + 9],
+        ]));
+        let rdata_offset = next_offset + 10;
+        if rdata_offset + rdata_len > response.len() {
+            return Err(DnsResponseError::Truncated);
+        }
+
+        if record_class == 1 {
+            match (record_type, rdata_len) {
+                (1, 4) => records.push(DnsResponseRecord {
+                    hostname,
+                    address: IpAddr::V4(Ipv4Addr::new(
+                        response[rdata_offset],
+                        response[rdata_offset + 1],
+                        response[rdata_offset + 2],
+                        response[rdata_offset + 3],
+                    )),
+                    ttl_seconds,
+                }),
+                (28, 16) => {
+                    let mut octets = [0_u8; 16];
+                    octets.copy_from_slice(&response[rdata_offset..rdata_offset + 16]);
+                    records.push(DnsResponseRecord {
+                        hostname,
+                        address: IpAddr::V6(Ipv6Addr::from(octets)),
+                        ttl_seconds,
+                    });
+                }
+                _ => {}
+            }
+        }
+        offset = rdata_offset + rdata_len;
+    }
+
+    Ok(records)
+}
+
+fn parse_dns_name(response: &[u8], start: usize) -> Result<(String, usize), DnsResponseError> {
+    let mut labels = Vec::new();
+    let mut offset = start;
+    let mut next_offset = None;
+    let mut jumps = 0_u8;
+
+    loop {
+        if offset >= response.len() {
+            return Err(DnsResponseError::Truncated);
+        }
+        let length = response[offset];
+        if length & 0xc0 == 0xc0 {
+            if offset + 1 >= response.len() {
+                return Err(DnsResponseError::Truncated);
+            }
+            let pointer = usize::from(u16::from_be_bytes([length & 0x3f, response[offset + 1]]));
+            if next_offset.is_none() {
+                next_offset = Some(offset + 2);
+            }
+            jumps = jumps.saturating_add(1);
+            if jumps > 16 {
+                return Err(DnsResponseError::CompressionPointerLoop);
+            }
+            offset = pointer;
+            continue;
+        }
+        if length & 0xc0 != 0 {
+            return Err(DnsResponseError::InvalidName);
+        }
+        offset += 1;
+        if length == 0 {
+            return Ok((labels.join("."), next_offset.unwrap_or(offset)));
+        }
+        let length = usize::from(length);
+        if length > 63 || offset + length > response.len() {
+            return Err(DnsResponseError::Truncated);
+        }
+        let label = std::str::from_utf8(&response[offset..offset + length])
+            .map_err(|_| DnsResponseError::InvalidName)?;
+        labels.push(label.to_ascii_lowercase());
+        offset += length;
+    }
 }
 
 /// Plaintext HTTP request parsing errors.
@@ -544,6 +722,31 @@ mod tests {
         parse_ipv4_packet(&context(), &packet).unwrap()
     }
 
+    fn dns_a_response(hostname: &str, address: [u8; 4], ttl_seconds: u32) -> Vec<u8> {
+        let mut response = vec![
+            0x12, 0x34, // ID
+            0x81, 0x80, // standard response, no error
+            0x00, 0x01, // QDCOUNT
+            0x00, 0x01, // ANCOUNT
+            0x00, 0x00, // NSCOUNT
+            0x00, 0x00, // ARCOUNT
+        ];
+        for label in hostname.split('.') {
+            response.push(label.len() as u8);
+            response.extend_from_slice(label.as_bytes());
+        }
+        response.push(0);
+        response.extend_from_slice(&1_u16.to_be_bytes()); // QTYPE A
+        response.extend_from_slice(&1_u16.to_be_bytes()); // QCLASS IN
+        response.extend_from_slice(&0xc00c_u16.to_be_bytes()); // compressed answer name
+        response.extend_from_slice(&1_u16.to_be_bytes()); // TYPE A
+        response.extend_from_slice(&1_u16.to_be_bytes()); // CLASS IN
+        response.extend_from_slice(&ttl_seconds.to_be_bytes());
+        response.extend_from_slice(&4_u16.to_be_bytes());
+        response.extend_from_slice(&address);
+        response
+    }
+
     fn tls_client_hello(server_name: Option<&str>) -> Vec<u8> {
         let mut body = Vec::new();
         body.extend_from_slice(&[0x03, 0x03]);
@@ -628,6 +831,50 @@ mod tests {
             evaluation.audit.hostname_confidence,
             Some(AttributionConfidence::Medium)
         );
+    }
+
+    #[test]
+    fn dns_response_records_answer_and_enriches_later_tcp_flow() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_000);
+        let mut cache = DnsAttributionCache::new();
+        let recorded = cache
+            .record_response(&dns_a_response("Example.COM", [93, 184, 216, 34], 30), now)
+            .unwrap();
+
+        let enriched = cache.enrich_event(tcp_connect_event(), now + Duration::from_secs(1));
+        let evaluation = domain_policy().evaluate(&enriched);
+
+        assert_eq!(recorded, 1);
+        assert_eq!(cache.len(), 1);
+        assert_eq!(enriched.hostname(), Some("example.com"));
+        assert_eq!(
+            evaluation.decision,
+            PolicyDecision::Allow {
+                rule_id: Some("allow-example-https".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn dns_response_rejects_compression_pointer_loop() {
+        let response = vec![
+            0x12, 0x34, 0x81, 0x80, // header id + flags
+            0x00, 0x00, // no questions
+            0x00, 0x01, // one answer
+            0x00, 0x00, 0x00, 0x00, // no authority/additional
+            0xc0, 0x0c, // answer name points to itself
+            0x00, 0x01, 0x00, 0x01, // A IN
+            0x00, 0x00, 0x00, 0x3c, // TTL
+            0x00, 0x04, 93, 184, 216, 34,
+        ];
+        let mut cache = DnsAttributionCache::new();
+
+        let error = cache
+            .record_response(&response, SystemTime::UNIX_EPOCH)
+            .unwrap_err();
+
+        assert_eq!(error, DnsResponseError::CompressionPointerLoop);
+        assert!(cache.is_empty());
     }
 
     #[test]

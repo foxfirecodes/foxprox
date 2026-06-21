@@ -285,3 +285,25 @@
 - What failed or surprised the agent: SOCKS5 IP-address requests can still provide a host string for audit, but domain policy should rely on domain-form requests or later DNS attribution rather than treating IP strings as domain evidence.
 - What remains unproven: SOCKS greeting negotiation, TCP stream forwarding, proxy response generation, authentication rejection, resource limits, and malformed request integration with a live proxy listener are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — DNS response bytes → cache → flow attribution slice
+
+- Slice attempted: parse DNS response answer bytes into DNS attribution cache entries and prove a later transparent TCP flow receives hostname attribution from the parsed answer.
+- Why next: DNS queries and manual cache insertion are proven, but alpha DNS correlation still lacks the real response-to-cache boundary needed for transparent hostname attribution.
+- Verification plan: add DNS response answer parsing with compressed names for A/AAAA answers in `foxprox-inspect`, expose a cache `record_response` method, verify parsed response enrichment drives domain policy, verify malformed compression fails closed, then run formatting, clippy, focused tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — DNS response bytes → cache → flow attribution
+
+- Slice attempted: parse DNS response answer bytes into attribution cache entries and use them to enrich a later transparent TCP flow.
+- Why next: manual DNS cache insertion proved the cache-to-policy boundary, but real DNS response parsing was still missing from the DNS-to-flow correlation path.
+- What changed: added `DnsAttributionCache::record_response`, DNS response answer parsing for A/AAAA IN records, compressed-name handling, TTL-based cache expiry, and fail-closed errors for malformed DNS response structure and compression pointer loops.
+- Verification:
+  - `cargo fmt --check` initially failed on new DNS response parser formatting; `cargo fmt` was run.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 4 `foxprox-config` tests, 10 `foxprox-core` tests, 18 `foxprox-inspect` tests, 10 `foxprox-packet` tests, and 0 doc tests.
+  - Focused checks passed: `cargo test -p foxprox-inspect dns_response_records_answer_and_enriches_later_tcp_flow` and `cargo test -p foxprox-inspect dns_response_rejects_compression_pointer_loop`.
+  - `cargo fmt --check` passed after focused checks.
+- What failed or surprised the agent: DNS compression pointers need loop protection even for this narrow response parser; the parser caps pointer jumps and treats loops as attribution-sensitive parse failures.
+- What remains unproven: upstream DNS forwarding, DNS resolver socket behavior, CNAME chain attribution, cache eviction limits, negative responses, response/query transaction matching, and live UDP DNS forwarding are still absent.
+- Commit: this commit.

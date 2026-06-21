@@ -52,3 +52,7 @@ Policy port rules cannot depend solely on IP endpoints. Explicit proxy events ma
 ## 2026-06-21 — SOCKS5 CONNECT parsing should expose both host string and IP when available
 
 Domain-form SOCKS requests feed hostname policy directly, while IP-form requests should preserve destination IP for audit/IP policy. Do not infer domain attribution from IP-form requests.
+
+## 2026-06-21 — DNS response parsing needs compression loop protection
+
+DNS answer names commonly use compression pointers, so response parsing is necessary for realistic cache population. Pointer following must be bounded and fail closed on loops before using any hostname attribution.
