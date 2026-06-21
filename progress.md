@@ -131,5 +131,5 @@
   - `crates/foxprox-dns/Cargo.toml`
   - `crates/foxprox-dns/src/lib.rs`
   - `progress.md`
-- Commit hash after commit: pending.
+- Commit hash after commit: 3ca2ed2.
 - Remaining boundary risks: upstream DNS forwarding, answer parsing/caching from real upstream responses, async DNS service IO, TCP DNS, and DoH/DoT detection remain.
