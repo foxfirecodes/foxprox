@@ -408,3 +408,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * transparent requests still retain both destination endpoint and requested-port metadata.
 * Audit evidence: unit tests assert requested-port preservation in policy-derived audit events.
 * Residual risk: audit serialization/sinks and DNS/flow-specific audit builder coverage remain future work.
+* Commit hash: 3477db0 preserve requested port in audit context.
