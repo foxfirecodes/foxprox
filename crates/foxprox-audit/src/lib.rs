@@ -172,7 +172,7 @@ fn destination_string(event: &NormalizedEvent) -> Option<String> {
         NormalizedEvent::TcpConnectAttempt(event) => Some(event.destination.to_string()),
         NormalizedEvent::UdpFlowAttempt(event) => Some(event.destination.to_string()),
         NormalizedEvent::DnsQuery(event) => Some(event.destination.to_string()),
-        NormalizedEvent::HttpRequest(event) => Some(format!("{}:{}", event.host, event.port)),
+        NormalizedEvent::HttpRequest(event) => Some(format_destination(&event.host, event.port)),
         NormalizedEvent::HttpsConnect(event) => Some(format_destination(&event.host, event.port)),
         NormalizedEvent::TlsClientHello(event) => Some(event.destination.to_string()),
         NormalizedEvent::SocksConnect(event) => {

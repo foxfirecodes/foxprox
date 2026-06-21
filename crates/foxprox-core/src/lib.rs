@@ -381,7 +381,7 @@ pub struct HttpRequest {
     pub frontend: FrontendKind,
     pub method: HttpMethod,
     pub scheme: HttpScheme,
-    pub host: Hostname,
+    pub host: DestinationHost,
     pub port: u16,
     pub path_query: String,
 }
@@ -570,7 +570,8 @@ impl NormalizedEvent {
             Self::IcmpMessage(event) => Some(event.destination),
             Self::HttpsConnect(event) => event.host.ip(),
             Self::SocksConnect(event) => event.destination.ip(),
-            Self::HttpRequest(_) | Self::UnsupportedNetworkEvent(_) => None,
+            Self::HttpRequest(event) => event.host.ip(),
+            Self::UnsupportedNetworkEvent(_) => None,
         }
     }
 
@@ -590,7 +591,7 @@ impl NormalizedEvent {
     pub fn explicit_hostname(&self) -> Option<&Hostname> {
         match self {
             Self::DnsQuery(event) => Some(&event.hostname),
-            Self::HttpRequest(event) => Some(&event.host),
+            Self::HttpRequest(event) => event.host.hostname(),
             Self::HttpsConnect(event) => event.host.hostname(),
             Self::TlsClientHello(event) => event.sni.as_ref(),
             Self::SocksConnect(event) => event.destination.hostname(),

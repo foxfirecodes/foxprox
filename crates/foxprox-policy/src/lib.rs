@@ -284,7 +284,7 @@ mod tests {
             frontend: FrontendKind::Tun,
             method: HttpMethod::Get,
             scheme: HttpScheme::Http,
-            host: Hostname::new("www.example.com").unwrap(),
+            host: DestinationHost::Hostname(Hostname::new("www.example.com").unwrap()),
             port: 80,
             path_query: "/index.html".to_string(),
         });

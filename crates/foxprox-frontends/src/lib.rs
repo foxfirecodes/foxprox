@@ -173,12 +173,6 @@ fn parse_http_request_inner(
         (HttpScheme::Http, host, port, target.to_string())
     };
 
-    let DestinationHost::Hostname(host) = host else {
-        return Err(FrontendError::MalformedHttp(
-            "HTTP host must be hostname for alpha policy",
-        ));
-    };
-
     Ok(NormalizedEvent::HttpRequest(HttpRequest {
         sandbox_id,
         frontend,
@@ -331,7 +325,7 @@ mod tests {
         let NormalizedEvent::HttpRequest(request) = event else {
             panic!("expected HTTP request");
         };
-        assert_eq!(request.host.as_str(), "example.com");
+        assert_eq!(request.host.hostname().unwrap().as_str(), "example.com");
         assert_eq!(request.port, 8080);
         assert_eq!(request.path_query, "/a?b=c");
     }

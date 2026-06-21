@@ -133,3 +133,22 @@
   - `progress.md`
 - Commit hash after commit: 3ca2ed2.
 - Remaining boundary risks: upstream DNS forwarding, answer parsing/caching from real upstream responses, async DNS service IO, TCP DNS, and DoH/DoT detection remain.
+
+## 2026-06-21 — Boundary objective: widen HTTP origin contract safely
+
+- Boundary under work: HTTP normalized request destination type.
+- Allowed dependency direction: frontend parsing may produce a normalized hostname-or-IP destination; policy/audit consume that normalized type without raw parser structs.
+- Dependency-risk assessment: the initial HTTP contract was too narrow because Host/absolute-URI authorities can be IP literals; forcing hostnames would make IP/port policy paths inconsistent across TCP, HTTP proxy, and SOCKS.
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 38 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Changed files:
+  - `crates/foxprox-core/src/lib.rs`
+  - `crates/foxprox-audit/src/lib.rs`
+  - `crates/foxprox-frontends/src/lib.rs`
+  - `crates/foxprox-policy/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Commit hash after commit: pending.
+- Remaining boundary risks: HTTP path/method matching is still not represented in rule matchers and should be added before relying on path-aware policy.

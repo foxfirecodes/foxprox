@@ -21,3 +21,7 @@
 
 - DNS bypass detection belongs in normalized DNS metadata (`direct_external`) rather than in policy looking at raw UDP payloads; this keeps direct-external DNS fail-closed without packet leaks.
 - A denied DNS response can be synthesized from the original question at the DNS boundary while audit/policy still operate only on `DnsQuery` and decisions.
+
+## 2026-06-21 — HTTP origin contract widened
+
+- The first `HttpRequest` contract was too narrow because it required `Hostname`; explicit and transparent HTTP requests can target IP literals, so the normalized contract now uses `DestinationHost` to preserve IP/port policy support without frontend leakage.
