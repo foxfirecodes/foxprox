@@ -116,3 +116,16 @@
 - Commit hash when committed: previous integration planning slice committed as `3e817e5`; line audit commit pending.
 - Remaining risks: audit line format is intentionally simple and not yet a stable JSON schema; no rotating file writer or async backpressure strategy is implemented.
 - Exact next step: commit audit sink slice, then run final workspace verification and summarize remaining alpha gaps.
+
+## 2026-06-21T17:14:20Z
+- Current objective: final workspace verification after verified alpha-kernel slices.
+- Files changed: `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+  - `git status --short`
+- Observed result: all verification passed; 35 core tests, 3 integration tests, and 2 runtime tests passed. `git status --short` was clean before this final progress entry.
+- Commit hash when committed: previous audit sink slice committed as `7ebe3f0`; final ledger commit pending.
+- Remaining risks: alpha is not complete end-to-end. Missing pieces include real TUN creation/configuration, fd handoff, `foxproxsetup`, smoltcp TCP bridging, real UDP/DNS egress, HTTP/SOCKS listener loops, bwrap execution, namespace integration tests, fuzz targets, and runtime network smoke tests.
+- Exact next step: implement the first real OS-facing integration slice: `foxproxsetup`/device crate that can create/configure a TUN in a controlled namespace, then verify with a sandbox-visible packet log or ICMP ping proof.
