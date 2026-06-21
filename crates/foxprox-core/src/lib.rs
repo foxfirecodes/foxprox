@@ -9,6 +9,7 @@ pub mod attribution;
 pub mod audit;
 pub mod config;
 pub mod dns;
+pub mod flow;
 pub mod http;
 pub mod packet;
 pub mod policy;
@@ -24,6 +25,10 @@ pub use config::{Cidr, ConfigError, HostMatcher, PolicyConfig, PolicyRule, RuleA
 pub use dns::{
     parse_dns_address_response, parse_dns_query, DnsAddressResponseMetadata, DnsAttributionCache,
     DnsAttributionEntry, DnsParseError, DnsQueryMetadata, DnsQueryType, ObserveOutcome,
+};
+pub use flow::{
+    UdpFlowClass, UdpFlowEntry, UdpFlowKey, UdpFlowObserveOutcome, UdpFlowObserveStatus,
+    UdpFlowTable, UdpFlowTimeouts,
 };
 pub use http::{
     parse_http_request_head, parse_https_connect_head, HttpParseError, HttpRequestMetadata,

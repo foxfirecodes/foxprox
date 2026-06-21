@@ -273,3 +273,26 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: unit tests assert the expanded audit schema preserves HTTP/source metadata and denial details.
 * Residual risk: audit serialization/sink implementation, DNS query type fields, flow byte/duration accounting, and lifecycle/error event builders remain future audit work.
 * Commit hash: 380353f preserve http source audit context.
+
+## 2026-06-21 - UDP pseudo-flow timeout and capacity foundation
+
+* Invariant under work: UDP/QUIC/DNS pseudo-flow tracking must use explicit per-class timeouts and fixed capacity so hostile datagram traffic cannot create unbounded memory growth or stale flow state.
+* Threat or failure mode addressed: unbounded UDP mapping tables or stale QUIC/DNS flows could exhaust broker memory, retain obsolete policy decisions, or misroute replies after attribution has expired.
+* Planned verification: add flow table tests for DNS/generic/QUIC timeout selection, byte counters and last-seen updates, expiry, oldest-flow eviction at capacity, zero-capacity rejection, and deterministic flow keys; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - UDP pseudo-flow timeout and capacity foundation results
+
+* Tests added/updated:
+  * DNS, generic UDP, QUIC candidate, and NTP-like flows receive explicit configurable timeout classes.
+  * existing flows update last-seen time, expiry, class, and saturating byte counters without resetting creation time.
+  * expired flows are purged deterministically before accepting new flows.
+  * capacity is fixed, oldest flows are evicted when full, and zero-capacity tables reject new flows without allocation growth.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` found one incorrect test expectation for QUIC expiry after an update.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 67 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * UDP flow state is capacity-bounded and timeout-bounded by class.
+  * QUIC candidate state lives longer than generic UDP by default, while DNS/NTP-like flows expire quickly.
+  * byte counters saturate instead of overflowing.
+* Audit evidence: not applicable in this commit; flow expiration/byte counts feed future UDP audit events.
+* Residual risk: actual UDP socket forwarding, reply routing, audit emission for flow creation/expiration, and policy-decision caching are not implemented yet.

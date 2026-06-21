@@ -45,3 +45,7 @@ HTTP path/method rules should not act as wildcards when request metadata is abse
 ## 2026-06-21 - Audit schema must follow policy dimensions
 
 Whenever policy gains a new security decision dimension, audit context needs a matching field or builder path. HTTP method/path decisions are not reviewable if audit records only retain host and destination metadata.
+
+## 2026-06-21 - UDP flow state requires independent bounds
+
+UDP pseudo-flow tracking needs both capacity limits and protocol-class timeouts. QUIC, DNS, generic UDP, and NTP-like traffic have materially different safe lifetimes, and byte counters should saturate rather than overflow under hostile traffic.
