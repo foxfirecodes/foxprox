@@ -316,3 +316,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: resolver backing data is not yet configured, denied DNS answers are not represented, and synthesized DNS packets are not yet written back through TUN/UDP packet synthesis.
 - Exact next step: commit DNS response synthesis, then add a static broker DNS resolver component that maps parsed DNS queries to synthesized allowed/empty responses and cache observations.
+
+## 2026-06-21T23:31:20Z
+- Current objective: add a static broker DNS resolver component that maps parsed queries to synthesized responses without arbitrary UDP egress.
+- Files changed: `crates/foxprox-core/src/dns.rs`, `crates/foxprox-core/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on formatting in new resolver tests; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 47 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 13 runtime tests, and 7 setup tests passed. New tests prove a static broker DNS resolver preserves query IDs, returns type-filtered synthesized answers with observations, and returns empty no-observation responses for unknown hosts.
+- Commit hash when committed: pending.
+- Remaining risks: static resolver records are in-memory only; DNS response packets are not yet wrapped in UDP/IPv4 and written back through the TUN session.
+- Exact next step: commit static DNS resolver, then add IPv4 UDP response synthesis so broker DNS answers can be written back through TUN with valid IP/UDP checksums.

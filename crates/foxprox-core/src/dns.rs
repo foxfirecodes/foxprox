@@ -103,6 +103,60 @@ pub struct DnsQuestion {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrokerDnsResponse {
+    pub packet: Vec<u8>,
+    pub observation: Option<DnsObservation>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaticDnsRecord {
+    pub hostname: Hostname,
+    pub addresses: Vec<IpAddr>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaticDnsResolver {
+    ttl_secs: u32,
+    records: Vec<StaticDnsRecord>,
+}
+
+impl StaticDnsResolver {
+    pub fn new(ttl_secs: u32) -> Self {
+        Self {
+            ttl_secs,
+            records: Vec::new(),
+        }
+    }
+
+    pub fn insert(&mut self, hostname: Hostname, addresses: Vec<IpAddr>) {
+        self.records.push(StaticDnsRecord {
+            hostname,
+            addresses,
+        });
+    }
+
+    pub fn resolve_query_packet(
+        &self,
+        query_packet: &[u8],
+        observed_at_millis: u128,
+    ) -> Result<BrokerDnsResponse, DnsParseError> {
+        let question = parse_dns_query(query_packet)?;
+        let addresses = self
+            .records
+            .iter()
+            .find(|record| record.hostname == question.hostname)
+            .map(|record| record.addresses.as_slice())
+            .unwrap_or(&[]);
+        let packet = synthesize_dns_response(query_packet, addresses, self.ttl_secs)?;
+        let observation = parse_dns_response_observation(&packet, observed_at_millis)?;
+        Ok(BrokerDnsResponse {
+            packet,
+            observation,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DnsParseError {
     TruncatedHeader,
     TruncatedName,
@@ -425,6 +479,38 @@ mod tests {
             parse_dns_query(&build_query(0x0100, 2)),
             Err(DnsParseError::QuestionCountNotOne { count: 2 })
         );
+    }
+
+    #[test]
+    fn static_dns_resolver_returns_synthesized_response_and_observation() {
+        let query = build_query(0x0100, 1);
+        let mut resolver = StaticDnsResolver::new(30);
+        resolver.insert(
+            Hostname::normalize("example.com").unwrap(),
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+        );
+
+        let response = resolver.resolve_query_packet(&query, 100).unwrap();
+
+        assert_eq!(response.packet[0..2], query[0..2]);
+        let observation = response.observation.unwrap();
+        assert_eq!(observation.hostname.as_str(), "example.com");
+        assert_eq!(observation.ttl_millis, 30_000);
+        assert_eq!(
+            observation.addresses,
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
+        );
+    }
+
+    #[test]
+    fn static_dns_resolver_returns_empty_response_for_unknown_host() {
+        let query = build_query(0x0100, 1);
+        let resolver = StaticDnsResolver::new(30);
+
+        let response = resolver.resolve_query_packet(&query, 100).unwrap();
+
+        assert_eq!(&response.packet[6..8], &0u16.to_be_bytes());
+        assert!(response.observation.is_none());
     }
 
     #[test]
