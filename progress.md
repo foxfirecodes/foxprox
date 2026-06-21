@@ -296,3 +296,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * byte counters saturate instead of overflowing.
 * Audit evidence: not applicable in this commit; flow expiration/byte counts feed future UDP audit events.
 * Residual risk: actual UDP socket forwarding, reply routing, audit emission for flow creation/expiration, and policy-decision caching are not implemented yet.
+* Commit hash: 7aa848b bound udp pseudo flow tracking.
