@@ -73,5 +73,5 @@
   - `crates/foxprox-packet/Cargo.toml`
   - `crates/foxprox-packet/src/lib.rs`
   - `progress.md`
-- Commit hash after commit: pending.
+- Commit hash after commit: 9bcbd63.
 - Remaining boundary risks: IPv6, TCP/UDP parsing, smoltcp handoff, production TUN writes, and ICMP policy response behavior remain to be implemented behind adapter contracts.
