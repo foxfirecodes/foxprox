@@ -110,4 +110,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * header scanning is bounded by caller-supplied maximum bytes.
 * Audit evidence: not applicable in this commit; parser output feeds future transparent/proxy HTTP policy events.
 * Residual risk: parser currently handles HTTP/1.x request-head metadata only; chunking/body semantics, header folding policy, IPv6/IP-literal Host support, HTTPS CONNECT parsing, and actual stream buffering remain future frontend work.
-* Commit hash: pending.
+* Commit hash: bed2ddf strict plaintext http attribution parsing.
