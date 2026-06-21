@@ -778,6 +778,7 @@ pub struct PolicyRule {
     pub http_method: HttpMethodMatcher,
     pub http_path: HttpPathMatcher,
     pub minimum_hostname_confidence: HostnameConfidence,
+    pub timeout_override: Option<Duration>,
 }
 
 impl PolicyRule {
@@ -791,6 +792,7 @@ impl PolicyRule {
             http_method: HttpMethodMatcher::Any,
             http_path: HttpPathMatcher::Any,
             minimum_hostname_confidence: HostnameConfidence::Unknown,
+            timeout_override: None,
         }
     }
 

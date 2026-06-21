@@ -292,3 +292,22 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: 71dac67.
 - Remaining boundary risks: production TCP close hooks, UDP expiry scheduler, and stream byte accounting integration remain.
+
+## 2026-06-21 — Boundary objective: policy timeout override contract
+
+- Boundary under work: normalized allow-decision timeout overrides for rule-matched flows.
+- Allowed dependency direction: timeout override is a `foxprox-core` policy contract and `foxprox-config` validates user seconds into typed durations; flow code consumes `AllowDecision` without config strings.
+- Dependency-risk assessment: UDP/QUIC timeout policy can become hard-coded in flow code unless rule-specific overrides are normalized at policy decision time.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: allow rules can now carry typed timeout overrides; config validates nonzero seconds and policy returns the override in `AllowDecision`. All verification passed.
+- Changed files:
+  - `crates/foxprox-core/src/lib.rs`
+  - `crates/foxprox-config/src/lib.rs`
+  - `crates/foxprox-policy/src/lib.rs`
+  - `progress.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 50 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: per-flow storage of timeout override and production expiry scheduling remain.

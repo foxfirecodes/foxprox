@@ -129,7 +129,7 @@ impl PolicyEngine {
             .map(|rule| match rule.action {
                 RuleAction::Allow => PolicyDecision::Allow(AllowDecision {
                     rule_id: Some(rule.id.clone()),
-                    timeout_override: None,
+                    timeout_override: rule.timeout_override,
                     reason: Some("matched allow rule".into()),
                 }),
                 RuleAction::Deny(action) => {
@@ -307,6 +307,33 @@ mod tests {
 
         let decision = PolicyEngine::new(config).decide(&event);
         assert!(decision.is_allowed());
+    }
+
+    #[test]
+    fn allow_rule_can_set_timeout_override() {
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut rule = PolicyRule::allow(RuleId::new("quic-timeout").unwrap());
+        rule.protocol = ProtocolMatcher::Exact(Protocol::QuicCandidate);
+        rule.timeout_override = Some(std::time::Duration::from_secs(240));
+        config.quic_policy = QuicPolicy::AllowCandidates;
+        config.rules.push(rule);
+        let event = NormalizedEvent::UdpFlowAttempt(UdpFlowAttempt {
+            sandbox_id: sandbox(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:41000".parse().unwrap(),
+            destination: "203.0.113.10:443".parse().unwrap(),
+            hostname: None,
+            classification: UdpClassification::QuicCandidate,
+        });
+
+        let decision = PolicyEngine::new(config).decide(&event);
+        let PolicyDecision::Allow(allow) = decision else {
+            panic!("expected allow");
+        };
+        assert_eq!(
+            allow.timeout_override,
+            Some(std::time::Duration::from_secs(240))
+        );
     }
 
     #[test]

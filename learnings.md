@@ -56,3 +56,7 @@
 ## 2026-06-21 — Flow lifecycle audit boundary
 
 - Flow close/expiry audit constructors should accept a normalized input struct, not stack adapter objects or long parameter lists; this keeps lifecycle schema explicit and prevents audit from depending on flow-manager internals.
+
+## 2026-06-21 — Policy timeout override contract
+
+- Timeout overrides belong in the normalized allow decision, not in flow-manager config string handling; this lets UDP/QUIC expiry policy remain a policy output that flow code can cache per flow.

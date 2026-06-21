@@ -134,6 +134,7 @@ pub struct RuleConfig {
     pub http_method: Option<HttpMethodConfig>,
     pub http_path: Option<HttpPathConfig>,
     pub minimum_hostname_confidence: Option<HostnameConfidence>,
+    pub timeout_override_seconds: Option<u64>,
 }
 
 impl RuleConfig {
@@ -160,6 +161,10 @@ impl RuleConfig {
         }
         if let Some(confidence) = self.minimum_hostname_confidence {
             rule.minimum_hostname_confidence = confidence;
+        }
+        if let Some(seconds) = self.timeout_override_seconds {
+            rule.timeout_override =
+                Some(nonzero_duration(seconds, "rules.timeout_override_seconds")?);
         }
         Ok(rule)
     }
@@ -327,6 +332,7 @@ mod tests {
                 http_method: Some(HttpMethodConfig::Exact("GET".to_string())),
                 http_path: Some(HttpPathConfig::Prefix("/api/".to_string())),
                 minimum_hostname_confidence: Some(HostnameConfidence::High),
+                timeout_override_seconds: Some(30),
             }],
         };
 
@@ -350,6 +356,10 @@ mod tests {
             runtime.rules[0].http_path,
             HttpPathMatcher::Prefix("/api/".to_string())
         );
+        assert_eq!(
+            runtime.rules[0].timeout_override,
+            Some(Duration::from_secs(30))
+        );
     }
 
     #[test]
@@ -367,6 +377,7 @@ mod tests {
                 http_method: None,
                 http_path: None,
                 minimum_hostname_confidence: None,
+                timeout_override_seconds: None,
             }],
             ..ConfigDocument::default()
         };
