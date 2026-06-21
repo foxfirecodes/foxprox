@@ -68,6 +68,8 @@ pub struct PolicyRequest {
     pub dns_attribution: Option<Hostname>,
     pub presented_hostname: Option<Hostname>,
     pub icmp: Option<IcmpMessage>,
+    pub http_method: Option<String>,
+    pub http_path_query: Option<String>,
     pub malformed: bool,
     pub hidden_sni: bool,
 }
@@ -84,6 +86,8 @@ impl PolicyRequest {
             dns_attribution: None,
             presented_hostname: None,
             icmp: None,
+            http_method: None,
+            http_path_query: None,
             malformed: false,
             hidden_sni: false,
         }
@@ -106,6 +110,16 @@ impl PolicyRequest {
 
     pub fn with_presented_hostname(mut self, hostname: Hostname) -> Self {
         self.presented_hostname = Some(hostname);
+        self
+    }
+
+    pub fn with_http_metadata(
+        mut self,
+        method: impl Into<String>,
+        path_query: impl Into<String>,
+    ) -> Self {
+        self.http_method = Some(method.into());
+        self.http_path_query = Some(path_query.into());
         self
     }
 
@@ -187,7 +201,11 @@ fn first_matching_rule(config: &PolicyConfig, request: &PolicyRequest) -> Option
     config
         .rules
         .iter()
-        .find(|rule| rule.matches_protocol(request.protocol) && destination_matches(rule, request))
+        .find(|rule| {
+            rule.matches_protocol(request.protocol)
+                && destination_matches(rule, request)
+                && request_matches(rule, request)
+        })
         .map(|rule| action_to_decision(rule.action, Some(rule.id.clone()), DenialReason::RuleDeny))
 }
 
@@ -209,6 +227,25 @@ fn destination_matches(rule: &PolicyRule, request: &PolicyRequest) -> bool {
                     .is_some_and(|hostname| host.matches(hostname))
         }
     }
+}
+
+fn request_matches(rule: &PolicyRule, request: &PolicyRequest) -> bool {
+    if let Some(expected) = &rule.request.http_method {
+        if request.http_method.as_deref() != Some(expected.as_str()) {
+            return false;
+        }
+    }
+
+    if let Some(prefix) = &rule.request.http_path_prefix {
+        let Some(path_query) = &request.http_path_query else {
+            return false;
+        };
+        if !path_query.starts_with(prefix) {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn port_matches(expected: Option<u16>, actual: Option<u16>) -> bool {
@@ -559,6 +596,7 @@ mod tests {
             action: RuleAction::Deny(DenyBehavior::Reset),
             protocol: crate::config::ProtocolMatcher::Any,
             destination: DestinationMatcher::Any,
+            request: crate::config::RequestMatcher::default(),
         });
         config.rules.push(PolicyRule::allow_ip(
             "allow-second",
@@ -574,6 +612,84 @@ mod tests {
                 behavior: DenyBehavior::Reset,
                 reason: DenialReason::RuleDeny,
                 rule_id: Some("deny-first".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn http_method_and_path_rules_require_matching_metadata() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow_domain(
+                "allow-api-get",
+                HostMatcher::exact("api.example.com").unwrap(),
+                Some(80),
+            )
+            .with_http_method("GET")
+            .with_http_path_prefix("/v1/"),
+        );
+        let destination = Endpoint::tcp(ip([203, 0, 113, 10]), 80);
+        let attribution =
+            HostAttribution::plaintext_http(Hostname::parse("api.example.com").unwrap());
+
+        let allowed = PolicyRequest::new(Protocol::Http)
+            .with_destination(destination)
+            .with_attribution(attribution.clone())
+            .with_http_metadata("GET", "/v1/users?limit=1");
+        assert!(PolicyEngine::decide(&config, &allowed).is_allow());
+
+        for request in [
+            PolicyRequest::new(Protocol::Http)
+                .with_destination(destination)
+                .with_attribution(attribution.clone())
+                .with_http_metadata("POST", "/v1/users"),
+            PolicyRequest::new(Protocol::Http)
+                .with_destination(destination)
+                .with_attribution(attribution.clone())
+                .with_http_metadata("GET", "/admin"),
+            PolicyRequest::new(Protocol::Http)
+                .with_destination(destination)
+                .with_attribution(attribution),
+        ] {
+            assert_eq!(
+                PolicyEngine::decide(&config, &request).reason(),
+                Some(DenialReason::DefaultDeny)
+            );
+        }
+    }
+
+    #[test]
+    fn http_specific_deny_rules_preserve_first_match_order() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule {
+                id: "deny-admin".into(),
+                action: RuleAction::Deny(DenyBehavior::Reset),
+                protocol: crate::config::ProtocolMatcher::Exact(Protocol::Http),
+                destination: DestinationMatcher::Any,
+                request: crate::config::RequestMatcher::default(),
+            }
+            .with_http_path_prefix("/admin"),
+        );
+        config.rules.push(PolicyRule::allow_domain(
+            "allow-example",
+            HostMatcher::suffix("example.com").unwrap(),
+            Some(80),
+        ));
+
+        let request = PolicyRequest::new(Protocol::Http)
+            .with_destination(Endpoint::tcp(ip([203, 0, 113, 10]), 80))
+            .with_attribution(HostAttribution::plaintext_http(
+                Hostname::parse("www.example.com").unwrap(),
+            ))
+            .with_http_metadata("GET", "/admin/panel");
+
+        assert_eq!(
+            PolicyEngine::decide(&config, &request),
+            Decision::Deny {
+                behavior: DenyBehavior::Reset,
+                reason: DenialReason::RuleDeny,
+                rule_id: Some("deny-admin".into()),
             }
         );
     }

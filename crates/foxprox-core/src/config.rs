@@ -25,6 +25,22 @@ impl PolicyConfig {
             if rule.id.trim().is_empty() {
                 return Err(ConfigError::EmptyRuleId);
             }
+            if rule
+                .request
+                .http_method
+                .as_ref()
+                .is_some_and(|method| !is_valid_http_method(method))
+            {
+                return Err(ConfigError::InvalidHttpMethodMatcher);
+            }
+            if rule
+                .request
+                .http_path_prefix
+                .as_ref()
+                .is_some_and(|prefix| !is_valid_http_path_prefix(prefix))
+            {
+                return Err(ConfigError::InvalidHttpPathPrefixMatcher);
+            }
         }
         Ok(())
     }
@@ -57,6 +73,7 @@ pub struct PolicyRule {
     pub action: RuleAction,
     pub protocol: ProtocolMatcher,
     pub destination: DestinationMatcher,
+    pub request: RequestMatcher,
 }
 
 impl PolicyRule {
@@ -66,6 +83,7 @@ impl PolicyRule {
             action: RuleAction::Allow,
             protocol: ProtocolMatcher::Any,
             destination: DestinationMatcher::Ip { cidr, port },
+            request: RequestMatcher::default(),
         }
     }
 
@@ -75,12 +93,29 @@ impl PolicyRule {
             action: RuleAction::Allow,
             protocol: ProtocolMatcher::Any,
             destination: DestinationMatcher::Host { host, port },
+            request: RequestMatcher::default(),
         }
+    }
+
+    pub fn with_http_method(mut self, method: impl Into<String>) -> Self {
+        self.request.http_method = Some(method.into());
+        self
+    }
+
+    pub fn with_http_path_prefix(mut self, path_prefix: impl Into<String>) -> Self {
+        self.request.http_path_prefix = Some(path_prefix.into());
+        self
     }
 
     pub fn matches_protocol(&self, protocol: Protocol) -> bool {
         self.protocol.matches(protocol)
     }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RequestMatcher {
+    pub http_method: Option<String>,
+    pub http_path_prefix: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -219,6 +254,19 @@ pub enum ConfigError {
     InvalidCidrAddress,
     InvalidCidrPrefixText,
     InvalidCidrPrefix { prefix: u8, max: u8 },
+    InvalidHttpMethodMatcher,
+    InvalidHttpPathPrefixMatcher,
+}
+
+fn is_valid_http_method(method: &str) -> bool {
+    !method.is_empty()
+        && method
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte == b'-')
+}
+
+fn is_valid_http_path_prefix(prefix: &str) -> bool {
+    prefix.starts_with('/') && !prefix.bytes().any(|byte| byte.is_ascii_control())
 }
 
 fn mask_ip(ip: IpAddr, prefix: u8) -> IpAddr {
@@ -278,5 +326,36 @@ mod tests {
     fn invalid_cidr_prefixes_are_rejected() {
         assert!("192.0.2.0/33".parse::<Cidr>().is_err());
         assert!("2001:db8::/129".parse::<Cidr>().is_err());
+    }
+
+    #[test]
+    fn invalid_http_request_matchers_are_rejected() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow_domain(
+                "bad-method",
+                HostMatcher::exact("example.com").unwrap(),
+                Some(80),
+            )
+            .with_http_method("get"),
+        );
+        assert_eq!(
+            config.validate(),
+            Err(ConfigError::InvalidHttpMethodMatcher)
+        );
+
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow_domain(
+                "bad-path",
+                HostMatcher::exact("example.com").unwrap(),
+                Some(80),
+            )
+            .with_http_path_prefix("admin"),
+        );
+        assert_eq!(
+            config.validate(),
+            Err(ConfigError::InvalidHttpPathPrefixMatcher)
+        );
     }
 }

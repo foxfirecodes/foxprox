@@ -230,3 +230,25 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; parsed DNS responses feed future DNS handler cache/audit events.
 * Residual risk: CNAME chain handling, EDNS(0), additional records, response-code audit mapping, upstream forwarding, and DNS response synthesis remain future DNS-handler work.
 * Commit hash: dd1ddfa strict dns address response parsing.
+
+## 2026-06-21 - HTTP method/path policy matching foundation
+
+* Invariant under work: plaintext HTTP allow/deny decisions that depend on method or path must require explicit parsed HTTP metadata and must not be satisfied by generic TCP/IP or hostname-only events.
+* Threat or failure mode addressed: domain-only HTTP rules could accidentally authorize paths or methods that should be denied, while missing HTTP metadata might be treated as a permissive wildcard.
+* Planned verification: add policy tests for method/path-prefix allow rules, mismatch denial by default, missing HTTP metadata not matching HTTP-specific rules, deterministic deny-before-allow ordering, and preservation of existing deny-by-default/domain attribution behavior; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - HTTP method/path policy matching foundation results
+
+* Tests added/updated:
+  * HTTP allow rule with exact method and path prefix permits only matching parsed HTTP metadata.
+  * method mismatch, path mismatch, and missing HTTP metadata fall through to default deny instead of satisfying HTTP-specific rules.
+  * HTTP-specific deny rules preserve first-match ordering before broader domain allows.
+  * invalid configured HTTP method/path matchers fail config validation before policy use.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 61 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * path/method policy dimensions are opt-in and only match explicit parsed metadata.
+  * hostname/domain attribution requirements remain unchanged for host-based HTTP rules.
+  * invalid HTTP request matchers produce `InvalidConfig` fail-closed policy behavior through config validation.
+* Audit evidence: not applicable in this commit; policy decisions continue to feed structured audit events, but audit schema does not yet include HTTP method/path fields.
+* Residual risk: HTTP audit method/path fields, proxy/transparent stream integration, request body handling, and richer origin tuple policy remain future work.
