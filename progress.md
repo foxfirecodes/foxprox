@@ -175,3 +175,25 @@
 - What failed or surprised the agent: Cargo's test CLI does not accept multiple bare test filters; use separate commands or broader substring filters.
 - What remains unproven: DNS response parsing/cache, upstream DNS forwarding, broker resolver socket, DNS answer audit records, compression-pointer support, and hostname-to-flow attribution are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — DNS cache → flow attribution → domain policy slice
+
+- Slice attempted: add the smallest hostname attribution cache that maps DNS answers to later transparent TCP/UDP flow events and proves domain policy decisions use the enriched hostname.
+- Why next: DNS query audit now exposes hostnames, but transparent TCP/UDP flows still have no hostname attribution; alpha policy requires DNS-to-flow correlation before domain rules can govern TUN traffic.
+- Verification plan: add a platform-independent `foxprox-inspect` crate with expiring DNS answer records, enrich parsed TCP/UDP events with medium-confidence DNS attribution, verify domain allow rules deny before enrichment and allow after enrichment, verify expiry and no overwrite of higher-confidence attribution, then run formatting, clippy, focused inspect tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — DNS cache → flow attribution → domain policy
+
+- Slice attempted: medium-confidence DNS answer cache enrichment for transparent TCP/UDP flow events.
+- Why next: DNS query parsing produced hostname audit evidence, but domain policy on later TUN flows still needed DNS-to-flow correlation.
+- What changed: added `crates/foxprox-inspect` with `DnsAttributionCache`, expiring hostname-to-IP answer records, newest-answer lookup for reused IPs, and enrichment of TCP/UDP flow attempts only when no higher-confidence attribution is already present.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in the new inspect crate; `cargo fmt` was run.
+  - `cargo clippy --workspace --all-targets -- -D warnings` initially failed on an unused test import, then passed after cleanup.
+  - `cargo test --workspace` passed: 2 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 3 `foxprox-config` tests, 9 `foxprox-core` tests, 4 `foxprox-inspect` tests, 10 `foxprox-packet` tests, and 0 doc tests.
+  - Focused checks passed: `cargo test -p foxprox-inspect dns_cache_enriches_tcp_flow_for_domain_policy_and_audit`, `cargo test -p foxprox-inspect expired_dns_answer_does_not_enrich_flow`, and `cargo test -p foxprox-inspect dns_cache_does_not_overwrite_existing_high_confidence_attribution`.
+  - `cargo fmt --check` passed after focused checks.
+- What failed or surprised the agent: the cache needs explicit freshness semantics even in a minimal version; otherwise shared-IP hostname reuse would be misleading. The current proof chooses the newest non-expired answer.
+- What remains unproven: parsing DNS responses into cache records, cache eviction/resource limits, confidence downgrade rules for shared IPs, SNI/DNS mismatch integration with cached attribution, and live DNS resolver forwarding are still absent.
+- Commit: this commit.

@@ -32,3 +32,7 @@ The first process-boundary harness should emit JSON Lines audit on stdout and wr
 ## 2026-06-21 — DNS observations need payload fixtures, not just UDP/53
 
 Port-based DNS classification is enough for direct-bypass denial, but hostname attribution requires real DNS question fixtures. Minimal uncompressed QNAME parsing gives useful audit evidence now while leaving compression and response caching for a later DNS subsystem slice.
+
+## 2026-06-21 — DNS attribution should not overwrite stronger metadata
+
+DNS cache correlation is only medium-confidence. The enrichment layer should fill missing transparent flow attribution but preserve higher-confidence metadata from future HTTP Host, TLS SNI, QUIC metadata, or explicit proxy frontends.
