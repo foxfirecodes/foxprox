@@ -21,7 +21,10 @@ pub use audit::{
 };
 pub use config::{Cidr, ConfigError, HostMatcher, PolicyConfig, PolicyRule, RuleAction};
 pub use dns::{DnsAttributionCache, DnsAttributionEntry, ObserveOutcome};
-pub use http::{parse_http_request_head, HttpParseError, HttpRequestMetadata};
+pub use http::{
+    parse_http_request_head, parse_https_connect_head, HttpParseError, HttpRequestMetadata,
+    HttpsConnectMetadata,
+};
 pub use packet::{parse_ip_packet, PacketParseError, PacketSummary};
 pub use policy::{Decision, DenialReason, DenyBehavior, PolicyEngine, PolicyRequest};
 pub use tls::{parse_tls_client_hello, TlsClientHelloMetadata, TlsParseError};

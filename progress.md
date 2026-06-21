@@ -137,3 +137,28 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; TLS metadata feeds future transparent HTTPS policy/audit events.
 * Residual risk: parser handles single-record ClientHello only; GREASE nuances, fragmented TLS records, QUIC TLS metadata, and stream reassembly remain future frontend/inspection work.
 * Commit hash: a41c021 strict tls clienthello sni parsing.
+
+## 2026-06-21 - HTTPS CONNECT authority parser
+
+* Invariant under work: explicit HTTPS proxy CONNECT destinations must be parsed as unambiguous host/port origins with high-confidence explicit-proxy attribution and malformed/conflicting authority rejected.
+* Threat or failure mode addressed: permissive CONNECT parsing could allow missing ports, Host/authority mismatches, duplicate Host ambiguity, invalid hostnames, or unbounded header scans to bypass origin policy.
+* Planned verification: add unit tests for valid CONNECT parsing, normalized host and required port, Host header match, missing/invalid port rejection, duplicate Host rejection, Host mismatch rejection, invalid method/target rejection, and scan limit enforcement; run `cargo test` and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - HTTPS CONNECT authority parser results
+
+* Tests added/updated:
+  * valid CONNECT request parsing with normalized host, required port, and high-confidence explicit-proxy attribution.
+  * missing port rejection for CONNECT authority.
+  * CONNECT authority/Host mismatch rejection.
+  * duplicate CONNECT Host header rejection.
+  * invalid method, malformed target, and header scan limit rejection.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` found one overly-specific expected error in a malformed-target test.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 44 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * CONNECT attribution is explicit-proxy/high-confidence only for strict `host:port` authorities.
+  * malformed or conflicting CONNECT destinations are rejected before policy matching.
+  * CONNECT header scanning remains bounded by caller-supplied maximum bytes.
+* Audit evidence: not applicable in this commit; CONNECT parser output feeds future proxy frontend policy/audit events.
+* Residual risk: actual proxy accept loop, CONNECT tunneling, SOCKS5 parser, proxy response synthesis, and shared egress backend are not implemented yet.
+* Commit hash: pending.

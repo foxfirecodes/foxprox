@@ -21,3 +21,7 @@ Plaintext HTTP Host attribution should reject duplicate Host headers and absolut
 ## 2026-06-21 - TLS hidden-SNI representation
 
 TLS inspection should distinguish valid SNI attribution from hidden-SNI states. Missing SNI or ECH presence must be surfaced explicitly so policy can apply the documented deny-unless-explicit-IP rule instead of silently falling back to domain rules.
+
+## 2026-06-21 - CONNECT authority strictness
+
+HTTPS CONNECT should require an explicit nonzero port in the request authority and reject Host/authority mismatches. Successful CONNECT parsing can be treated as high-confidence explicit-proxy attribution, but only after duplicate/conflicting host inputs are excluded.

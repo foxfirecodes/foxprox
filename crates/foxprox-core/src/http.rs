@@ -9,6 +9,13 @@ pub struct HttpRequestMetadata {
     pub attribution: HostAttribution,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HttpsConnectMetadata {
+    pub host: Hostname,
+    pub port: u16,
+    pub attribution: HostAttribution,
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum HttpParseError {
     HeaderTooLarge,
@@ -85,6 +92,65 @@ pub fn parse_http_request_head(
         port: host_parts.port.unwrap_or(80),
         path_query: target_parts.path_query,
         attribution: HostAttribution::plaintext_http(host_parts.host),
+    })
+}
+
+pub fn parse_https_connect_head(
+    bytes: &[u8],
+    max_header_bytes: usize,
+) -> Result<HttpsConnectMetadata, HttpParseError> {
+    let scan_len = bytes.len().min(max_header_bytes);
+    let Some(head_end) = find_header_end(&bytes[..scan_len]) else {
+        if bytes.len() >= max_header_bytes {
+            return Err(HttpParseError::HeaderTooLarge);
+        }
+        return Err(HttpParseError::IncompleteHeaders);
+    };
+
+    let head = std::str::from_utf8(&bytes[..head_end]).map_err(|_| HttpParseError::NonAscii)?;
+    if !head.is_ascii() {
+        return Err(HttpParseError::NonAscii);
+    }
+
+    let mut lines = head.split("\r\n");
+    let request_line = lines.next().ok_or(HttpParseError::MalformedRequestLine)?;
+    let (method, target, version) = parse_request_line(request_line)?;
+    if method != "CONNECT" {
+        return Err(HttpParseError::InvalidMethod);
+    }
+    if !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
+        return Err(HttpParseError::UnsupportedHttpVersion);
+    }
+
+    let target_host = parse_host_port(target)?;
+    let port = target_host.port.ok_or(HttpParseError::InvalidPort)?;
+
+    let mut host_header = None;
+    for line in lines {
+        if line.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = line.split_once(':') else {
+            return Err(HttpParseError::MalformedRequestLine);
+        };
+        if name.eq_ignore_ascii_case("host") {
+            if host_header.is_some() {
+                return Err(HttpParseError::DuplicateHost);
+            }
+            host_header = Some(parse_host_port(value.trim())?);
+        }
+    }
+
+    if let Some(host_header) = host_header {
+        if host_header != target_host {
+            return Err(HttpParseError::HostMismatch);
+        }
+    }
+
+    Ok(HttpsConnectMetadata {
+        host: target_host.host.clone(),
+        port,
+        attribution: HostAttribution::explicit_proxy(target_host.host),
     })
 }
 
@@ -283,6 +349,61 @@ mod tests {
         assert_eq!(
             parse_http_request_head(
                 b"GET / HTTP/1.1\r\nHost: example.com\r\nX-Long: 1234567890\r\n\r\n",
+                32,
+            ),
+            Err(HttpParseError::HeaderTooLarge)
+        );
+    }
+
+    #[test]
+    fn parses_https_connect_as_explicit_proxy_attribution() {
+        let parsed = parse_https_connect_head(
+            b"CONNECT Example.COM:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n",
+            1024,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.host.as_str(), "example.com");
+        assert_eq!(parsed.port, 443);
+        assert_eq!(parsed.attribution.source, HostnameSource::ExplicitProxy);
+        assert_eq!(parsed.attribution.confidence, HostnameConfidence::High);
+    }
+
+    #[test]
+    fn rejects_connect_without_required_port_or_with_host_mismatch() {
+        assert_eq!(
+            parse_https_connect_head(b"CONNECT example.com HTTP/1.1\r\n\r\n", 1024),
+            Err(HttpParseError::InvalidPort)
+        );
+        assert_eq!(
+            parse_https_connect_head(
+                b"CONNECT a.example:443 HTTP/1.1\r\nHost: b.example:443\r\n\r\n",
+                1024,
+            ),
+            Err(HttpParseError::HostMismatch)
+        );
+        assert_eq!(
+            parse_https_connect_head(
+                b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\nHost: example.com:443\r\n\r\n",
+                1024,
+            ),
+            Err(HttpParseError::DuplicateHost)
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_connect_method_target_and_limits() {
+        assert_eq!(
+            parse_https_connect_head(b"GET example.com:443 HTTP/1.1\r\n\r\n", 1024),
+            Err(HttpParseError::InvalidMethod)
+        );
+        assert_eq!(
+            parse_https_connect_head(b"CONNECT http://example.com/ HTTP/1.1\r\n\r\n", 1024),
+            Err(HttpParseError::InvalidPort)
+        );
+        assert_eq!(
+            parse_https_connect_head(
+                b"CONNECT example.com:443 HTTP/1.1\r\nX-Long: 1234567890\r\n\r\n",
                 32,
             ),
             Err(HttpParseError::HeaderTooLarge)
