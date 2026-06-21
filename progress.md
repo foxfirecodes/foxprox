@@ -535,3 +535,47 @@
 - Files changed: `crates/foxprox-net/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
 - Current git status summary: source and progress ledger modified; review artifact directory summarized and ready for removal before commit.
 - Next exact action: remove transient `reviews/`, commit transparent TLS inspection proof, then select the next alpha slice: combined DNS-to-TCP attribution or explicit proxy frontend foundation.
+
+## 2026-06-21T22:52:03Z — TLS inspection committed; next objective selected
+
+- Commit created: `dd7ceb0` (`inspect transparent tls before tcp egress`).
+- Current objective: start Milestone 6 explicit proxy frontend foundation with dependency-light parsing and policy event generation for HTTP proxy requests, HTTPS CONNECT, and SOCKS5 CONNECT.
+- Rationale: Milestone 5 now has transparent HTTP/TLS proof gates and UDP/QUIC attribution policy gates. The largest remaining alpha gap is Milestone 6 explicit proxy networking; the smallest safe slice is parser/frontend normalization before live listener/egress wiring.
+- Verification plan: add a new proxy/frontend module or crate with tests for HTTP absolute-form requests, CONNECT targets, malformed requests, SOCKS5 greeting/connect parsing for host and IP destinations, and normalized `NetworkEvent` output; run workspace fmt/check/test/clippy/doc.
+- Expected commit boundary: explicit proxy parser/normalization foundation only; live proxy listener and host egress forwarding to follow.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: inspect workspace layout and implement `foxprox-proxy` foundation with tests.
+
+## 2026-06-21T22:57:38Z — explicit proxy parser foundation verified pending rereview
+
+- Current objective: commit Milestone 6 explicit proxy parsing/normalization foundation after rereview.
+- Changes implemented:
+  - Added workspace crate `foxprox-proxy`, depending only on `foxprox-core`.
+  - Added dependency-light parsing of HTTP proxy absolute-form `http://host[:port]/path` requests into `NetworkEvent::HttpRequest` with `Frontend::HttpProxy`.
+  - Added HTTP `CONNECT host:port HTTP/1.x` parsing into `NetworkEvent::HttpsConnect`.
+  - Added SOCKS5 no-auth TCP CONNECT parsing for hostname, IPv4, and IPv6 destinations into `NetworkEvent::SocksConnect`.
+  - Unsupported proxy paths fail closed as parser errors: relative HTTP targets, malformed CONNECT targets, UDP ASSOCIATE/BIND, unsupported SOCKS auth methods, unsupported SOCKS address types, HTTP proxy IP-literal authorities, and non-HTTP/1.0/1.1 request versions.
+  - Added focused tests for HTTP absolute-form, HTTPS CONNECT, malformed HTTP proxy requests, IP literal rejection, unsupported HTTP versions, SOCKS5 host/IP CONNECT, SOCKS UDP ASSOCIATE rejection, and normalized protocol classes.
+- Subagents/reviews requested and findings:
+  - `proxy-parser-final` found two blockers: IP-literal HTTP/CONNECT authorities were accepted as hostnames, and unsupported HTTP versions were accepted. Both were fixed with fail-closed checks and regressions.
+  - `proxy-parser-rereview` requested and running to confirm blocker fixes before commit.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed after formatting.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-proxy` passed: 9 tests.
+  - `cargo test --workspace` passed: 45 core tests, 8 device tests, 8 net tests, 9 proxy tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core` still showed only `foxprox-core`; `cargo tree -p foxprox-proxy` showed only `foxprox-core` as a dependency.
+- Files changed: `Cargo.toml`, `Cargo.lock`, `crates/foxprox-proxy/Cargo.toml`, `crates/foxprox-proxy/src/lib.rs`, `progress.md`.
+- Current git status summary: proxy crate and workspace files modified; review artifacts pending rereview/removal.
+- Next exact action: read proxy parser rereview, fix any blockers, remove transient `reviews/`, commit parser foundation, then start live explicit proxy listener/egress proof slice.
+
+## 2026-06-21T22:58:44Z — explicit proxy parser foundation rereview passed
+
+- Current objective: commit Milestone 6 explicit proxy parsing/normalization foundation.
+- Rereview result: `proxy-parser-rereview` found no blockers after IP-literal authority and HTTP-version fixes.
+- Verification evidence remains valid from prior entry: workspace fmt/check/test/clippy/doc passed; `foxprox-proxy` has 9 focused parser tests; dependency trees confirm `foxprox-core` remains dependency-free and `foxprox-proxy` depends only on `foxprox-core`.
+- Files changed: `Cargo.toml`, `Cargo.lock`, `crates/foxprox-proxy/Cargo.toml`, `crates/foxprox-proxy/src/lib.rs`, `progress.md`.
+- Current git status summary: proxy crate/workspace/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit proxy parser foundation, then start live explicit proxy listener/egress proof slice.
