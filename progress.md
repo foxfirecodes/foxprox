@@ -131,3 +131,27 @@
 - Interpretation: the bwrap-compatible setup helper now has a reproducible host-side fd handoff proof. This closes the previous gap between configure-only TUN setup and the broker-owned fd model required by the architecture.
 - Next verification gap: use the received TUN fd for an external packet write-back proof, ideally by running a sandbox ping target and having the host harness synthesize ICMP echo replies through the handed-off fd.
 - Commit hash after commit: pending.
+
+## 2026-06-21T13:50:00Z — Handoff smoke commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs learnings.md progress.md && git commit -m "Add TUN fd handoff smoke harness"`
+- Environment assumptions: handoff smoke and workspace tests above were verified before commit.
+- Expected result: commit captures host-side `SCM_RIGHTS` fd receive harness and documentation.
+- Observed result: commit `a0a3b30` created with 4 files changed.
+- Relevant output excerpt: `[harness-lab a0a3b30] Add TUN fd handoff smoke harness`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: fd handoff proof checkpoint is preserved.
+- Next verification gap: packet write-back through the handed-off fd from a host-side harness.
+- Commit hash after commit: a0a3b30.
+
+## 2026-06-21T14:20:00Z — Host-side TUN packet write-back smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run writeback-smoke`
+- Environment assumptions: `python3` is available inside the bwrap namespace through the `/usr` bind; unprivileged UDP sockets are allowed in the sandbox; the host harness owns the TUN fd received from `foxproxsetup` via `SCM_RIGHTS`.
+- Expected result: deterministic tests remain green; sandbox target sends a UDP probe to `10.0.2.1:5353`; host harness reads the IPv4/UDP packet from the handed-off TUN fd, writes a synthetic UDP reply, and the sandbox target exits successfully after receiving it.
+- Observed result: pass. `foxprox-core` ran 30 tests, `foxprox-cli` ran 2 tests, `foxproxsetup` ran 7 tests, and `writeback-smoke` emitted `decision":"allow"`.
+- Relevant output excerpt: `"reason":"sandbox UDP probe received synthetic reply through handed-off TUN fd"`; `"packets_read":"2"`; `"reply_written":"true"`; `"status":"exit status: 0"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`, `learnings.md`.
+- Interpretation: the harness now proves real bidirectional packet movement over a bwrap-created TUN fd owned by the host harness. This is a stronger environment-dependent packet write-back proof than the earlier pure unit ICMP synthesis fixture.
+- Next verification gap: introduce an actual broker/runtime abstraction around the handoff fd instead of keeping write-back logic inside the CLI harness; then move toward TCP stack/forwarding proof.
+- Commit hash after commit: pending.

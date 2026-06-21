@@ -21,3 +21,7 @@
 ## 2026-06-21 — Host-side setup fd handoff
 
 - A bwrap-contained `foxproxsetup` can connect to a host Unix socket when the socket directory is explicitly bind-mounted into the sandbox and passed through `FOXPROX_SETUP_SOCKET`. `SCM_RIGHTS` fd passing preserves the non-persistent TUN device after the helper closes its local fd and execs/exits the target.
+
+## 2026-06-21 — Packet write-back smoke constraints
+
+- `ping` inside the bwrap target failed before sending traffic because the target lacked `CAP_NET_RAW`/setuid ping privileges after setup capability drop (`/usr/bin/ping: socket: Operation not permitted`). For unprivileged write-back smoke in this environment, a UDP socket probe is a better reusable pattern than ICMP ping. Keep ICMP synthesis covered by deterministic packet fixtures until a safe ping capability strategy is defined.
