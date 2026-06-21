@@ -1,0 +1,173 @@
+use crate::audit::AuditRecord;
+use crate::types::{AuditKind, Decision, Frontend, NetworkEndpoint};
+use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkSetupConfig {
+    pub sandbox_id: String,
+    pub tun_name: String,
+    pub sandbox_ip: IpAddr,
+    pub gateway_ip: IpAddr,
+    pub mtu: u16,
+    pub broker_dns_ip: IpAddr,
+    pub http_proxy_port: u16,
+    pub socks_proxy_port: u16,
+    pub setup_control_fd: Option<i32>,
+}
+
+impl NetworkSetupConfig {
+    pub fn alpha_default(sandbox_id: impl Into<String>) -> Self {
+        Self {
+            sandbox_id: sandbox_id.into(),
+            tun_name: "foxprox0".to_string(),
+            sandbox_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 15)),
+            gateway_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 2)),
+            mtu: 1500,
+            broker_dns_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 2, 3)),
+            http_proxy_port: 3128,
+            socks_proxy_port: 1080,
+            setup_control_fd: None,
+        }
+    }
+
+    pub fn proxy_environment(&self) -> ProxyEnvironment {
+        let http = format!("http://{}:{}", self.gateway_ip, self.http_proxy_port);
+        let socks = format!("socks5h://{}:{}", self.gateway_ip, self.socks_proxy_port);
+        ProxyEnvironment {
+            http_proxy: http.clone(),
+            https_proxy: http,
+            all_proxy: socks,
+            no_proxy: "localhost,127.0.0.1,::1".to_string(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyEnvironment {
+    pub http_proxy: String,
+    pub https_proxy: String,
+    pub all_proxy: String,
+    pub no_proxy: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BwrapSetupPlan {
+    pub config: NetworkSetupConfig,
+    pub bwrap_args: Vec<String>,
+    pub setup_command: Vec<String>,
+    pub proxy_environment: ProxyEnvironment,
+}
+
+impl BwrapSetupPlan {
+    pub fn new(config: NetworkSetupConfig, target_command: &[String]) -> Self {
+        let mut bwrap_args = vec![
+            "--unshare-user".to_string(),
+            "--unshare-net".to_string(),
+            "--cap-add".to_string(),
+            "CAP_NET_ADMIN".to_string(),
+            "--dev-bind".to_string(),
+            "/dev/net/tun".to_string(),
+            "/dev/net/tun".to_string(),
+        ];
+        if let Some(fd) = config.setup_control_fd {
+            bwrap_args.extend(["--sync-fd".to_string(), fd.to_string()]);
+        }
+
+        let mut setup_command = vec![
+            "foxproxsetup".to_string(),
+            "--tun-name".to_string(),
+            config.tun_name.clone(),
+            "--sandbox-ip".to_string(),
+            config.sandbox_ip.to_string(),
+            "--gateway-ip".to_string(),
+            config.gateway_ip.to_string(),
+            "--mtu".to_string(),
+            config.mtu.to_string(),
+            "--dns".to_string(),
+            config.broker_dns_ip.to_string(),
+            "--http-proxy".to_string(),
+            format!("{}:{}", config.gateway_ip, config.http_proxy_port),
+            "--socks-proxy".to_string(),
+            format!("{}:{}", config.gateway_ip, config.socks_proxy_port),
+            "--drop-cap".to_string(),
+            "CAP_NET_ADMIN".to_string(),
+            "--".to_string(),
+        ];
+        setup_command.extend(target_command.iter().cloned());
+
+        let proxy_environment = config.proxy_environment();
+        Self {
+            config,
+            bwrap_args,
+            setup_command,
+            proxy_environment,
+        }
+    }
+
+    pub fn audit_record(&self) -> AuditRecord {
+        AuditRecord::new(AuditKind::SetupPlanCreated, self.config.sandbox_id.clone())
+            .with_frontend(Frontend::Setup)
+            .with_destination(NetworkEndpoint::ip(self.config.gateway_ip))
+            .with_decision(Decision::Allow, None)
+            .with_detail("tun_name", self.config.tun_name.clone())
+            .with_detail("mtu", self.config.mtu.to_string())
+            .with_detail("broker_dns_ip", self.config.broker_dns_ip.to_string())
+            .with_detail("requires_capability", "CAP_NET_ADMIN")
+            .with_detail("setup_helper", "foxproxsetup")
+    }
+
+    pub fn full_command(&self) -> Vec<String> {
+        let mut command = vec!["bwrap".to_string()];
+        command.extend(self.bwrap_args.clone());
+        command.extend(self.setup_command.clone());
+        command
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn bwrap_plan_contains_alpha_network_setup_contract() {
+        let target = vec!["curl".to_string(), "http://example.com".to_string()];
+        let plan = BwrapSetupPlan::new(NetworkSetupConfig::alpha_default("s1"), &target);
+        let full = plan.full_command();
+
+        assert!(full.contains(&"--unshare-user".to_string()));
+        assert!(full.contains(&"--unshare-net".to_string()));
+        assert!(full.windows(2).any(|w| w == ["--cap-add", "CAP_NET_ADMIN"]));
+        assert!(full
+            .windows(3)
+            .any(|w| w == ["--dev-bind", "/dev/net/tun", "/dev/net/tun"]));
+        assert!(full.contains(&"foxproxsetup".to_string()));
+        assert!(full
+            .windows(2)
+            .any(|w| w == ["--drop-cap", "CAP_NET_ADMIN"]));
+        assert!(full.ends_with(&target));
+    }
+
+    #[test]
+    fn proxy_environment_points_at_sandbox_reachable_gateway() {
+        let config = NetworkSetupConfig::alpha_default("s1");
+        let env = config.proxy_environment();
+        assert_eq!(env.http_proxy, "http://10.0.2.2:3128");
+        assert_eq!(env.https_proxy, "http://10.0.2.2:3128");
+        assert_eq!(env.all_proxy, "socks5h://10.0.2.2:1080");
+    }
+
+    #[test]
+    fn setup_plan_audit_is_structured() {
+        let plan = BwrapSetupPlan::new(
+            NetworkSetupConfig::alpha_default("s1"),
+            &["true".to_string()],
+        );
+        let audit = plan.audit_record();
+        assert_eq!(audit.kind, AuditKind::SetupPlanCreated);
+        assert_eq!(audit.frontend, Some(Frontend::Setup));
+        assert_eq!(audit.details["setup_helper"], "foxproxsetup");
+        assert_eq!(audit.details["requires_capability"], "CAP_NET_ADMIN");
+    }
+}

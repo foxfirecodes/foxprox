@@ -1,10 +1,29 @@
 //! Core, platform-independent types for foxprox.
 //!
-//! This crate is intentionally minimal for now. It is the home for broker
-//! concepts that must not depend on Linux, TUN, bwrap, smoltcp, or any concrete
-//! frontend/backend implementation.
+//! This crate holds the broker contracts that must stay independent from Linux,
+//! TUN, bwrap, smoltcp, or any concrete frontend/backend implementation. The
+//! alpha implementation intentionally makes policy, packet handling, flow state,
+//! setup planning, and audit output observable before privileged runtime pieces
+//! are wired in.
 
 #![forbid(unsafe_code)]
+
+pub mod audit;
+pub mod broker;
+pub mod flow;
+pub mod inspect;
+pub mod packet;
+pub mod policy;
+pub mod setup;
+pub mod types;
+
+pub use audit::{AuditError, AuditRecord, BoundedAuditLedger};
+pub use broker::BrokerCore;
+pub use flow::{DnsCache, FlowKey, FlowProtocol, UdpFlowManager};
+pub use packet::{IpParseError, ParsedIpPacket};
+pub use policy::{Cidr, PolicyConfig, PolicyDecision, PolicyEngine, PolicyRequest, PolicyRule};
+pub use setup::{BwrapSetupPlan, NetworkSetupConfig, ProxyEnvironment};
+pub use types::*;
 
 /// Stable crate marker used by scaffold tests and downstream workspace checks.
 pub const CRATE_NAME: &str = "foxprox-core";
