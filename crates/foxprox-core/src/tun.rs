@@ -79,6 +79,11 @@ impl<D: PacketDevice> TunPacketHarness<D> {
             return Ok(result_from_decision(Some(parsed), decision, false));
         }
 
+        let policy_decision = self.broker.evaluate(&request);
+        if policy_decision.decision.is_deny() {
+            return Ok(result_from_decision(Some(parsed), policy_decision, false));
+        }
+
         if parsed.ip_version == 4
             && parsed.protocol == Protocol::Icmp
             && parsed.icmp_type == Some(8)
@@ -119,8 +124,8 @@ impl<D: PacketDevice> TunPacketHarness<D> {
 
         Ok(TunPacketHarnessResult {
             parsed: Some(parsed),
-            decision: Decision::Allow,
-            reason: None,
+            decision: policy_decision.decision,
+            reason: policy_decision.reason,
             wrote_packet: false,
         })
     }
@@ -225,8 +230,12 @@ mod tests {
 
     #[test]
     fn valid_ipv4_udp_packet_emits_structured_packet_observed_audit() {
-        let packet = ipv4_packet(17, 0, &[0x12, 0x34, 0x00, 0x35, 0, 8, 0, 0]);
-        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 4);
+        let packet = ipv4_packet(17, 0, &[0x12, 0x34, 0x30, 0x39, 0, 8, 0, 0]);
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
         let device = InMemoryPacketDevice::with_inbound([packet]);
         let mut harness = TunPacketHarness::new("s1", broker, device);
 
@@ -238,7 +247,7 @@ mod tests {
         assert_eq!(record.frontend, Some(Frontend::Tun));
         assert_eq!(record.protocol, Some(Protocol::Udp));
         assert_eq!(record.source.as_ref().unwrap().port, Some(0x1234));
-        assert_eq!(record.destination.as_ref().unwrap().port, Some(53));
+        assert_eq!(record.destination.as_ref().unwrap().port, Some(12345));
         assert_eq!(record.details["direction"], "from_sandbox");
         assert_eq!(record.details["ip_version"], "4");
         assert_eq!(record.details["packet_len"], "28");
@@ -247,8 +256,12 @@ mod tests {
 
     #[test]
     fn valid_ipv6_udp_packet_emits_ip_version_six_audit() {
-        let packet = ipv6_packet(17, &[0x12, 0x34, 0x00, 0x35, 0, 8, 0, 0]);
-        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 4);
+        let packet = ipv6_packet(17, &[0x12, 0x34, 0x30, 0x39, 0, 8, 0, 0]);
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
         let device = InMemoryPacketDevice::with_inbound([packet]);
         let mut harness = TunPacketHarness::new("s1", broker, device);
 
@@ -258,7 +271,25 @@ mod tests {
         assert_eq!(record.kind, AuditKind::PacketObserved);
         assert_eq!(record.protocol, Some(Protocol::Udp));
         assert_eq!(record.details["ip_version"], "6");
-        assert_eq!(record.destination.as_ref().unwrap().port, Some(53));
+        assert_eq!(record.destination.as_ref().unwrap().port, Some(12345));
+    }
+
+    #[test]
+    fn default_denied_tun_packet_is_observed_then_denied_without_write() {
+        let packet = ipv4_packet(17, 0, &[0x12, 0x34, 0x30, 0x39, 0, 8, 0, 0]);
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 4);
+        let device = InMemoryPacketDevice::with_inbound([packet]);
+        let mut harness = TunPacketHarness::new("s1", broker, device);
+
+        let result = harness.process_next_packet(1_750).unwrap().unwrap();
+        assert_eq!(result.decision, Decision::DenyDrop);
+        assert_eq!(result.reason, Some(DenialReason::DefaultDeny));
+        assert!(!result.wrote_packet);
+        assert!(harness.device().outbound().is_empty());
+        let records: Vec<_> = harness.broker().audit().records().collect();
+        assert_eq!(records[0].kind, AuditKind::PacketObserved);
+        assert_eq!(records[1].kind, AuditKind::UdpPacketDecision);
+        assert_eq!(records[1].reason, Some(DenialReason::DefaultDeny));
     }
 
     #[test]
@@ -284,7 +315,12 @@ mod tests {
         let icmp_checksum = checksum(&icmp);
         icmp[2..4].copy_from_slice(&icmp_checksum.to_be_bytes());
         let packet = ipv4_packet(1, 0, &icmp);
-        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 4);
+        let config = PolicyConfig {
+            allow_ping: true,
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
         let device = InMemoryPacketDevice::with_inbound([packet]);
         let mut harness = TunPacketHarness::new("s1", broker, device);
 
@@ -292,10 +328,12 @@ mod tests {
         assert_eq!(result.decision, Decision::Allow);
         assert!(result.wrote_packet);
         let records: Vec<_> = harness.broker().audit().records().collect();
-        assert_eq!(records.len(), 2);
+        assert_eq!(records.len(), 3);
         assert_eq!(records[0].details["direction"], "from_sandbox");
-        assert_eq!(records[1].details["direction"], "to_sandbox");
-        assert_eq!(records[1].details["write_back"], "icmp_echo_reply");
+        assert_eq!(records[1].kind, AuditKind::IcmpDecision);
+        assert_eq!(records[1].decision, Some(Decision::Allow));
+        assert_eq!(records[2].details["direction"], "to_sandbox");
+        assert_eq!(records[2].details["write_back"], "icmp_echo_reply");
         let reply = &harness.device().outbound()[0];
         let parsed = ParsedIpPacket::parse_ipv4(reply).unwrap();
         assert_eq!(parsed.source, "8.8.8.8".parse::<IpAddr>().unwrap());
@@ -303,6 +341,26 @@ mod tests {
         assert_eq!(parsed.icmp_type, Some(0));
         assert_eq!(checksum(&reply[..20]), 0);
         assert_eq!(checksum(&reply[20..]), 0);
+    }
+
+    #[test]
+    fn icmp_echo_request_is_denied_when_ping_is_not_allowed() {
+        let mut icmp = vec![8, 0, 0, 0, 0x12, 0x34, 0, 1];
+        let icmp_checksum = checksum(&icmp);
+        icmp[2..4].copy_from_slice(&icmp_checksum.to_be_bytes());
+        let packet = ipv4_packet(1, 0, &icmp);
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 4);
+        let device = InMemoryPacketDevice::with_inbound([packet]);
+        let mut harness = TunPacketHarness::new("s1", broker, device);
+
+        let result = harness.process_next_packet(3_500).unwrap().unwrap();
+        assert_eq!(result.decision, Decision::DenyDrop);
+        assert_eq!(result.reason, Some(DenialReason::IcmpUnsupported));
+        assert!(!result.wrote_packet);
+        assert!(harness.device().outbound().is_empty());
+        let records: Vec<_> = harness.broker().audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::IcmpDecision);
+        assert_eq!(records[1].reason, Some(DenialReason::IcmpUnsupported));
     }
 
     #[test]

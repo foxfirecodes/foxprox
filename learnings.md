@@ -31,3 +31,11 @@ A TCP connect allow audit proves host egress was authorized, but it does not pro
 ## 2026-06-21 — IP-version dispatch changes malformed-packet evidence
 
 Switching the TUN harness from IPv4-only parsing to IP-version dispatch changed all-zero short packets from `short_ipv4_header` to `unsupported_ip_version`. Tests should assert the structured parse detail produced by the dispatch boundary, not assume every malformed packet entered the IPv4 parser.
+
+## 2026-06-21 — Observation and authorization must stay separate at frontend boundaries
+
+The TUN packet harness originally emitted `packet_observed` and then treated successful parsing as allow/write-back. Review caught that this bypassed default-deny and `allow_ping=false`. Frontend harnesses must record packet observation first, then still run normalized policy decisions before any forwarding or write-back.
+
+## 2026-06-21 — Mutable attribution/flow state must commit after audit success
+
+DNS cache updates and UDP flow byte counts are decision-relevant state. Review caught that both could mutate before audit append succeeded, leaving invisible state after fail-closed outcomes. Future state managers should use prepare-audit/commit or rollback patterns when audit is required for correctness.

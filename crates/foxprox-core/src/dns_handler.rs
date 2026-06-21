@@ -2,7 +2,7 @@ use crate::broker::BrokerCore;
 use crate::dns::{
     build_refused_response, parse_dns_query, DnsParseError, DnsQueryMetadata, DnsQueryType,
 };
-use crate::flow::DnsCache;
+use crate::flow::{DnsCache, DnsObservation};
 use crate::policy::{PolicyDecision, PolicyRequest};
 use crate::types::{Decision, DenialReason, Frontend, NetworkEndpoint};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -122,21 +122,23 @@ impl<U: DnsUpstream> DnsBrokerHandler<U> {
 
         let answers = parse_dns_response_addresses(&response).unwrap_or_default();
         let ttl_ms = answers.ttl_ms.unwrap_or(self.fallback_ttl_ms);
-        let observation = self.cache.observe(
-            request.sandbox.session_id.clone(),
+        let observation = DnsObservation::new(
             metadata.hostname,
             dns_query_type_name(metadata.query_type),
             answers.addresses.clone(),
             now_ms,
             ttl_ms,
         );
-        if let Err(decision) = self.broker.append_audit_for(&request, observation) {
+        let observation_audit =
+            DnsCache::observation_audit(request.sandbox.session_id.clone(), &observation);
+        if let Err(decision) = self.broker.append_audit_for(&request, observation_audit) {
             return DnsHandlerResult {
                 response: build_refused_response(packet).ok(),
                 decision,
-                observed_addresses: answers.addresses,
+                observed_addresses: Vec::new(),
             };
         }
+        self.cache.commit_observation(observation);
 
         DnsHandlerResult {
             response: Some(response),
@@ -409,6 +411,11 @@ mod tests {
         let result = handler.handle_query("s1", &query, 1_000);
         assert_eq!(result.decision.decision, Decision::FailClosed);
         assert_eq!(result.response.unwrap()[3] & 0x0f, 5);
+        assert!(result.observed_addresses.is_empty());
+        assert!(handler
+            .cache()
+            .attribution_for("93.184.216.34".parse().unwrap(), 2_000)
+            .is_none());
         let records: Vec<_> = handler.broker().audit().records().collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, AuditKind::AuditBackpressure);

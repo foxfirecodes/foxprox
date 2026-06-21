@@ -358,3 +358,42 @@ Policy rules now cover documented dimensions for sandbox profile, HTTP method, a
 
 ### Remaining blind spots
 - Profile values are supplied by callers through `SandboxIdentity`; launcher/runtime identity discovery is still outside this core slice.
+
+## 2026-06-21 — Reviewer blocker fix cycle
+
+### Behavior under work
+Address independent reviewer blockers in audit-gated runtime harnesses: TUN parsed packets must still pass policy before allow/write-back; DNS cache updates must happen only after returned-address audit succeeds; UDP flow state must not retain unsent or unaudited lifecycle bytes when audit/egress fails.
+
+### Expected evidence
+- Default-denied parsed TUN UDP packets return a policy denial after `packet_observed`; ICMP echo write-back requires `allow_ping=true` and is suppressed when ping is denied.
+- DNS observation audit backpressure returns REFUSED and leaves no DNS cache attribution.
+- UDP lifecycle audit backpressure leaves no flow state and no egress sends; egress send failure rolls back the flow update.
+
+### Commands run
+- `cargo fmt --check` — passed before fixes; `cargo test --all-targets --all-features` passed with 67 tests, confirming reviewer validation-staleness finding no longer applied to current committed state.
+- `cargo fmt` — applied formatting for blocker fixes.
+- `cargo test --all-targets --all-features` — passed, 70 unit tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tun::tests::default_denied_tun_packet_is_observed_then_denied_without_write ... ok`
+- `tun::tests::icmp_echo_request_is_denied_when_ping_is_not_allowed ... ok`
+- `tun::tests::icmp_echo_request_writes_reply_after_write_back_audit ... ok`
+- `dns_handler::tests::address_observation_backpressure_blocks_upstream_response_release ... ok`
+- `udp::tests::flow_lifecycle_backpressure_prevents_unobservable_send ... ok`
+- `udp::tests::egress_send_failure_rolls_back_flow_state ... ok`
+
+### Interpretation
+Reviewer blockers were valid and fixed. TUN parsing is no longer treated as authorization: parsed packets are observed, then evaluated through policy before allow/write-back; ping defaults now deny ICMP echo as documented. DNS returned-address cache state is committed only after observation audit succeeds. UDP flow state rolls back when lifecycle audit backpressures or fake egress send fails, avoiding retained byte counts for unsent datagrams.
+
+### Changed files
+- `crates/foxprox-core/src/dns_handler.rs`
+- `crates/foxprox-core/src/flow.rs`
+- `crates/foxprox-core/src/tun.rs`
+- `crates/foxprox-core/src/udp.rs`
+- `progress.md`
+- `learnings.md`
+
+### Remaining blind spots
+- TCP close-audit backpressure remains observable after bytes have already crossed in the harness; real async runtime will need stronger reservation/guaranteed close-ledger design before production use.

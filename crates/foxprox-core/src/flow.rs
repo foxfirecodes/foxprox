@@ -256,6 +256,24 @@ pub struct DnsObservation {
     pub ttl_ms: u64,
 }
 
+impl DnsObservation {
+    pub fn new(
+        hostname: impl Into<String>,
+        query_type: impl Into<String>,
+        addresses: Vec<IpAddr>,
+        observed_at_ms: u64,
+        ttl_ms: u64,
+    ) -> Self {
+        Self {
+            hostname: crate::types::normalize_hostname(&hostname.into()),
+            addresses,
+            query_type: query_type.into(),
+            observed_at_ms,
+            ttl_ms,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DnsCache {
     by_ip: BTreeMap<IpAddr, Vec<DnsObservation>>,
@@ -271,35 +289,41 @@ impl DnsCache {
         observed_at_ms: u64,
         ttl_ms: u64,
     ) -> AuditRecord {
-        let hostname = crate::types::normalize_hostname(&hostname.into());
-        let query_type = query_type.into();
-        let observation = DnsObservation {
-            hostname: hostname.clone(),
-            addresses: addresses.clone(),
-            query_type: query_type.clone(),
-            observed_at_ms,
-            ttl_ms,
-        };
-        for address in &addresses {
-            self.by_ip
-                .entry(*address)
-                .or_default()
-                .push(observation.clone());
-        }
+        let observation =
+            DnsObservation::new(hostname, query_type, addresses, observed_at_ms, ttl_ms);
+        let audit = Self::observation_audit(sandbox_id, &observation);
+        self.commit_observation(observation);
+        audit
+    }
+
+    pub fn observation_audit(
+        sandbox_id: impl Into<String>,
+        observation: &DnsObservation,
+    ) -> AuditRecord {
         AuditRecord::new(AuditKind::DnsQueryDecision, sandbox_id)
             .with_frontend(Frontend::Tun)
             .with_protocol(Protocol::Dns)
-            .with_timestamp_ms(observed_at_ms as u128)
-            .with_hostname(hostname)
-            .with_detail("dns_query_type", query_type)
+            .with_timestamp_ms(observation.observed_at_ms as u128)
+            .with_hostname(observation.hostname.clone())
+            .with_detail("dns_query_type", observation.query_type.clone())
             .with_detail(
                 "returned_addresses",
-                addresses
+                observation
+                    .addresses
                     .iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(","),
             )
+    }
+
+    pub fn commit_observation(&mut self, observation: DnsObservation) {
+        for address in &observation.addresses {
+            self.by_ip
+                .entry(*address)
+                .or_default()
+                .push(observation.clone());
+        }
     }
 
     pub fn attribution_for(&self, ip: IpAddr, now_ms: u64) -> Option<HostnameAttribution> {

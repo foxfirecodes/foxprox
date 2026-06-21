@@ -60,16 +60,21 @@ impl<E: UdpEgress> UdpForwarder<E> {
             return Ok(result_from_decision(decision, false));
         }
 
+        let previous_flows = self.flows.clone();
         let flow_records =
             self.flows
                 .observe_outbound_datagram(key.clone(), payload.len() as u64, now_ms);
         for record in flow_records {
             if let Err(decision) = self.broker.append_audit_for(&request, record) {
+                self.flows = previous_flows;
                 return Ok(result_from_decision(decision, false));
             }
         }
 
-        self.egress.send_datagram(key.destination(), payload)?;
+        if let Err(error) = self.egress.send_datagram(key.destination(), payload) {
+            self.flows = previous_flows;
+            return Err(error);
+        }
         Ok(UdpForwardResult {
             decision: Decision::Allow,
             reason: None,
@@ -83,12 +88,17 @@ impl<E: UdpEgress> UdpForwarder<E> {
     }
 
     pub fn expire(&mut self, now_ms: u64) -> Vec<PolicyDecision> {
+        let previous_flows = self.flows.clone();
         let records = self.flows.expire(now_ms);
         let request = PolicyRequest::new(self.sandbox_id.clone(), Frontend::Tun, Protocol::Udp);
-        records
+        let decisions: Vec<_> = records
             .into_iter()
             .filter_map(|record| self.broker.append_audit_for(&request, record).err())
-            .collect()
+            .collect();
+        if !decisions.is_empty() {
+            self.flows = previous_flows;
+        }
+        decisions
     }
 
     pub fn broker(&self) -> &BrokerCore {
@@ -326,8 +336,45 @@ mod tests {
         assert_eq!(result.decision, Decision::FailClosed);
         assert_eq!(result.reason, Some(DenialReason::AuditBackpressure));
         assert!(forwarder.egress().sent().is_empty());
+        assert!(forwarder.flows().is_empty());
         let records: Vec<_> = forwarder.broker().audit().records().collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, AuditKind::AuditBackpressure);
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct FailingUdpEgress;
+
+    impl UdpEgress for FailingUdpEgress {
+        fn send_datagram(
+            &mut self,
+            _destination: NetworkEndpoint,
+            _payload: &[u8],
+        ) -> Result<(), UdpEgressError> {
+            Err(UdpEgressError::SendFailed)
+        }
+    }
+
+    #[test]
+    fn egress_send_failure_rolls_back_flow_state() {
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let key = FlowKey::udp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.42".parse().unwrap(),
+            12345,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut forwarder =
+            UdpForwarder::new("s1", broker, FailingUdpEgress, UdpTimeoutConfig::default());
+
+        let error = forwarder
+            .handle_outbound_datagram(key, b"hello", 1_000)
+            .unwrap_err();
+        assert_eq!(error, UdpEgressError::SendFailed);
+        assert!(forwarder.flows().is_empty());
     }
 }
