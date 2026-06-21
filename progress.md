@@ -417,3 +417,25 @@
 - What failed or surprised the agent: adding protocol-specific defaults changes the reason observed by generic packet/CLI paths; tests that asserted global default-deny needed to assert the more specific ICMP denial instead.
 - What remains unproven: ICMPv6 distinctions, ICMP unreachable synthesis for denied UDP/TCP, path-MTU handling, ping runtime through TUN, and user-facing config examples are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — IPv6 packet parser → normalized policy events slice
+
+- Slice attempted: add basic IPv6 packet parsing for TCP connect attempts, UDP/DNS/QUIC flows, and ICMPv6 messages into existing normalized events.
+- Why next: IPv4 parsing is proven, but architecture scope includes IPv6 parsing and ICMPv6 basics; this reduces parser coverage risk without requiring TUN privileges.
+- Verification plan: add `parse_ipv6_packet`/fail-closed helpers in `foxprox-packet`, reject malformed payload lengths and unsupported extension headers, verify IPv6 TCP SYN, UDP/443 QUIC, broker DNS resolver policy, ICMPv6 message normalization, and malformed fail-closed behavior, then run formatting, clippy, focused packet tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — IPv6 packet parser → normalized policy events
+
+- Slice attempted: basic IPv6 packet parsing into existing normalized policy events.
+- Why next: IPv4 parser coverage was strong, but documented architecture includes IPv6/ICMPv6; adding platform-independent IPv6 parsing reduces packet-core scope risk before TUN/runtime integration.
+- What changed: added `parse_ipv6_packet` and `parse_ipv6_packet_fail_closed` to `foxprox-packet`, parses fixed-header IPv6 TCP SYN connect attempts, UDP DNS queries, UDP/443 QUIC candidates, and ICMPv6 type/code messages, rejects malformed payload lengths, and treats IPv6 extension headers as unsupported/fail-closed in this minimal parser.
+- Verification:
+  - `cargo fmt --check` passed.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 7 `foxprox-config` tests, 14 `foxprox-core` tests, 5 `foxprox-flow` tests, 18 `foxprox-inspect` tests, 15 `foxprox-packet` tests, and 0 doc tests.
+  - Focused checks passed: `cargo test -p foxprox-packet parses_ipv6_tcp_syn_into_connect_attempt`, `cargo test -p foxprox-packet parses_ipv6_dns_query_and_policy_allows_broker_resolver`, and `cargo test -p foxprox-packet malformed_ipv6_packet_can_be_converted_to_fail_closed_event`.
+  - `cargo fmt --check` passed after focused checks.
+- What failed or surprised the agent: the minimal IPv6 parser can share normalized events with IPv4 cleanly, but extension-header support should remain fail-closed until a deliberate parser slice handles hop-by-hop/routing/fragment semantics.
+- What remains unproven: IPv6 extension header traversal, IPv6 fragmentation policy beyond fail-closed extension rejection, ICMPv6 essential-error defaults, IPv6 checksums, and broker/TUN runtime dispatch between IPv4 and IPv6 are still absent.
+- Commit: this commit.

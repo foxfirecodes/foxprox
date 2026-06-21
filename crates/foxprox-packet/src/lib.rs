@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use foxprox_core::{
     DnsQuery, Endpoint, FrontendKind, IcmpMessage, NormalizedEvent, SandboxId, TcpConnectAttempt,
@@ -40,6 +40,9 @@ pub enum PacketParseError {
     NotIpv4 {
         version: u8,
     },
+    NotIpv6 {
+        version: u8,
+    },
     InvalidHeaderLength {
         ihl_words: u8,
     },
@@ -53,6 +56,13 @@ pub enum PacketParseError {
     },
     FragmentedIpv4 {
         flags_fragment_offset: u16,
+    },
+    InvalidIpv6PayloadLength {
+        payload_length: usize,
+        actual_payload: usize,
+    },
+    UnsupportedIpv6ExtensionHeader {
+        next_header: u8,
     },
     TcpHeaderTooShort {
         actual: usize,
@@ -86,6 +96,7 @@ impl PacketParseError {
                 format!("ipv4-packet-too-short: actual={actual} minimum={minimum}")
             }
             Self::NotIpv4 { version } => format!("not-ipv4: version={version}"),
+            Self::NotIpv6 { version } => format!("not-ipv6: version={version}"),
             Self::InvalidHeaderLength { ihl_words } => {
                 format!("invalid-ipv4-header-length: ihl_words={ihl_words}")
             }
@@ -104,6 +115,15 @@ impl PacketParseError {
             } => format!(
                 "unsupported-ipv4-fragmentation: flags_fragment_offset=0x{flags_fragment_offset:04x}"
             ),
+            Self::InvalidIpv6PayloadLength {
+                payload_length,
+                actual_payload,
+            } => format!(
+                "invalid-ipv6-payload-length: payload_length={payload_length} actual_payload={actual_payload}"
+            ),
+            Self::UnsupportedIpv6ExtensionHeader { next_header } => {
+                format!("unsupported-ipv6-extension-header: next_header={next_header}")
+            }
             Self::TcpHeaderTooShort { actual } => {
                 format!("tcp-header-too-short: actual={actual}")
             }
@@ -208,6 +228,39 @@ pub fn parse_ipv4_packet(
 /// suitable for policy fail-closed evaluation.
 pub fn parse_ipv4_packet_fail_closed(context: &PacketContext, packet: &[u8]) -> NormalizedEvent {
     match parse_ipv4_packet(context, packet) {
+        Ok(event) => event,
+        Err(error) => unsupported_event(context, None, None, error.fail_closed_reason()),
+    }
+}
+
+/// Parse one IPv6 packet into a normalized event.
+pub fn parse_ipv6_packet(
+    context: &PacketContext,
+    packet: &[u8],
+) -> Result<NormalizedEvent, PacketParseError> {
+    let header = Ipv6Header::parse(packet)?;
+    let payload = &packet[40..40 + header.payload_length];
+
+    match header.next_header {
+        6 => parse_tcp_ipv6(context, header, payload),
+        17 => parse_udp_ipv6(context, header, payload),
+        58 => parse_icmpv6(context, header, payload),
+        0 | 43 | 44 | 50 | 51 | 60 => Err(PacketParseError::UnsupportedIpv6ExtensionHeader {
+            next_header: header.next_header,
+        }),
+        protocol => Ok(unsupported_event(
+            context,
+            Some(header.source_endpoint(None)),
+            Some(header.destination_endpoint(None)),
+            format!("unsupported-ipv6-protocol: {protocol}"),
+        )),
+    }
+}
+
+/// Parse an IPv6 packet and convert malformed input into an unsupported event
+/// suitable for policy fail-closed evaluation.
+pub fn parse_ipv6_packet_fail_closed(context: &PacketContext, packet: &[u8]) -> NormalizedEvent {
+    match parse_ipv6_packet(context, packet) {
         Ok(event) => event,
         Err(error) => unsupported_event(context, None, None, error.fail_closed_reason()),
     }
@@ -390,6 +443,111 @@ fn parse_icmp(
     }))
 }
 
+fn parse_tcp_ipv6(
+    context: &PacketContext,
+    header: Ipv6Header,
+    payload: &[u8],
+) -> Result<NormalizedEvent, PacketParseError> {
+    if payload.len() < 20 {
+        return Err(PacketParseError::TcpHeaderTooShort {
+            actual: payload.len(),
+        });
+    }
+
+    let source_port = u16::from_be_bytes([payload[0], payload[1]]);
+    let destination_port = u16::from_be_bytes([payload[2], payload[3]]);
+    let flags = payload[13];
+    let syn = flags & 0x02 != 0;
+    let ack = flags & 0x10 != 0;
+
+    if !syn || ack {
+        return Ok(unsupported_event(
+            context,
+            Some(header.source_endpoint(Some(source_port))),
+            Some(header.destination_endpoint(Some(destination_port))),
+            "tcp-packet-is-not-connect-attempt",
+        ));
+    }
+
+    Ok(NormalizedEvent::TcpConnectAttempt(TcpConnectAttempt {
+        sandbox_id: context.sandbox_id.clone(),
+        frontend: context.frontend,
+        source: header.source_endpoint(Some(source_port)),
+        destination: header.destination_endpoint(Some(destination_port)),
+        attribution: None,
+    }))
+}
+
+fn parse_udp_ipv6(
+    context: &PacketContext,
+    header: Ipv6Header,
+    payload: &[u8],
+) -> Result<NormalizedEvent, PacketParseError> {
+    if payload.len() < 8 {
+        return Err(PacketParseError::UdpHeaderTooShort {
+            actual: payload.len(),
+        });
+    }
+
+    let source_port = u16::from_be_bytes([payload[0], payload[1]]);
+    let destination_port = u16::from_be_bytes([payload[2], payload[3]]);
+    let udp_length = usize::from(u16::from_be_bytes([payload[4], payload[5]]));
+    if udp_length < 8 || udp_length > payload.len() {
+        return Err(PacketParseError::InvalidUdpLength {
+            udp_length,
+            actual: payload.len(),
+        });
+    }
+    let udp_body = &payload[8..udp_length];
+
+    if destination_port == 53 {
+        let query = parse_dns_question(udp_body)?;
+        return Ok(NormalizedEvent::DnsQuery(DnsQuery {
+            sandbox_id: context.sandbox_id.clone(),
+            frontend: context.frontend,
+            source: Some(header.source_endpoint(Some(source_port))),
+            resolver: header.destination_endpoint(Some(destination_port)),
+            hostname: query.hostname,
+            query_type: query.query_type,
+        }));
+    }
+
+    let classification = match destination_port {
+        443 => UdpClassification::QuicCandidate,
+        _ => UdpClassification::Generic,
+    };
+
+    Ok(NormalizedEvent::UdpFlowAttempt(UdpFlowAttempt {
+        sandbox_id: context.sandbox_id.clone(),
+        frontend: context.frontend,
+        source: header.source_endpoint(Some(source_port)),
+        destination: header.destination_endpoint(Some(destination_port)),
+        classification,
+        attribution: None,
+    }))
+}
+
+fn parse_icmpv6(
+    context: &PacketContext,
+    header: Ipv6Header,
+    payload: &[u8],
+) -> Result<NormalizedEvent, PacketParseError> {
+    if payload.len() < 2 {
+        return Err(PacketParseError::IcmpHeaderTooShort {
+            actual: payload.len(),
+        });
+    }
+
+    Ok(NormalizedEvent::IcmpMessage(IcmpMessage {
+        sandbox_id: context.sandbox_id.clone(),
+        frontend: context.frontend,
+        source: header.source_endpoint(None),
+        destination: header.destination_endpoint(None),
+        icmp_type: payload[0],
+        icmp_code: payload[1],
+    }))
+}
+
 fn unsupported_event(
     context: &PacketContext,
     source: Option<Endpoint>,
@@ -469,6 +627,56 @@ impl Ipv4Header {
             protocol: packet[9],
             source: Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]),
             destination: Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]),
+        })
+    }
+
+    fn source_endpoint(self, port: Option<u16>) -> Endpoint {
+        Endpoint::new(self.source.into(), port)
+    }
+
+    fn destination_endpoint(self, port: Option<u16>) -> Endpoint {
+        Endpoint::new(self.destination.into(), port)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Ipv6Header {
+    payload_length: usize,
+    next_header: u8,
+    source: Ipv6Addr,
+    destination: Ipv6Addr,
+}
+
+impl Ipv6Header {
+    fn parse(packet: &[u8]) -> Result<Self, PacketParseError> {
+        if packet.len() < 40 {
+            return Err(PacketParseError::TooShort {
+                actual: packet.len(),
+                minimum: 40,
+            });
+        }
+        let version = packet[0] >> 4;
+        if version != 6 {
+            return Err(PacketParseError::NotIpv6 { version });
+        }
+        let payload_length = usize::from(u16::from_be_bytes([packet[4], packet[5]]));
+        let actual_payload = packet.len() - 40;
+        if actual_payload < payload_length {
+            return Err(PacketParseError::InvalidIpv6PayloadLength {
+                payload_length,
+                actual_payload,
+            });
+        }
+        let mut source = [0_u8; 16];
+        source.copy_from_slice(&packet[8..24]);
+        let mut destination = [0_u8; 16];
+        destination.copy_from_slice(&packet[24..40]);
+
+        Ok(Self {
+            payload_length,
+            next_header: packet[6],
+            source: Ipv6Addr::from(source),
+            destination: Ipv6Addr::from(destination),
         })
     }
 
@@ -572,6 +780,23 @@ mod tests {
         packet[12..16].copy_from_slice(&source);
         packet[16..20].copy_from_slice(&destination);
         packet[20..].copy_from_slice(payload);
+        packet
+    }
+
+    fn ipv6_packet(
+        next_header: u8,
+        source: Ipv6Addr,
+        destination: Ipv6Addr,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut packet = vec![0_u8; 40 + payload.len()];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        packet[6] = next_header;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&source.octets());
+        packet[24..40].copy_from_slice(&destination.octets());
+        packet[40..].copy_from_slice(payload);
         packet
     }
 
@@ -718,6 +943,104 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_ipv6_tcp_syn_into_connect_attempt() {
+        let source = "2001:db8::2".parse::<Ipv6Addr>().unwrap();
+        let destination = "2001:db8::10".parse::<Ipv6Addr>().unwrap();
+        let packet = ipv6_packet(6, source, destination, &tcp_syn_payload(49152, 443));
+
+        let event = parse_ipv6_packet(&context(), &packet).unwrap();
+
+        assert_eq!(event.protocol(), Protocol::Tcp);
+        assert_eq!(event.source(), Some(Endpoint::tcp(source.into(), 49152)));
+        assert_eq!(
+            event.destination(),
+            Some(Endpoint::tcp(destination.into(), 443))
+        );
+    }
+
+    #[test]
+    fn parses_ipv6_udp_443_as_quic_candidate() {
+        let packet = ipv6_packet(
+            17,
+            "2001:db8::2".parse().unwrap(),
+            "2001:db8::10".parse().unwrap(),
+            &udp_payload(53000, 443),
+        );
+
+        let event = parse_ipv6_packet(&context(), &packet).unwrap();
+
+        assert_eq!(event.protocol(), Protocol::QuicCandidate);
+    }
+
+    #[test]
+    fn parses_ipv6_dns_query_and_policy_allows_broker_resolver() {
+        let source = "2001:db8::2".parse::<Ipv6Addr>().unwrap();
+        let resolver = "2001:db8::1".parse::<Ipv6Addr>().unwrap();
+        let packet = ipv6_packet(
+            17,
+            source,
+            resolver,
+            &udp_payload_with_body(53000, 53, &dns_query_body("example.com", 28)),
+        );
+        let event = parse_ipv6_packet(&context(), &packet).unwrap();
+        let engine = PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            dns: DnsPolicy {
+                broker_resolvers: vec![Endpoint::udp(resolver.into(), 53)],
+                deny_direct_external_dns: true,
+            },
+            ..PolicyConfig::default()
+        });
+
+        let evaluation = engine.evaluate(&event);
+
+        assert_eq!(event.protocol(), Protocol::Dns);
+        assert_eq!(event.hostname(), Some("example.com"));
+        assert_eq!(evaluation.decision, PolicyDecision::Allow { rule_id: None });
+    }
+
+    #[test]
+    fn parses_ipv6_icmpv6_message() {
+        let packet = ipv6_packet(
+            58,
+            "2001:db8::2".parse().unwrap(),
+            "2001:db8::10".parse().unwrap(),
+            &[128, 0, 0, 0],
+        );
+
+        let event = parse_ipv6_packet(&context(), &packet).unwrap();
+
+        assert_eq!(event.protocol(), Protocol::Icmp);
+        match event {
+            NormalizedEvent::IcmpMessage(message) => {
+                assert_eq!(message.icmp_type, 128);
+                assert_eq!(message.icmp_code, 0);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_ipv6_packet_can_be_converted_to_fail_closed_event() {
+        let mut packet = ipv6_packet(
+            0,
+            "2001:db8::2".parse().unwrap(),
+            "2001:db8::10".parse().unwrap(),
+            &[0; 8],
+        );
+        packet[6] = 0; // hop-by-hop extension header unsupported in the minimal parser
+
+        assert_eq!(
+            parse_ipv6_packet(&context(), &packet),
+            Err(PacketParseError::UnsupportedIpv6ExtensionHeader { next_header: 0 })
+        );
+        let event = parse_ipv6_packet_fail_closed(&context(), &packet);
+        let evaluation = PolicyEngine::new(PolicyConfig::default()).evaluate(&event);
+        assert_eq!(event.protocol(), Protocol::Unsupported);
+        assert_eq!(evaluation.audit.decision, AuditDecision::FailClosed);
     }
 
     #[test]

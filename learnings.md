@@ -76,3 +76,7 @@ For policy defaults like multicast/broadcast denial, evaluate explicit rules fir
 ## 2026-06-21 — protocol-specific defaults should produce protocol-specific denial reasons
 
 When a protocol has documented defaults, audit reasons should identify that layer (for example `icmp-default-deny`) rather than falling through to global `default-deny`.
+
+## 2026-06-21 — minimal IPv6 support should reject extension headers until handled deliberately
+
+Fixed-header IPv6 TCP/UDP/ICMPv6 parsing can reuse normalized core events, but extension headers include fragmentation and routing semantics that should fail closed until explicitly modeled.
