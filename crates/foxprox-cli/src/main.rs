@@ -158,6 +158,11 @@ where
         }
     }
 
+    config
+        .policy
+        .rules
+        .push(allow_tcp_forward_rule(config.tcp_port));
+
     let setup_socket = setup_socket.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -243,6 +248,12 @@ where
         config.broker_ip, config.dns_port, config.upstream_dns
     );
     run_udp_dns_proof_with_ready(tun_fd, config, || stream.write_all(b"ready\n"))
+}
+
+fn allow_tcp_forward_rule(port: u16) -> PolicyRule {
+    PolicyRule::new(format!("proof-allow-tcp-{port}"), RuleEffect::Allow)
+        .with_protocol(Protocol::Tcp)
+        .with_destination_ports(PortRange::single(port))
 }
 
 fn allow_udp_forward_rule(port: u16) -> PolicyRule {

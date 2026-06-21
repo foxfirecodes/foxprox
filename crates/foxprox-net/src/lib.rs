@@ -11,7 +11,9 @@ mod udp;
 
 pub use udp::{run_udp_dns_proof, run_udp_dns_proof_with_ready, UdpDnsProofConfig};
 
-use foxprox_core::{Attribution, Frontend, NetworkEvent, SandboxId, TransportEndpoint};
+use foxprox_core::{
+    Attribution, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, SandboxId, TransportEndpoint,
+};
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, TunTapInterface};
 use smoltcp::socket::tcp;
@@ -42,6 +44,8 @@ pub struct TcpProofConfig {
     pub pending_buffer_limit: usize,
     /// Idle timeout for a proof TCP flow.
     pub idle_timeout: Duration,
+    /// Policy used before host TCP connect in the proof runtime.
+    pub policy: PolicyRuleSet,
 }
 
 impl TcpProofConfig {
@@ -56,6 +60,7 @@ impl TcpProofConfig {
             connect_timeout: Duration::from_secs(5),
             pending_buffer_limit: 256 * 1024,
             idle_timeout: Duration::from_secs(30),
+            policy: PolicyRuleSet::default(),
         }
     }
 }
@@ -130,7 +135,7 @@ where
         }
 
         if flow.is_none() {
-            let socket = sockets.get::<tcp::Socket>(tcp_handle);
+            let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
             if socket.is_active() {
                 if let (Some(local), Some(remote)) =
                     (socket.local_endpoint(), socket.remote_endpoint())
@@ -148,12 +153,17 @@ where
                         destination: TransportEndpoint::from(destination),
                         attribution: Attribution::ip_only(),
                     };
-                    eprintln!("foxprox-net: allow {event:?}");
-                    flow = Some(FlowState::Connecting(ConnectingFlow::new(
-                        source,
-                        destination,
-                        config.connect_timeout,
-                    )));
+                    let decision = PolicyEngine::new(config.policy.clone()).evaluate(&event);
+                    eprintln!("foxprox-net: tcp policy decision={decision:?} event={event:?}");
+                    if decision.is_allowed() {
+                        flow = Some(FlowState::Connecting(ConnectingFlow::new(
+                            source,
+                            destination,
+                            config.connect_timeout,
+                        )));
+                    } else {
+                        socket.abort();
+                    }
                 }
             }
         }
@@ -468,5 +478,23 @@ mod tests {
         assert!(config.connect_timeout <= Duration::from_secs(5));
         assert!(config.idle_timeout <= Duration::from_secs(30));
         assert_eq!(config.pending_buffer_limit, 256 * 1024);
+    }
+
+    #[test]
+    fn default_tcp_policy_denies_host_connect_events() {
+        let config = TcpProofConfig::new(SandboxId::new("test").unwrap());
+        let event = NetworkEvent::TcpConnectAttempt {
+            sandbox_id: config.sandbox_id.clone(),
+            frontend: Frontend::Tun,
+            source: Some(TransportEndpoint::new(
+                IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)),
+                44_444,
+            )),
+            destination: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 80),
+            attribution: Attribution::ip_only(),
+        };
+        assert!(!PolicyEngine::new(config.policy)
+            .evaluate(&event)
+            .is_allowed());
     }
 }

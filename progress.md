@@ -436,3 +436,36 @@
 - Learning ledger updated: recorded the proof-runtime policy gate lesson.
 - Current git status summary: source and ledgers modified; review artifact directory summarized and ready for removal before commit.
 - Next exact action: remove transient `reviews/`, commit UDP attribution/QUIC policy gate, then start the next smallest Milestone 5 slice: likely TCP-side policy enforcement/DNS attribution or transparent HTTP/TLS inspection planning.
+
+## 2026-06-21T22:38:00Z — UDP attribution/QUIC policy gate committed; next objective selected
+
+- Commit created: `183026c` (`gate udp proof with policy attribution`).
+- Current objective: add an equivalent policy gate to the TCP proof before host connect, preserving proof usability by installing an explicit CLI allow rule for `--tcp-port`.
+- Rationale: transparent TCP currently logs an allow without evaluating `PolicyEngine`; adding a default-deny policy gate is the smallest follow-on Milestone 5 runtime enforcement slice before larger DNS-to-TCP attribution and HTTP/TLS stream inspection work.
+- Verification plan: add `PolicyRuleSet` to `TcpProofConfig`, evaluate `TcpConnectAttempt` before spawning host connect, abort denied sockets, add focused config/default-deny tests, run full workspace fmt/check/test/clippy/doc, and run a live proof TCP smoke if practical.
+- Expected commit boundary: TCP proof policy enforcement and CLI proof allow rule only; no stream HTTP/TLS inspection or DNS attribution in this slice.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: implement TCP proof policy gate in `crates/foxprox-net/src/lib.rs` and `crates/foxprox-cli/src/main.rs`.
+
+## 2026-06-21T22:41:24Z — TCP proof policy gate verified
+
+- Current objective: commit TCP proof policy enforcement before larger transparent HTTP/TLS inspection work.
+- Changes implemented:
+  - `TcpProofConfig` now carries a `PolicyRuleSet` that defaults to fail-closed/default-deny.
+  - TCP proof runtime now builds a `TcpConnectAttempt`, evaluates `PolicyEngine` before constructing `ConnectingFlow`/spawning host connect, logs the decision, and aborts denied smoltcp sockets.
+  - `foxprox proof-tcp` installs an explicit proof allow rule for the configured `--tcp-port` so proof CLI behavior remains usable while default runtime config remains deny-by-default.
+  - Added focused net test proving default TCP proof policy denies host-connect events.
+- Subagents/reviews requested and findings:
+  - `tcp-policy-gate-final` found no blockers and confirmed policy is evaluated before host connect, default config is fail-closed, and CLI installs the explicit proof allow rule.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed after formatting.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-net` passed: 6 tests.
+  - `cargo test --workspace` passed: 45 core tests, 8 device tests, 6 net tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core` still showed only `foxprox-core`; `cargo tree -p foxprox-net -e features` showed the existing smoltcp TCP/UDP/TUN feature set.
+  - Live bwrap/TUN TCP smoke passed with sandbox Python HTTP client to resolved `example.com:80`; broker logged `tcp policy decision=Decision { action: Allow, rule_id: Some("proof-allow-tcp-80"), reason: None }` before host connect and the response started `HTTP/1.1 200 OK`.
+- Files changed: `crates/foxprox-net/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: source and progress ledger modified; review artifact directory summarized and ready for removal before commit.
+- Next exact action: remove transient `reviews/`, commit TCP proof policy gate, then select the next Milestone 5 slice (DNS-to-TCP attribution or transparent HTTP/TLS first-byte inspection).
