@@ -7,9 +7,9 @@
 
 use foxprox_core::{
     AllowDecision, DefaultPolicy, DenialAction, DenyDecision, DestinationMatcher, DirectDnsPolicy,
-    HostnameConfidence, HostnameMismatch, HttpMethodMatcher, HttpPathMatcher, NormalizedEvent,
-    PolicyDecision, PolicyRule, Protocol, ProtocolMatcher, QuicPolicy, RuleAction, RuntimeConfig,
-    UdpClassification,
+    HostnameConfidence, HostnameMismatch, HttpMethodMatcher, HttpPathMatcher, HttpSchemeMatcher,
+    NormalizedEvent, PolicyDecision, PolicyRule, Protocol, ProtocolMatcher, QuicPolicy, RuleAction,
+    RuntimeConfig, UdpClassification,
 };
 
 /// Policy engine with a typed, normalized runtime configuration.
@@ -171,6 +171,13 @@ fn destination_matches(rule: &PolicyRule, event: &NormalizedEvent) -> bool {
 }
 
 fn request_metadata_matches(rule: &PolicyRule, event: &NormalizedEvent) -> bool {
+    let scheme_matches = match rule.http_scheme {
+        HttpSchemeMatcher::Any => true,
+        HttpSchemeMatcher::Exact(expected) => match event {
+            NormalizedEvent::HttpRequest(request) => request.scheme == expected,
+            _ => false,
+        },
+    };
     let method_matches = match &rule.http_method {
         HttpMethodMatcher::Any => true,
         HttpMethodMatcher::Exact(expected) => match event {
@@ -189,7 +196,7 @@ fn request_metadata_matches(rule: &PolicyRule, event: &NormalizedEvent) -> bool 
             _ => false,
         },
     };
-    method_matches && path_matches
+    scheme_matches && method_matches && path_matches
 }
 
 fn is_essential_icmp(icmp: &foxprox_core::IcmpMessage) -> bool {
@@ -251,8 +258,8 @@ mod tests {
     use foxprox_core::{
         DestinationHost, DnsQuery, DnsQueryType, DomainSuffix, FrontendKind, Hostname,
         HostnameAttribution, HostnameAttributionSource, HttpMethod, HttpRequest, HttpScheme,
-        IcmpMessage, IpCidr, RuleId, SandboxId, TcpConnectAttempt, TlsClientHello, UdpFlowAttempt,
-        UnsupportedNetworkEvent, UnsupportedReason,
+        HttpSchemeMatcher, IcmpMessage, IpCidr, RuleId, SandboxId, TcpConnectAttempt,
+        TlsClientHello, UdpFlowAttempt, UnsupportedNetworkEvent, UnsupportedReason,
     };
 
     fn sandbox() -> SandboxId {
@@ -383,10 +390,11 @@ mod tests {
     }
 
     #[test]
-    fn http_method_and_path_matchers_are_enforced() {
+    fn http_scheme_method_and_path_matchers_are_enforced() {
         let mut config = RuntimeConfig::deny_by_default();
         let mut rule = PolicyRule::allow(RuleId::new("http-api").unwrap());
         rule.protocol = ProtocolMatcher::Exact(Protocol::Http);
+        rule.http_scheme = HttpSchemeMatcher::Exact(HttpScheme::Http);
         rule.http_method = HttpMethodMatcher::Exact(HttpMethod::Get);
         rule.http_path = HttpPathMatcher::Prefix("/api/".to_string());
         config.rules.push(rule);
@@ -398,6 +406,15 @@ mod tests {
             scheme: HttpScheme::Http,
             host: DestinationHost::Hostname(Hostname::new("example.com").unwrap()),
             port: 80,
+            path_query: "/api/items".to_string(),
+        });
+        let wrong_scheme = NormalizedEvent::HttpRequest(HttpRequest {
+            sandbox_id: sandbox(),
+            frontend: FrontendKind::HttpProxy,
+            method: HttpMethod::Get,
+            scheme: HttpScheme::Https,
+            host: DestinationHost::Hostname(Hostname::new("example.com").unwrap()),
+            port: 443,
             path_query: "/api/items".to_string(),
         });
         let denied = NormalizedEvent::HttpRequest(HttpRequest {
@@ -412,6 +429,7 @@ mod tests {
         let engine = PolicyEngine::new(config);
 
         assert!(engine.decide(&allowed).is_allowed());
+        assert!(!engine.decide(&wrong_scheme).is_allowed());
         assert!(!engine.decide(&denied).is_allowed());
     }
 

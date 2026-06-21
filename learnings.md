@@ -68,3 +68,7 @@
 ## 2026-06-21 — CNAME attribution boundary
 
 - CNAME expansion can stay inside DNS normalization by emitting extra hostname/IP records for aliases; downstream attribution cache still does not need DNS RR or compression-pointer details.
+
+## 2026-06-21 — HTTP scheme matcher boundary
+
+- Origin-aware HTTP policy needs scheme as a typed matcher alongside host/port/path; otherwise explicit proxy absolute-form requests could not distinguish `http` and `https` origins without parser-specific shortcuts.

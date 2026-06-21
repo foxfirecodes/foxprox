@@ -345,3 +345,22 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: 9ae7f71.
 - Remaining boundary risks: multi-response cache merging, negative DNS caching, and DNSSEC/authority metadata remain.
+
+## 2026-06-21 — Boundary objective: HTTP origin scheme matcher contract
+
+- Boundary under work: normalized HTTP scheme matching for origin-aware plaintext/proxy HTTP policy.
+- Allowed dependency direction: frontends emit `HttpRequest.scheme`; `foxprox-policy` matches typed core rule fields; no parser structs or raw request text enter policy.
+- Dependency-risk assessment: origin policy is incomplete if rules can match host/port/path but not scheme, especially for explicit proxy absolute-form HTTP requests.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: added typed `HttpSchemeMatcher` to core rules, config validation, and policy matching; HTTP origin rules can now distinguish `http` from `https` normalized requests. All verification passed.
+- Changed files:
+  - `crates/foxprox-core/src/lib.rs`
+  - `crates/foxprox-config/src/lib.rs`
+  - `crates/foxprox-policy/src/lib.rs`
+  - `progress.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 52 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: header matching, production proxy forwarding, and transparent HTTP stream reassembly remain.

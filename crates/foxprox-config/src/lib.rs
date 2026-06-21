@@ -12,8 +12,9 @@ use std::time::Duration;
 
 use foxprox_core::{
     DefaultPolicy, DenialAction, DestinationMatcher, DirectDnsPolicy, DomainSuffix,
-    HostnameConfidence, HttpMethod, HttpMethodMatcher, HttpPathMatcher, IpCidr, PolicyRule,
-    PortMatcher, Protocol, ProtocolMatcher, QuicPolicy, RuleId, RuntimeConfig, UdpTimeouts,
+    HostnameConfidence, HttpMethod, HttpMethodMatcher, HttpPathMatcher, HttpScheme,
+    HttpSchemeMatcher, IpCidr, PolicyRule, PortMatcher, Protocol, ProtocolMatcher, QuicPolicy,
+    RuleId, RuntimeConfig, UdpTimeouts,
 };
 
 /// User-facing alpha policy config document.
@@ -131,6 +132,7 @@ pub struct RuleConfig {
     pub protocol: Option<ProtocolConfig>,
     pub destination: Option<DestinationConfig>,
     pub port: Option<PortConfig>,
+    pub http_scheme: Option<HttpSchemeConfig>,
     pub http_method: Option<HttpMethodConfig>,
     pub http_path: Option<HttpPathConfig>,
     pub minimum_hostname_confidence: Option<HostnameConfidence>,
@@ -152,6 +154,9 @@ impl RuleConfig {
         }
         if let Some(port) = self.port {
             rule.port = port.validate()?;
+        }
+        if let Some(scheme) = self.http_scheme {
+            rule.http_scheme = scheme.validate();
         }
         if let Some(method) = self.http_method {
             rule.http_method = method.validate();
@@ -253,6 +258,23 @@ impl PortConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum HttpSchemeConfig {
+    Any,
+    Http,
+    Https,
+}
+
+impl HttpSchemeConfig {
+    fn validate(self) -> HttpSchemeMatcher {
+        match self {
+            Self::Any => HttpSchemeMatcher::Any,
+            Self::Http => HttpSchemeMatcher::Exact(HttpScheme::Http),
+            Self::Https => HttpSchemeMatcher::Exact(HttpScheme::Https),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum HttpMethodConfig {
     Any,
@@ -329,6 +351,7 @@ mod tests {
                 protocol: Some(ProtocolConfig::Http),
                 destination: Some(DestinationConfig::DomainSuffix("Example.COM".to_string())),
                 port: Some(PortConfig::Exact(80)),
+                http_scheme: Some(HttpSchemeConfig::Http),
                 http_method: Some(HttpMethodConfig::Exact("GET".to_string())),
                 http_path: Some(HttpPathConfig::Prefix("/api/".to_string())),
                 minimum_hostname_confidence: Some(HostnameConfidence::High),
@@ -348,6 +371,10 @@ mod tests {
             ProtocolMatcher::Exact(Protocol::Http)
         );
         assert_eq!(runtime.rules[0].port, PortMatcher::Exact(80));
+        assert_eq!(
+            runtime.rules[0].http_scheme,
+            HttpSchemeMatcher::Exact(HttpScheme::Http)
+        );
         assert_eq!(
             runtime.rules[0].http_method,
             HttpMethodMatcher::Exact(HttpMethod::Get)
@@ -374,6 +401,7 @@ mod tests {
                     start: 100,
                     end: 10,
                 }),
+                http_scheme: None,
                 http_method: None,
                 http_path: None,
                 minimum_hostname_confidence: None,
