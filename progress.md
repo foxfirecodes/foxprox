@@ -57,4 +57,4 @@ The alpha core now exposes decision-relevant behavior through structured audit r
 
 ### Commit
 - `7b462c2` — observable alpha broker core foundation.
-- `6b58a05` — reviewer fixes for packet validation, timestamps, ICMP defaults, flow audit semantics, setup fd modeling, and backpressure evidence.
+- `7227fce` — reviewer fixes for packet validation, timestamps, ICMP defaults, flow audit semantics, setup fd modeling, and backpressure evidence.
