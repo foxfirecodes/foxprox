@@ -90,10 +90,15 @@ impl BwrapSetupPlan {
             format!("{}:{}", config.gateway_ip, config.http_proxy_port),
             "--socks-proxy".to_string(),
             format!("{}:{}", config.gateway_ip, config.socks_proxy_port),
+        ];
+        if let Some(fd) = config.setup_control_fd {
+            setup_command.extend(["--setup-control-fd".to_string(), fd.to_string()]);
+        }
+        setup_command.extend([
             "--drop-cap".to_string(),
             "CAP_NET_ADMIN".to_string(),
             "--".to_string(),
-        ];
+        ]);
         setup_command.extend(target_command.iter().cloned());
 
         let proxy_environment = config.proxy_environment();
@@ -147,6 +152,18 @@ mod tests {
             .windows(2)
             .any(|w| w == ["--drop-cap", "CAP_NET_ADMIN"]));
         assert!(full.ends_with(&target));
+    }
+
+    #[test]
+    fn bwrap_plan_passes_setup_control_fd_to_helper() {
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.setup_control_fd = Some(9);
+        let plan = BwrapSetupPlan::new(config, &["true".to_string()]);
+        assert!(plan.bwrap_args.windows(2).any(|w| w == ["--sync-fd", "9"]));
+        assert!(plan
+            .setup_command
+            .windows(2)
+            .any(|w| w == ["--setup-control-fd", "9"]));
     }
 
     #[test]

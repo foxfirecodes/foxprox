@@ -16,7 +16,7 @@ impl BrokerCore {
     pub fn new(policy: PolicyEngine, audit_capacity: usize) -> Self {
         Self {
             policy,
-            audit: BoundedAuditLedger::new(audit_capacity),
+            audit: BoundedAuditLedger::new(audit_capacity.max(1)),
         }
     }
 
@@ -95,6 +95,27 @@ mod tests {
         assert_eq!(records[0].kind, AuditKind::TcpConnectDecision);
         assert_eq!(records[0].decision, Some(Decision::Allow));
         assert_eq!(records[0].rule_id.as_deref(), Some("allow-doc-net"));
+    }
+
+    #[test]
+    fn broker_core_keeps_backpressure_evidence_with_zero_requested_capacity() {
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let mut broker = BrokerCore::new(PolicyEngine::new(config), 0);
+        let request = PolicyRequest::tcp_connect(
+            "s1",
+            Frontend::Tun,
+            NetworkEndpoint::socket("10.0.2.15".parse().unwrap(), 50000),
+            NetworkEndpoint::socket("203.0.113.42".parse().unwrap(), 443),
+        );
+
+        assert_eq!(broker.evaluate(&request).decision, Decision::Allow);
+        assert_eq!(broker.evaluate(&request).decision, Decision::FailClosed);
+        let records: Vec<_> = broker.audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::AuditBackpressure);
     }
 
     #[test]

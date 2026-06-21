@@ -4,6 +4,7 @@ use crate::types::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AuditRecord {
@@ -29,7 +30,7 @@ pub struct AuditRecord {
 
 impl AuditRecord {
     pub fn new(kind: AuditKind, sandbox_id: impl Into<String>) -> Self {
-        Self::new_at(kind, sandbox_id, 0)
+        Self::new_at(kind, sandbox_id, unix_timestamp_ms())
     }
 
     pub fn new_at(kind: AuditKind, sandbox_id: impl Into<String>, timestamp_ms: u128) -> Self {
@@ -203,6 +204,13 @@ impl BoundedAuditLedger {
     pub fn is_empty(&self) -> bool {
         self.records.is_empty()
     }
+}
+
+pub fn unix_timestamp_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

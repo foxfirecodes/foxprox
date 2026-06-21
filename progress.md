@@ -16,7 +16,7 @@ Implemented the platform-independent alpha broker core in Rust with observable p
 ### Commands run
 - `cargo fmt --check` — passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
-- `cargo test --all-targets --all-features` — passed, 30 unit tests.
+- `cargo test --all-targets --all-features` — passed, 34 unit tests after reviewer fixes.
 
 ### Evidence excerpts
 - `audit::tests::audit_record_serializes_stable_structured_fields ... ok`
@@ -28,11 +28,13 @@ Implemented the platform-independent alpha broker core in Rust with observable p
 - `policy::tests::sni_dns_mismatch_is_denied_with_specific_event ... ok`
 - `flow::tests::udp_flow_lifecycle_emits_create_quic_and_expire_audit ... ok`
 - `packet::tests::fragmented_ipv4_fails_closed_with_structured_audit ... ok`
+- `packet::tests::short_tcp_udp_and_icmp_headers_fail_closed ... ok`
 - `packet::tests::icmp_echo_reply_swaps_addresses_and_recomputes_checksums ... ok`
 - `setup::tests::bwrap_plan_contains_alpha_network_setup_contract ... ok`
+- `setup::tests::bwrap_plan_passes_setup_control_fd_to_helper ... ok`
 
 ### Interpretation
-The alpha core now exposes decision-relevant behavior through structured audit records and tests that assert stable fields, denial reasons, frontend source, attribution source, byte counts, durations, and bounded audit-buffer behavior. Runtime forwarding is still represented as platform-independent contracts/harness primitives rather than privileged TUN/smoltcp/socket execution.
+The alpha core now exposes decision-relevant behavior through structured audit records and tests that assert stable fields, denial reasons, frontend source, attribution source, byte counts, durations, and bounded audit-buffer behavior. A reviewer pass identified missing malformed-packet guards, misleading UDP flow decisions, timestamp defaults, ICMP default mismatch, setup-control fd modeling, and zero-capacity backpressure evidence; those were fixed with focused tests. Runtime forwarding is still represented as platform-independent contracts/harness primitives rather than privileged TUN/smoltcp/socket execution.
 
 ### Changed files
 - `Cargo.lock`
@@ -51,7 +53,8 @@ The alpha core now exposes decision-relevant behavior through structured audit r
 
 ### Remaining blind spots
 - Real TUN fd I/O, bwrap execution, fd handoff, smoltcp TCP bridging, explicit proxy listeners, DNS upstream forwarding, and host socket egress require privileged/integration crates and runtime environments. The current implementation locks down the platform-independent observable contracts those runtime layers must emit.
-- Independent reviewer run `96f9f4db-0ed0-4317-86ae-a79c6cab374d` is in progress; incorporate blocker findings before commit if any are returned.
+- Independent reviewer run `96f9f4db-0ed0-4317-86ae-a79c6cab374d` failed acceptance finalization but wrote findings. Blocker/high findings were addressed except for full privileged runtime implementation, which remains the next alpha milestone.
 
 ### Commit
-- _pending_
+- `7b462c2` — observable alpha broker core foundation.
+- `6b58a05` — reviewer fixes for packet validation, timestamps, ICMP defaults, flow audit semantics, setup fd modeling, and backpressure evidence.

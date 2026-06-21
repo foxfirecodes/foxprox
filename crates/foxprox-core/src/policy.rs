@@ -1,4 +1,4 @@
-use crate::audit::AuditRecord;
+use crate::audit::{unix_timestamp_ms, AuditRecord};
 use crate::types::{
     normalize_hostname, AttributionConfidence, AttributionSource, AuditKind, Decision,
     DenialReason, Frontend, HostnameAttribution, NetworkEndpoint, Origin, Protocol,
@@ -478,12 +478,15 @@ impl PolicyEngine {
                 audit_kind,
             );
         }
-        if request.protocol == Protocol::Icmp && !self.icmp_allowed(request) {
-            return PolicyDecision::deny(
-                Decision::DenyDrop,
-                DenialReason::IcmpUnsupported,
-                audit_kind,
-            );
+        if request.protocol == Protocol::Icmp {
+            if !self.icmp_allowed(request) {
+                return PolicyDecision::deny(
+                    Decision::DenyDrop,
+                    DenialReason::IcmpUnsupported,
+                    audit_kind,
+                );
+            }
+            return PolicyDecision::allow(audit_kind, None);
         }
 
         for rule in &self.config.rules {
@@ -531,13 +534,25 @@ impl PolicyEngine {
     }
 
     pub fn decide_with_audit(&self, request: &PolicyRequest) -> (PolicyDecision, AuditRecord) {
+        self.decide_with_audit_at(request, unix_timestamp_ms())
+    }
+
+    pub fn decide_with_audit_at(
+        &self,
+        request: &PolicyRequest,
+        timestamp_ms: u128,
+    ) -> (PolicyDecision, AuditRecord) {
         let decision = self.decide(request);
-        let mut audit = AuditRecord::new(decision.audit_kind, request.sandbox.session_id.clone())
-            .with_frontend(request.frontend)
-            .with_protocol(request.protocol)
-            .with_source(request.source.clone())
-            .with_destination(request.destination.clone())
-            .with_decision(decision.decision, decision.reason);
+        let mut audit = AuditRecord::new_at(
+            decision.audit_kind,
+            request.sandbox.session_id.clone(),
+            timestamp_ms,
+        )
+        .with_frontend(request.frontend)
+        .with_protocol(request.protocol)
+        .with_source(request.source.clone())
+        .with_destination(request.destination.clone())
+        .with_decision(decision.decision, decision.reason);
         audit.process_id = request.sandbox.process_id;
         if let Some(attribution) = &request.hostname_attribution {
             audit = audit.with_attribution(attribution.clone());
@@ -808,6 +823,17 @@ mod tests {
         );
         let engine = PolicyEngine::new(config);
         assert_eq!(engine.decide(&request).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn essential_icmp_errors_are_allowed_by_default() {
+        let mut request = PolicyRequest::new("s1", Frontend::Tun, Protocol::Icmp)
+            .with_destination(NetworkEndpoint::ip("10.0.2.15".parse().unwrap()));
+        request.icmp_type = Some(3);
+        request.icmp_code = Some(1);
+        let decision = PolicyEngine::new(PolicyConfig::default()).decide(&request);
+        assert_eq!(decision.decision, Decision::Allow);
+        assert_eq!(decision.reason, None);
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use crate::audit::AuditRecord;
 use crate::types::{
-    AttributionConfidence, AttributionSource, AuditKind, ByteCounts, Decision, Frontend,
-    HostnameAttribution, NetworkEndpoint, Protocol,
+    AttributionConfidence, AttributionSource, AuditKind, ByteCounts, Frontend, HostnameAttribution,
+    NetworkEndpoint, Protocol,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -118,7 +118,7 @@ impl UdpFlowManager {
                     .with_protocol(Protocol::Udp)
                     .with_source(key.source())
                     .with_destination(key.destination())
-                    .with_decision(Decision::Allow, None)
+                    .with_timestamp_ms(now_ms as u128)
                     .with_detail(
                         "classification",
                         format!("{classification:?}").to_ascii_lowercase(),
@@ -132,7 +132,7 @@ impl UdpFlowManager {
                         .with_protocol(Protocol::Quic)
                         .with_source(key.source())
                         .with_destination(key.destination())
-                        .with_decision(Decision::Allow, None),
+                        .with_timestamp_ms(now_ms as u128),
                 );
             }
             UdpFlow {
@@ -172,6 +172,7 @@ impl UdpFlowManager {
                         .with_protocol(Protocol::Udp)
                         .with_source(flow.key.source())
                         .with_destination(flow.key.destination())
+                        .with_timestamp_ms(now_ms as u128)
                         .with_byte_counts(flow.byte_counts)
                         .with_duration_ms(now_ms.saturating_sub(flow.created_at_ms))
                         .with_detail(
@@ -257,8 +258,8 @@ impl DnsCache {
         AuditRecord::new(AuditKind::DnsQueryDecision, sandbox_id)
             .with_frontend(Frontend::Tun)
             .with_protocol(Protocol::Dns)
+            .with_timestamp_ms(observed_at_ms as u128)
             .with_hostname(hostname)
-            .with_decision(Decision::Allow, None)
             .with_detail("dns_query_type", query_type)
             .with_detail(
                 "returned_addresses",
@@ -307,13 +308,17 @@ mod tests {
         let records = manager.observe_outbound_datagram(key.clone(), 1200, 1_000);
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].kind, AuditKind::UdpFlowCreated);
+        assert_eq!(records[0].decision, None);
+        assert_eq!(records[0].timestamp_ms, 1_000);
         assert_eq!(records[1].kind, AuditKind::QuicCandidateFlowCreated);
+        assert_eq!(records[1].decision, None);
         assert_eq!(manager.get(&key).unwrap().byte_counts.from_sandbox, 1200);
 
         manager.observe_inbound_datagram(&key, 900, 2_000);
         let expired = manager.expire(182_000);
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0].kind, AuditKind::UdpFlowExpired);
+        assert_eq!(expired[0].timestamp_ms, 182_000);
         assert_eq!(expired[0].byte_counts.as_ref().unwrap().from_sandbox, 1200);
         assert_eq!(expired[0].byte_counts.as_ref().unwrap().to_sandbox, 900);
         assert!(manager.is_empty());
@@ -331,6 +336,7 @@ mod tests {
             30_000,
         );
         assert_eq!(audit.kind, AuditKind::DnsQueryDecision);
+        assert_eq!(audit.timestamp_ms, 1_000);
         assert_eq!(audit.hostname.as_deref(), Some("example.com"));
 
         let attribution = cache

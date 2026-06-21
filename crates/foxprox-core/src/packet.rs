@@ -44,7 +44,7 @@ impl ParsedIpPacket {
         let payload = &packet[ihl..total_len];
         let (protocol, source_port, destination_port, icmp_type, icmp_code) = match packet[9] {
             1 => {
-                if payload.len() < 2 {
+                if payload.len() < 4 {
                     return Err(IpParseError::MalformedPacket("short_icmp_header"));
                 }
                 (
@@ -56,7 +56,7 @@ impl ParsedIpPacket {
                 )
             }
             6 => {
-                if payload.len() < 4 {
+                if payload.len() < 20 {
                     return Err(IpParseError::MalformedPacket("short_tcp_header"));
                 }
                 (
@@ -68,7 +68,7 @@ impl ParsedIpPacket {
                 )
             }
             17 => {
-                if payload.len() < 4 {
+                if payload.len() < 8 {
                     return Err(IpParseError::MalformedPacket("short_udp_header"));
                 }
                 (
@@ -151,6 +151,9 @@ pub fn synthesize_icmpv4_echo_reply(packet: &[u8]) -> Result<Vec<u8>, IpParseErr
     }
     let ihl = ((packet[0] & 0x0f) as usize) * 4;
     let total_len = u16::from_be_bytes([packet[2], packet[3]]) as usize;
+    if total_len.saturating_sub(ihl) < 8 {
+        return Err(IpParseError::MalformedPacket("short_icmp_echo_header"));
+    }
     let mut reply = packet[..total_len].to_vec();
 
     // Swap IPv4 source/destination.
@@ -200,6 +203,27 @@ mod tests {
         assert_eq!(parsed.destination_port, Some(53));
         assert_eq!(parsed.source, "10.0.2.15".parse::<IpAddr>().unwrap());
         assert_eq!(parsed.destination, "8.8.8.8".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn short_tcp_udp_and_icmp_headers_fail_closed() {
+        let tcp = ipv4_packet(6, 0, &[0x12, 0x34, 0x00, 0x50]);
+        assert_eq!(
+            ParsedIpPacket::parse_ipv4(&tcp).unwrap_err(),
+            IpParseError::MalformedPacket("short_tcp_header")
+        );
+
+        let udp = ipv4_packet(17, 0, &[0x12, 0x34, 0x00, 0x35]);
+        assert_eq!(
+            ParsedIpPacket::parse_ipv4(&udp).unwrap_err(),
+            IpParseError::MalformedPacket("short_udp_header")
+        );
+
+        let icmp = ipv4_packet(1, 0, &[8, 0]);
+        assert_eq!(
+            synthesize_icmpv4_echo_reply(&icmp).unwrap_err(),
+            IpParseError::MalformedPacket("short_icmp_header")
+        );
     }
 
     #[test]
