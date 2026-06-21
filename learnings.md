@@ -61,3 +61,7 @@ Strict DNS response parsing is not sufficient for safe attribution. Address answ
 ## 2026-06-21 - Domain allow rules must bind proxy authority ports
 
 Host/domain policy rules with ports cannot rely only on IP destination endpoints. Explicit proxy requests may have no resolved IP yet, so policy needs a separate requested-port field populated from CONNECT/SOCKS/HTTP authority metadata; missing requested-port must not match port-scoped host rules.
+
+## 2026-06-21 - Normalize parser output before policy decisions
+
+Parser outputs should have first-class conversion paths into normalized policy requests. This avoids hand-built requests that accidentally omit requested ports, frontend source, path/method metadata, or IP-only-vs-hostname attribution distinctions.

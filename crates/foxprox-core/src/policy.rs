@@ -2,6 +2,8 @@ use std::net::IpAddr;
 
 use crate::attribution::{HostAttribution, Hostname};
 use crate::config::{DestinationMatcher, PolicyConfig, PolicyRule, RuleAction};
+use crate::http::{HttpRequestMetadata, HttpsConnectMetadata};
+use crate::socks::{Socks5ConnectMetadata, Socks5Destination};
 use crate::types::{Endpoint, Frontend, IcmpMessage, Protocol, SandboxId};
 
 /// Exhaustive policy outcome. Callers must handle allow, denial, and fail-closed
@@ -129,6 +131,43 @@ impl PolicyRequest {
         self.http_method = Some(method.into());
         self.http_path_query = Some(path_query.into());
         self
+    }
+
+    pub fn from_http_request_metadata(
+        frontend: Frontend,
+        metadata: HttpRequestMetadata,
+        destination: Option<Endpoint>,
+    ) -> Self {
+        let mut request = Self::new(Protocol::Http)
+            .with_attribution(metadata.attribution)
+            .with_requested_port(metadata.port)
+            .with_http_metadata(metadata.method, metadata.path_query);
+        request.frontend = frontend;
+        if let Some(destination) = destination {
+            request = request.with_destination(destination);
+            request.requested_port = Some(metadata.port);
+        }
+        request
+    }
+
+    pub fn from_https_connect_metadata(metadata: HttpsConnectMetadata) -> Self {
+        let mut request = Self::new(Protocol::HttpsConnect)
+            .with_attribution(metadata.attribution)
+            .with_requested_port(metadata.port);
+        request.frontend = Frontend::HttpProxy;
+        request
+    }
+
+    pub fn from_socks5_connect_metadata(metadata: Socks5ConnectMetadata) -> Self {
+        let mut request = Self::new(Protocol::Socks)
+            .with_attribution(metadata.attribution)
+            .with_requested_port(metadata.port);
+        request.frontend = Frontend::Socks5;
+        if let Socks5Destination::Ip(ip) = metadata.destination {
+            request = request.with_destination(Endpoint::tcp(ip, metadata.port));
+        }
+        request.requested_port = Some(metadata.port);
+        request
     }
 
     pub fn malformed(protocol: Protocol) -> Self {
@@ -377,6 +416,8 @@ mod tests {
 
     use crate::attribution::{HostAttribution, Hostname};
     use crate::config::{Cidr, HostMatcher, PolicyRule};
+    use crate::http::{parse_http_request_head, parse_https_connect_head};
+    use crate::socks::parse_socks5_connect_request;
     use crate::types::{HostnameConfidence, HostnameSource};
 
     use super::*;
@@ -657,6 +698,95 @@ mod tests {
                 Hostname::parse("example.com").unwrap(),
             ));
         assert!(PolicyEngine::decide(&config, &transparent).is_allow());
+    }
+
+    #[test]
+    fn parser_metadata_normalizes_into_policy_requests() {
+        let http = parse_http_request_head(
+            b"GET /v1/users HTTP/1.1\r\nHost: Api.Example.COM:8080\r\n\r\n",
+            1024,
+        )
+        .unwrap();
+        let request = PolicyRequest::from_http_request_metadata(Frontend::Tun, http, None);
+        assert_eq!(request.protocol, Protocol::Http);
+        assert_eq!(request.frontend, Frontend::Tun);
+        assert_eq!(request.requested_port, Some(8080));
+        assert_eq!(request.http_method.as_deref(), Some("GET"));
+        assert_eq!(request.http_path_query.as_deref(), Some("/v1/users"));
+        assert_eq!(
+            request.attribution.hostname.as_ref().unwrap().as_str(),
+            "api.example.com"
+        );
+
+        let connect = parse_https_connect_head(
+            b"CONNECT secure.example.com:443 HTTP/1.1\r\nHost: secure.example.com:443\r\n\r\n",
+            1024,
+        )
+        .unwrap();
+        let request = PolicyRequest::from_https_connect_metadata(connect);
+        assert_eq!(request.protocol, Protocol::HttpsConnect);
+        assert_eq!(request.frontend, Frontend::HttpProxy);
+        assert_eq!(request.requested_port, Some(443));
+        assert_eq!(
+            request.attribution.hostname.as_ref().unwrap().as_str(),
+            "secure.example.com"
+        );
+
+        let socks_domain = parse_socks5_connect_request(
+            &[
+                0x05, 0x01, 0x00, 0x03, 11, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c',
+                b'o', b'm', 0x01, 0xbb,
+            ],
+            64,
+        )
+        .unwrap();
+        let request = PolicyRequest::from_socks5_connect_metadata(socks_domain);
+        assert_eq!(request.protocol, Protocol::Socks);
+        assert_eq!(request.frontend, Frontend::Socks5);
+        assert_eq!(request.requested_port, Some(443));
+        assert!(request.destination.is_none());
+        assert_eq!(
+            request.attribution.hostname.as_ref().unwrap().as_str(),
+            "example.com"
+        );
+
+        let socks_ip = parse_socks5_connect_request(
+            &[0x05, 0x01, 0x00, 0x01, 203, 0, 113, 10, 0x00, 0x50],
+            64,
+        )
+        .unwrap();
+        let request = PolicyRequest::from_socks5_connect_metadata(socks_ip);
+        assert_eq!(request.requested_port, Some(80));
+        assert_eq!(
+            request.destination,
+            Some(Endpoint::tcp(ip([203, 0, 113, 10]), 80))
+        );
+        assert_eq!(request.attribution, HostAttribution::ip_only());
+    }
+
+    #[test]
+    fn normalized_proxy_requests_enforce_port_scoped_domain_policy() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(PolicyRule::allow_domain(
+            "allow-https",
+            HostMatcher::exact("secure.example.com").unwrap(),
+            Some(443),
+        ));
+
+        let allowed = PolicyRequest::from_https_connect_metadata(
+            parse_https_connect_head(b"CONNECT secure.example.com:443 HTTP/1.1\r\n\r\n", 1024)
+                .unwrap(),
+        );
+        assert!(PolicyEngine::decide(&config, &allowed).is_allow());
+
+        let denied = PolicyRequest::from_https_connect_metadata(
+            parse_https_connect_head(b"CONNECT secure.example.com:8443 HTTP/1.1\r\n\r\n", 1024)
+                .unwrap(),
+        );
+        assert_eq!(
+            PolicyEngine::decide(&config, &denied).reason(),
+            Some(DenialReason::DefaultDeny)
+        );
     }
 
     #[test]

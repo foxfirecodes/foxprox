@@ -366,3 +366,25 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; requested port should be added to expanded audit context in a later audit schema cycle.
 * Residual risk: parser-to-policy conversion helpers for CONNECT/SOCKS/HTTP and requested-port audit fields remain future work.
 * Commit hash: 95d4fbf bind domain policy to requested ports.
+
+## 2026-06-21 - Parser-to-policy normalization helpers
+
+* Invariant under work: HTTP, HTTPS CONNECT, and SOCKS parser outputs must normalize into policy requests with explicit frontend, protocol, hostname attribution, requested port, path/method metadata, and IP destination where available.
+* Threat or failure mode addressed: callers hand-building policy requests could omit requested-port or attribution metadata, causing port-scoped domain rules, audit context, or IP-only SOCKS decisions to behave incorrectly.
+* Planned verification: add normalization tests for plaintext HTTP method/path/port attribution, HTTPS CONNECT requested-port attribution, SOCKS domain requested-port attribution, SOCKS IP destination/IP-only attribution, and policy allow/deny behavior using normalized requests; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Parser-to-policy normalization helpers results
+
+* Tests added/updated:
+  * plaintext HTTP parser metadata normalizes into HTTP policy requests with frontend, high-confidence host attribution, requested port, method, and path/query.
+  * HTTPS CONNECT parser metadata normalizes into explicit HTTP proxy policy requests with high-confidence host attribution and requested port.
+  * SOCKS5 domain metadata normalizes into SOCKS policy requests with requested port and no premature IP destination; SOCKS5 IP metadata normalizes into an IP destination with IP-only attribution.
+  * normalized CONNECT requests enforce port-scoped domain policy for matching and mismatching authority ports.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 79 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * callers can now preserve parser-derived ports and attribution consistently when entering policy.
+  * SOCKS IP destinations remain unable to satisfy domain rules.
+  * port-scoped explicit proxy domain rules deny normalized requests with the wrong requested port.
+* Audit evidence: not applicable in this commit; normalized policy requests feed existing audit context builders, with requested-port audit coverage still pending.
+* Residual risk: transparent TLS metadata normalization, DNS metadata normalization, requested-port audit fields, and actual frontend wiring remain future work.
