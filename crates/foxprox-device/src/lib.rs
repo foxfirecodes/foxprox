@@ -439,6 +439,41 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_smoke_packet_parsers_are_total() {
+        let seeds = [Vec::new(), vec![0; 4], echo_request()];
+        for seed in seeds {
+            for input in mutated_inputs(&seed) {
+                let ipv4 = parse_ipv4_metadata(&input);
+                if let Ok(metadata) = ipv4 {
+                    let _ = parse_icmpv4_metadata(&input, metadata);
+                }
+                let _ = synthesize_icmpv4_echo_reply(&input, Ipv4Addr::new(10, 255, 0, 1));
+            }
+        }
+    }
+
+    fn mutated_inputs(seed: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        out.push(seed.to_vec());
+        for len in 0..=seed.len().min(16) {
+            out.push(seed[..len].to_vec());
+        }
+        for index in 0..seed.len().min(32) {
+            let mut mutated = seed.to_vec();
+            mutated[index] ^= 0xaa;
+            out.push(mutated);
+        }
+        let mut generated = Vec::new();
+        let mut state = seed.len() as u32 ^ 0x1020_3040;
+        for _ in 0..96 {
+            state = state.wrapping_mul(22_695_477).wrapping_add(1);
+            generated.push((state >> 24) as u8);
+        }
+        out.push(generated);
+        out
+    }
+
+    #[test]
     fn maps_drop_reason_to_unsupported_event() {
         let event = unsupported_event_for_drop(None, PacketDropReason::UnsupportedIpProtocol(99));
         assert_eq!(event.protocol(), foxprox_core::Protocol::Unsupported);

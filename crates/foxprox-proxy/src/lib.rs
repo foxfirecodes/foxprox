@@ -986,6 +986,47 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_smoke_proxy_parsers_are_total() {
+        let mut socks_host = vec![0x05, 0x01, 0x00, 0x05, 0x01, 0x00, 0x03, 11];
+        socks_host.extend_from_slice(b"example.com");
+        socks_host.extend_from_slice(&443_u16.to_be_bytes());
+        let seeds: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec(),
+            b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec(),
+            vec![0x05, 0x01, 0x00],
+            socks_host,
+        ];
+        for seed in seeds {
+            for input in mutated_inputs(&seed) {
+                let _ = parse_http_proxy_request_head(sandbox_id(), &input);
+                let _ = parse_socks5_connect(sandbox_id(), &input);
+            }
+        }
+    }
+
+    fn mutated_inputs(seed: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        out.push(seed.to_vec());
+        for len in 0..=seed.len().min(16) {
+            out.push(seed[..len].to_vec());
+        }
+        for index in 0..seed.len().min(32) {
+            let mut mutated = seed.to_vec();
+            mutated[index] ^= 0x55;
+            out.push(mutated);
+        }
+        let mut generated = Vec::new();
+        let mut state = seed.len() as u32 ^ 0xfeed_cafe;
+        for _ in 0..96 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            generated.push((state >> 24) as u8);
+        }
+        out.push(generated);
+        out
+    }
+
+    #[test]
     fn proxy_audit_event_records_http_metadata() {
         let event = parse_http_proxy_request_head(
             sandbox_id(),

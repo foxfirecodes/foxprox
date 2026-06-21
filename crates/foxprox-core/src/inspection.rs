@@ -338,6 +338,44 @@ mod tests {
         assert_eq!(classify_udp_candidate(53), Protocol::Udp);
     }
 
+    #[test]
+    fn fuzz_smoke_http_and_tls_parsers_are_total() {
+        let seeds: &[&[u8]] = &[
+            b"",
+            b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            b"CONNECT example.com:443 HTTP/1.1\r\n\r\n",
+            b"\x16\x03\x03\x00\x04\x01\x00\x00\x00",
+            &tls_client_hello_with_extensions(&[sni_extension("www.example.com")]),
+        ];
+        for seed in seeds {
+            for input in mutated_inputs(seed) {
+                let _ = parse_http_request_head(&input, 80);
+                let _ = parse_tls_client_hello(&input);
+            }
+        }
+    }
+
+    fn mutated_inputs(seed: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        out.push(seed.to_vec());
+        for len in 0..=seed.len().min(16) {
+            out.push(seed[..len].to_vec());
+        }
+        for index in 0..seed.len().min(32) {
+            let mut mutated = seed.to_vec();
+            mutated[index] ^= 0xff;
+            out.push(mutated);
+        }
+        let mut generated = Vec::new();
+        let mut state = seed.len() as u32 ^ 0xa5a5_5a5a;
+        for _ in 0..64 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            generated.push((state >> 24) as u8);
+        }
+        out.push(generated);
+        out
+    }
+
     fn sni_extension(hostname: &str) -> Vec<u8> {
         let mut list = Vec::new();
         list.push(0);

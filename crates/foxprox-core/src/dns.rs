@@ -531,6 +531,38 @@ mod tests {
     }
 
     #[test]
+    fn fuzz_smoke_dns_parsers_are_total() {
+        let seeds = [Vec::new(), vec![0; 4], example_query()];
+        for seed in seeds {
+            for input in mutated_inputs(&seed) {
+                let _ = parse_dns_query(&input);
+                let _ = parse_dns_response(&input, None);
+            }
+        }
+    }
+
+    fn mutated_inputs(seed: &[u8]) -> Vec<Vec<u8>> {
+        let mut out = Vec::new();
+        out.push(seed.to_vec());
+        for len in 0..=seed.len().min(16) {
+            out.push(seed[..len].to_vec());
+        }
+        for index in 0..seed.len().min(32) {
+            let mut mutated = seed.to_vec();
+            mutated[index] ^= 0x80;
+            out.push(mutated);
+        }
+        let mut generated = Vec::new();
+        let mut state = seed.len() as u32 ^ 0x1357_2468;
+        for _ in 0..96 {
+            state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            generated.push((state >> 16) as u8);
+        }
+        out.push(generated);
+        out
+    }
+
+    #[test]
     fn cache_entry_requires_address_and_expires() {
         let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
         assert!(
