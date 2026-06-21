@@ -255,5 +255,5 @@
   - `cargo check --workspace` — passed.
   - `cargo test --workspace` — passed, 46 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
-- Commit hash after commit: pending.
+- Commit hash after commit: a1ee0ce.
 - Remaining boundary risks: production stream reassembly, ECH detection hardening, and richer TLS parser fuzzing remain.
