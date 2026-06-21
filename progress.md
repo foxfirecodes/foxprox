@@ -155,3 +155,27 @@
 - Interpretation: the harness now proves real bidirectional packet movement over a bwrap-created TUN fd owned by the host harness. This is a stronger environment-dependent packet write-back proof than the earlier pure unit ICMP synthesis fixture.
 - Next verification gap: introduce an actual broker/runtime abstraction around the handoff fd instead of keeping write-back logic inside the CLI harness; then move toward TCP stack/forwarding proof.
 - Commit hash after commit: pending.
+
+## 2026-06-21T14:25:00Z — Write-back smoke commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs learnings.md progress.md && git commit -m "Add TUN writeback smoke harness"`
+- Environment assumptions: write-back smoke and workspace tests above were verified before commit.
+- Expected result: commit captures host-side packet read/write proof over the handed-off TUN fd.
+- Observed result: commit `d0658b1` created with 4 files changed.
+- Relevant output excerpt: `[harness-lab d0658b1] Add TUN writeback smoke harness`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: packet write-back proof checkpoint is preserved.
+- Next verification gap: factor repeated bwrap/handoff harness code into reusable helpers or a broker-device/runtime boundary before adding richer forwarding behavior.
+- Commit hash after commit: d0658b1.
+
+## 2026-06-21T14:45:00Z — Local UDP forwarding proof over handed-off TUN
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run udp-forward-smoke`
+- Environment assumptions: local-only UDP echo fixture is available on `127.0.0.1`; sandbox target can run Python and send UDP to an arbitrary routed IP through the TUN; host harness can translate the TUN packet to host UDP egress and synthesize the return packet to the sandbox source.
+- Expected result: deterministic tests remain green; `udp-forward-smoke` reads the sandbox UDP packet from TUN, forwards the payload through a host `UdpSocket`, receives the echo fixture response, writes it back to TUN, and the sandbox target exits successfully.
+- Observed result: pass. `foxprox-core` ran 30 tests, `foxprox-cli` ran 2 tests, `foxproxsetup` ran 7 tests, and `udp-forward-smoke` emitted `decision":"allow"`.
+- Relevant output excerpt: `"reason":"sandbox UDP probe was forwarded through host UDP egress and returned over TUN"`; `"forwarded":"true"`; `"egress_fixture":"127.0.0.1:48603"`; `"status":"exit status: 0"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: Milestone 4 has a first local UDP forwarding proof: not just synthetic write-back, but a sandbox datagram bridged through a host UDP socket and returned over the broker-owned TUN fd. This is still harness code, not the final broker runtime abstraction.
+- Next verification gap: move the repeated TUN fd read/UDP reply logic into a reusable broker runtime/helper boundary and add policy/audit decisions around the environment smoke forwarding path.
+- Commit hash after commit: pending.

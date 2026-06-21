@@ -1,4 +1,5 @@
 use std::env;
+use std::net::UdpSocket;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -39,6 +40,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("setup-smoke");
             println!("handoff-smoke");
             println!("writeback-smoke");
+            println!("udp-forward-smoke");
             Ok(())
         }
         [cmd, scenario] if cmd == "run" => run_named_scenario(scenario),
@@ -60,6 +62,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         handoff_smoke_records()
     } else if scenario == "writeback-smoke" {
         writeback_smoke_records()
+    } else if scenario == "udp-forward-smoke" {
+        udp_forward_smoke_records()
     } else {
         run_scenario(ScenarioName::parse(scenario)?)
     };
@@ -71,7 +75,7 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke>",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke>",
         ScenarioName::list().join("|")
     );
 }
@@ -568,8 +572,8 @@ fn synthesize_udp_echo_reply(request_packet: &[u8], payload: &[u8]) -> Result<Ve
         return Err("not UDP".to_string());
     }
     let udp = foxprox_core::packet::parse_udp(parsed.payload)?;
-    if udp.destination_port != 5353 || udp.payload != b"probe" {
-        return Err("not the write-back smoke UDP probe".to_string());
+    if !matches!(udp.destination_port, 5353 | 5354) || udp.payload != b"probe" {
+        return Err("not a harness UDP probe".to_string());
     }
     let udp_len = 8 + payload.len();
     let total_len = 20 + udp_len;
@@ -591,6 +595,230 @@ fn synthesize_udp_echo_reply(request_packet: &[u8], payload: &[u8]) -> Result<Ve
     udp_out[6..8].copy_from_slice(&[0, 0]);
     udp_out[8..].copy_from_slice(payload);
     Ok(out)
+}
+
+#[cfg(unix)]
+fn udp_forward_smoke_records() -> Vec<AuditRecord> {
+    match run_udp_forward_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::UdpFlowCreated,
+            "udp-forward-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::Harness)
+        .with_protocol(Protocol::Udp)],
+    }
+}
+
+#[cfg(not(unix))]
+fn udp_forward_smoke_records() -> Vec<AuditRecord> {
+    vec![AuditRecord::new(
+        EventKind::UdpFlowCreated,
+        "udp-forward-smoke",
+        Decision::FailClosed,
+        "UDP forward smoke is only supported on Unix",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Udp)]
+}
+
+#[cfg(unix)]
+fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
+    let echo = UdpSocket::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind host UDP echo fixture: {err}"))?;
+    let echo_addr = echo
+        .local_addr()
+        .map_err(|err| format!("failed to inspect host UDP echo fixture: {err}"))?;
+    echo.set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|err| format!("failed to set host UDP echo timeout: {err}"))?;
+    let echo_thread = std::thread::spawn(move || -> Result<(), String> {
+        let mut buf = [0_u8; 2048];
+        let (n, peer) = echo.recv_from(&mut buf).map_err(|err| {
+            format!("host UDP echo fixture did not receive egress datagram: {err}")
+        })?;
+        let mut response = b"egress:".to_vec();
+        response.extend_from_slice(&buf[..n]);
+        echo.send_to(&response, peer)
+            .map_err(|err| format!("host UDP echo fixture failed to reply: {err}"))?;
+        Ok(())
+    });
+
+    let helper = setup_helper_path()?;
+    let target_dir = helper
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| {
+            format!(
+                "could not derive target directory from {}",
+                helper.display()
+            )
+        })?
+        .to_path_buf();
+    let socket_dir = target_dir.join(format!("foxprox-udp-forward-smoke-{}", std::process::id()));
+    let socket_path = socket_dir.join("setup.sock");
+    let _ = std::fs::remove_file(&socket_path);
+    std::fs::create_dir_all(&socket_dir)
+        .map_err(|err| format!("failed to create UDP forward smoke socket dir: {err}"))?;
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|err| format!("failed to bind UDP forward smoke socket: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make UDP forward listener nonblocking: {err}"))?;
+
+    let mut child = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--ro-bind",
+        ])
+        .arg(&target_dir)
+        .arg(&target_dir)
+        .args(["--bind"])
+        .arg(&socket_dir)
+        .arg(&socket_dir)
+        .args(["--proc", "/proc", "--"])
+        .env("FOXPROX_SETUP_SOCKET", &socket_path)
+        .arg(&helper)
+        .args([
+            "--",
+            "/usr/bin/python3",
+            "-c",
+            "import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(5); s.sendto(b'probe',('203.0.113.10',5354)); data,_=s.recvfrom(64); sys.exit(0 if data==b'egress:probe' else 3)",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn bwrap UDP forward smoke: {err}"))?;
+
+    let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
+    fd_handoff::set_nonblocking(fd)?;
+    let egress = UdpSocket::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind host UDP egress socket: {err}"))?;
+    egress
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|err| format!("failed to set host UDP egress timeout: {err}"))?;
+    let mut buf = [0_u8; 2048];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut packets_read = 0_u64;
+    let mut forwarded = false;
+    while Instant::now() < deadline {
+        match fd_handoff::read_fd(fd, &mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                packets_read += 1;
+                let packet = &buf[..n];
+                if let Ok(parsed) = foxprox_core::packet::parse_ipv4(packet) {
+                    if parsed.protocol_number == 17 {
+                        if let Ok(udp) = foxprox_core::packet::parse_udp(parsed.payload) {
+                            if udp.destination_port == 5354 && udp.payload == b"probe" {
+                                egress
+                                    .send_to(udp.payload, echo_addr)
+                                    .map_err(|err| format!("host UDP egress send failed: {err}"))?;
+                                let mut reply_payload = [0_u8; 2048];
+                                let (reply_len, _) =
+                                    egress.recv_from(&mut reply_payload).map_err(|err| {
+                                        format!("host UDP egress receive failed: {err}")
+                                    })?;
+                                let reply =
+                                    synthesize_udp_echo_reply(packet, &reply_payload[..reply_len])?;
+                                fd_handoff::write_all_fd(fd, &reply)?;
+                                forwarded = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to read TUN fd during UDP forward smoke: {err}"
+                ))
+            }
+        }
+        if child
+            .try_wait()
+            .map_err(|err| format!("failed to poll bwrap UDP forward smoke: {err}"))?
+            .is_some()
+        {
+            let output = child
+                .wait_with_output()
+                .map_err(|err| format!("failed to collect early UDP forward output: {err}"))?;
+            return Err(format!(
+                "UDP forward target exited before reply: {}; stdout={:?}; stderr={:?}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !forwarded {
+        return Err(
+            "timed out waiting for UDP forward probe packet on handed-off TUN fd".to_string(),
+        );
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for bwrap UDP forward smoke: {err}"))?;
+    fd_handoff::close_fd(fd);
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir(&socket_dir);
+    let echo_result = echo_thread
+        .join()
+        .map_err(|_| "host UDP echo fixture thread panicked".to_string())?;
+    echo_result?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut record = AuditRecord::new(
+        EventKind::UdpFlowCreated,
+        "udp-forward-smoke",
+        if output.status.success() {
+            Decision::Allow
+        } else {
+            Decision::FailClosed
+        },
+        if output.status.success() {
+            "sandbox UDP probe was forwarded through host UDP egress and returned over TUN"
+        } else {
+            "host UDP egress forwarded a reply but sandbox probe command failed"
+        },
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Udp)
+    .with_metadata("status", output.status.to_string())
+    .with_metadata("packets_read", packets_read.to_string())
+    .with_metadata("forwarded", forwarded.to_string())
+    .with_metadata("egress_fixture", echo_addr.to_string());
+    if !stdout.is_empty() {
+        record = record.with_metadata("stdout", stdout);
+    }
+    if !stderr.is_empty() {
+        record = record.with_metadata("stderr", stderr);
+    }
+    Ok(record)
 }
 
 #[cfg(unix)]
