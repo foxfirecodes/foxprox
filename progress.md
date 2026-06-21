@@ -95,3 +95,15 @@
 - Interpretation: setup-helper planning checkpoint is preserved.
 - Next verification gap: direct syscall/netlink/ioctl TUN setup from helper.
 - Commit hash after commit: 2bb815f.
+
+## 2026-06-21T13:15:00Z — Direct ioctl foxproxsetup TUN configuration
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run setup-smoke`
+- Environment assumptions: Linux bwrap environment has `/dev/net/tun`, temporary `CAP_NET_ADMIN`, and dynamic runtime bind mounts for the locally built Rust helper; `setup-smoke` uses direct Rust ioctl/syscall setup rather than spawning `/bin/sh` or `/usr/bin/ip` from the helper.
+- Expected result: deterministic tests stay green; `foxproxsetup --configure-only` can create/configure a TUN device, assign IPv4/netmask/MTU, bring it up, install a default dev route, and emit sandbox proxy/DNS environment from inside `bwrap --unshare-net`.
+- Observed result: pass. `foxprox-core` ran 30 tests, `foxprox-cli` ran 2 tests, `foxproxsetup` ran 7 tests, and `setup-smoke` emitted `decision":"allow"`.
+- Relevant output excerpt: `"reason":"foxproxsetup direct TUN setup succeeded inside bwrap"`; `"stdout":"export HTTP_PROXY='http://10.0.2.1:8080'...export FOXPROX_DNS='10.0.2.1:53'"`.
+- Changed files: `crates/foxprox-setup/src/main.rs`, `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`, `learnings.md`.
+- Interpretation: the setup helper no longer relies on the previously failing child-process path for TUN setup. It now has direct Linux ioctl coverage plus a reusable harness smoke. The helper also parses the launch-plan `--handoff-env` option, sends the TUN fd over that socket when provided, drops `CAP_NET_ADMIN` before target exec, and fails closed before target exec if no fd handoff socket is provided.
+- Next verification gap: add a broker-side handoff harness that receives the TUN fd over a Unix socket and proves the fd remains usable after `foxproxsetup` exits, then use that fd for packet write-back from outside the sandbox namespace.
+- Commit hash after commit: pending.

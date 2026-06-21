@@ -32,6 +32,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             }
             println!("env-smoke");
             println!("tun-smoke");
+            println!("setup-smoke");
             Ok(())
         }
         [cmd, scenario] if cmd == "run" => run_named_scenario(scenario),
@@ -47,6 +48,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         env_smoke_records()
     } else if scenario == "tun-smoke" {
         tun_smoke_records()
+    } else if scenario == "setup-smoke" {
+        setup_smoke_records()
     } else {
         run_scenario(ScenarioName::parse(scenario)?)
     };
@@ -58,7 +61,7 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke>",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke>",
         ScenarioName::list().join("|")
     );
 }
@@ -143,22 +146,131 @@ fn tun_smoke_records() -> Vec<AuditRecord> {
         ])
         .output();
 
+    command_record(
+        "tun-smoke",
+        output,
+        "bwrap namespace TUN setup command succeeded",
+        "bwrap namespace TUN setup command failed",
+        "failed to execute bwrap TUN smoke",
+    )
+}
+
+fn setup_smoke_records() -> Vec<AuditRecord> {
+    let helper = match setup_helper_path() {
+        Ok(path) => path,
+        Err(err) => {
+            return vec![AuditRecord::new(
+                EventKind::TunConfigured,
+                "setup-smoke",
+                Decision::FailClosed,
+                err,
+            )
+            .with_frontend(Frontend::Harness)
+            .with_protocol(Protocol::Unsupported)]
+        }
+    };
+    let target_dir = match helper.parent().and_then(|path| path.parent()) {
+        Some(path) => path.to_path_buf(),
+        None => {
+            return vec![AuditRecord::new(
+                EventKind::TunConfigured,
+                "setup-smoke",
+                Decision::FailClosed,
+                format!(
+                    "could not derive target directory from {}",
+                    helper.display()
+                ),
+            )
+            .with_frontend(Frontend::Harness)
+            .with_protocol(Protocol::Unsupported)]
+        }
+    };
+    let output = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--ro-bind",
+        ])
+        .arg(&target_dir)
+        .arg(&target_dir)
+        .args(["--proc", "/proc", "--"])
+        .arg(&helper)
+        .arg("--configure-only")
+        .output();
+
+    command_record(
+        "setup-smoke",
+        output,
+        "foxproxsetup direct TUN setup succeeded inside bwrap",
+        "foxproxsetup direct TUN setup failed inside bwrap",
+        "failed to execute foxproxsetup setup smoke",
+    )
+}
+
+fn setup_helper_path() -> Result<std::path::PathBuf, String> {
+    if let Ok(path) = env::var("FOXPROX_SETUP_HELPER") {
+        let path = std::path::PathBuf::from(path);
+        if path.exists() {
+            return Ok(path);
+        }
+        return Err(format!(
+            "FOXPROX_SETUP_HELPER points to missing helper {}",
+            path.display()
+        ));
+    }
+    let mut path =
+        env::current_exe().map_err(|err| format!("could not find current exe: {err}"))?;
+    path.set_file_name("foxproxsetup");
+    if path.exists() {
+        Ok(path)
+    } else {
+        Err(format!(
+            "foxproxsetup helper not found at {}; build it first or set FOXPROX_SETUP_HELPER",
+            path.display()
+        ))
+    }
+}
+
+fn command_record(
+    sandbox_id: &str,
+    output: std::io::Result<std::process::Output>,
+    success_reason: &str,
+    failure_reason: &str,
+    exec_failure_prefix: &str,
+) -> Vec<AuditRecord> {
     match output {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             let mut record = AuditRecord::new(
                 EventKind::TunConfigured,
-                "tun-smoke",
+                sandbox_id,
                 if output.status.success() {
                     Decision::Allow
                 } else {
                     Decision::FailClosed
                 },
                 if output.status.success() {
-                    "bwrap namespace TUN setup command succeeded"
+                    success_reason
                 } else {
-                    "bwrap namespace TUN setup command failed"
+                    failure_reason
                 },
             )
             .with_frontend(Frontend::Harness)
@@ -174,9 +286,9 @@ fn tun_smoke_records() -> Vec<AuditRecord> {
         }
         Err(err) => vec![AuditRecord::new(
             EventKind::TunConfigured,
-            "tun-smoke",
+            sandbox_id,
             Decision::FailClosed,
-            format!("failed to execute bwrap TUN smoke: {err}"),
+            format!("{exec_failure_prefix}: {err}"),
         )
         .with_frontend(Frontend::Harness)
         .with_protocol(Protocol::Unsupported)],

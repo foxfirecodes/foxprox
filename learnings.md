@@ -12,3 +12,8 @@
 ## 2026-06-21 — bwrap setup helper spawning limitation
 
 - A `foxproxsetup` Rust binary launched directly as the bwrap command can start inside the namespace, but `std::process::Command::output()` from that helper failed with `ENOENT` when attempting to spawn both `/usr/bin/ip` and `/bin/sh`. The equivalent bwrap command that runs `/bin/sh -lc 'ip tuntap ...'` as the initial process succeeds. Treat shelling out from the setup helper as unreliable until investigated; direct TUN setup syscalls/netlink/ioctl are likely needed for the real helper.
+
+## 2026-06-21 — Direct setup helper TUN path
+
+- Direct ioctl-based TUN setup from the Rust `foxproxsetup` process succeeds inside the same `bwrap --unshare-user --unshare-net --cap-add CAP_NET_ADMIN` environment where spawning `/bin/sh` from the helper failed. Prefer direct `/dev/net/tun`, `TUNSETIFF`, `SIOCSIF*`, and route ioctls for setup-helper behavior; keep shell/IP-based smoke only as an independent environment comparison.
+- A non-persistent TUN created with `TUNSETIFF` is tied to the open fd, so target execution must be gated on successful fd handoff to the host-side broker. `foxproxsetup` should fail closed rather than exec a target without `FOXPROX_SETUP_SOCKET`/`--handoff-env` being available.

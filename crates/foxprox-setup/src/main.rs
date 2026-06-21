@@ -24,6 +24,7 @@ struct SetupArgs {
     print_plan: bool,
     configure_only: bool,
     no_default_route: bool,
+    handoff_env: String,
 }
 
 impl SetupArgs {
@@ -32,6 +33,7 @@ impl SetupArgs {
         let mut print_plan = false;
         let mut configure_only = false;
         let mut no_default_route = false;
+        let mut handoff_env = "FOXPROX_SETUP_SOCKET".to_string();
         let mut target_argv = Vec::new();
         let mut iter = args.into_iter().peekable();
         while let Some(arg) = iter.next() {
@@ -85,6 +87,7 @@ impl SetupArgs {
                         .parse()
                         .map_err(|err| format!("invalid --socks-proxy-listener: {err}"))?;
                 }
+                "--handoff-env" => handoff_env = next_value(&mut iter, "--handoff-env")?,
                 other => return Err(format!("unknown argument '{other}'")),
             }
         }
@@ -102,6 +105,7 @@ impl SetupArgs {
             print_plan,
             configure_only,
             no_default_route,
+            handoff_env,
         })
     }
 }
@@ -113,62 +117,65 @@ fn run(raw_args: Vec<String>) -> Result<(), String> {
         return Ok(());
     }
 
-    configure_tun(&args)?;
+    let tun = configure_tun(&args)?;
     emit_setup_environment(&args.setup);
 
     if args.configure_only {
         return Ok(());
     }
 
+    let socket_path = env::var(&args.handoff_env).map_err(|_| {
+        format!(
+            "target exec requires TUN fd handoff; set {} or use --configure-only",
+            args.handoff_env
+        )
+    })?;
+    send_tun_fd(&socket_path, tun.raw_fd())?;
+    drop_setup_capabilities()?;
+    drop(tun);
+
     exec_target(&args.target_argv)
 }
 
-fn configure_tun(args: &SetupArgs) -> Result<(), String> {
-    run_ip(&["tuntap", "add", "dev", &args.setup.tun_name, "mode", "tun"])?;
-    run_ip(&[
-        "addr",
-        "add",
-        &format!("{}/{}", args.setup.sandbox_ip, args.setup.prefix_len),
-        "dev",
-        &args.setup.tun_name,
-    ])?;
-    run_ip(&[
-        "link",
-        "set",
-        "dev",
-        &args.setup.tun_name,
-        "mtu",
-        &args.setup.mtu.to_string(),
-        "up",
-    ])?;
-    if !args.no_default_route {
-        run_ip(&["route", "replace", "default", "dev", &args.setup.tun_name])?;
-    }
-    Ok(())
+struct ConfiguredTun {
+    raw_fd: i32,
 }
 
-fn run_ip(args: &[&str]) -> Result<(), String> {
-    let ip_path = env::var("FOXPROX_IP_PATH").unwrap_or_else(|_| "/usr/bin/ip".to_string());
-    let command_line = std::iter::once(ip_path.clone())
-        .chain(args.iter().map(|arg| arg.to_string()))
-        .map(|part| shell_quote(&part))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let output = Command::new("/bin/sh")
-        .current_dir("/")
-        .args(["-c", &command_line])
-        .output()
-        .map_err(|err| format!("failed to execute /bin/sh for {ip_path}: {err}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "ip {} failed with {}: {}",
-            args.join(" "),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        ))
+impl ConfiguredTun {
+    fn raw_fd(&self) -> i32 {
+        self.raw_fd
     }
+}
+
+#[cfg(unix)]
+impl Drop for ConfiguredTun {
+    fn drop(&mut self) {
+        linux_tun::close_fd(self.raw_fd);
+    }
+}
+
+fn configure_tun(args: &SetupArgs) -> Result<ConfiguredTun, String> {
+    linux_tun::configure_tun(&args.setup, !args.no_default_route)
+}
+
+#[cfg(unix)]
+fn send_tun_fd(socket_path: &str, fd: i32) -> Result<(), String> {
+    linux_tun::send_fd(socket_path, fd)
+}
+
+#[cfg(not(unix))]
+fn send_tun_fd(_socket_path: &str, _fd: i32) -> Result<(), String> {
+    Err("TUN fd handoff is only supported on Unix".to_string())
+}
+
+#[cfg(unix)]
+fn drop_setup_capabilities() -> Result<(), String> {
+    linux_tun::drop_net_admin_capability()
+}
+
+#[cfg(not(unix))]
+fn drop_setup_capabilities() -> Result<(), String> {
+    Err("setup capability drop is only supported on Unix".to_string())
 }
 
 fn emit_setup_environment(setup: &TunSetupConfig) {
@@ -203,7 +210,7 @@ fn plan_json(args: &SetupArgs) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"tun_name\":\"{}\",\"sandbox_ip\":\"{}/{}\",\"broker_ip\":\"{}\",\"mtu\":{},\"dns_listener\":\"{}\",\"configure_only\":{},\"no_default_route\":{},\"proxy_environment\":{{{}}},\"target_argv\":[{}]}}",
+        "{{\"tun_name\":\"{}\",\"sandbox_ip\":\"{}/{}\",\"broker_ip\":\"{}\",\"mtu\":{},\"dns_listener\":\"{}\",\"configure_only\":{},\"no_default_route\":{},\"handoff_env\":\"{}\",\"proxy_environment\":{{{}}},\"target_argv\":[{}]}}",
         json_escape(&args.setup.tun_name),
         args.setup.sandbox_ip,
         args.setup.prefix_len,
@@ -212,6 +219,7 @@ fn plan_json(args: &SetupArgs) -> String {
         args.setup.dns_listener,
         args.configure_only,
         args.no_default_route,
+        json_escape(&args.handoff_env),
         env,
         args.target_argv.iter().map(|arg| format!("\"{}\"", json_escape(arg))).collect::<Vec<_>>().join(",")
     )
@@ -232,6 +240,443 @@ fn print_usage() {
     );
 }
 
+#[cfg(unix)]
+mod linux_tun {
+    use std::fs::OpenOptions;
+    use std::io;
+    use std::mem::size_of;
+    use std::net::IpAddr;
+    use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
+    use std::os::raw::{c_char, c_int, c_short, c_ulong, c_void};
+    use std::os::unix::net::UnixStream;
+
+    use foxprox_core::integration::TunSetupConfig;
+
+    const IFNAMSIZ: usize = 16;
+    const AF_INET: c_int = 2;
+    const SOCK_DGRAM: c_int = 2;
+
+    const IFF_TUN: c_short = 0x0001;
+    const IFF_NO_PI: c_short = 0x1000;
+    const IFF_UP: c_short = 0x0001;
+    const IFF_RUNNING: c_short = 0x0040;
+
+    const TUNSETIFF: c_ulong = 0x4004_54ca;
+    const SIOCGIFFLAGS: c_ulong = 0x8913;
+    const SIOCSIFFLAGS: c_ulong = 0x8914;
+    const SIOCSIFADDR: c_ulong = 0x8916;
+    const SIOCSIFNETMASK: c_ulong = 0x891c;
+    const SIOCSIFMTU: c_ulong = 0x8922;
+    const SIOCADDRT: c_ulong = 0x890b;
+
+    const RTF_UP: u16 = 0x0001;
+
+    const SOL_SOCKET: c_int = 1;
+    const SCM_RIGHTS: c_int = 1;
+
+    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+    const CAP_NET_ADMIN: usize = 12;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct SockAddr {
+        sa_family: u16,
+        sa_data: [u8; 14],
+    }
+
+    #[repr(C)]
+    union IfReqData {
+        addr: SockAddr,
+        flags: c_short,
+        mtu: c_int,
+    }
+
+    #[repr(C)]
+    struct IfReq {
+        name: [c_char; IFNAMSIZ],
+        data: IfReqData,
+    }
+
+    #[repr(C)]
+    struct RtEntry {
+        rt_pad1: c_ulong,
+        rt_dst: SockAddr,
+        rt_gateway: SockAddr,
+        rt_genmask: SockAddr,
+        rt_flags: u16,
+        rt_pad2: c_short,
+        rt_pad3: c_ulong,
+        rt_pad4: *mut c_void,
+        rt_metric: c_short,
+        rt_dev: *mut c_char,
+        rt_mtu: c_ulong,
+        rt_window: c_ulong,
+        rt_irtt: u16,
+    }
+
+    #[repr(C)]
+    struct Iovec {
+        iov_base: *mut c_void,
+        iov_len: usize,
+    }
+
+    #[repr(C)]
+    struct Msghdr {
+        msg_name: *mut c_void,
+        msg_namelen: u32,
+        msg_iov: *mut Iovec,
+        msg_iovlen: usize,
+        msg_control: *mut c_void,
+        msg_controllen: usize,
+        msg_flags: c_int,
+    }
+
+    #[repr(C)]
+    struct Cmsghdr {
+        cmsg_len: usize,
+        cmsg_level: c_int,
+        cmsg_type: c_int,
+    }
+
+    #[repr(C)]
+    struct CapUserHeader {
+        version: u32,
+        pid: c_int,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CapUserData {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+
+    extern "C" {
+        fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
+        fn close(fd: c_int) -> c_int;
+        fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
+        fn sendmsg(fd: c_int, msg: *const Msghdr, flags: c_int) -> isize;
+        fn capget(header: *mut CapUserHeader, data: *mut CapUserData) -> c_int;
+        fn capset(header: *mut CapUserHeader, data: *const CapUserData) -> c_int;
+    }
+
+    pub(super) fn configure_tun(
+        setup: &TunSetupConfig,
+        install_default_route: bool,
+    ) -> Result<super::ConfiguredTun, String> {
+        let tun_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/net/tun")
+            .map_err(|err| format!("failed to open /dev/net/tun: {err}"))?;
+        let tun_fd = tun_file.as_raw_fd();
+        create_tun(tun_fd, &setup.tun_name)?;
+        let ctl_fd = unsafe { socket(AF_INET, SOCK_DGRAM, 0) };
+        if ctl_fd < 0 {
+            return Err(format!(
+                "failed to open AF_INET control socket: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        let control = FdGuard(ctl_fd);
+        set_addr(control.0, &setup.tun_name, setup.sandbox_ip)?;
+        set_netmask(control.0, &setup.tun_name, setup.prefix_len)?;
+        set_mtu(control.0, &setup.tun_name, setup.mtu)?;
+        set_up(control.0, &setup.tun_name)?;
+        if install_default_route {
+            add_default_route(control.0, &setup.tun_name)?;
+        }
+        Ok(super::ConfiguredTun {
+            raw_fd: tun_file.into_raw_fd(),
+        })
+    }
+
+    pub(super) fn close_fd(fd: RawFd) {
+        unsafe {
+            close(fd);
+        }
+    }
+
+    pub(super) fn send_fd(socket_path: &str, fd_to_send: RawFd) -> Result<(), String> {
+        let stream = UnixStream::connect(socket_path).map_err(|err| {
+            format!("failed to connect setup handoff socket {socket_path}: {err}")
+        })?;
+        let socket_fd = stream.as_raw_fd();
+        let mut byte = [b'T'];
+        let mut iov = Iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: byte.len(),
+        };
+        let mut control = vec![0_u8; cmsg_space(size_of::<RawFd>())];
+        let header = control.as_mut_ptr().cast::<Cmsghdr>();
+        unsafe {
+            (*header).cmsg_len = cmsg_len(size_of::<RawFd>());
+            (*header).cmsg_level = SOL_SOCKET;
+            (*header).cmsg_type = SCM_RIGHTS;
+            let data = control
+                .as_mut_ptr()
+                .add(cmsg_align(size_of::<Cmsghdr>()))
+                .cast::<RawFd>();
+            *data = fd_to_send;
+        }
+        let msg = Msghdr {
+            msg_name: std::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: &mut iov,
+            msg_iovlen: 1,
+            msg_control: control.as_mut_ptr().cast(),
+            msg_controllen: control.len(),
+            msg_flags: 0,
+        };
+        let sent = unsafe { sendmsg(socket_fd, &msg, 0) };
+        if sent == 1 {
+            Ok(())
+        } else if sent < 0 {
+            Err(format!(
+                "failed to send TUN fd over handoff socket: {}",
+                io::Error::last_os_error()
+            ))
+        } else {
+            Err(format!("short TUN fd handoff send: {sent}"))
+        }
+    }
+
+    pub(super) fn drop_net_admin_capability() -> Result<(), String> {
+        let mut header = CapUserHeader {
+            version: LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
+        let mut data = [
+            CapUserData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            },
+            CapUserData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            },
+        ];
+        let rc = unsafe { capget(&mut header, data.as_mut_ptr()) };
+        if rc != 0 {
+            return Err(format!(
+                "capget before target exec failed: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        let word = CAP_NET_ADMIN / 32;
+        let bit = 1_u32 << (CAP_NET_ADMIN % 32);
+        data[word].effective &= !bit;
+        data[word].permitted &= !bit;
+        data[word].inheritable &= !bit;
+        let rc = unsafe { capset(&mut header, data.as_ptr()) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "capset dropping CAP_NET_ADMIN before target exec failed: {}",
+                io::Error::last_os_error()
+            ))
+        }
+    }
+
+    struct FdGuard(RawFd);
+
+    impl Drop for FdGuard {
+        fn drop(&mut self) {
+            close_fd(self.0);
+        }
+    }
+
+    fn create_tun(fd: RawFd, name: &str) -> Result<(), String> {
+        let mut ifr = ifreq_flags(name, IFF_TUN | IFF_NO_PI)?;
+        ioctl_check(fd, TUNSETIFF, &mut ifr, "TUNSETIFF")
+    }
+
+    fn set_addr(fd: RawFd, name: &str, ip: IpAddr) -> Result<(), String> {
+        let mut ifr = ifreq_addr(name, ip)?;
+        ioctl_check(fd, SIOCSIFADDR, &mut ifr, "SIOCSIFADDR")
+    }
+
+    fn set_netmask(fd: RawFd, name: &str, prefix_len: u8) -> Result<(), String> {
+        if prefix_len > 32 {
+            return Err(
+                "only IPv4 prefix lengths up to /32 are supported for alpha TUN setup".to_string(),
+            );
+        }
+        let mask = if prefix_len == 0 {
+            0
+        } else {
+            u32::MAX.checked_shl((32 - prefix_len) as u32).unwrap_or(0)
+        };
+        let mut ifr = ifreq_addr(name, IpAddr::from(mask.to_be_bytes()))?;
+        ioctl_check(fd, SIOCSIFNETMASK, &mut ifr, "SIOCSIFNETMASK")
+    }
+
+    fn set_mtu(fd: RawFd, name: &str, mtu: u16) -> Result<(), String> {
+        let mut ifr = ifreq_mtu(name, i32::from(mtu))?;
+        ioctl_check(fd, SIOCSIFMTU, &mut ifr, "SIOCSIFMTU")
+    }
+
+    fn set_up(fd: RawFd, name: &str) -> Result<(), String> {
+        let mut ifr = ifreq_flags(name, 0)?;
+        ioctl_check(fd, SIOCGIFFLAGS, &mut ifr, "SIOCGIFFLAGS")?;
+        let current = unsafe { ifr.data.flags };
+        ifr.data.flags = current | IFF_UP | IFF_RUNNING;
+        ioctl_check(fd, SIOCSIFFLAGS, &mut ifr, "SIOCSIFFLAGS")
+    }
+
+    fn add_default_route(fd: RawFd, name: &str) -> Result<(), String> {
+        let mut name = interface_name(name)?;
+        let mut route = RtEntry {
+            rt_pad1: 0,
+            rt_dst: sockaddr_v4([0, 0, 0, 0]),
+            rt_gateway: sockaddr_v4([0, 0, 0, 0]),
+            rt_genmask: sockaddr_v4([0, 0, 0, 0]),
+            rt_flags: RTF_UP,
+            rt_pad2: 0,
+            rt_pad3: 0,
+            rt_pad4: std::ptr::null_mut(),
+            rt_metric: 0,
+            rt_dev: name.as_mut_ptr(),
+            rt_mtu: 0,
+            rt_window: 0,
+            rt_irtt: 0,
+        };
+        let rc = unsafe { ioctl(fd, SIOCADDRT, &mut route) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            let err = io::Error::last_os_error();
+            if err.raw_os_error() == Some(17) {
+                Ok(())
+            } else {
+                Err(format!("SIOCADDRT default dev route failed: {err}"))
+            }
+        }
+    }
+
+    fn ioctl_check(
+        fd: RawFd,
+        request: c_ulong,
+        ifr: &mut IfReq,
+        label: &str,
+    ) -> Result<(), String> {
+        let rc = unsafe { ioctl(fd, request, ifr) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(format!("{label} failed: {}", io::Error::last_os_error()))
+        }
+    }
+
+    fn ifreq_flags(name: &str, flags: c_short) -> Result<IfReq, String> {
+        let mut ifr = ifreq_empty(name)?;
+        ifr.data.flags = flags;
+        Ok(ifr)
+    }
+
+    fn ifreq_addr(name: &str, ip: IpAddr) -> Result<IfReq, String> {
+        let mut ifr = ifreq_empty(name)?;
+        let IpAddr::V4(ip) = ip else {
+            return Err("alpha TUN setup currently supports IPv4 addresses only".to_string());
+        };
+        ifr.data.addr = sockaddr_v4(ip.octets());
+        Ok(ifr)
+    }
+
+    fn ifreq_mtu(name: &str, mtu: c_int) -> Result<IfReq, String> {
+        let mut ifr = ifreq_empty(name)?;
+        ifr.data.mtu = mtu;
+        Ok(ifr)
+    }
+
+    fn ifreq_empty(name: &str) -> Result<IfReq, String> {
+        Ok(IfReq {
+            name: interface_name(name)?,
+            data: IfReqData { flags: 0 },
+        })
+    }
+
+    fn interface_name(name: &str) -> Result<[c_char; IFNAMSIZ], String> {
+        let bytes = name.as_bytes();
+        if bytes.is_empty() {
+            return Err("TUN interface name must not be empty".to_string());
+        }
+        if bytes.len() >= IFNAMSIZ {
+            return Err(format!("TUN interface name '{name}' is too long"));
+        }
+        let mut out = [0 as c_char; IFNAMSIZ];
+        for (idx, byte) in bytes.iter().enumerate() {
+            out[idx] = *byte as c_char;
+        }
+        Ok(out)
+    }
+
+    fn sockaddr_v4(octets: [u8; 4]) -> SockAddr {
+        let mut sa_data = [0_u8; 14];
+        sa_data[2..6].copy_from_slice(&octets);
+        SockAddr {
+            sa_family: AF_INET as u16,
+            sa_data,
+        }
+    }
+
+    fn cmsg_align(len: usize) -> usize {
+        let align = size_of::<usize>();
+        (len + align - 1) & !(align - 1)
+    }
+
+    fn cmsg_len(payload_len: usize) -> usize {
+        cmsg_align(size_of::<Cmsghdr>()) + payload_len
+    }
+
+    fn cmsg_space(payload_len: usize) -> usize {
+        cmsg_align(size_of::<Cmsghdr>()) + cmsg_align(payload_len)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn rejects_overlong_interface_names() {
+            assert!(interface_name("123456789012345").is_ok());
+            assert!(interface_name("1234567890123456").is_err());
+        }
+
+        #[test]
+        fn sockaddr_v4_places_ipv4_octets_after_port() {
+            let addr = sockaddr_v4([10, 0, 2, 2]);
+            assert_eq!(addr.sa_family, AF_INET as u16);
+            assert_eq!(&addr.sa_data[2..6], &[10, 0, 2, 2]);
+        }
+
+        #[test]
+        fn cmsg_space_includes_aligned_header_and_payload() {
+            assert!(cmsg_space(size_of::<RawFd>()) >= size_of::<Cmsghdr>() + size_of::<RawFd>());
+            assert_eq!(
+                cmsg_len(size_of::<RawFd>()),
+                cmsg_align(size_of::<Cmsghdr>()) + size_of::<RawFd>()
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+mod linux_tun {
+    use foxprox_core::integration::TunSetupConfig;
+
+    pub(super) fn configure_tun(
+        _setup: &TunSetupConfig,
+        _install_default_route: bool,
+    ) -> Result<super::ConfiguredTun, String> {
+        Err("foxproxsetup direct TUN configuration is only supported on Unix/Linux".to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -243,12 +688,15 @@ mod tests {
             "fx0".to_string(),
             "--sandbox-ip".to_string(),
             "10.9.0.2/24".to_string(),
+            "--handoff-env".to_string(),
+            "FX_SOCK".to_string(),
             "--".to_string(),
             "true".to_string(),
         ])
         .unwrap();
         assert_eq!(args.setup.tun_name, "fx0");
         assert_eq!(args.setup.prefix_len, 24);
+        assert_eq!(args.handoff_env, "FX_SOCK");
         assert_eq!(args.target_argv, vec!["true"]);
     }
 
@@ -257,6 +705,7 @@ mod tests {
         let args = SetupArgs::parse(vec!["--print-plan".to_string()]).unwrap();
         assert!(args.print_plan);
         assert!(plan_json(&args).contains("HTTP_PROXY"));
+        assert!(plan_json(&args).contains("handoff_env"));
     }
 
     #[test]
