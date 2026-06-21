@@ -151,6 +151,39 @@ pub fn event_protocol(event: &NormalizedEvent) -> Protocol {
     event.to_policy_input().protocol
 }
 
+pub struct TunIcmpProofSession<T> {
+    device: T,
+    buffer: Vec<u8>,
+}
+
+impl<T> TunIcmpProofSession<T> {
+    pub fn new(device: T, mtu: usize) -> Self {
+        Self {
+            device,
+            buffer: vec![0; mtu],
+        }
+    }
+
+    pub fn into_inner(self) -> T {
+        self.device
+    }
+}
+
+impl<T: Read + Write> TunIcmpProofSession<T> {
+    pub fn run_once(&mut self) -> io::Result<TunPacketOutcome> {
+        let bytes_read = self.device.read(&mut self.buffer)?;
+        let packet = &self.buffer[..bytes_read];
+        match tun_packet_reply(packet) {
+            Ok(Some(reply)) => {
+                self.device.write_all(&reply)?;
+                Ok(TunPacketOutcome::EchoReplyWritten { bytes: reply.len() })
+            }
+            Ok(None) => unsupported_or_malformed_outcome(packet),
+            Err(error) => Ok(TunPacketOutcome::DroppedMalformed { error }),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TunPacketOutcome {
     EchoReplyWritten {
@@ -178,22 +211,24 @@ pub fn handle_one_tun_packet<R: Read, W: Write>(
             writer.write_all(&reply)?;
             Ok(TunPacketOutcome::EchoReplyWritten { bytes: reply.len() })
         }
-        Ok(None) => match parse_ip_packet(packet) {
-            Ok(ParsedIpPacket::UnsupportedIpv4Protocol(UnsupportedIpv4Protocol {
-                source,
-                destination,
-                protocol,
-                ..
-            })) => Ok(TunPacketOutcome::DroppedUnsupportedIpv4 {
-                source: IpAddr::V4(source),
-                destination: IpAddr::V4(destination),
-                protocol,
-            }),
-            Ok(ParsedIpPacket::Icmpv4EchoRequest(_)) => {
-                unreachable!("echo requests produce replies")
-            }
-            Err(error) => Ok(TunPacketOutcome::DroppedMalformed { error }),
-        },
+        Ok(None) => unsupported_or_malformed_outcome(packet),
+        Err(error) => Ok(TunPacketOutcome::DroppedMalformed { error }),
+    }
+}
+
+fn unsupported_or_malformed_outcome(packet: &[u8]) -> io::Result<TunPacketOutcome> {
+    match parse_ip_packet(packet) {
+        Ok(ParsedIpPacket::UnsupportedIpv4Protocol(UnsupportedIpv4Protocol {
+            source,
+            destination,
+            protocol,
+            ..
+        })) => Ok(TunPacketOutcome::DroppedUnsupportedIpv4 {
+            source: IpAddr::V4(source),
+            destination: IpAddr::V4(destination),
+            protocol,
+        }),
+        Ok(ParsedIpPacket::Icmpv4EchoRequest(_)) => unreachable!("echo requests produce replies"),
         Err(error) => Ok(TunPacketOutcome::DroppedMalformed { error }),
     }
 }
@@ -233,6 +268,28 @@ mod tests {
         }
     }
 
+    struct FakeTunIo {
+        input: std::io::Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+
+    impl Read for FakeTunIo {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.input.read(buf)
+        }
+    }
+
+    impl Write for FakeTunIo {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.output.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     fn tcp_event() -> NormalizedEvent {
         NormalizedEvent::TcpConnectAttempt {
             sandbox_id: SandboxId::new("runtime").unwrap(),
@@ -243,6 +300,24 @@ mod tests {
             sni_status: SniStatus::Missing,
             sni_dns_mismatch: false,
         }
+    }
+
+    #[test]
+    fn tun_icmp_proof_session_runs_one_packet_against_device_io() {
+        let request = build_ipv4_packet(1, &[8, 0, 0, 0, 0x12, 0x34, 0, 7]);
+        let fake = FakeTunIo {
+            input: std::io::Cursor::new(request),
+            output: Vec::new(),
+        };
+        let mut session = TunIcmpProofSession::new(fake, 1500);
+
+        let outcome = session.run_once().unwrap();
+        let fake = session.into_inner();
+
+        assert_eq!(outcome, TunPacketOutcome::EchoReplyWritten { bytes: 28 });
+        assert_eq!(fake.output[20], 0);
+        assert_eq!(checksum(&fake.output[..20]), 0);
+        assert_eq!(checksum(&fake.output[20..]), 0);
     }
 
     #[test]

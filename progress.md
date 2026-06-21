@@ -223,3 +223,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: the launcher still does not spawn bwrap with fd-preservation semantics, and the received TUN file is not yet connected to the ICMP proof loop.
 - Exact next step: commit launcher preparation, then add a broker session type that accepts a received TUN file and runs the ICMP proof loop for one packet with deterministic IO tests.
+
+## 2026-06-21T23:44:05Z
+- Current objective: wrap the ICMP packet proof in a broker-side session type that can own received TUN-like IO.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 35 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 6 runtime tests, and 7 setup tests passed. New runtime test proves `TunIcmpProofSession` can own a TUN-like read/write object, process one packet, and write a valid synthetic ICMP reply.
+- Commit hash when committed: pending.
+- Remaining risks: session is still tested against fake IO, not a real received TUN fd; forwarding beyond ICMP proof is still absent.
+- Exact next step: commit the session wrapper, then add minimal IPv4 UDP parsing/classification in the packet/runtime path to start Milestone 4 without bypassing policy.
