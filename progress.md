@@ -299,3 +299,39 @@
 - Interpretation: hostname attribution is now proven end-to-end in an environment-dependent bwrap/TUN session: DNS observation in the harness changes the policy outcome for a later transparent UDP flow.
 - Next verification gap: TCP forwarding gate scaffolding, likely starting with deterministic TCP SYN parsing/policy/audit and then a userspace stack or minimal local smoke path.
 - Commit hash after commit: pending.
+
+## 2026-06-21T17:15:00Z — DNS attribution smoke commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs learnings.md progress.md && git commit -m "Add DNS attribution environment smoke"`
+- Environment assumptions: DNS attribution smoke and deterministic tests above were verified before commit.
+- Expected result: commit captures one-session DNS attribution environment proof.
+- Observed result: commit `de1897d` created with 4 files changed.
+- Relevant output excerpt: `[harness-lab de1897d] Add DNS attribution environment smoke`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: DNS-attributed transparent flow checkpoint is preserved.
+- Next verification gap: TCP forwarding gate scaffolding.
+- Commit hash after commit: de1897d.
+
+## 2026-06-21T17:30:00Z — Deterministic TCP connect runtime scaffold
+
+- Command executed: `cargo fmt --all && cargo test --all`
+- Environment assumptions: this is a deterministic scaffold only; it parses synthetic IPv4/TCP SYN packets and does not attempt real TCP stream forwarding or smoltcp integration.
+- Expected result: add a platform-independent transparent TCP runtime boundary that evaluates TCP SYN connect attempts through policy, uses DNS cache attribution when available, calls egress only for allowed connects, and audits allowed/denied decisions.
+- Observed result: pass. `foxprox-core` increased to 38 tests; `foxprox-cli` ran 2 tests; `foxproxsetup` ran 7 tests.
+- Relevant output excerpt: `runtime::tests::tcp_syn_connect_attempt_uses_policy_before_egress ... ok`; `runtime::tests::denied_tcp_syn_never_reaches_egress ... ok`.
+- Changed files: `crates/foxprox-core/src/runtime.rs`, `progress.md`.
+- Interpretation: this does not satisfy the smoltcp TCP forwarding gate, but it creates a verified policy/audit/egress boundary for TCP connect attempts that the future stack adapter can call when it emits stream events.
+- Next verification gap: real TCP stack/forwarding proof with smoltcp or another userspace stack, or a smaller harness that demonstrates TCP SYN packets arriving from the bwrap TUN fd.
+- Commit hash after commit: pending.
+
+## 2026-06-21T17:35:00Z — TCP scaffold commit recorded
+
+- Command executed: `git add crates/foxprox-core/src/runtime.rs progress.md && git commit -m "Add TCP connect runtime scaffold"`
+- Environment assumptions: deterministic TCP runtime tests above were verified before commit.
+- Expected result: commit captures transparent TCP connect policy/audit/egress scaffold.
+- Observed result: commit `f1f5e6b` created with 2 files changed.
+- Relevant output excerpt: `[harness-lab f1f5e6b] Add TCP connect runtime scaffold`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: TCP connect scaffold checkpoint is preserved.
+- Next verification gap: real TCP stack/forwarding proof or smaller bwrap/TUN TCP SYN arrival smoke.
+- Commit hash after commit: f1f5e6b.

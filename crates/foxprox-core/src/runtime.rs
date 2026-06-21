@@ -3,7 +3,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use crate::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
 use crate::dns::DnsCache;
 use crate::egress::{EgressBackend, EgressRequest};
-use crate::packet::{parse_ipv4, parse_udp, synthesize_udp_reply};
+use crate::packet::{parse_ipv4, parse_tcp, parse_udp, synthesize_udp_reply};
 use crate::policy::{PolicyEngine, PolicyRequest};
 
 /// Minimal transparent TUN UDP runtime boundary used by the harness and future broker runtime.
@@ -150,6 +150,120 @@ impl<B: EgressBackend> TransparentUdpRuntime<B> {
     }
 }
 
+/// Minimal transparent TUN TCP connect runtime boundary.
+///
+/// This is not a TCP stack. It proves the policy/audit/egress boundary for TCP SYN connect
+/// attempts before the smoltcp forwarding gate is wired in.
+#[derive(Debug)]
+pub struct TransparentTcpRuntime<B> {
+    pub policy: PolicyEngine,
+    pub egress: B,
+    pub audit: Vec<AuditRecord>,
+    pub dns_cache: DnsCache,
+    pub now_tick: u64,
+}
+
+impl<B: EgressBackend> TransparentTcpRuntime<B> {
+    pub fn new(policy: PolicyEngine, egress: B) -> Self {
+        Self {
+            policy,
+            egress,
+            audit: Vec::new(),
+            dns_cache: DnsCache::new(),
+            now_tick: 0,
+        }
+    }
+
+    pub fn with_dns_cache(mut self, dns_cache: DnsCache, now_tick: u64) -> Self {
+        self.dns_cache = dns_cache;
+        self.now_tick = now_tick;
+        self
+    }
+
+    pub fn handle_ipv4_packet(
+        &mut self,
+        sandbox_id: impl Into<String>,
+        packet: &[u8],
+    ) -> Result<(), String> {
+        let sandbox_id = sandbox_id.into();
+        let parsed = parse_ipv4(packet).map_err(|err| format!("malformed IPv4 packet: {err}"))?;
+        if parsed.protocol_number != 6 {
+            self.audit.push(
+                AuditRecord::new(
+                    EventKind::UnsupportedNetworkEvent,
+                    sandbox_id,
+                    Decision::FailClosed,
+                    "transparent TCP runtime received non-TCP packet",
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(parsed.protocol()),
+            );
+            return Ok(());
+        }
+        let tcp =
+            parse_tcp(parsed.payload).map_err(|err| format!("malformed TCP segment: {err}"))?;
+        let destination = SocketAddr::new(IpAddr::V4(parsed.destination), tcp.destination_port);
+        let source = SocketAddr::new(IpAddr::V4(parsed.source), tcp.source_port);
+        if !tcp.syn || tcp.rst {
+            self.audit.push(
+                AuditRecord::new(
+                    EventKind::UnsupportedNetworkEvent,
+                    sandbox_id,
+                    Decision::FailClosed,
+                    "only TCP SYN connect attempts are supported by the alpha TCP runtime",
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(Protocol::Tcp)
+                .with_addresses(Some(source), Some(destination)),
+            );
+            return Ok(());
+        }
+
+        let mut request = PolicyRequest::new(&sandbox_id, Frontend::Tun, Protocol::Tcp)
+            .with_source(source.ip(), source.port())
+            .with_destination(destination.ip(), destination.port());
+        let attribution = self
+            .dns_cache
+            .attribution_for(destination.ip(), self.now_tick);
+        if let Some(attr) = &attribution {
+            request = request.with_hostname(&attr.hostname, attr.confidence);
+        }
+        let outcome = self.policy.evaluate(&request);
+        let mut record = AuditRecord::new(
+            EventKind::TcpConnectAttempt,
+            &sandbox_id,
+            outcome.decision,
+            &outcome.reason,
+        )
+        .with_frontend(Frontend::Tun)
+        .with_protocol(Protocol::Tcp)
+        .with_addresses(Some(source), Some(destination))
+        .with_rule(outcome.rule_id.clone());
+        if let Some(attr) = attribution {
+            record = record.with_hostname(Some(attr.hostname), attr.source, attr.confidence);
+        }
+
+        if outcome.decision.is_allow() {
+            match self
+                .egress
+                .execute(&EgressRequest::TcpConnect { destination })
+            {
+                Ok(egress) => {
+                    record = record
+                        .with_bytes(egress.bytes_sent, egress.bytes_received)
+                        .with_metadata("egress", egress.message);
+                }
+                Err(err) => {
+                    record.decision = Decision::FailClosed;
+                    record.reason = format!("egress failed closed: {err}");
+                }
+            }
+        }
+        self.audit.push(record);
+        Ok(())
+    }
+}
+
 fn is_multicast_or_broadcast(ip: Ipv4Addr) -> bool {
     ip.is_multicast() || ip == Ipv4Addr::BROADCAST || ip.octets()[3] == 255
 }
@@ -238,6 +352,59 @@ mod tests {
     }
 
     #[test]
+    fn tcp_syn_connect_attempt_uses_policy_before_egress() {
+        let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443);
+        let policy = PolicyEngine::new(
+            PolicyConfig::deny_by_default().with_rule(
+                PolicyRule::new("allow-example-tcp", RuleAction::Allow)
+                    .protocol(Protocol::Tcp)
+                    .domain_suffix("example.com")
+                    .port(443)
+                    .require_hostname_attribution(),
+            ),
+        );
+        let egress = MockEgressBackend::new().with_response(
+            destination,
+            EgressOutcome {
+                connected: true,
+                bytes_sent: 0,
+                bytes_received: 0,
+                message: "mock TCP connected".to_string(),
+                response_payload: Vec::new(),
+            },
+        );
+        let mut cache = DnsCache::new();
+        cache
+            .observe_response("www.example.com", [destination.ip()], 1, 60)
+            .unwrap();
+        let mut runtime = TransparentTcpRuntime::new(policy, egress).with_dns_cache(cache, 2);
+        let packet = tcp_syn_packet(destination.ip(), destination.port());
+        runtime.handle_ipv4_packet("lab", &packet).unwrap();
+        assert_eq!(runtime.egress.requests.len(), 1);
+        assert_eq!(runtime.audit[0].decision, Decision::Allow);
+        assert_eq!(
+            runtime.audit[0].hostname.as_deref(),
+            Some("www.example.com")
+        );
+        assert_eq!(
+            runtime.audit[0].rule_id.as_deref(),
+            Some("allow-example-tcp")
+        );
+    }
+
+    #[test]
+    fn denied_tcp_syn_never_reaches_egress() {
+        let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 20)), 443);
+        let policy = PolicyEngine::new(PolicyConfig::deny_by_default());
+        let egress = MockEgressBackend::new();
+        let mut runtime = TransparentTcpRuntime::new(policy, egress);
+        let packet = tcp_syn_packet(destination.ip(), destination.port());
+        runtime.handle_ipv4_packet("lab", &packet).unwrap();
+        assert!(runtime.egress.requests.is_empty());
+        assert_eq!(runtime.audit[0].decision, Decision::DenyReset);
+    }
+
+    #[test]
     fn denied_udp_packet_never_reaches_egress() {
         let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)), 5354);
         let policy = PolicyEngine::new(PolicyConfig::deny_by_default());
@@ -248,6 +415,27 @@ mod tests {
         assert!(reply.is_none());
         assert!(runtime.egress.requests.is_empty());
         assert_eq!(runtime.audit[0].decision, Decision::DenyDrop);
+    }
+
+    fn tcp_syn_packet(destination: IpAddr, destination_port: u16) -> Vec<u8> {
+        let IpAddr::V4(destination) = destination else {
+            panic!("test destination must be IPv4");
+        };
+        let total_len = 40;
+        let mut packet = vec![0_u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[10, 0, 2, 2]);
+        packet[16..20].copy_from_slice(&destination.octets());
+        let sum = checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&sum.to_be_bytes());
+        packet[20..22].copy_from_slice(&49152_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        packet[32] = 5 << 4;
+        packet[33] = 0x02;
+        packet
     }
 
     fn udp_probe_packet(destination: IpAddr, destination_port: u16, payload: &[u8]) -> Vec<u8> {
