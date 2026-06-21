@@ -20,3 +20,7 @@ A single-packet broker handler can prove parser → policy/audit → write-back 
 ## 2026-06-21 — stable audit output can map from core records
 
 The audit output crate can avoid coupling serialization derives into `foxprox-core` by mapping `AuditRecord` into a JSON-specific schema. This keeps the core boundary typed and allows audit output format to evolve independently.
+
+## 2026-06-21 — config parsing should terminate in core types
+
+The TOML config layer is safest when it validates strings at the edge and returns `PolicyConfig`; broker code does not need to know whether policy came from tests, TOML, or a future live reload source.

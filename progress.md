@@ -108,3 +108,25 @@
 - What failed or surprised the agent: adding serde introduced 11 lockfile packages; no core serde derives were needed because the audit crate maps core records into a stable output schema.
 - What remains unproven: file/stdout sinks, async audit flushing, integration with a runtime loop, and backpressure policy for live forwarding are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — config → policy → broker slice
+
+- Slice attempted: load a minimal user-facing policy config and prove it controls broker packet behavior.
+- Why next: alpha requires configurable default policy and rules; this turns hard-coded policy construction into a verified config-to-policy boundary.
+- Verification plan: add a `foxprox-config` crate that parses TOML into `PolicyConfig`, supports default allow/deny, DNS broker resolvers, protocol/port/host/IP rule dimensions, verifies ICMP allow config produces an echo reply, verifies DNS resolver config preserves direct DNS bypass denial, and run formatting, clippy, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — config → policy → broker
+
+- Slice attempted: parse minimal TOML policy config into core policy and prove it controls broker packet handling.
+- Why next: alpha requires configurable default policy and rules rather than hard-coded policy construction.
+- What changed: added `crates/foxprox-config`, workspace `toml` dependency, TOML parsing for default allow/deny, deny behavior, DNS broker resolvers/direct-DNS setting, protocol rules, destination CIDRs/ports, hostname patterns, and hostname confidence. Tests verify config-loaded ICMP allow emits a broker echo reply, config-loaded DNS resolver keeps direct DNS bypass denied, and invalid protocol values fail validation.
+- Verification:
+  - `cargo fmt --check` initially failed before formatting; `cargo fmt` was run.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 2 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-config` tests, 9 `foxprox-core` tests, 9 `foxprox-packet` tests, and 0 doc tests.
+  - `cargo fmt --check` passed after formatting.
+  - Focused checks passed: `cargo test -p foxprox-config loaded_icmp_rule_allows_broker_echo_reply`, `cargo test -p foxprox-config loaded_dns_resolver_preserves_direct_dns_bypass_denial`, and `cargo test -p foxprox-config invalid_protocol_is_rejected`.
+- What failed or surprised the agent: adding TOML introduced additional parser dependencies, but config validation could still map into existing core types without changing core serialization.
+- What remains unproven: config file discovery/CLI loading, richer rule schema, user-facing diagnostics with source spans, reload behavior, and integration with a long-running runtime are still absent.
+- Commit: this commit.
