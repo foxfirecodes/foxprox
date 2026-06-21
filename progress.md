@@ -20,3 +20,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: this slice intentionally does not yet create TUN devices, bridge TCP/UDP, run bwrap setup, expose proxy listeners, fuzz parsers, or provide a CLI/config loader.
 - Exact next step: commit this verified core slice, then add executable configuration loading and proxy/frontend normalized request handling tests around the same policy engine.
+
+## 2026-06-21T16:51:50Z
+- Current objective: add deterministic packet-facing proof for the packet write-back milestone without introducing Linux/TUN dependencies.
+- Files changed: `crates/foxprox-core/src/lib.rs`, `crates/foxprox-core/src/packet.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially identified formatting in new packet tests; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 20 unit tests passed. New tests prove IPv4 ICMP echo requests parse deterministically, synthetic echo replies reverse source/destination and preserve id/sequence/payload with valid checksums, malformed checksums are rejected, and fragmentation fails closed.
+- Commit hash when committed: previous verified core slice committed as `7762592`; packet proof commit pending.
+- Remaining risks: packet parsing currently covers only the minimal IPv4/ICMP proof path; TCP/UDP parsing, IPv6, fuzzing, and real TUN write-back are not implemented yet.
+- Exact next step: commit packet proof, then add normalized proxy frontend parsers for HTTP CONNECT/SOCKS and config validation around the shared policy engine.
