@@ -203,3 +203,27 @@
 - Interpretation: UDP forwarding is no longer just ad hoc CLI harness logic. The core now has a reusable transparent UDP runtime that proves policy-before-egress, denied-no-egress, audit emission, and packet reply synthesis without Linux dependencies; the bwrap smoke uses that runtime for the environment proof.
 - Next verification gap: add a negative environment smoke that proves denied UDP traffic from the sandbox does not reach the host egress fixture and times out/fails closed with an audit denial.
 - Commit hash after commit: pending.
+
+## 2026-06-21T15:25:00Z — Transparent UDP runtime commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs crates/foxprox-core/src/egress.rs crates/foxprox-core/src/lib.rs crates/foxprox-core/src/packet.rs crates/foxprox-core/src/runtime.rs learnings.md progress.md && git commit -m "Add transparent UDP runtime boundary"`
+- Environment assumptions: runtime tests and environment smokes above were verified before commit.
+- Expected result: commit captures reusable core UDP runtime plus CLI smoke integration.
+- Observed result: commit `3ef2b20` created with 8 files changed.
+- Relevant output excerpt: `[harness-lab 3ef2b20] Add transparent UDP runtime boundary`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: reusable transparent UDP runtime checkpoint is preserved.
+- Next verification gap: negative denied UDP environment smoke.
+- Commit hash after commit: 3ef2b20.
+
+## 2026-06-21T15:50:00Z — Denied UDP environment smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run udp-deny-smoke && target/debug/foxprox-lab run udp-forward-smoke`
+- Environment assumptions: sandbox Python UDP target treats receive timeout as success for the negative path; transparent UDP runtime default-deny policy should deny the packet before egress; the local egress adapter counts calls.
+- Expected result: deterministic tests remain green; `udp-deny-smoke` observes a sandbox UDP packet, emits a deny audit record from the runtime, performs zero egress calls, sends no reply, and the sandbox target exits successfully after timing out. Existing allow/forward smoke should still pass.
+- Observed result: pass. `foxprox-core` ran 33 tests, `foxprox-cli` ran 2 tests, `foxproxsetup` ran 7 tests. `udp-deny-smoke` emitted `decision":"deny_drop"`, `egress_calls":"0"`, and `policy_reason":"default deny"`; `udp-forward-smoke` still emitted `decision":"allow"`.
+- Relevant output excerpt: `"reason":"sandbox UDP probe was denied, no egress call occurred, and target timed out"`; `"runtime_audit":"{...\"destination\":\"203.0.113.11:5354\",...\"decision\":\"deny_drop\",\"reason\":\"default deny\"...}"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: the environment harness now proves both positive and negative UDP behavior over the bwrap-created TUN fd with the same core runtime: allowed traffic reaches host egress, denied traffic does not.
+- Next verification gap: DNS broker foundation on the transparent UDP runtime path: handle sandbox UDP/53 locally, audit DNS query, and cache/attribute returned addresses without host egress.
+- Commit hash after commit: pending.

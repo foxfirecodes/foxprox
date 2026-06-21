@@ -44,6 +44,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("handoff-smoke");
             println!("writeback-smoke");
             println!("udp-forward-smoke");
+            println!("udp-deny-smoke");
             Ok(())
         }
         [cmd, scenario] if cmd == "run" => run_named_scenario(scenario),
@@ -67,6 +68,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         writeback_smoke_records()
     } else if scenario == "udp-forward-smoke" {
         udp_forward_smoke_records()
+    } else if scenario == "udp-deny-smoke" {
+        udp_deny_smoke_records()
     } else {
         run_scenario(ScenarioName::parse(scenario)?)
     };
@@ -78,7 +81,7 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke>",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke>",
         ScenarioName::list().join("|")
     );
 }
@@ -805,9 +808,204 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
 }
 
 #[cfg(unix)]
+fn udp_deny_smoke_records() -> Vec<AuditRecord> {
+    match run_udp_deny_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::UdpFlowCreated,
+            "udp-deny-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::Harness)
+        .with_protocol(Protocol::Udp)],
+    }
+}
+
+#[cfg(not(unix))]
+fn udp_deny_smoke_records() -> Vec<AuditRecord> {
+    vec![AuditRecord::new(
+        EventKind::UdpFlowCreated,
+        "udp-deny-smoke",
+        Decision::FailClosed,
+        "UDP deny smoke is only supported on Unix",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Udp)]
+}
+
+#[cfg(unix)]
+fn run_udp_deny_smoke() -> Result<AuditRecord, String> {
+    let echo = UdpSocket::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind denied UDP echo fixture: {err}"))?;
+    let echo_addr = echo
+        .local_addr()
+        .map_err(|err| format!("failed to inspect denied UDP echo fixture: {err}"))?;
+    let helper = setup_helper_path()?;
+    let target_dir = helper
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| {
+            format!(
+                "could not derive target directory from {}",
+                helper.display()
+            )
+        })?
+        .to_path_buf();
+    let socket_dir = target_dir.join(format!("foxprox-udp-deny-smoke-{}", std::process::id()));
+    let socket_path = socket_dir.join("setup.sock");
+    let _ = std::fs::remove_file(&socket_path);
+    std::fs::create_dir_all(&socket_dir)
+        .map_err(|err| format!("failed to create UDP deny smoke socket dir: {err}"))?;
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|err| format!("failed to bind UDP deny smoke socket: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make UDP deny listener nonblocking: {err}"))?;
+
+    let mut child = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--ro-bind",
+        ])
+        .arg(&target_dir)
+        .arg(&target_dir)
+        .args(["--bind"])
+        .arg(&socket_dir)
+        .arg(&socket_dir)
+        .args(["--proc", "/proc", "--"])
+        .env("FOXPROX_SETUP_SOCKET", &socket_path)
+        .arg(&helper)
+        .args([
+            "--",
+            "/usr/bin/python3",
+            "-c",
+            "import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(1); s.sendto(b'probe',('203.0.113.11',5354));\ntry:\n data,_=s.recvfrom(64); sys.exit(4)\nexcept socket.timeout:\n sys.exit(0)",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn bwrap UDP deny smoke: {err}"))?;
+
+    let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
+    fd_handoff::set_nonblocking(fd)?;
+    let policy = PolicyEngine::new(PolicyConfig::deny_by_default());
+    let mut runtime = TransparentUdpRuntime::new(policy, LocalUdpEgress::new(echo_addr)?);
+    let mut buf = [0_u8; 2048];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut packets_read = 0_u64;
+    let mut denied = false;
+    while Instant::now() < deadline {
+        match fd_handoff::read_fd(fd, &mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                packets_read += 1;
+                let packet = &buf[..n];
+                if runtime
+                    .handle_ipv4_packet("udp-deny-smoke", packet)?
+                    .is_some()
+                {
+                    return Err("denied UDP smoke unexpectedly produced a reply".to_string());
+                }
+                denied = runtime
+                    .audit
+                    .last()
+                    .is_some_and(|audit| audit.decision == Decision::DenyDrop);
+                if denied {
+                    break;
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to read TUN fd during UDP deny smoke: {err}"
+                ))
+            }
+        }
+        if child
+            .try_wait()
+            .map_err(|err| format!("failed to poll bwrap UDP deny smoke: {err}"))?
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !denied {
+        return Err("timed out waiting for denied UDP packet audit".to_string());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for bwrap UDP deny smoke: {err}"))?;
+    fd_handoff::close_fd(fd);
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir(&socket_dir);
+    let runtime_audit = runtime.audit.last().cloned();
+    let egress_calls = runtime.egress.calls;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let success = output.status.success() && egress_calls == 0;
+    let mut record = AuditRecord::new(
+        EventKind::UdpFlowCreated,
+        "udp-deny-smoke",
+        if success {
+            Decision::DenyDrop
+        } else {
+            Decision::FailClosed
+        },
+        if success {
+            "sandbox UDP probe was denied, no egress call occurred, and target timed out"
+        } else {
+            "denied UDP smoke did not fail closed as expected"
+        },
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Udp)
+    .with_metadata("status", output.status.to_string())
+    .with_metadata("packets_read", packets_read.to_string())
+    .with_metadata("denied", denied.to_string())
+    .with_metadata("egress_calls", egress_calls.to_string());
+    if let Some(audit) = runtime_audit {
+        let runtime_audit_json = audit.to_json_line();
+        record = record
+            .with_metadata("policy_decision", audit.decision.as_str())
+            .with_metadata("policy_reason", audit.reason.clone())
+            .with_metadata("runtime_audit", runtime_audit_json);
+    }
+    if !stdout.is_empty() {
+        record = record.with_metadata("stdout", stdout);
+    }
+    if !stderr.is_empty() {
+        record = record.with_metadata("stderr", stderr);
+    }
+    Ok(record)
+}
+
+#[cfg(unix)]
 struct LocalUdpEgress {
     socket: UdpSocket,
     fixture: std::net::SocketAddr,
+    calls: usize,
 }
 
 #[cfg(unix)]
@@ -818,7 +1016,11 @@ impl LocalUdpEgress {
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(|err| format!("failed to set host UDP egress timeout: {err}"))?;
-        Ok(Self { socket, fixture })
+        Ok(Self {
+            socket,
+            fixture,
+            calls: 0,
+        })
     }
 }
 
@@ -828,6 +1030,7 @@ impl EgressBackend for LocalUdpEgress {
         let EgressRequest::UdpDatagram { bytes, .. } = request else {
             return Err("local UDP egress only supports UDP datagrams".to_string());
         };
+        self.calls += 1;
         self.socket
             .send_to(bytes, self.fixture)
             .map_err(|err| format!("host UDP egress send failed: {err}"))?;
