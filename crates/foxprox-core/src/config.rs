@@ -1,0 +1,282 @@
+use std::fmt;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::str::FromStr;
+
+use crate::attribution::{Hostname, HostnameError};
+use crate::policy::DenyBehavior;
+use crate::types::Protocol;
+
+/// Validated policy configuration. Defaults intentionally deny network access.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PolicyConfig {
+    pub default_action: RuleAction,
+    pub rules: Vec<PolicyRule>,
+    pub broker_dns_servers: Vec<IpAddr>,
+    pub allow_direct_dns: bool,
+    pub allow_multicast_broadcast: bool,
+    pub allow_ping: bool,
+    pub deny_attribution_mismatch: bool,
+    pub quic_default: RuleAction,
+}
+
+impl PolicyConfig {
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        for rule in &self.rules {
+            if rule.id.trim().is_empty() {
+                return Err(ConfigError::EmptyRuleId);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Default for PolicyConfig {
+    fn default() -> Self {
+        Self {
+            default_action: RuleAction::Deny(DenyBehavior::Drop),
+            rules: Vec::new(),
+            broker_dns_servers: Vec::new(),
+            allow_direct_dns: false,
+            allow_multicast_broadcast: false,
+            allow_ping: false,
+            deny_attribution_mismatch: true,
+            quic_default: RuleAction::Deny(DenyBehavior::Drop),
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum RuleAction {
+    Allow,
+    Deny(DenyBehavior),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PolicyRule {
+    pub id: String,
+    pub action: RuleAction,
+    pub protocol: ProtocolMatcher,
+    pub destination: DestinationMatcher,
+}
+
+impl PolicyRule {
+    pub fn allow_ip(id: impl Into<String>, cidr: Cidr, port: Option<u16>) -> Self {
+        Self {
+            id: id.into(),
+            action: RuleAction::Allow,
+            protocol: ProtocolMatcher::Any,
+            destination: DestinationMatcher::Ip { cidr, port },
+        }
+    }
+
+    pub fn allow_domain(id: impl Into<String>, host: HostMatcher, port: Option<u16>) -> Self {
+        Self {
+            id: id.into(),
+            action: RuleAction::Allow,
+            protocol: ProtocolMatcher::Any,
+            destination: DestinationMatcher::Host { host, port },
+        }
+    }
+
+    pub fn matches_protocol(&self, protocol: Protocol) -> bool {
+        self.protocol.matches(protocol)
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ProtocolMatcher {
+    Any,
+    Exact(Protocol),
+}
+
+impl ProtocolMatcher {
+    pub fn matches(self, protocol: Protocol) -> bool {
+        match self {
+            ProtocolMatcher::Any => true,
+            ProtocolMatcher::Exact(expected) => expected == protocol,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DestinationMatcher {
+    Any,
+    Ip {
+        cidr: Cidr,
+        port: Option<u16>,
+    },
+    Host {
+        host: HostMatcher,
+        port: Option<u16>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HostMatcher {
+    Exact(Hostname),
+    DomainSuffix(Hostname),
+}
+
+impl HostMatcher {
+    pub fn exact(value: &str) -> Result<Self, HostnameError> {
+        Ok(Self::Exact(Hostname::parse(value)?))
+    }
+
+    pub fn suffix(value: &str) -> Result<Self, HostnameError> {
+        Ok(Self::DomainSuffix(Hostname::parse(value)?))
+    }
+
+    pub fn matches(&self, hostname: &Hostname) -> bool {
+        match self {
+            HostMatcher::Exact(expected) => hostname == expected,
+            HostMatcher::DomainSuffix(suffix) => hostname.matches_domain_suffix(suffix),
+        }
+    }
+}
+
+/// Small dependency-free CIDR matcher used by the core policy engine.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Cidr {
+    network: IpAddr,
+    prefix: u8,
+}
+
+impl Cidr {
+    pub fn new(network: IpAddr, prefix: u8) -> Result<Self, ConfigError> {
+        let max = match network {
+            IpAddr::V4(_) => 32,
+            IpAddr::V6(_) => 128,
+        };
+        if prefix > max {
+            return Err(ConfigError::InvalidCidrPrefix { prefix, max });
+        }
+        Ok(Self {
+            network: mask_ip(network, prefix),
+            prefix,
+        })
+    }
+
+    pub fn host(ip: IpAddr) -> Self {
+        Self {
+            network: ip,
+            prefix: match ip {
+                IpAddr::V4(_) => 32,
+                IpAddr::V6(_) => 128,
+            },
+        }
+    }
+
+    pub fn contains(&self, ip: IpAddr) -> bool {
+        matches!(
+            (self.network, ip),
+            (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_))
+        ) && mask_ip(ip, self.prefix) == self.network
+    }
+
+    pub fn network(&self) -> IpAddr {
+        self.network
+    }
+
+    pub fn prefix(&self) -> u8 {
+        self.prefix
+    }
+}
+
+impl FromStr for Cidr {
+    type Err = ConfigError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (ip, prefix) = match value.split_once('/') {
+            Some((ip, prefix)) => {
+                let ip = ip.parse().map_err(|_| ConfigError::InvalidCidrAddress)?;
+                let prefix = prefix
+                    .parse()
+                    .map_err(|_| ConfigError::InvalidCidrPrefixText)?;
+                (ip, prefix)
+            }
+            None => {
+                let ip: IpAddr = value.parse().map_err(|_| ConfigError::InvalidCidrAddress)?;
+                let prefix = match ip {
+                    IpAddr::V4(_) => 32,
+                    IpAddr::V6(_) => 128,
+                };
+                (ip, prefix)
+            }
+        };
+        Self::new(ip, prefix)
+    }
+}
+
+impl fmt::Display for Cidr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.network, self.prefix)
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ConfigError {
+    EmptyRuleId,
+    InvalidCidrAddress,
+    InvalidCidrPrefixText,
+    InvalidCidrPrefix { prefix: u8, max: u8 },
+}
+
+fn mask_ip(ip: IpAddr, prefix: u8) -> IpAddr {
+    match ip {
+        IpAddr::V4(ip) => IpAddr::V4(mask_ipv4(ip, prefix)),
+        IpAddr::V6(ip) => IpAddr::V6(mask_ipv6(ip, prefix)),
+    }
+}
+
+fn mask_ipv4(ip: Ipv4Addr, prefix: u8) -> Ipv4Addr {
+    let value = u32::from(ip);
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    };
+    Ipv4Addr::from(value & mask)
+}
+
+fn mask_ipv6(ip: Ipv6Addr, prefix: u8) -> Ipv6Addr {
+    let value = u128::from(ip);
+    let mask = if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix)
+    };
+    Ipv6Addr::from(value & mask)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_config_is_deny_by_default() {
+        let config = PolicyConfig::default();
+        assert_eq!(config.default_action, RuleAction::Deny(DenyBehavior::Drop));
+        assert!(!config.allow_direct_dns);
+        assert!(!config.allow_multicast_broadcast);
+        assert!(!config.allow_ping);
+        assert!(config.deny_attribution_mismatch);
+    }
+
+    #[test]
+    fn cidr_matching_is_family_specific_and_prefix_aware() {
+        let cidr: Cidr = "192.0.2.0/24".parse().unwrap();
+        assert!(cidr.contains("192.0.2.45".parse().unwrap()));
+        assert!(!cidr.contains("192.0.3.1".parse().unwrap()));
+        assert!(!cidr.contains("2001:db8::1".parse().unwrap()));
+
+        let v6: Cidr = "2001:db8::/32".parse().unwrap();
+        assert!(v6.contains("2001:db8::beef".parse().unwrap()));
+        assert!(!v6.contains("2001:db9::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn invalid_cidr_prefixes_are_rejected() {
+        assert!("192.0.2.0/33".parse::<Cidr>().is_err());
+        assert!("2001:db8::/129".parse::<Cidr>().is_err());
+    }
+}

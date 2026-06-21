@@ -1,10 +1,25 @@
 //! Core, platform-independent types for foxprox.
 //!
-//! This crate is intentionally minimal for now. It is the home for broker
-//! concepts that must not depend on Linux, TUN, bwrap, smoltcp, or any concrete
-//! frontend/backend implementation.
+//! This crate is the home for broker concepts that must not depend on Linux,
+//! TUN, bwrap, smoltcp, or any concrete frontend/backend implementation.
 
 #![forbid(unsafe_code)]
+
+pub mod attribution;
+pub mod audit;
+pub mod config;
+pub mod policy;
+pub mod types;
+
+pub use attribution::{HostAttribution, Hostname, HostnameError};
+pub use audit::{
+    AuditDecision, AuditEvent, AuditEventKind, AuditPolicyContext, BoundedAuditBuffer, PushOutcome,
+};
+pub use config::{Cidr, ConfigError, HostMatcher, PolicyConfig, PolicyRule, RuleAction};
+pub use policy::{Decision, DenialReason, DenyBehavior, PolicyEngine, PolicyRequest};
+pub use types::{
+    Endpoint, Frontend, HostnameConfidence, HostnameSource, IcmpMessage, Protocol, SandboxId,
+};
 
 /// Stable crate marker used by scaffold tests and downstream workspace checks.
 pub const CRATE_NAME: &str = "foxprox-core";
