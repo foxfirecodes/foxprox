@@ -129,3 +129,25 @@
 - Commit hash when committed: previous audit sink slice committed as `7ebe3f0`; final ledger commit pending.
 - Remaining risks: alpha is not complete end-to-end. Missing pieces include real TUN creation/configuration, fd handoff, `foxproxsetup`, smoltcp TCP bridging, real UDP/DNS egress, HTTP/SOCKS listener loops, bwrap execution, namespace integration tests, fuzz targets, and runtime network smoke tests.
 - Exact next step: implement the first real OS-facing integration slice: `foxproxsetup`/device crate that can create/configure a TUN in a controlled namespace, then verify with a sandbox-visible packet log or ICMP ping proof.
+
+## 2026-06-21T22:36:06Z
+- Current objective: continue autonomous verification-kernel work toward the next alpha gap after final kernel verification.
+- Git status summary: clean worktree at session start.
+- Intended slice: implement the first OS-facing device/setup boundary for Linux TUN creation/configuration while keeping policy core free of Linux and bwrap semantics.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`; privileged TUN smoke will be recorded as unavailable unless `/dev/net/tun` and required capabilities are present.
+- Files expected to change: `Cargo.toml`, `Cargo.lock`, a new device/setup crate, and ledgers.
+- Remaining risks: actual namespace/TUN smoke may require unavailable kernel capabilities in this worktree environment, so unit tests must prove fail-early planning and command behavior first.
+- Exact next step: add a `foxprox-device` crate with validated TUN setup execution boundaries and deterministic tests for fail-early setup behavior.
+
+## 2026-06-21T22:44:40Z
+- Current objective: add first OS-facing TUN device setup boundary while preserving verified core isolation.
+- Files changed: `Cargo.toml`, `Cargo.lock`, `crates/foxprox-device/Cargo.toml`, `crates/foxprox-device/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on formatting in the new device crate; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings` (initially failed because a test compared `Result<TunDevice, _>` without `TunDevice: PartialEq`; fixed by asserting the error)
+  - `cargo test --all-targets --all-features`
+  - `/dev/net/tun`/capability probe: `/dev/net/tun` exists, but the current user lacks `CAP_NET_ADMIN`, so privileged TUN creation smoke was not attempted.
+- Observed result: final verification passed; 35 core tests, 5 device tests, 3 integration tests, and 2 runtime tests passed. The device crate validates Linux TUN names, wraps `TUNSETIFF` in a small documented unsafe boundary, and deterministically tests point-to-point `ip` setup command ordering and fail-early behavior.
+- Commit hash when committed: pending.
+- Remaining risks: no `foxproxsetup` executable, fd handoff, namespace execution, DNS file configuration, or real ping/TUN smoke exists yet; TUN creation requires capabilities unavailable in this session.
+- Exact next step: commit the device setup boundary, then add a `foxproxsetup` CLI/helper crate that parses the bwrap-planned arguments, creates/configures the TUN through `foxprox-device`, and fails before target exec on setup errors.

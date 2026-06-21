@@ -7,6 +7,13 @@ name = "foxprox-core"
 version = "0.1.0"
 
 [[package]]
+name = "foxprox-device"
+version = "0.1.0"
+dependencies = [
+ "foxprox-integrations",
+]
+
+[[package]]
 name = "foxprox-integrations"
 version = "0.1.0"
 dependencies = [
