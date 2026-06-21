@@ -8,6 +8,9 @@ use foxprox_device::{
 use foxprox_net::{
     run_tcp_proof_with_ready, run_udp_dns_proof_with_ready, TcpProofConfig, UdpDnsProofConfig,
 };
+use foxprox_proxy::{
+    run_http_proxy_proof, run_socks5_proxy_proof, HttpProxyProofConfig, Socks5ProxyProofConfig,
+};
 use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
 use std::env;
 use std::fs::{self, File};
@@ -30,6 +33,8 @@ fn run() -> io::Result<()> {
         Some("proof-icmp") => proof_icmp(args),
         Some("proof-tcp") => proof_tcp(args),
         Some("proof-udp-dns") => proof_udp_dns(args),
+        Some("proof-http-proxy") => proof_http_proxy(args),
+        Some("proof-socks5-proxy") => proof_socks5_proxy(args),
         Some("--help" | "-h") | None => Err(io::Error::new(io::ErrorKind::InvalidInput, usage())),
         Some(other) => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -39,7 +44,7 @@ fn run() -> io::Result<()> {
 }
 
 fn usage() -> &'static str {
-    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80]\n       foxprox proof-udp-dns --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]..."
+    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80]\n       foxprox proof-udp-dns --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]...\n       foxprox proof-http-proxy [--listen 10.255.0.1:8080] [--allow-port PORT]... [--request-head-limit BYTES] [--request-head-timeout-ms MS] [--connect-timeout-ms MS]\n       foxprox proof-socks5-proxy [--listen 10.255.0.1:1080] [--allow-port PORT]... [--request-timeout-ms MS] [--connect-timeout-ms MS]"
 }
 
 fn proof_icmp<I>(mut args: I) -> io::Result<()>
@@ -262,6 +267,107 @@ where
     run_udp_dns_proof_with_ready(tun_fd, config, || stream.write_all(b"ready\n"))
 }
 
+fn proof_http_proxy<I>(mut args: I) -> io::Result<()>
+where
+    I: Iterator<Item = String>,
+{
+    let mut config = HttpProxyProofConfig::new(
+        SandboxId::new("proof-http-proxy").map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid sandbox id: {error}"),
+            )
+        })?,
+        SocketAddr::from(([10, 255, 0, 1], 8080)),
+    );
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--listen" => {
+                config.listen_addr = parse_socket_addr(&required_value(&mut args, "--listen")?)?
+            }
+            "--allow-port" => {
+                let port = parse_value(&required_value(&mut args, "--allow-port")?)?;
+                config.policy.rules.push(allow_http_proxy_rule(port));
+                config.policy.rules.push(allow_connect_proxy_rule(port));
+            }
+            "--request-head-limit" => {
+                config.request_head_limit =
+                    parse_value(&required_value(&mut args, "--request-head-limit")?)?
+            }
+            "--request-head-timeout-ms" => {
+                config.request_head_timeout =
+                    parse_millis(&required_value(&mut args, "--request-head-timeout-ms")?)?
+            }
+            "--connect-timeout-ms" => {
+                config.connect_timeout =
+                    parse_millis(&required_value(&mut args, "--connect-timeout-ms")?)?
+            }
+            "--help" | "-h" => return Err(io::Error::new(io::ErrorKind::InvalidInput, usage())),
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unexpected argument {other:?}\n{}", usage()),
+                ));
+            }
+        }
+    }
+
+    eprintln!(
+        "foxprox: starting HTTP/CONNECT proxy proof on {}",
+        config.listen_addr
+    );
+    run_http_proxy_proof(config)
+}
+
+fn proof_socks5_proxy<I>(mut args: I) -> io::Result<()>
+where
+    I: Iterator<Item = String>,
+{
+    let mut config = Socks5ProxyProofConfig::new(
+        SandboxId::new("proof-socks5-proxy").map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid sandbox id: {error}"),
+            )
+        })?,
+        SocketAddr::from(([10, 255, 0, 1], 1080)),
+    );
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--listen" => {
+                config.listen_addr = parse_socket_addr(&required_value(&mut args, "--listen")?)?
+            }
+            "--allow-port" => {
+                let port = parse_value(&required_value(&mut args, "--allow-port")?)?;
+                config.policy.rules.push(allow_socks_proxy_rule(port));
+            }
+            "--request-timeout-ms" => {
+                config.request_timeout =
+                    parse_millis(&required_value(&mut args, "--request-timeout-ms")?)?
+            }
+            "--connect-timeout-ms" => {
+                config.connect_timeout =
+                    parse_millis(&required_value(&mut args, "--connect-timeout-ms")?)?
+            }
+            "--help" | "-h" => return Err(io::Error::new(io::ErrorKind::InvalidInput, usage())),
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unexpected argument {other:?}\n{}", usage()),
+                ));
+            }
+        }
+    }
+
+    eprintln!(
+        "foxprox: starting SOCKS5 proxy proof on {}",
+        config.listen_addr
+    );
+    run_socks5_proxy_proof(config)
+}
+
 fn allow_tcp_forward_rule(port: u16) -> PolicyRule {
     PolicyRule::new(format!("proof-allow-tcp-{port}"), RuleEffect::Allow)
         .with_protocol(Protocol::Tcp)
@@ -288,6 +394,27 @@ fn allow_udp_forward_rule(port: u16) -> PolicyRule {
     };
     PolicyRule::new(format!("proof-allow-udp-{port}"), RuleEffect::Allow)
         .with_protocol(protocol)
+        .with_destination_ports(PortRange::single(port))
+}
+
+fn allow_http_proxy_rule(port: u16) -> PolicyRule {
+    PolicyRule::new(format!("proof-allow-http-proxy-{port}"), RuleEffect::Allow)
+        .with_protocol(Protocol::Http)
+        .with_destination_ports(PortRange::single(port))
+}
+
+fn allow_connect_proxy_rule(port: u16) -> PolicyRule {
+    PolicyRule::new(
+        format!("proof-allow-connect-proxy-{port}"),
+        RuleEffect::Allow,
+    )
+    .with_protocol(Protocol::HttpsConnect)
+    .with_destination_ports(PortRange::single(port))
+}
+
+fn allow_socks_proxy_rule(port: u16) -> PolicyRule {
+    PolicyRule::new(format!("proof-allow-socks-proxy-{port}"), RuleEffect::Allow)
+        .with_protocol(Protocol::Socks)
         .with_destination_ports(PortRange::single(port))
 }
 
@@ -323,6 +450,11 @@ fn parse_socket_addr(value: &str) -> io::Result<SocketAddr> {
             format!("invalid socket address {value:?}: {error}"),
         )
     })
+}
+
+fn parse_millis(value: &str) -> io::Result<std::time::Duration> {
+    let millis = parse_value(value)?;
+    Ok(std::time::Duration::from_millis(millis))
 }
 
 fn verify_peer_credentials(stream: &UnixStream) -> io::Result<()> {

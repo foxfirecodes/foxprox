@@ -95,6 +95,7 @@ dependencies = [
  "foxprox-core",
  "foxprox-device",
  "foxprox-net",
+ "foxprox-proxy",
  "libc",
  "nix",
 ]

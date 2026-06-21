@@ -762,3 +762,35 @@
 - Files changed: `crates/foxprox-core/src/config.rs`, `crates/foxprox-core/src/lib.rs`, `progress.md`.
 - Current git status summary: core config source and progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit resource limit config, then wire audit/resource-limit primitives into proof runtimes.
+
+## 2026-06-21T23:27:19Z — CLI proxy proof wiring pending review
+
+- Commit created: `4befcc9` (`add core resource limits`).
+- Current objective: expose live explicit proxy proof runtimes through `foxprox` CLI so alpha users can start HTTP/CONNECT and SOCKS5 listener proofs.
+- Changes implemented:
+  - Added `foxprox-proxy` as a CLI dependency.
+  - Added `proof-http-proxy` command with `--listen`, repeatable `--allow-port`, request-head limit/timeout, and connect timeout flags.
+  - Added `proof-socks5-proxy` command with `--listen`, repeatable `--allow-port`, request timeout, and connect timeout flags.
+  - Preserved fail-closed default policy: no ports are allowed unless `--allow-port` is supplied.
+  - HTTP proxy allow ports install both `Protocol::Http` and `Protocol::HttpsConnect`; SOCKS allow ports install `Protocol::Socks`.
+- Subagents/reviews requested: `cli-proxy-proof-final` is running.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-cli` passed: CLI 0 tests.
+  - `cargo test --workspace` passed: 49 core tests, 8 device tests, 8 net tests, 15 proxy tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-cli` shows expected workspace dependency on `foxprox-proxy`.
+- Files changed: `Cargo.lock`, `crates/foxprox-cli/Cargo.toml`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: CLI/progress modified; review artifact pending.
+- Next exact action: read CLI proxy proof review, fix blockers if any, then commit.
+
+## 2026-06-21T23:28:44Z — CLI proxy proof review passed
+
+- Current objective: commit CLI wiring for live explicit proxy proof runtimes.
+- Review result: `cli-proxy-proof-final` found no blockers after checking diffs, CLI/proxy dependency wiring, command policy defaults, allow rule protocol classes, and local CLI/proxy checks.
+- Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed, and `cargo tree -p foxprox-cli` shows the expected `foxprox-proxy` dependency.
+- Files changed: `Cargo.lock`, `crates/foxprox-cli/Cargo.toml`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: CLI/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit CLI proxy proof wiring, then continue Milestone 7 runtime audit/resource-limit integration.

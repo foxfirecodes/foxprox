@@ -14,5 +14,6 @@ path = "src/main.rs"
 foxprox-core = { path = "../foxprox-core" }
 foxprox-device = { path = "../foxprox-device" }
 foxprox-net = { path = "../foxprox-net" }
+foxprox-proxy = { path = "../foxprox-proxy" }
 libc = "0.2"
 nix = { version = "0.31", features = ["socket", "uio"] }
