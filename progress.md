@@ -44,5 +44,5 @@
   - `crates/foxprox-policy/src/lib.rs`
   - `progress.md`
   - `learnings.md`
-- Commit hash after commit: pending.
+- Commit hash after commit: 8318811.
 - Remaining boundary risks: production TUN setup/fd handoff, smoltcp adapter, real host socket egress, DNS resolver implementation, TLS/QUIC metadata parsing, and end-to-end namespace validation still need implementation behind the contracts.
