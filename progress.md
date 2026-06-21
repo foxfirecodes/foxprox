@@ -400,3 +400,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: ICMP handling is still echo-only; essential ICMP errors, unusual ICMP denial classification, and a unified policy-gated TUN session remain to be implemented.
 - Exact next step: commit ICMP policy gating, then add unified packet handling that routes ICMP, broker DNS, unsupported packets, and malformed packets through one session context.
+
+## 2026-06-22T00:20:30Z
+- Current objective: add one unified policy-gated TUN packet handler for ICMP, UDP/DNS, malformed packets, and unsupported protocols.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 49 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 23 runtime tests, and 7 setup tests passed. New runtime tests prove unsupported IPv4 protocols and malformed packets are converted to normalized policy/audit events and fail closed without write-back, alongside the existing DNS and ICMP gated paths.
+- Commit hash when committed: pending.
+- Remaining risks: unified handler does not yet own a real TUN fd session loop or TCP/smoltcp forwarding; UDP non-DNS allow still only observes flow metadata and does not egress.
+- Exact next step: commit unified TUN policy handler, then introduce an explicit host UDP egress trait/path gated by policy for allowed non-DNS UDP datagrams.

@@ -243,6 +243,87 @@ pub struct BrokerDnsRuntime<'a, S> {
     pub kernel: &'a mut VerificationKernel<S>,
 }
 
+pub fn handle_one_tun_packet_with_policy<R: Read, W: Write, S: AuditSink>(
+    reader: &mut R,
+    writer: &mut W,
+    buffer: &mut [u8],
+    runtime: &mut BrokerDnsRuntime<'_, S>,
+    timestamp_millis: u128,
+) -> io::Result<TunPacketOutcome> {
+    let bytes_read = reader.read(buffer)?;
+    let packet = &buffer[..bytes_read];
+    match parse_ip_packet(packet) {
+        Ok(ParsedIpPacket::Icmpv4EchoRequest(request)) => {
+            let event = NormalizedEvent::IcmpMessage {
+                sandbox_id: runtime.sandbox_id.clone(),
+                frontend: FrontendKind::Tun,
+                source: Endpoint::new(IpAddr::V4(request.source), 0),
+                destination: Endpoint::new(IpAddr::V4(request.destination), 0),
+            };
+            let decision = runtime.kernel.decide_and_audit(&event, timestamp_millis);
+            if decision.action != DecisionAction::Allow {
+                return Ok(TunPacketOutcome::PolicyDenied { decision });
+            }
+            let reply = synthesize_icmpv4_echo_reply(&request);
+            writer.write_all(&reply)?;
+            Ok(TunPacketOutcome::EchoReplyWritten { bytes: reply.len() })
+        }
+        Ok(ParsedIpPacket::Udpv4Packet(udp)) => {
+            let event = udpv4_packet_to_event_with_broker_dns(
+                runtime.sandbox_id.clone(),
+                &udp,
+                runtime.broker_dns,
+            );
+            let decision = runtime.kernel.decide_and_audit(&event, timestamp_millis);
+            if decision.action != DecisionAction::Allow {
+                return Ok(TunPacketOutcome::PolicyDenied { decision });
+            }
+            if matches!(event, NormalizedEvent::DnsQuery { .. }) {
+                return match handle_broker_dns_udp_packet(
+                    &udp,
+                    runtime.resolver,
+                    runtime.cache,
+                    timestamp_millis,
+                ) {
+                    Ok(response) => {
+                        writer.write_all(&response.packet)?;
+                        Ok(TunPacketOutcome::DnsResponseWritten {
+                            bytes: response.packet.len(),
+                            cached: response.cached,
+                        })
+                    }
+                    Err(_) => Ok(TunPacketOutcome::DroppedMalformedDns),
+                };
+            }
+            Ok(TunPacketOutcome::UdpObserved {
+                source: IpAddr::V4(udp.source),
+                destination: IpAddr::V4(udp.destination),
+                source_port: udp.source_port,
+                destination_port: udp.destination_port,
+                payload_len: udp.payload.len(),
+            })
+        }
+        Ok(ParsedIpPacket::UnsupportedIpv4Protocol(unsupported)) => {
+            let event = NormalizedEvent::UnsupportedNetworkEvent {
+                sandbox_id: runtime.sandbox_id.clone(),
+                frontend: FrontendKind::Tun,
+                protocol: Protocol::Unsupported(unsupported.protocol),
+            };
+            let decision = runtime.kernel.decide_and_audit(&event, timestamp_millis);
+            Ok(TunPacketOutcome::PolicyDenied { decision })
+        }
+        Err(_) => {
+            let event = NormalizedEvent::MalformedNetworkEvent {
+                sandbox_id: runtime.sandbox_id.clone(),
+                frontend: FrontendKind::Tun,
+                protocol: Protocol::Unsupported(0),
+            };
+            let decision = runtime.kernel.decide_and_audit(&event, timestamp_millis);
+            Ok(TunPacketOutcome::PolicyDenied { decision })
+        }
+    }
+}
+
 pub fn handle_one_tun_packet_with_icmp_policy<R: Read, W: Write, S: AuditSink>(
     reader: &mut R,
     writer: &mut W,
@@ -603,6 +684,87 @@ mod tests {
         assert_eq!(&writer[28..], b"ok");
         assert_eq!(checksum(&writer[..20]), 0);
         assert_eq!(checksum(&writer[20..]), 0);
+    }
+
+    #[test]
+    fn unified_tun_policy_handler_audits_unsupported_packets() {
+        let request = build_ipv4_packet(99, b"unsupported");
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+        let resolver = StaticDnsResolver::new(30);
+        let mut cache = DnsCache::new();
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(4),
+        );
+        let mut runtime = BrokerDnsRuntime {
+            sandbox_id: SandboxId::new("unsupported-audit").unwrap(),
+            resolver: &resolver,
+            cache: &mut cache,
+            broker_dns: &[IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+            kernel: &mut kernel,
+        };
+
+        let outcome = handle_one_tun_packet_with_policy(
+            &mut reader,
+            &mut writer,
+            &mut buffer,
+            &mut runtime,
+            100,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            TunPacketOutcome::PolicyDenied { decision }
+                if decision.action == DecisionAction::FailClosed
+        ));
+        assert!(writer.is_empty());
+        assert_eq!(kernel.audit_sink().events().len(), 1);
+        assert_eq!(
+            kernel.audit_sink().events()[0].sandbox_id.as_str(),
+            "unsupported-audit"
+        );
+    }
+
+    #[test]
+    fn unified_tun_policy_handler_audits_malformed_packets() {
+        let mut request = build_ipv4_packet(1, &[8, 0, 0, 0, 0x12, 0x34, 0, 7]);
+        request[10] = 0xff;
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+        let resolver = StaticDnsResolver::new(30);
+        let mut cache = DnsCache::new();
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(4),
+        );
+        let mut runtime = BrokerDnsRuntime {
+            sandbox_id: SandboxId::new("malformed-audit").unwrap(),
+            resolver: &resolver,
+            cache: &mut cache,
+            broker_dns: &[IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+            kernel: &mut kernel,
+        };
+
+        let outcome = handle_one_tun_packet_with_policy(
+            &mut reader,
+            &mut writer,
+            &mut buffer,
+            &mut runtime,
+            100,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            TunPacketOutcome::PolicyDenied { decision }
+                if decision.reason == DecisionReason::MalformedInput
+        ));
+        assert!(writer.is_empty());
+        assert_eq!(kernel.audit_sink().events().len(), 1);
     }
 
     #[test]
