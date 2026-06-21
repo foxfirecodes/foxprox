@@ -196,6 +196,7 @@ pub enum TunPacketOutcome {
     DroppedMalformed {
         error: PacketError,
     },
+    DroppedMalformedDns,
     DroppedUnsupportedIpv4 {
         source: IpAddr,
         destination: IpAddr,
@@ -207,6 +208,10 @@ pub enum TunPacketOutcome {
         source_port: u16,
         destination_port: u16,
         payload_len: usize,
+    },
+    DnsResponseWritten {
+        bytes: usize,
+        cached: bool,
     },
 }
 
@@ -223,6 +228,44 @@ pub fn handle_one_tun_packet<R: Read, W: Write>(
             Ok(TunPacketOutcome::EchoReplyWritten { bytes: reply.len() })
         }
         Ok(None) => unsupported_or_malformed_outcome(packet),
+        Err(error) => Ok(TunPacketOutcome::DroppedMalformed { error }),
+    }
+}
+
+pub fn handle_one_tun_packet_with_dns<R: Read, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    buffer: &mut [u8],
+    resolver: &StaticDnsResolver,
+    cache: &mut DnsCache,
+    broker_dns: &[IpAddr],
+    now_millis: u128,
+) -> io::Result<TunPacketOutcome> {
+    let bytes_read = reader.read(buffer)?;
+    let packet = &buffer[..bytes_read];
+    match parse_ip_packet(packet) {
+        Ok(ParsedIpPacket::Udpv4Packet(udp)) => {
+            let destination = IpAddr::V4(udp.destination);
+            if udp.destination_port == 53 && broker_dns.contains(&destination) {
+                return match handle_broker_dns_udp_packet(&udp, resolver, cache, now_millis) {
+                    Ok(response) => {
+                        writer.write_all(&response.packet)?;
+                        Ok(TunPacketOutcome::DnsResponseWritten {
+                            bytes: response.packet.len(),
+                            cached: response.cached,
+                        })
+                    }
+                    Err(_) => Ok(TunPacketOutcome::DroppedMalformedDns),
+                };
+            }
+            unsupported_or_malformed_outcome(packet)
+        }
+        Ok(ParsedIpPacket::Icmpv4EchoRequest(request)) => {
+            let reply = synthesize_icmpv4_echo_reply(&request);
+            writer.write_all(&reply)?;
+            Ok(TunPacketOutcome::EchoReplyWritten { bytes: reply.len() })
+        }
+        Ok(ParsedIpPacket::UnsupportedIpv4Protocol(_)) => unsupported_or_malformed_outcome(packet),
         Err(error) => Ok(TunPacketOutcome::DroppedMalformed { error }),
     }
 }
@@ -452,6 +495,85 @@ mod tests {
         assert_eq!(&writer[28..], b"ok");
         assert_eq!(checksum(&writer[..20]), 0);
         assert_eq!(checksum(&writer[20..]), 0);
+    }
+
+    #[test]
+    fn tun_packet_with_broker_dns_query_writes_dns_response() {
+        let dns_payload = dns_query_payload();
+        let mut udp_payload = Vec::new();
+        udp_payload.extend_from_slice(&53000u16.to_be_bytes());
+        udp_payload.extend_from_slice(&53u16.to_be_bytes());
+        udp_payload.extend_from_slice(&((8 + dns_payload.len()) as u16).to_be_bytes());
+        udp_payload.extend_from_slice(&0u16.to_be_bytes());
+        udp_payload.extend_from_slice(&dns_payload);
+        let request = build_ipv4_packet(17, &udp_payload);
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+        let mut resolver = StaticDnsResolver::new(30);
+        resolver.insert(
+            Hostname::normalize("example.com").unwrap(),
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+        );
+        let mut cache = DnsCache::new();
+
+        let outcome = handle_one_tun_packet_with_dns(
+            &mut reader,
+            &mut writer,
+            &mut buffer,
+            &resolver,
+            &mut cache,
+            &[IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+            100,
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            TunPacketOutcome::DnsResponseWritten {
+                bytes: writer.len(),
+                cached: true,
+            }
+        );
+        let ParsedIpPacket::Udpv4Packet(response_udp) = parse_ip_packet(&writer).unwrap() else {
+            panic!("expected UDP response");
+        };
+        assert_eq!(response_udp.source_port, 53);
+        assert_eq!(response_udp.destination_port, 53000);
+        assert!(cache
+            .lookup_ip(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 101)
+            .is_some());
+    }
+
+    #[test]
+    fn tun_packet_with_malformed_broker_dns_query_drops_without_writeback() {
+        let mut udp_payload = Vec::new();
+        udp_payload.extend_from_slice(&53000u16.to_be_bytes());
+        udp_payload.extend_from_slice(&53u16.to_be_bytes());
+        udp_payload.extend_from_slice(&11u16.to_be_bytes());
+        udp_payload.extend_from_slice(&0u16.to_be_bytes());
+        udp_payload.extend_from_slice(&[0, 1, 2]);
+        let request = build_ipv4_packet(17, &udp_payload);
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+        let resolver = StaticDnsResolver::new(30);
+        let mut cache = DnsCache::new();
+
+        let outcome = handle_one_tun_packet_with_dns(
+            &mut reader,
+            &mut writer,
+            &mut buffer,
+            &resolver,
+            &mut cache,
+            &[IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+            100,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, TunPacketOutcome::DroppedMalformedDns);
+        assert!(writer.is_empty());
+        assert!(cache.observations().is_empty());
     }
 
     #[test]

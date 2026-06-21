@@ -352,3 +352,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: broker DNS handling is not yet integrated into the `TunIcmpProofSession` loop, and DNS records are still static in-memory configuration only.
 - Exact next step: commit broker DNS UDP response handling, then extend the TUN proof session to handle broker DNS UDP packets in addition to ICMP echo replies.
+
+## 2026-06-21T23:50:15Z
+- Current objective: extend TUN packet handling to answer broker DNS UDP packets in addition to ICMP echo proof packets.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 48 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 17 runtime tests, and 7 setup tests passed. New runtime tests prove a TUN-read broker DNS query is answered with a valid UDP response packet and DNS cache attribution, while malformed broker DNS queries are dropped without write-back or cache mutation.
+- Commit hash when committed: pending.
+- Remaining risks: the TUN session still does not perform policy/audit before DNS write-back, and DNS records remain static; no host upstream resolver exists.
+- Exact next step: commit DNS TUN write-back, then gate broker DNS write-back through the verification kernel so malformed/denied DNS events are audited before any response is emitted.
