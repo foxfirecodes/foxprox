@@ -110,3 +110,16 @@ Commit only verified invariant-preserving changes. Avoid bundling unrelated func
 Continue autonomously by selecting the most severe unverified invariant, especially those related to bypass, malformed input, attribution, and resource exhaustion.
 
 Autonomy means proceed by default. Pause only for decisions that are scope-changing, security-sensitive, hard to reverse, or explicitly outside the source docs. For ordinary implementation choices, choose the safest documented option, record the assumption in `progress.md`, and continue.
+
+
+A verified commit is a checkpoint, not a completion signal. After each meaningful commit, continue by selecting the next highest-value documented implementation or verification gap from `progress.md`, `learnings.md`, or the source docs.
+
+Do not continue by making ledger-only, cosmetic, or speculative changes. Each loop must advance product code, tests, harnesses, verification coverage, or an explicitly required architecture boundary.
+
+Stop only when one of these is true:
+
+* the documented success criteria are complete;
+* the next step requires a scope-changing, security-sensitive, hard-to-reverse, or outside-docs decision;
+* verification is impossible after reducing the issue to a minimal repro;
+* two consecutive work cycles produce no meaningful product or verification progress;
+* an explicit runtime or turn budget is reached.
