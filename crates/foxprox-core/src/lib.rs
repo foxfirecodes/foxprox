@@ -12,6 +12,7 @@ pub mod dns;
 pub mod http;
 pub mod packet;
 pub mod policy;
+pub mod socks;
 pub mod tls;
 pub mod types;
 
@@ -27,6 +28,10 @@ pub use http::{
 };
 pub use packet::{parse_ip_packet, PacketParseError, PacketSummary};
 pub use policy::{Decision, DenialReason, DenyBehavior, PolicyEngine, PolicyRequest};
+pub use socks::{
+    parse_socks5_connect_request, parse_socks5_greeting, Socks5AuthMethod, Socks5ConnectMetadata,
+    Socks5Destination, Socks5Greeting, Socks5ParseError,
+};
 pub use tls::{parse_tls_client_hello, TlsClientHelloMetadata, TlsParseError};
 pub use types::{
     Endpoint, Frontend, HostnameConfidence, HostnameSource, IcmpMessage, Protocol, SandboxId,

@@ -25,3 +25,7 @@ TLS inspection should distinguish valid SNI attribution from hidden-SNI states. 
 ## 2026-06-21 - CONNECT authority strictness
 
 HTTPS CONNECT should require an explicit nonzero port in the request authority and reject Host/authority mismatches. Successful CONNECT parsing can be treated as high-confidence explicit-proxy attribution, but only after duplicate/conflicting host inputs are excluded.
+
+## 2026-06-21 - SOCKS5 explicit proxy strictness
+
+SOCKS5 support should treat only TCP CONNECT as alpha scope. BIND, UDP ASSOCIATE, unsupported authentication, malformed address lengths, and invalid domain names must fail closed. SOCKS domain destinations can be high-confidence explicit-proxy attribution; SOCKS IP destinations remain IP-only and should not satisfy domain rules.

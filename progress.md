@@ -162,3 +162,25 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; CONNECT parser output feeds future proxy frontend policy/audit events.
 * Residual risk: actual proxy accept loop, CONNECT tunneling, SOCKS5 parser, proxy response synthesis, and shared egress backend are not implemented yet.
 * Commit hash: 80f7973 strict https connect authority parsing.
+
+## 2026-06-21 - SOCKS5 TCP CONNECT parser fail-closed foundation
+
+* Invariant under work: explicit SOCKS proxy destinations must be parsed as bounded, unambiguous TCP CONNECT requests, reject unsupported commands/address forms/auth modes, and attach high-confidence explicit-proxy attribution only to validated domain destinations.
+* Threat or failure mode addressed: permissive SOCKS parsing could allow UDP ASSOCIATE, BIND, malformed address lengths, invalid hostnames, or partial request buffering to bypass origin policy or create ambiguous audit metadata.
+* Planned verification: add unit tests for no-auth method negotiation, valid domain/IP TCP CONNECT parsing, unsupported auth/command/address rejection, malformed/truncated length handling, invalid host/port rejection, and bounded request size enforcement; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - SOCKS5 TCP CONNECT parser fail-closed foundation results
+
+* Tests added/updated:
+  * SOCKS5 greeting selects only no-auth when offered and rejects unsupported auth, invalid versions, partial messages, trailing bytes, and oversized messages.
+  * SOCKS5 TCP CONNECT parser accepts validated domain, IPv4, and IPv6 destinations.
+  * domain destinations normalize hostnames and receive high-confidence explicit-proxy attribution; IP destinations remain low-confidence IP-only attribution.
+  * BIND/UDP ASSOCIATE, nonzero reserved byte, unknown address types, zero-length domains, invalid hostnames, zero ports, trailing bytes, and oversized requests are rejected.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 50 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * SOCKS proxy metadata is produced only for complete, bounded SOCKS5 CONNECT requests.
+  * unsupported SOCKS features are rejected rather than downgraded to permissive TCP metadata.
+  * domain-based policy can only use validated SOCKS domain destinations, not IP-only requests.
+* Audit evidence: not applicable in this commit; SOCKS metadata feeds future proxy frontend policy/audit events.
+* Residual risk: actual SOCKS accept loop, reply synthesis, stream forwarding, and shared egress integration remain future proxy frontend work.
