@@ -365,3 +365,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * explicit proxy events must carry parser-derived authority/destination port to satisfy port-scoped domain rules.
 * Audit evidence: not applicable in this commit; requested port should be added to expanded audit context in a later audit schema cycle.
 * Residual risk: parser-to-policy conversion helpers for CONNECT/SOCKS/HTTP and requested-port audit fields remain future work.
+* Commit hash: 95d4fbf bind domain policy to requested ports.
