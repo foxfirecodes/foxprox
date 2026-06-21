@@ -150,5 +150,5 @@
   - `crates/foxprox-policy/src/lib.rs`
   - `progress.md`
   - `learnings.md`
-- Commit hash after commit: pending.
+- Commit hash after commit: f05915d.
 - Remaining boundary risks: HTTP path/method matching is still not represented in rule matchers and should be added before relying on path-aware policy.
