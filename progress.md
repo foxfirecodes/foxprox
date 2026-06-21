@@ -340,3 +340,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: DNS response synthesis and UDP packet synthesis are not yet joined in runtime; no continuous TUN write-back for DNS exists.
 - Exact next step: commit UDP response synthesis, then wire broker DNS query handling to synthesize a DNS UDP response packet in runtime without host egress.
+
+## 2026-06-21T23:43:50Z
+- Current objective: join static DNS resolution with UDP packet synthesis in runtime without opening host UDP egress.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 48 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 15 runtime tests, and 7 setup tests passed. New runtime tests prove broker DNS UDP handling synthesizes a reversed UDP response packet, caches successful observations for later attribution, and rejects malformed DNS queries without cache mutation.
+- Commit hash when committed: pending.
+- Remaining risks: broker DNS handling is not yet integrated into the `TunIcmpProofSession` loop, and DNS records are still static in-memory configuration only.
+- Exact next step: commit broker DNS UDP response handling, then extend the TUN proof session to handle broker DNS UDP packets in addition to ICMP echo replies.

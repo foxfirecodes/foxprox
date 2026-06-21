@@ -7,10 +7,11 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    classify_udp, parse_dns_query, parse_ip_packet, synthesize_icmpv4_echo_reply, AuditSink,
-    Decision, DecisionAction, Endpoint, FlowKey, FlowTable, FrontendKind, HostnameAttribution,
-    NormalizedEvent, PacketError, ParsedIpPacket, Protocol, QuicStatus, SandboxId, UdpFlow,
-    Udpv4Packet, UnsupportedIpv4Protocol, VerificationKernel,
+    classify_udp, parse_dns_query, parse_ip_packet, synthesize_icmpv4_echo_reply,
+    synthesize_udpv4_response, AuditSink, Decision, DecisionAction, DnsCache, DnsParseError,
+    Endpoint, FlowKey, FlowTable, FrontendKind, HostnameAttribution, NormalizedEvent, PacketError,
+    ParsedIpPacket, Protocol, QuicStatus, SandboxId, StaticDnsResolver, UdpFlow, Udpv4Packet,
+    UnsupportedIpv4Protocol, VerificationKernel,
 };
 use std::io::{self, Read, Write};
 use std::net::IpAddr;
@@ -256,6 +257,31 @@ fn unsupported_or_malformed_outcome(packet: &[u8]) -> io::Result<TunPacketOutcom
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrokerDnsUdpResponse {
+    pub packet: Vec<u8>,
+    pub cached: bool,
+}
+
+pub fn handle_broker_dns_udp_packet(
+    packet: &Udpv4Packet<'_>,
+    resolver: &StaticDnsResolver,
+    cache: &mut DnsCache,
+    now_millis: u128,
+) -> Result<BrokerDnsUdpResponse, DnsParseError> {
+    let dns_response = resolver.resolve_query_packet(packet.payload, now_millis)?;
+    let cached = if let Some(observation) = dns_response.observation {
+        cache.record(observation);
+        true
+    } else {
+        false
+    };
+    Ok(BrokerDnsUdpResponse {
+        packet: synthesize_udpv4_response(packet, &dns_response.packet),
+        cached,
+    })
+}
+
 pub fn record_udpv4_flow(
     table: &mut FlowTable,
     packet: &Udpv4Packet<'_>,
@@ -333,8 +359,8 @@ fn tun_packet_reply(packet: &[u8]) -> Result<Option<Vec<u8>>, PacketError> {
 mod tests {
     use super::*;
     use foxprox_core::{
-        DecisionAction, DecisionReason, PolicyConfig, PolicyEngine, PolicyRule, RuleSet, SniStatus,
-        UdpClass, UdpTimeouts, VecAuditSink,
+        DecisionAction, DecisionReason, Hostname, PolicyConfig, PolicyEngine, PolicyRule, RuleSet,
+        SniStatus, UdpClass, UdpTimeouts, VecAuditSink,
     };
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -426,6 +452,55 @@ mod tests {
         assert_eq!(&writer[28..], b"ok");
         assert_eq!(checksum(&writer[..20]), 0);
         assert_eq!(checksum(&writer[20..]), 0);
+    }
+
+    #[test]
+    fn broker_dns_udp_handler_writes_response_and_caches_observation() {
+        let dns_payload = dns_query_payload();
+        let packet = Udpv4Packet {
+            source: Ipv4Addr::new(10, 66, 0, 2),
+            destination: Ipv4Addr::new(10, 66, 0, 1),
+            source_port: 53000,
+            destination_port: 53,
+            payload: &dns_payload,
+        };
+        let mut resolver = StaticDnsResolver::new(30);
+        resolver.insert(
+            Hostname::normalize("example.com").unwrap(),
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+        );
+        let mut cache = DnsCache::new();
+
+        let response = handle_broker_dns_udp_packet(&packet, &resolver, &mut cache, 100).unwrap();
+
+        assert!(response.cached);
+        let ParsedIpPacket::Udpv4Packet(response_udp) = parse_ip_packet(&response.packet).unwrap()
+        else {
+            panic!("expected UDP response packet");
+        };
+        assert_eq!(response_udp.source, Ipv4Addr::new(10, 66, 0, 1));
+        assert_eq!(response_udp.destination, Ipv4Addr::new(10, 66, 0, 2));
+        assert_eq!(response_udp.source_port, 53);
+        assert_eq!(response_udp.destination_port, 53000);
+        assert!(cache
+            .lookup_ip(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 101)
+            .is_some());
+    }
+
+    #[test]
+    fn broker_dns_udp_handler_rejects_malformed_query_without_cache() {
+        let packet = Udpv4Packet {
+            source: Ipv4Addr::new(10, 66, 0, 2),
+            destination: Ipv4Addr::new(10, 66, 0, 1),
+            source_port: 53000,
+            destination_port: 53,
+            payload: &[0, 1, 2],
+        };
+        let resolver = StaticDnsResolver::new(30);
+        let mut cache = DnsCache::new();
+
+        assert!(handle_broker_dns_udp_packet(&packet, &resolver, &mut cache, 100).is_err());
+        assert!(cache.observations().is_empty());
     }
 
     #[test]
