@@ -185,3 +185,25 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; SOCKS metadata feeds future proxy frontend policy/audit events.
 * Residual risk: actual SOCKS accept loop, reply synthesis, stream forwarding, and shared egress integration remain future proxy frontend work.
 * Commit hash: 73f6f2f strict socks5 connect parsing.
+
+## 2026-06-21 - DNS query wire parser fail-closed foundation
+
+* Invariant under work: broker-controlled DNS handling must extract query hostnames and types only from strict, bounded DNS query messages, rejecting malformed, compressed, multi-question, non-IN, response, or unsupported-message shapes before audit/policy use.
+* Threat or failure mode addressed: permissive DNS parsing could misattribute hostnames, accept ambiguous compressed question names, ignore extra questions, or let malformed query packets feed DNS cache/audit state.
+* Planned verification: add DNS query parser tests for valid A/AAAA normalization, query type classification, malformed/truncated headers and labels, pointer/compression rejection, multi-question/response/opcode/class rejection, trailing data rejection, root/invalid host rejection, and message-size bounding; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - DNS query wire parser fail-closed foundation results
+
+* Tests added/updated:
+  * valid DNS A/AAAA/unknown-type queries parse transaction ID, recursion-desired flag, normalized hostname, and query type.
+  * truncated headers/questions, oversized messages, response messages, unsupported opcodes, multi-question messages, and unexpected answer/authority/additional records are rejected.
+  * compressed/reserved-label question names, root names, invalid hostnames, unsupported classes, trailing bytes, and incomplete qtype/qclass fields are rejected.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` found one test expectation that treated a reserved high-bit DNS label as invalid length rather than unsupported compression/reserved label encoding.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 54 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * DNS query metadata is produced only for a single standard IN-class question with no extra records.
+  * ambiguous compressed/reserved question names are rejected rather than followed or normalized permissively.
+  * invalid DNS names never feed hostname attribution or audit metadata.
+* Audit evidence: not applicable in this commit; DNS query metadata feeds future DNS handler policy/audit events.
+* Residual risk: DNS response parsing, EDNS(0), CNAME answer handling, upstream forwarding, DNS response synthesis, and DNS query audit emission remain future DNS-handler work.

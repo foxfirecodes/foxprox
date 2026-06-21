@@ -29,3 +29,7 @@ HTTPS CONNECT should require an explicit nonzero port in the request authority a
 ## 2026-06-21 - SOCKS5 explicit proxy strictness
 
 SOCKS5 support should treat only TCP CONNECT as alpha scope. BIND, UDP ASSOCIATE, unsupported authentication, malformed address lengths, and invalid domain names must fail closed. SOCKS domain destinations can be high-confidence explicit-proxy attribution; SOCKS IP destinations remain IP-only and should not satisfy domain rules.
+
+## 2026-06-21 - DNS query parser strictness
+
+The first DNS wire parser is intentionally single-question, IN-class, no-extra-records, and no-compression for query names. That avoids ambiguous hostname attribution, but EDNS(0) and compressed question support will need explicit semantics before enabling for compatibility.
