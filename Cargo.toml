@@ -2,6 +2,7 @@
 members = [
     "crates/foxprox-audit",
     "crates/foxprox-core",
+    "crates/foxprox-dns",
     "crates/foxprox-egress",
     "crates/foxprox-frontends",
     "crates/foxprox-inspect",

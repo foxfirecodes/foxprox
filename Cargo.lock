@@ -14,6 +14,13 @@ name = "foxprox-core"
 version = "0.1.0"
 
 [[package]]
+name = "foxprox-dns"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+]
+
+[[package]]
 name = "foxprox-egress"
 version = "0.1.0"
 dependencies = [

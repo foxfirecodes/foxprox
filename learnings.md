@@ -16,3 +16,8 @@
 
 - TLS inspection should normalize ECH as an unsupported event rather than a regular no-SNI ClientHello because default policy treats hidden SNI as policy-sensitive and fail-closed.
 - The QUIC alpha classifier should stay heuristic and payload-local; full QUIC semantics would be a separate parser/inspection boundary.
+
+## 2026-06-21 — DNS normalization boundary
+
+- DNS bypass detection belongs in normalized DNS metadata (`direct_external`) rather than in policy looking at raw UDP payloads; this keeps direct-external DNS fail-closed without packet leaks.
+- A denied DNS response can be synthesized from the original question at the DNS boundary while audit/policy still operate only on `DnsQuery` and decisions.
