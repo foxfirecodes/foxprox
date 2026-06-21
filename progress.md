@@ -80,3 +80,15 @@
 - Commit hash when committed: previous normalized event slice committed as `99add43`; verification kernel commit pending.
 - Remaining risks: only in-memory audit sink exists; durable append-only audit sinks, runtime forwarding, and process lifecycle events are not yet implemented.
 - Exact next step: commit kernel slice, then scaffold the runtime crate boundaries for device/integration/egress code without leaking those types into core policy.
+
+## 2026-06-21T17:07:10Z
+- Current objective: scaffold runtime egress boundary so host sockets cannot be opened before verified policy/audit decisions.
+- Files changed: `Cargo.toml`, `crates/foxprox-runtime/Cargo.toml`, `crates/foxprox-runtime/src/lib.rs`, `Cargo.lock`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially identified formatting in the new runtime crate; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 34 core unit tests and 2 runtime unit tests passed. Runtime tests prove denied events do not call host egress and allowed TCP events call egress exactly once after the verification kernel decision/audit path.
+- Commit hash when committed: previous audit kernel slice committed as `dc88fa8`; runtime boundary commit pending.
+- Remaining risks: host egress trait is not yet backed by real TCP/UDP sockets; there is no smoltcp adapter, device frontend, bwrap setup helper, or network namespace integration.
+- Exact next step: commit runtime boundary, then add device/setup backend abstractions and fail-early setup planning types for TUN/bwrap integration.
