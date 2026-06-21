@@ -229,3 +229,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * unsupported CNAME/other answer semantics fail closed instead of attributing addresses across unimplemented alias chains.
 * Audit evidence: not applicable in this commit; parsed DNS responses feed future DNS handler cache/audit events.
 * Residual risk: CNAME chain handling, EDNS(0), additional records, response-code audit mapping, upstream forwarding, and DNS response synthesis remain future DNS-handler work.
+* Commit hash: dd1ddfa strict dns address response parsing.
