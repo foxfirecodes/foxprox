@@ -452,3 +452,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * domain authorization still requires DNS or other explicit hostname attribution; QUIC headers alone do not provide it.
 * Audit evidence: not applicable in this commit; normalized QUIC requests feed existing audit context builders.
 * Residual risk: QUIC version/type audit fields, visible QUIC TLS SNI/ECH parsing, and UDP frontend integration remain future work.
+* Commit hash: 966e79d normalize quic candidate metadata for policy.
