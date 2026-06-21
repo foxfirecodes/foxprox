@@ -235,3 +235,24 @@
   - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
   - `cargo tree -p foxprox-core` still shows only `foxprox-core`, confirming no dependency creep.
 - Next exact action: remove context/review artifacts and commit `add core frontend and egress abstractions`.
+
+## 2026-06-21T18:09:00Z — UDP/DNS data foundation verified
+
+- Current objective: start Milestone 4 with platform-independent data types before live UDP/DNS forwarding.
+- Added `foxprox-core::dns` data model:
+  - `DnsQueryType` with normalized `A`/`AAAA`/other labels.
+  - `DnsObservation` for broker-controlled query observations.
+  - `DnsCacheEntry` with TTL/expiry and medium-confidence DNS-cache attribution.
+  - `DnsCache` with hostname lookup, reverse address lookup, and expiry.
+- Extended `foxprox-core::flow` with UDP pseudo-flow runtime state:
+  - `UdpFlowRecord` with key, timeout class, attribution, activity timestamps, and byte counters.
+  - `UdpFlowTable` with sandbox/host datagram accounting and deterministic expiry.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed after formatting.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 31 core tests, 8 device tests, 1 net test.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core` still shows only `foxprox-core`, confirming no dependency creep.
+- Commit boundary: core UDP pseudo-flow and DNS cache shape only; no live smoltcp UDP/DNS proof yet.
+- Next exact action: commit, then implement broker-reachable DNS/UDP proof in `foxprox-net` and CLI.

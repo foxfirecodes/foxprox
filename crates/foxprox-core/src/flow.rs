@@ -1,7 +1,9 @@
 //! Flow keys and timeout classes used by the broker flow manager.
 
+use crate::event::Attribution;
+use std::collections::HashMap;
 use std::net::IpAddr;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 /// Transport protocol for flow keys.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -86,6 +88,135 @@ impl FlowTimeoutClass {
     }
 }
 
+/// Runtime metadata for a UDP pseudo-flow.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UdpFlowRecord {
+    /// Stable UDP flow key.
+    pub key: FlowKey,
+    /// Timeout class selected for this pseudo-flow.
+    pub timeout_class: FlowTimeoutClass,
+    /// Hostname attribution available when the flow was created or updated.
+    pub attribution: Attribution,
+    /// Time the pseudo-flow was first observed.
+    pub created_at: SystemTime,
+    /// Time the pseudo-flow last saw traffic in either direction.
+    pub last_activity: SystemTime,
+    /// Bytes sent from sandbox to host.
+    pub bytes_from_sandbox: u64,
+    /// Bytes sent from host to sandbox.
+    pub bytes_to_sandbox: u64,
+}
+
+impl UdpFlowRecord {
+    /// Creates a new UDP pseudo-flow record.
+    pub fn new(
+        key: FlowKey,
+        timeout_class: FlowTimeoutClass,
+        attribution: Attribution,
+        now: SystemTime,
+    ) -> Self {
+        Self {
+            key,
+            timeout_class,
+            attribution,
+            created_at: now,
+            last_activity: now,
+            bytes_from_sandbox: 0,
+            bytes_to_sandbox: 0,
+        }
+    }
+
+    /// Records sandbox-to-host bytes and refreshes activity time.
+    pub fn record_sandbox_bytes(&mut self, bytes: usize, now: SystemTime) {
+        self.bytes_from_sandbox = self.bytes_from_sandbox.saturating_add(bytes as u64);
+        self.last_activity = now;
+    }
+
+    /// Records host-to-sandbox bytes and refreshes activity time.
+    pub fn record_host_bytes(&mut self, bytes: usize, now: SystemTime) {
+        self.bytes_to_sandbox = self.bytes_to_sandbox.saturating_add(bytes as u64);
+        self.last_activity = now;
+    }
+
+    /// Returns true when this pseudo-flow has exceeded its timeout.
+    pub fn is_expired(&self, now: SystemTime) -> bool {
+        match now.duration_since(self.last_activity) {
+            Ok(elapsed) => elapsed >= self.timeout_class.default_duration(),
+            Err(_) => false,
+        }
+    }
+}
+
+/// Small UDP pseudo-flow table with deterministic expiry behavior.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UdpFlowTable {
+    flows: HashMap<FlowKey, UdpFlowRecord>,
+}
+
+impl UdpFlowTable {
+    /// Inserts a new pseudo-flow or updates an existing one with sandbox bytes.
+    pub fn record_sandbox_datagram(
+        &mut self,
+        key: FlowKey,
+        timeout_class: FlowTimeoutClass,
+        attribution: Attribution,
+        bytes: usize,
+        now: SystemTime,
+    ) -> &mut UdpFlowRecord {
+        let record = self
+            .flows
+            .entry(key)
+            .or_insert_with(|| UdpFlowRecord::new(key, timeout_class, attribution.clone(), now));
+        record.timeout_class = timeout_class;
+        record.attribution = attribution;
+        record.record_sandbox_bytes(bytes, now);
+        record
+    }
+
+    /// Records host-to-sandbox bytes for an existing pseudo-flow.
+    pub fn record_host_datagram(
+        &mut self,
+        key: &FlowKey,
+        bytes: usize,
+        now: SystemTime,
+    ) -> Option<&mut UdpFlowRecord> {
+        let record = self.flows.get_mut(key)?;
+        record.record_host_bytes(bytes, now);
+        Some(record)
+    }
+
+    /// Looks up a pseudo-flow by key.
+    pub fn get(&self, key: &FlowKey) -> Option<&UdpFlowRecord> {
+        self.flows.get(key)
+    }
+
+    /// Removes expired pseudo-flows and returns the expired records.
+    pub fn expire(&mut self, now: SystemTime) -> Vec<UdpFlowRecord> {
+        let expired_keys: Vec<_> = self
+            .flows
+            .iter()
+            .filter_map(|(key, record)| record.is_expired(now).then_some(*key))
+            .collect();
+        let mut expired = Vec::with_capacity(expired_keys.len());
+        for key in expired_keys {
+            if let Some(record) = self.flows.remove(&key) {
+                expired.push(record);
+            }
+        }
+        expired
+    }
+
+    /// Returns the number of active pseudo-flows.
+    pub fn len(&self) -> usize {
+        self.flows.len()
+    }
+
+    /// Returns true when no pseudo-flows are active.
+    pub fn is_empty(&self) -> bool {
+        self.flows.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +245,35 @@ mod tests {
             FlowTimeoutClass::Quic.default_duration(),
             Duration::from_secs(180)
         );
+    }
+
+    #[test]
+    fn udp_flow_table_tracks_bytes_and_expires() {
+        let source = "10.0.0.2".parse().unwrap();
+        let destination = "93.184.216.34".parse().unwrap();
+        let key = FlowKey::udp(source, 40_000, destination, 443);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+        let mut table = UdpFlowTable::default();
+
+        let record = table.record_sandbox_datagram(
+            key,
+            FlowTimeoutClass::Quic,
+            Attribution::ip_only(),
+            1200,
+            now,
+        );
+        assert_eq!(record.bytes_from_sandbox, 1200);
+        table
+            .record_host_datagram(&key, 900, now + Duration::from_secs(1))
+            .unwrap();
+
+        let record = table.get(&key).unwrap();
+        assert_eq!(record.bytes_to_sandbox, 900);
+        assert!(table
+            .expire(now + FlowTimeoutClass::Quic.default_duration())
+            .is_empty());
+        let expired = table.expire(now + Duration::from_secs(181));
+        assert_eq!(expired.len(), 1);
+        assert!(table.is_empty());
     }
 }

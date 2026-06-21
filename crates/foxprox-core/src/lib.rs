@@ -9,6 +9,7 @@
 
 pub mod audit;
 pub mod config;
+pub mod dns;
 pub mod egress;
 pub mod event;
 pub mod flow;
@@ -19,6 +20,7 @@ pub use audit::{AuditEvent, AuditEventKind, AuditSinkConfig};
 pub use config::{
     BrokerConfig, DnsConfig, ProxyConfig, ProxyEnvironment, TunConfig, UdpTimeoutConfig,
 };
+pub use dns::{DnsCache, DnsCacheEntry, DnsObservation, DnsQueryType};
 pub use egress::{
     DnsEgress, DnsEgressRequest, EgressContext, EgressError, EgressErrorKind, EgressOutcome,
     TcpEgress, TcpEgressRequest, UdpEgress, UdpEgressRequest,
@@ -28,7 +30,7 @@ pub use event::{
     NetworkEvent, Origin, Protocol, SandboxId, SocksDestination, TransportEndpoint,
     UnsupportedReason,
 };
-pub use flow::{FlowKey, FlowProtocol, FlowTimeoutClass};
+pub use flow::{FlowKey, FlowProtocol, FlowTimeoutClass, UdpFlowRecord, UdpFlowTable};
 pub use frontend::{FrontendContext, FrontendError, FrontendErrorKind, NetworkFrontend};
 pub use policy::{
     Cidr, Decision, DecisionAction, DenialReason, PolicyEngine, PolicyRule, PolicyRuleSet,
