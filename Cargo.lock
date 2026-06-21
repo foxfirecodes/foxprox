@@ -3,6 +3,14 @@
 version = 3
 
 [[package]]
+name = "foxprox-broker"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+ "foxprox-packet",
+]
+
+[[package]]
 name = "foxprox-core"
 version = "0.1.0"
 

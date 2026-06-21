@@ -65,3 +65,24 @@
 - What failed or surprised the agent: the focused verification briefly waited on Cargo's package-cache lock but completed successfully.
 - What remains unproven: actual TUN fd write-back, ping inside a sandbox, ICMP policy allow/deny behavior, IPv4 checksum validation on ingress, and broader ICMP error synthesis.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — policy-gated packet handling slice
+
+- Slice attempted: connect packet parsing, policy/audit evaluation, and ICMP echo reply synthesis behind a small broker-facing handler.
+- Why next: this crosses frontend-style packet input through parser/core/policy/audit to outbound packet generation, reducing the next integration risk before real TUN IO.
+- Verification plan: add a minimal `foxprox-broker` crate that processes one IPv4 packet, emits audit evidence, writes an echo reply only when policy allows ICMP, suppresses replies when policy denies, fails closed on malformed packets, and run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — policy-gated packet handling
+
+- Slice attempted: connect inbound IPv4 packet bytes to parser normalization, policy/audit evaluation, and outbound ICMP echo reply synthesis.
+- Why next: this reduces the frontend-to-core and policy-to-writeback integration risk before real TUN IO is available.
+- What changed: added `crates/foxprox-broker` with `Ipv4PacketBroker::process_packet`, which emits a `PolicyEvaluation`, synthesizes echo replies only for allowed ICMP echo requests, suppresses denied/non-echo replies, and converts malformed packets into fail-closed audit evidence.
+- Verification:
+  - `cargo fmt --check` passed.
+  - `cargo clippy --workspace --all-targets -- -D warnings` initially failed on an unused test import, then passed after cleanup.
+  - `cargo test --workspace` passed: 4 `foxprox-broker` tests, 9 `foxprox-core` tests, 9 `foxprox-packet` tests, and 0 doc tests.
+  - Focused checks passed: `cargo test -p foxprox-broker allowed_icmp_echo_request_emits_audit_and_reply_packet`, `cargo test -p foxprox-broker denied_icmp_echo_request_is_audited_without_reply`, and `cargo test -p foxprox-broker malformed_packet_is_audited_fail_closed_without_reply`.
+- What failed or surprised the agent: clippy caught an unused import in the new broker tests; no behavior changes were needed.
+- What remains unproven: no real TUN reader/writer, async runtime loop, sandbox ping, TCP/UDP host egress, DNS server, or audit sink backpressure yet.
+- Commit: this commit.
