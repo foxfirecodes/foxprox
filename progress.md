@@ -3,7 +3,7 @@
 ## 2026-06-21 — Alpha scope observability foundation
 
 ### Behavior under work
-Implemented the platform-independent alpha broker core in Rust with observable policy decisions, audit records, flow lifecycle state, DNS attribution, proxy/transparent event normalization, packet validation/write-back primitives, setup planning, and bounded audit backpressure that fails closed through `BrokerCore`.
+Implemented the platform-independent alpha broker core in Rust with observable policy decisions, audit records, flow lifecycle state, DNS attribution and DNS query/refusal parsing, proxy/transparent event normalization, packet validation/write-back primitives, setup planning, and bounded audit backpressure that fails closed through `BrokerCore`.
 
 ### Expected evidence
 - Structured audit serialization tests assert stable fields and denial context.
@@ -16,12 +16,15 @@ Implemented the platform-independent alpha broker core in Rust with observable p
 ### Commands run
 - `cargo fmt --check` — passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
-- `cargo test --all-targets --all-features` — passed, 34 unit tests after reviewer fixes.
+- `cargo test --all-targets --all-features` — passed, 37 unit tests after DNS foundation additions.
 
 ### Evidence excerpts
 - `audit::tests::audit_record_serializes_stable_structured_fields ... ok`
 - `audit::tests::audit_ledger_backpressure_is_bounded_and_observable ... ok`
 - `broker::tests::broker_core_fails_closed_when_audit_is_backpressured ... ok`
+- `dns::tests::parses_dns_query_with_structured_qtype ... ok`
+- `dns::tests::malformed_dns_query_is_rejected ... ok`
+- `dns::tests::refused_response_preserves_question_and_sets_rcode ... ok`
 - `policy::tests::direct_external_dns_fails_closed_with_audit_context ... ok`
 - `policy::tests::domain_rule_without_hostname_has_specific_denial_reason ... ok`
 - `policy::tests::dot_is_denied_by_default_but_can_be_explicitly_allowed ... ok`
@@ -42,6 +45,7 @@ The alpha core now exposes decision-relevant behavior through structured audit r
 - `crates/foxprox-core/src/lib.rs`
 - `crates/foxprox-core/src/audit.rs`
 - `crates/foxprox-core/src/broker.rs`
+- `crates/foxprox-core/src/dns.rs`
 - `crates/foxprox-core/src/flow.rs`
 - `crates/foxprox-core/src/inspect.rs`
 - `crates/foxprox-core/src/packet.rs`
@@ -58,3 +62,4 @@ The alpha core now exposes decision-relevant behavior through structured audit r
 ### Commit
 - `7b462c2` — observable alpha broker core foundation.
 - `7227fce` — reviewer fixes for packet validation, timestamps, ICMP defaults, flow audit semantics, setup fd modeling, and backpressure evidence.
+- _pending_ — DNS query parser and refused-response foundation.

@@ -10,6 +10,7 @@
 
 pub mod audit;
 pub mod broker;
+pub mod dns;
 pub mod flow;
 pub mod inspect;
 pub mod packet;
@@ -19,6 +20,9 @@ pub mod types;
 
 pub use audit::{AuditError, AuditRecord, BoundedAuditLedger};
 pub use broker::BrokerCore;
+pub use dns::{
+    build_refused_response, parse_dns_query, DnsParseError, DnsQueryMetadata, DnsQueryType,
+};
 pub use flow::{DnsCache, FlowKey, FlowProtocol, UdpFlowManager};
 pub use packet::{IpParseError, ParsedIpPacket};
 pub use policy::{Cidr, PolicyConfig, PolicyDecision, PolicyEngine, PolicyRequest, PolicyRule};
