@@ -31,6 +31,12 @@ pub enum NormalizedEvent {
         destination: Endpoint,
         query: HostnameAttribution,
     },
+    DnsPacketAttempt {
+        sandbox_id: SandboxId,
+        frontend: FrontendKind,
+        source: Endpoint,
+        destination: Endpoint,
+    },
     HttpRequest {
         sandbox_id: SandboxId,
         frontend: FrontendKind,
@@ -111,6 +117,13 @@ impl NormalizedEvent {
                 input.hostname = Some(query.clone());
                 input
             }
+            Self::DnsPacketAttempt {
+                sandbox_id,
+                frontend,
+                source,
+                destination,
+            } => PolicyInput::new(sandbox_id.clone(), *frontend, Protocol::Dns)
+                .with_endpoints(source.clone(), destination.clone()),
             Self::HttpRequest {
                 sandbox_id,
                 frontend,
@@ -221,6 +234,19 @@ impl NormalizedEvent {
             .with_protocol(Protocol::Dns)
             .with_endpoints(source.clone(), destination.clone())
             .with_hostname(query.hostname.clone(), query.confidence),
+            Self::DnsPacketAttempt {
+                sandbox_id,
+                frontend,
+                source,
+                destination,
+            } => event_base(
+                timestamp_millis,
+                AuditEventKind::DnsQuery,
+                sandbox_id,
+                *frontend,
+            )
+            .with_protocol(Protocol::Dns)
+            .with_endpoints(source.clone(), destination.clone()),
             Self::HttpRequest {
                 sandbox_id,
                 frontend,

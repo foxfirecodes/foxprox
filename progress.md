@@ -247,3 +247,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: UDP forwarding, DNS resolver behavior, pseudo-flow tracking integration, and direct-DNS denial at packet runtime are still absent.
 - Exact next step: commit UDP parsing/classification, then wire UDP observations into normalized policy events so DNS/direct-DNS decisions can be audited before any UDP egress is introduced.
+
+## 2026-06-22T00:01:05Z
+- Current objective: wire UDP packet observations into normalized policy events before any UDP egress exists.
+- Files changed: `crates/foxprox-core/src/event.rs`, `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 38 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 9 runtime tests, and 7 setup tests passed. New runtime tests prove UDP/53 packets become DNS policy events that trigger `RequireBrokerDns` for non-broker resolvers, and UDP/443 packets become QUIC-candidate UDP flow events.
+- Commit hash when committed: pending.
+- Remaining risks: DNS payload parsing, DNS cache population, UDP pseudo-flow state, and actual UDP egress are still not implemented.
+- Exact next step: commit UDP policy event wiring, then add minimal DNS query parsing/caching for broker-directed DNS packets.

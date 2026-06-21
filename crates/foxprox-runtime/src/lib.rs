@@ -8,8 +8,8 @@
 
 use foxprox_core::{
     parse_ip_packet, synthesize_icmpv4_echo_reply, AuditSink, Decision, DecisionAction, Endpoint,
-    FrontendKind, NormalizedEvent, PacketError, ParsedIpPacket, Protocol, Udpv4Packet,
-    UnsupportedIpv4Protocol, VerificationKernel,
+    FrontendKind, NormalizedEvent, PacketError, ParsedIpPacket, Protocol, QuicStatus, SandboxId,
+    Udpv4Packet, UnsupportedIpv4Protocol, VerificationKernel,
 };
 use std::io::{self, Read, Write};
 use std::net::IpAddr;
@@ -140,6 +140,7 @@ fn event_to_egress(event: &NormalizedEvent) -> Option<EgressRequest> {
             destination: destination.clone(),
         })),
         NormalizedEvent::DnsQuery { .. }
+        | NormalizedEvent::DnsPacketAttempt { .. }
         | NormalizedEvent::HttpRequest { .. }
         | NormalizedEvent::IcmpMessage { .. }
         | NormalizedEvent::UnsupportedNetworkEvent { .. }
@@ -253,6 +254,31 @@ fn unsupported_or_malformed_outcome(packet: &[u8]) -> io::Result<TunPacketOutcom
     }
 }
 
+pub fn udpv4_packet_to_event(sandbox_id: SandboxId, packet: &Udpv4Packet<'_>) -> NormalizedEvent {
+    let source = Endpoint::new(IpAddr::V4(packet.source), packet.source_port);
+    let destination = Endpoint::new(IpAddr::V4(packet.destination), packet.destination_port);
+    if destination.is_dns_port() {
+        return NormalizedEvent::DnsPacketAttempt {
+            sandbox_id,
+            frontend: FrontendKind::Tun,
+            source,
+            destination,
+        };
+    }
+    NormalizedEvent::UdpFlowAttempt {
+        sandbox_id,
+        frontend: FrontendKind::Tun,
+        source,
+        destination: destination.clone(),
+        hostname: None,
+        quic_status: if destination.is_quic_port() {
+            QuicStatus::Candidate
+        } else {
+            QuicStatus::NotQuic
+        },
+    }
+}
+
 fn tun_packet_reply(packet: &[u8]) -> Result<Option<Vec<u8>>, PacketError> {
     match parse_ip_packet(packet)? {
         ParsedIpPacket::Icmpv4EchoRequest(request) => {
@@ -266,7 +292,8 @@ fn tun_packet_reply(packet: &[u8]) -> Result<Option<Vec<u8>>, PacketError> {
 mod tests {
     use super::*;
     use foxprox_core::{
-        PolicyConfig, PolicyEngine, PolicyRule, RuleSet, SandboxId, SniStatus, VecAuditSink,
+        DecisionAction, DecisionReason, PolicyConfig, PolicyEngine, PolicyRule, RuleSet, SniStatus,
+        VecAuditSink,
     };
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -358,6 +385,44 @@ mod tests {
         assert_eq!(&writer[28..], b"ok");
         assert_eq!(checksum(&writer[..20]), 0);
         assert_eq!(checksum(&writer[20..]), 0);
+    }
+
+    #[test]
+    fn udp_dns_packet_event_triggers_direct_dns_policy_denial() {
+        let packet = Udpv4Packet {
+            source: Ipv4Addr::new(10, 66, 0, 2),
+            destination: Ipv4Addr::new(8, 8, 8, 8),
+            source_port: 53000,
+            destination_port: 53,
+            payload: b"dns?",
+        };
+        let event = udpv4_packet_to_event(SandboxId::new("udp-policy").unwrap(), &packet);
+        assert!(matches!(event, NormalizedEvent::DnsPacketAttempt { .. }));
+
+        let decision = PolicyEngine::new(PolicyConfig {
+            broker_dns: vec![IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+            ..PolicyConfig::default()
+        })
+        .evaluate(&event.to_policy_input());
+
+        assert_eq!(decision.action, DecisionAction::RequireBrokerDns);
+        assert_eq!(decision.reason, DecisionReason::DirectDnsBypass);
+    }
+
+    #[test]
+    fn udp_443_packet_event_is_quic_candidate() {
+        let packet = Udpv4Packet {
+            source: Ipv4Addr::new(10, 66, 0, 2),
+            destination: Ipv4Addr::new(93, 184, 216, 34),
+            source_port: 53000,
+            destination_port: 443,
+            payload: b"quic?",
+        };
+        let event = udpv4_packet_to_event(SandboxId::new("udp-policy").unwrap(), &packet);
+        let NormalizedEvent::UdpFlowAttempt { quic_status, .. } = event else {
+            panic!("expected UDP flow event");
+        };
+        assert_eq!(quic_status, QuicStatus::Candidate);
     }
 
     #[test]
