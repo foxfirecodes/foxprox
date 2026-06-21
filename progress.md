@@ -46,3 +46,32 @@
   - `learnings.md`
 - Commit hash after commit: 8318811.
 - Remaining boundary risks: production TUN setup/fd handoff, smoltcp adapter, real host socket egress, DNS resolver implementation, TLS/QUIC metadata parsing, and end-to-end namespace validation still need implementation behind the contracts.
+
+## 2026-06-21 — Boundary objective: packet write-back proof behind adapter
+
+- Boundary under work: IPv4/ICMP packet parsing and synthetic ICMP echo reply generation for the alpha write-back proof.
+- Allowed dependency direction: packet parsing/synthesis may depend on `foxprox-core` normalized event types; `foxprox-core`, `foxprox-policy`, and `foxprox-audit` must not depend on packet parser structs or raw packet buffers.
+- Dependency-risk assessment: packet parsing is a high-risk boundary because raw IP/ICMP details can leak into policy. The parser must return normalized `IcmpMessage` or `UnsupportedNetworkEvent` plus opaque outbound packet bytes only.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo tree -p foxprox-packet`.
+- Observed results: pending.
+- Changed files: pending.
+- Commit hash after commit: pending.
+- Remaining boundary risks: IPv6, fragmentation, TCP/UDP stack integration, and real TUN fd IO are still outside this packet proof.
+
+### Results
+
+- Added `foxprox-packet` as the raw packet boundary for alpha write-back proof work.
+- Implemented IPv4 validation, unsupported-fragmentation and unsupported-protocol normalization, ICMP event normalization, and synthetic ICMP echo reply generation with IPv4/ICMP checksum recomputation.
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 30 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-packet` — packet crate depends only on `foxprox-core`.
+- Changed files:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `crates/foxprox-packet/Cargo.toml`
+  - `crates/foxprox-packet/src/lib.rs`
+  - `progress.md`
+- Commit hash after commit: pending.
+- Remaining boundary risks: IPv6, TCP/UDP parsing, smoltcp handoff, production TUN writes, and ICMP policy response behavior remain to be implemented behind adapter contracts.

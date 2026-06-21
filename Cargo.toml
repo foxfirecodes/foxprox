@@ -6,6 +6,7 @@ members = [
     "crates/foxprox-frontends",
     "crates/foxprox-integrations",
     "crates/foxprox-net",
+    "crates/foxprox-packet",
     "crates/foxprox-policy",
 ]
 resolver = "2"

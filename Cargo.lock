@@ -45,6 +45,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "foxprox-packet"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+]
+
+[[package]]
 name = "foxprox-policy"
 version = "0.1.0"
 dependencies = [
