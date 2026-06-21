@@ -201,3 +201,24 @@
   - `cargo tree -p foxprox-net` — network crate consumes DNS normalized records plus core/policy/audit/egress.
 - Commit hash after commit: 0e9c816.
 - Remaining boundary risks: upstream DNS IO, DNS response synthesis for allowed queries, TCP DNS, CNAME-to-address attribution, and DoH/DoT detection remain.
+
+## 2026-06-21 — Boundary objective: typed config validation contract
+
+- Boundary under work: user-facing alpha policy config validation into normalized `RuntimeConfig`.
+- Allowed dependency direction: `foxprox-config` may depend only on `foxprox-core`; policy consumes validated runtime contracts only and must not parse raw config strings or config-file shapes.
+- Dependency-risk assessment: config is a drift risk because stringly typed protocol, destination, decision, and timeout values could leak into policy; validation should normalize them before policy construction.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo tree -p foxprox-config`.
+- Observed results: initial verification found an unused import and ambiguous test IP parse; after narrowing the import and specifying `IpAddr`, all verification passed.
+- Changed files:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `crates/foxprox-config/Cargo.toml`
+  - `crates/foxprox-config/src/lib.rs`
+  - `progress.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 44 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-config` — config crate depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: file format deserialization, CLI config paths, config reload audit, and schema compatibility tests remain.

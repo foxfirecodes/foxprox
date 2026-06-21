@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "foxprox-config"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+]
+
+[[package]]
 name = "foxprox-core"
 version = "0.1.0"
 

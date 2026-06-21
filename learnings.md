@@ -34,3 +34,8 @@
 
 - DNS response parsing should export only hostname/IP/TTL address records; keeping answer offsets, compression pointers, and RR wire details inside `foxprox-dns` lets `foxprox-net` update attribution without giving policy raw DNS parser state.
 - CNAME-aware attribution is a separate contract decision: the current answer boundary handles direct A/AAAA owner names and deliberately leaves alias-chain semantics for a later DNS contract expansion.
+
+## 2026-06-21 — Config validation boundary
+
+- Config validation needs its own crate boundary so string/CIDR/hostname/path/timeout validation happens before policy construction; this keeps `foxprox-policy` deterministic over normalized contracts instead of config file shapes.
+- HTTP path matchers should reject non-absolute paths during config validation because policy matching should not need to decide whether a user-provided path pattern is syntactically meaningful.
