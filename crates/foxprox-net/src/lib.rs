@@ -309,8 +309,9 @@ mod tests {
     use super::*;
     use foxprox_audit::BoundedAuditSink;
     use foxprox_core::{
-        FrontendKind, PolicyRule, PortMatcher, Protocol, ProtocolMatcher, RuleId, RuntimeConfig,
-        TcpConnectAttempt, UdpFlowAttempt,
+        DestinationHost, FrontendKind, Hostname, HttpMethod, HttpRequest, HttpScheme, PolicyRule,
+        PortMatcher, Protocol, ProtocolMatcher, RuleId, RuntimeConfig, TcpConnectAttempt,
+        UdpFlowAttempt,
     };
     use foxprox_egress::MockEgress;
 
@@ -394,6 +395,32 @@ mod tests {
             handle_normalized_event(&event, &policy, &mut egress, &mut audit, 1, 1000).unwrap();
         assert_eq!(outcome, BrokerEventOutcome::Forwarded);
         assert_eq!(egress.tcp_connects.len(), 1);
+        assert_eq!(audit.records().len(), 1);
+    }
+
+    #[test]
+    fn allowed_http_request_reaches_shared_egress() {
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut rule = PolicyRule::allow(RuleId::new("http").unwrap());
+        rule.protocol = ProtocolMatcher::Exact(Protocol::Http);
+        config.rules.push(rule);
+        let policy = PolicyEngine::new(config);
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(8);
+        let event = NormalizedEvent::HttpRequest(HttpRequest {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::HttpProxy,
+            method: HttpMethod::Get,
+            scheme: HttpScheme::Http,
+            host: DestinationHost::Hostname(Hostname::new("example.com").unwrap()),
+            port: 80,
+            path_query: "/".to_string(),
+        });
+
+        let outcome =
+            handle_normalized_event(&event, &policy, &mut egress, &mut audit, 1, 1000).unwrap();
+        assert_eq!(outcome, BrokerEventOutcome::Forwarded);
+        assert_eq!(egress.http_requests.len(), 1);
         assert_eq!(audit.records().len(), 1);
     }
 

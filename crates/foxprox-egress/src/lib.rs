@@ -9,8 +9,8 @@ use std::fmt;
 use std::net::SocketAddr;
 
 use foxprox_core::{
-    DestinationHost, DnsQuery, HttpsConnect, NormalizedEvent, SocksConnect, TcpConnectAttempt,
-    UdpFlowAttempt,
+    DestinationHost, DnsQuery, HttpRequest, HttpsConnect, NormalizedEvent, SocksConnect,
+    TcpConnectAttempt, UdpFlowAttempt,
 };
 
 /// Shared host-side egress backend used by all frontends after policy allows an
@@ -18,10 +18,16 @@ use foxprox_core::{
 pub trait HostEgress {
     type TcpStream;
     type UdpHandle;
+    type HttpResponse;
 
     fn connect_tcp(&mut self, event: &TcpConnectAttempt) -> Result<Self::TcpStream, EgressError>;
 
     fn open_udp_flow(&mut self, event: &UdpFlowAttempt) -> Result<Self::UdpHandle, EgressError>;
+
+    fn proxy_http_request(
+        &mut self,
+        event: &HttpRequest,
+    ) -> Result<Self::HttpResponse, EgressError>;
 
     fn proxy_connect(&mut self, event: &HttpsConnect) -> Result<Self::TcpStream, EgressError>;
 
@@ -35,6 +41,7 @@ pub trait HostEgress {
 pub struct MockEgress {
     pub tcp_connects: Vec<TcpConnectAttempt>,
     pub udp_flows: Vec<UdpFlowAttempt>,
+    pub http_requests: Vec<HttpRequest>,
     pub proxy_connects: Vec<HttpsConnect>,
     pub socks_connects: Vec<SocksConnect>,
     pub dns_queries: Vec<DnsQuery>,
@@ -43,6 +50,7 @@ pub struct MockEgress {
 impl HostEgress for MockEgress {
     type TcpStream = MockTcpStream;
     type UdpHandle = MockUdpHandle;
+    type HttpResponse = MockHttpResponse;
 
     fn connect_tcp(&mut self, event: &TcpConnectAttempt) -> Result<Self::TcpStream, EgressError> {
         self.tcp_connects.push(event.clone());
@@ -52,6 +60,14 @@ impl HostEgress for MockEgress {
     fn open_udp_flow(&mut self, event: &UdpFlowAttempt) -> Result<Self::UdpHandle, EgressError> {
         self.udp_flows.push(event.clone());
         Ok(MockUdpHandle)
+    }
+
+    fn proxy_http_request(
+        &mut self,
+        event: &HttpRequest,
+    ) -> Result<Self::HttpResponse, EgressError> {
+        self.http_requests.push(event.clone());
+        Ok(MockHttpResponse)
     }
 
     fn proxy_connect(&mut self, event: &HttpsConnect) -> Result<Self::TcpStream, EgressError> {
@@ -76,6 +92,9 @@ pub struct MockTcpStream;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MockUdpHandle;
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MockHttpResponse;
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum EgressError {
     ConnectFailed(String),
@@ -95,11 +114,17 @@ impl fmt::Display for EgressError {
 
 impl std::error::Error for EgressError {}
 
+pub type DispatchOutcome<E> = EgressOutcome<
+    <E as HostEgress>::TcpStream,
+    <E as HostEgress>::UdpHandle,
+    <E as HostEgress>::HttpResponse,
+>;
+
 /// Dispatch a normalized allowed event through the shared egress backend.
 pub fn dispatch_allowed_event<E: HostEgress>(
     egress: &mut E,
     event: &NormalizedEvent,
-) -> Result<EgressOutcome<E::TcpStream, E::UdpHandle>, EgressError> {
+) -> Result<DispatchOutcome<E>, EgressError> {
     match event {
         NormalizedEvent::TcpConnectAttempt(event) => {
             egress.connect_tcp(event).map(EgressOutcome::TcpConnected)
@@ -110,23 +135,26 @@ pub fn dispatch_allowed_event<E: HostEgress>(
         NormalizedEvent::DnsQuery(event) => {
             egress.resolve_dns(event).map(EgressOutcome::DnsResolved)
         }
+        NormalizedEvent::HttpRequest(event) => egress
+            .proxy_http_request(event)
+            .map(EgressOutcome::HttpForwarded),
         NormalizedEvent::HttpsConnect(event) => {
             egress.proxy_connect(event).map(EgressOutcome::TcpConnected)
         }
         NormalizedEvent::SocksConnect(event) => {
             egress.socks_connect(event).map(EgressOutcome::TcpConnected)
         }
-        NormalizedEvent::HttpRequest(_)
-        | NormalizedEvent::TlsClientHello(_)
+        NormalizedEvent::TlsClientHello(_)
         | NormalizedEvent::IcmpMessage(_)
         | NormalizedEvent::UnsupportedNetworkEvent(_) => Err(EgressError::UnsupportedAllowedEvent),
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum EgressOutcome<TcpStream, UdpHandle> {
+pub enum EgressOutcome<TcpStream, UdpHandle, HttpResponse> {
     TcpConnected(TcpStream),
     UdpOpened(UdpHandle),
+    HttpForwarded(HttpResponse),
     DnsResolved(Vec<SocketAddr>),
 }
 
@@ -158,12 +186,23 @@ mod tests {
             host: DestinationHost::Hostname(foxprox_core::Hostname::new("example.com").unwrap()),
             port: 443,
         });
+        let http = NormalizedEvent::HttpRequest(HttpRequest {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::HttpProxy,
+            method: foxprox_core::HttpMethod::Get,
+            scheme: foxprox_core::HttpScheme::Http,
+            host: DestinationHost::Hostname(foxprox_core::Hostname::new("example.com").unwrap()),
+            port: 80,
+            path_query: "/index.html".to_string(),
+        });
 
         dispatch_allowed_event(&mut egress, &tcp).unwrap();
         dispatch_allowed_event(&mut egress, &proxy).unwrap();
+        dispatch_allowed_event(&mut egress, &http).unwrap();
 
         assert_eq!(egress.tcp_connects.len(), 1);
         assert_eq!(egress.proxy_connects.len(), 1);
+        assert_eq!(egress.http_requests.len(), 1);
     }
 
     #[test]

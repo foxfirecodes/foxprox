@@ -222,3 +222,21 @@
   - `cargo tree -p foxprox-config` — config crate depends only on `foxprox-core`.
 - Commit hash after commit: 6ed5a43.
 - Remaining boundary risks: file format deserialization, CLI config paths, config reload audit, and schema compatibility tests remain.
+
+## 2026-06-21 — Boundary objective: shared HTTP egress contract
+
+- Boundary under work: explicit/plaintext HTTP request forwarding contract through the shared host egress layer.
+- Allowed dependency direction: `foxprox-egress` receives normalized `HttpRequest` events from `foxprox-core`; frontends parse HTTP but do not forward directly; policy/audit do not import egress implementations.
+- Dependency-risk assessment: HTTP proxy support can become a policy bypass if allowed `HttpRequest` events are treated as no-op or frontend-local forwarding, so the egress trait must include normalized HTTP forwarding.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: initial clippy found the expanded dispatch return type too complex; factoring it into `DispatchOutcome` resolved the boundary API without allowing clippy exceptions. All verification passed.
+- Changed files:
+  - `crates/foxprox-egress/src/lib.rs`
+  - `crates/foxprox-net/src/lib.rs`
+  - `progress.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 45 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: production HTTP request IO, response streaming/backpressure, CONNECT byte bridging, and transparent stream reassembly remain.

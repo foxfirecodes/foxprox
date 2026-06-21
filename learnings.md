@@ -39,3 +39,8 @@
 
 - Config validation needs its own crate boundary so string/CIDR/hostname/path/timeout validation happens before policy construction; this keeps `foxprox-policy` deterministic over normalized contracts instead of config file shapes.
 - HTTP path matchers should reject non-absolute paths during config validation because policy matching should not need to decide whether a user-provided path pattern is syntactically meaningful.
+
+## 2026-06-21 — HTTP egress contract
+
+- Allowed plaintext `HttpRequest` events must dispatch through shared egress; treating them as `UnsupportedAllowedEvent` would make explicit HTTP proxy support incomplete and tempt frontend-local forwarding.
+- The egress dispatch outcome type should be aliased as the trait grows so the public contract stays readable and clippy-clean without suppressions.
