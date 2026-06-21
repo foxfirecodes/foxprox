@@ -17,6 +17,7 @@ pub mod inspect;
 pub mod packet;
 pub mod policy;
 pub mod proxy;
+pub mod proxy_frontend;
 pub mod setup;
 pub mod tcp;
 pub mod tun;
@@ -40,6 +41,10 @@ pub use policy::{
 pub use proxy::{
     malformed_proxy_request, parse_http_proxy_request, parse_socks5_connect_request,
     HttpProxyRequestMetadata, ProxyParseError, SocksConnectMetadata,
+};
+pub use proxy_frontend::{
+    ExplicitProxyEgress, ExplicitProxyFrontend, ExplicitProxyResult, InMemoryExplicitProxyEgress,
+    ProxyEgressError,
 };
 pub use setup::{BwrapSetupPlan, NetworkSetupConfig, ProxyEnvironment};
 pub use tcp::{InMemoryTcpEgress, TcpEgress, TcpEgressError, TcpForwardResult, TcpForwarder};

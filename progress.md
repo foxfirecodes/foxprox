@@ -397,3 +397,36 @@ Reviewer blockers were valid and fixed. TUN parsing is no longer treated as auth
 
 ### Remaining blind spots
 - TCP close-audit backpressure remains observable after bytes have already crossed in the harness; real async runtime will need stronger reservation/guaranteed close-ledger design before production use.
+
+## 2026-06-21 — Explicit proxy forwarding harness observability cycle
+
+### Behavior under work
+Add a platform-independent explicit proxy frontend harness that parses HTTP proxy / HTTPS CONNECT / SOCKS5 CONNECT request bytes, evaluates normalized requests through the shared policy/audit core, and calls a mockable proxy egress only for allowed decisions.
+
+### Expected evidence
+- Allowed HTTP proxy and SOCKS5 CONNECT requests append shared frontend decision audit and invoke fake proxy egress with parsed metadata.
+- Denied HTTPS CONNECT requests append structured denial audit and do not invoke egress.
+- Malformed HTTP proxy bytes fail closed with `proxy_malformed` audit detail and no egress.
+
+### Commands run
+- `cargo fmt` — applied formatting for `proxy_frontend.rs`.
+- `cargo test --all-targets --all-features` — passed, 74 unit tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `proxy_frontend::tests::allowed_http_proxy_request_forwards_after_shared_audit ... ok`
+- `proxy_frontend::tests::denied_https_connect_does_not_forward ... ok`
+- `proxy_frontend::tests::malformed_http_proxy_request_fails_closed_without_forwarding ... ok`
+- `proxy_frontend::tests::allowed_socks_connect_forwards_after_shared_audit ... ok`
+
+### Interpretation
+Explicit proxy requests now have a frontend harness, not just parsers. HTTP proxy, HTTPS CONNECT, and SOCKS5 CONNECT bytes are normalized into shared policy/audit decisions before mock egress is invoked; malformed and denied paths stay observable and do not forward.
+
+### Changed files
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-core/src/proxy_frontend.rs`
+- `progress.md`
+
+### Remaining blind spots
+- This is not a socket listener or HTTP runtime yet; it defines the observable parse→policy→egress contract that listener code must implement.
