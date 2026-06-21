@@ -4,6 +4,7 @@ use crate::event::{
     Attribution, Frontend, Hostname, HttpMethod, Origin, Protocol, SandboxId, TransportEndpoint,
 };
 use crate::policy::Decision;
+use std::collections::VecDeque;
 use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
@@ -180,6 +181,83 @@ impl AuditEvent {
     }
 }
 
+/// Bounded in-memory audit event queue.
+///
+/// This type encodes audit backpressure without tying `foxprox-core` to an
+/// async runtime or concrete sink. Runtime code should use `try_push` and treat
+/// `AuditBackpressure` as a visible blocker or fail-closed signal rather than
+/// allocating an unbounded queue.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuditBuffer {
+    capacity: usize,
+    queue: VecDeque<AuditEvent>,
+    dropped_events: u64,
+}
+
+impl AuditBuffer {
+    /// Creates an empty bounded audit buffer.
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            queue: VecDeque::with_capacity(capacity),
+            dropped_events: 0,
+        }
+    }
+
+    /// Attempts to enqueue an audit event without exceeding capacity.
+    pub fn try_push(&mut self, event: AuditEvent) -> Result<(), AuditBackpressure> {
+        if self.capacity == 0 {
+            self.dropped_events += 1;
+            return Err(AuditBackpressure::DisabledCapacity);
+        }
+        if self.queue.len() >= self.capacity {
+            self.dropped_events += 1;
+            return Err(AuditBackpressure::Full {
+                capacity: self.capacity,
+            });
+        }
+        self.queue.push_back(event);
+        Ok(())
+    }
+
+    /// Removes and returns the oldest queued audit event.
+    pub fn pop_front(&mut self) -> Option<AuditEvent> {
+        self.queue.pop_front()
+    }
+
+    /// Returns the number of queued audit events.
+    pub fn len(&self) -> usize {
+        self.queue.len()
+    }
+
+    /// Returns true when no events are queued.
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    /// Returns the configured maximum number of queued events.
+    pub const fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    /// Returns the number of events rejected due to backpressure.
+    pub const fn dropped_events(&self) -> u64 {
+        self.dropped_events
+    }
+}
+
+/// Audit queue backpressure result.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum AuditBackpressure {
+    /// The queue capacity is zero, so no event can be stored.
+    DisabledCapacity,
+    /// The queue is full.
+    Full {
+        /// Configured queue capacity.
+        capacity: usize,
+    },
+}
+
 /// Platform-independent audit sink configuration.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Hash)]
 pub enum AuditSinkConfig {
@@ -201,6 +279,10 @@ pub enum AuditSinkConfig {
 mod tests {
     use super::*;
     use crate::policy::DecisionAction;
+
+    fn tcp_audit_event() -> AuditEvent {
+        AuditEvent::new(Frontend::Tun, AuditEventKind::TcpConnect)
+    }
 
     #[test]
     fn audit_event_builder_attaches_decision_and_endpoints() {
@@ -232,5 +314,51 @@ mod tests {
         assert_eq!(event.dns_query_type.as_deref(), Some("A"));
         assert_eq!(event.dns_rcode, Some(0));
         assert_eq!(event.dns_answers, vec![answer]);
+    }
+
+    #[test]
+    fn audit_buffer_preserves_fifo_order() {
+        let mut buffer = AuditBuffer::new(2);
+        buffer.try_push(tcp_audit_event()).unwrap();
+        buffer
+            .try_push(AuditEvent::new(
+                Frontend::Tun,
+                AuditEventKind::TcpFlowClosed,
+            ))
+            .unwrap();
+
+        assert_eq!(buffer.len(), 2);
+        assert_eq!(buffer.pop_front().unwrap().kind, AuditEventKind::TcpConnect);
+        assert_eq!(
+            buffer.pop_front().unwrap().kind,
+            AuditEventKind::TcpFlowClosed
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn audit_buffer_reports_backpressure_when_full() {
+        let mut buffer = AuditBuffer::new(1);
+        buffer.try_push(tcp_audit_event()).unwrap();
+        let result = buffer.try_push(AuditEvent::new(
+            Frontend::Tun,
+            AuditEventKind::UdpFlowCreated,
+        ));
+
+        assert_eq!(result, Err(AuditBackpressure::Full { capacity: 1 }));
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(buffer.dropped_events(), 1);
+    }
+
+    #[test]
+    fn audit_buffer_rejects_zero_capacity() {
+        let mut buffer = AuditBuffer::new(0);
+        assert_eq!(buffer.capacity(), 0);
+        assert_eq!(
+            buffer.try_push(tcp_audit_event()),
+            Err(AuditBackpressure::DisabledCapacity)
+        );
+        assert_eq!(buffer.dropped_events(), 1);
+        assert!(buffer.is_empty());
     }
 }

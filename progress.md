@@ -700,6 +700,38 @@
 - Current git status summary: source and progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit live SOCKS5 proof, then compare remaining alpha scope and start robustness/audit/backpressure work.
 
+## 2026-06-21T23:19:08Z — SOCKS5 proof committed; next objective selected
+
+- Commit created: `23fa6e6` (`add live socks5 connect proof`).
+- Current objective: begin Milestone 7 robustness by adding dependency-free bounded audit buffering/backpressure primitives to `foxprox-core`.
+- Rationale: transparent TCP/UDP/DNS and explicit HTTP/CONNECT/SOCKS proof paths now exist, but alpha robustness requires audit backpressure so forwarding cannot grow memory unbounded when audit output is slow. The smallest safe slice is a core audit buffer type with explicit overflow behavior and tests.
+- Verification plan: add bounded `AuditBuffer`/error/outcome types in `crates/foxprox-core/src/audit.rs`, test FIFO drain, capacity limits, zero-capacity rejection, and no dependency creep; run full workspace fmt/check/test/clippy/doc and `cargo tree -p foxprox-core`.
+- Expected commit boundary: core audit backpressure primitives only; runtime integration into proof paths can follow.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: implement bounded audit buffer in `foxprox-core`.
+
+## 2026-06-21T23:22:07Z — core audit backpressure verified
+
+- Current objective: commit dependency-free audit backpressure primitives for Milestone 7.
+- Changes implemented:
+  - Added `AuditBuffer`, a bounded FIFO audit event queue using `VecDeque` only.
+  - Added explicit `AuditBackpressure` errors for full queues and zero-capacity buffers.
+  - `try_push` never grows beyond capacity and increments a visible dropped-event counter on rejection.
+  - Added FIFO, full-buffer, and zero-capacity tests; exported `AuditBuffer` and `AuditBackpressure` from `foxprox-core`.
+- Subagents/reviews requested and findings:
+  - `audit-backpressure-final` found no blockers and confirmed bounded memory behavior, explicit backpressure semantics, FIFO behavior, zero-capacity behavior, public exports, and no dependency creep.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-core` passed: 48 core tests.
+  - `cargo test --workspace` passed: 48 core tests, 8 device tests, 8 net tests, 15 proxy tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core` showed no dependencies.
+- Files changed: `crates/foxprox-core/src/audit.rs`, `crates/foxprox-core/src/lib.rs`, `progress.md`.
+- Current git status summary: core audit source and progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit audit backpressure primitives, then start runtime integration of audit buffer or resource-limit robustness work.
+
 ## 2026-06-21T22:58:44Z — explicit proxy parser foundation rereview passed
 
 - Current objective: commit Milestone 6 explicit proxy parsing/normalization foundation.
