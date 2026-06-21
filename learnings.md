@@ -8,3 +8,7 @@
 
 - Platform-independent alpha semantics can be verified without namespace privileges by routing normalized events through a shared policy engine, mock egress backend, structured audit records, and deterministic packet/proxy fixtures.
 - `foxprox-lab run env-smoke` should remain a capability report, not a success claim for real bwrap/TUN setup, until a setup helper can actually create/configure a TUN device and hand its fd to the broker.
+
+## 2026-06-21 — bwrap setup helper spawning limitation
+
+- A `foxproxsetup` Rust binary launched directly as the bwrap command can start inside the namespace, but `std::process::Command::output()` from that helper failed with `ENOENT` when attempting to spawn both `/usr/bin/ip` and `/bin/sh`. The equivalent bwrap command that runs `/bin/sh -lc 'ip tuntap ...'` as the initial process succeeds. Treat shelling out from the setup helper as unreliable until investigated; direct TUN setup syscalls/netlink/ioctl are likely needed for the real helper.

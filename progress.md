@@ -71,3 +71,15 @@
 - Interpretation: the bwrap/TUN smoke checkpoint is preserved.
 - Next verification gap: real setup helper and TUN fd handoff.
 - Commit hash after commit: 5307d0d.
+
+## 2026-06-21T00:45:00Z — foxproxsetup plan/parser scaffold and bwrap spawning discovery
+
+- Command executed: `cargo fmt --all && cargo test --all`; `cargo run -p foxprox-setup --bin foxproxsetup -- --print-plan`; `cargo build -p foxprox-setup --bin foxproxsetup && HELPER="$PWD/target/debug/foxproxsetup"; bwrap --unshare-user --unshare-net --cap-add CAP_NET_ADMIN --dev-bind /dev/net/tun /dev/net/tun --ro-bind /usr /usr --ro-bind /bin /bin --ro-bind /lib /lib --ro-bind /lib64 /lib64 --ro-bind "$PWD/target" "$PWD/target" --proc /proc -- "$HELPER" --configure-only`
+- Environment assumptions: local tests do not require privileges; bwrap helper configure run is environment-dependent.
+- Expected result: setup helper parser/plan tests pass; print-plan emits deterministic setup/proxy configuration; configure-only ideally creates a TUN inside bwrap.
+- Observed result: tests passed (`foxprox-core` 30, `foxprox-cli` 2, `foxproxsetup` 4). `--print-plan` emitted the default TUN/proxy JSON. `bwrap ... foxproxsetup --configure-only` failed when the helper attempted to spawn `/bin/sh`/`/usr/bin/ip` from Rust with ENOENT.
+- Relevant output excerpt: `"tun_name":"foxprox0","sandbox_ip":"10.0.2.2/24"`; `foxproxsetup: failed to execute /bin/sh for /usr/bin/ip: No such file or directory (os error 2)`.
+- Changed files: `Cargo.toml`, `Cargo.lock`, `crates/foxprox-setup/{Cargo.toml,src/main.rs}`, `README.md`, `learnings.md`, `progress.md`.
+- Interpretation: helper command-line contract and plan output are now harnessed, but actual TUN setup from the Rust helper cannot safely rely on shelling out inside bwrap in this environment. This validates the implementation approach directive to turn unknowns into runnable checks and record limitations.
+- Next verification gap: implement setup helper TUN configuration using direct syscalls/netlink/ioctl instead of child process spawning, then rerun the bwrap configure-only smoke.
+- Commit hash after commit: pending.
