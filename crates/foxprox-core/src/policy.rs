@@ -59,7 +59,12 @@ pub struct PolicyRule {
     pub destination_port: Option<u16>,
     pub hostname: Option<String>,
     pub domain_suffix: Option<String>,
+    pub origin_scheme: Option<String>,
+    pub origin_host: Option<String>,
+    pub origin_port: Option<u16>,
+    pub http_method: Option<String>,
     pub http_path_prefix: Option<String>,
+    pub sandbox_profile: Option<String>,
     pub min_attribution_confidence: Option<AttributionConfidence>,
 }
 
@@ -82,7 +87,12 @@ impl PolicyRule {
             destination_port: None,
             hostname: None,
             domain_suffix: None,
+            origin_scheme: None,
+            origin_host: None,
+            origin_port: None,
+            http_method: None,
             http_path_prefix: None,
+            sandbox_profile: None,
             min_attribution_confidence: None,
         }
     }
@@ -117,8 +127,25 @@ impl PolicyRule {
         self
     }
 
+    pub fn origin(mut self, scheme: impl Into<String>, host: impl Into<String>, port: u16) -> Self {
+        self.origin_scheme = Some(scheme.into().to_ascii_lowercase());
+        self.origin_host = Some(normalize_hostname(&host.into()));
+        self.origin_port = Some(port);
+        self
+    }
+
+    pub fn http_method(mut self, method: impl Into<String>) -> Self {
+        self.http_method = Some(method.into().to_ascii_uppercase());
+        self
+    }
+
     pub fn http_path_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.http_path_prefix = Some(prefix.into());
+        self
+    }
+
+    pub fn sandbox_profile(mut self, profile: impl Into<String>) -> Self {
+        self.sandbox_profile = Some(profile.into());
         self
     }
 
@@ -154,11 +181,18 @@ impl PolicyRule {
                 return false;
             }
         }
+        if self
+            .sandbox_profile
+            .as_ref()
+            .is_some_and(|profile| request.sandbox.profile.as_ref() != Some(profile))
+        {
+            return false;
+        }
         true
     }
 
     fn requires_hostname_context(&self, request: &PolicyRequest) -> bool {
-        (self.hostname.is_some() || self.domain_suffix.is_some())
+        (self.hostname.is_some() || self.domain_suffix.is_some() || self.origin_host.is_some())
             && self.matches_scope_without_hostname(request)
     }
 
@@ -186,6 +220,37 @@ impl PolicyRule {
                 return false;
             };
             if hostname != *suffix && !hostname.ends_with(&format!(".{suffix}")) {
+                return false;
+            }
+        }
+        if self.origin_scheme.is_some() || self.origin_host.is_some() || self.origin_port.is_some()
+        {
+            let Some(origin) = &request.origin else {
+                return false;
+            };
+            if self
+                .origin_scheme
+                .as_ref()
+                .is_some_and(|scheme| origin.scheme != *scheme)
+            {
+                return false;
+            }
+            if self
+                .origin_host
+                .as_ref()
+                .is_some_and(|host| origin.host != *host)
+            {
+                return false;
+            }
+            if self.origin_port.is_some_and(|port| origin.port != port) {
+                return false;
+            }
+        }
+        if let Some(method) = &self.http_method {
+            let Some(actual) = request.http_method.as_deref() else {
+                return false;
+            };
+            if actual.to_ascii_uppercase() != *method {
                 return false;
             }
         }
@@ -897,6 +962,84 @@ mod tests {
         assert_eq!(audit.kind, AuditKind::TransparentHttpDecision);
         assert_eq!(audit.details["http_method"], "GET");
         assert_eq!(audit.details["http_path"], "/v1/resource");
+    }
+
+    #[test]
+    fn http_method_rule_distinguishes_methods_with_audit_details() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-get-api")
+                .protocol(Protocol::Http)
+                .hostname("api.example.test")
+                .http_method("GET")
+                .http_path_prefix("/v1/"),
+        );
+        let engine = PolicyEngine::new(config);
+        let post = PolicyRequest::new("s1", Frontend::HttpProxy, Protocol::Http)
+            .with_attribution(HostnameAttribution::new(
+                "api.example.test",
+                AttributionSource::ExplicitProxyHost,
+                AttributionConfidence::High,
+            ))
+            .with_http("POST", "/v1/resource");
+
+        let (decision, audit) = engine.decide_with_audit(&post);
+        assert_eq!(decision.decision, Decision::DenyDrop);
+        assert_eq!(decision.reason, Some(DenialReason::DefaultDeny));
+        assert_eq!(audit.details["http_method"], "POST");
+        assert_eq!(audit.details["http_path"], "/v1/resource");
+
+        let get = PolicyRequest::new("s1", Frontend::HttpProxy, Protocol::Http)
+            .with_attribution(HostnameAttribution::new(
+                "api.example.test",
+                AttributionSource::ExplicitProxyHost,
+                AttributionConfidence::High,
+            ))
+            .with_http("GET", "/v1/resource");
+        assert_eq!(engine.decide(&get).decision, Decision::Allow);
+    }
+
+    #[test]
+    fn origin_tuple_rule_matches_explicit_proxy_origin() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-origin")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Https)
+                .origin("https", "Example.COM", 443),
+        );
+        let engine = PolicyEngine::new(config);
+        let request = PolicyRequest::new("s1", Frontend::HttpProxy, Protocol::Https)
+            .with_origin(Origin::new("https", "example.com", 443));
+
+        let (decision, audit) = engine.decide_with_audit(&request);
+        assert_eq!(decision.decision, Decision::Allow);
+        assert_eq!(decision.rule_id.as_deref(), Some("allow-origin"));
+        assert_eq!(audit.origin.as_ref().unwrap().host, "example.com");
+        assert_eq!(audit.rule_id.as_deref(), Some("allow-origin"));
+    }
+
+    #[test]
+    fn sandbox_profile_rule_scopes_policy() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-dev-profile")
+                .protocol(Protocol::Tcp)
+                .destination_port(443)
+                .sandbox_profile("dev"),
+        );
+        let engine = PolicyEngine::new(config);
+        let mut request = PolicyRequest::tcp_connect(
+            "s1",
+            Frontend::Tun,
+            socket("10.0.2.15", 41000),
+            socket("203.0.113.10", 443),
+        );
+        assert_eq!(engine.decide(&request).decision, Decision::DenyDrop);
+        request.sandbox.profile = Some("dev".to_string());
+        let (decision, audit) = engine.decide_with_audit(&request);
+        assert_eq!(decision.decision, Decision::Allow);
+        assert_eq!(audit.rule_id.as_deref(), Some("allow-dev-profile"));
     }
 
     #[test]

@@ -324,3 +324,37 @@ Policy configuration now has an explicit validation surface and structured reloa
 
 ### Remaining blind spots
 - The repo still lacks a CLI/config-file loader; validation is available as the core contract that a launcher/runtime must call before applying policy.
+
+### Commit
+- `62910ce` — observable policy config validation.
+
+## 2026-06-21 — Policy rule dimension coverage cycle
+
+### Behavior under work
+Fill documented policy rule dimensions that were still implicit or missing: sandbox profile scoping, HTTP method matching, and explicit origin scheme/host/port matching for proxy and transparent HTTP decisions.
+
+### Expected evidence
+- Rules can match only a specific sandbox profile and produce stable rule IDs in audit.
+- HTTP method/path rules distinguish allowed and denied methods with structured `http_method`/`http_path` details.
+- Origin tuple rules match scheme, host, and port for explicit proxy requests.
+
+### Commands run
+- `cargo fmt` — applied formatting for policy rule dimension changes.
+- `cargo test --all-targets --all-features` — passed, 67 unit tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `policy::tests::http_method_rule_distinguishes_methods_with_audit_details ... ok`
+- `policy::tests::origin_tuple_rule_matches_explicit_proxy_origin ... ok`
+- `policy::tests::sandbox_profile_rule_scopes_policy ... ok`
+
+### Interpretation
+Policy rules now cover documented dimensions for sandbox profile, HTTP method, and origin tuple matching. Audit output keeps method/path/origin/rule IDs visible so denied method mismatches and allowed origin/profile matches are explainable from structured records.
+
+### Changed files
+- `crates/foxprox-core/src/policy.rs`
+- `progress.md`
+
+### Remaining blind spots
+- Profile values are supplied by callers through `SandboxIdentity`; launcher/runtime identity discovery is still outside this core slice.
