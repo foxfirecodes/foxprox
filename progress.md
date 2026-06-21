@@ -219,3 +219,25 @@
 - What failed or surprised the agent: no runtime/TCP stream integration exists yet, so the HTTP parser is intentionally byte-slice based and does not attempt incremental request buffering.
 - What remains unproven: extracting HTTP bytes from real TCP streams, multiple requests per connection, absolute-form proxy requests, malformed HTTP fail-closed integration, and TCP forwarding are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — TLS ClientHello bytes → SNI policy/audit slice
+
+- Slice attempted: parse TLS ClientHello bytes for SNI, compare against optional DNS attribution, and prove SNI/domain policy plus mismatch fail-closed behavior.
+- Why next: plaintext HTTP metadata is covered, and alpha transparent HTTPS requires SNI visibility and SNI/DNS mismatch handling before forwarding can safely apply hostname rules.
+- Verification plan: add a minimal ClientHello parser in `foxprox-inspect`, produce `TlsClientHello` normalized events, verify SNI allow rules, DNS/SNI mismatch denial, and missing-SNI denial, then run formatting, clippy, focused inspect tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — TLS ClientHello bytes → SNI policy/audit
+
+- Slice attempted: parse TLS ClientHello bytes for SNI and enforce transparent HTTPS SNI/DNS mismatch policy.
+- Why next: plaintext HTTP method/path inspection was proven; transparent HTTPS alpha behavior requires visible SNI attribution and mismatch denial before domain-based HTTPS rules can be trusted.
+- What changed: added `parse_tls_client_hello` and minimal TLS ClientHello/SNI extension parsing to `foxprox-inspect`, emits `TlsClientHello` normalized events, normalizes SNI hostnames, compares optional DNS attribution, marks missing SNI, and reuses existing policy fail-closed mismatch/missing-SNI decisions.
+- Verification:
+  - `cargo fmt --check` initially failed on new TLS parser formatting; `cargo fmt` was run.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 4 `foxprox-config` tests, 10 `foxprox-core` tests, 10 `foxprox-inspect` tests, 10 `foxprox-packet` tests, and 0 doc tests.
+  - Focused checks passed: `cargo test -p foxprox-inspect tls_client_hello_sni_allows_domain_policy_and_audit`, `cargo test -p foxprox-inspect tls_client_hello_dns_sni_mismatch_is_denied_before_allow_rule`, and `cargo test -p foxprox-inspect tls_client_hello_missing_sni_is_denied`.
+  - `cargo fmt --check` passed after focused checks.
+- What failed or surprised the agent: a minimal ClientHello parser is enough for SNI evidence but still needs careful length checks at every variable-length TLS field.
+- What remains unproven: fragmented/incremental TLS parsing from real TCP streams, ECH detection beyond missing-SNI policy, GREASE/edge extension coverage, QUIC TLS metadata, and integration with DNS cache in a live flow manager are still absent.
+- Commit: this commit.

@@ -40,3 +40,7 @@ DNS cache correlation is only medium-confidence. The enrichment layer should fil
 ## 2026-06-21 — HTTP policy needs audit fields, not just match logic
 
 Adding method/path matching without carrying those fields into structured audit would make policy behavior hard to verify externally. Semantic inspection slices should update both rule evaluation and audit output together.
+
+## 2026-06-21 — TLS metadata parsers must stay length-first
+
+Even a minimal SNI-only ClientHello parser has multiple nested length fields. Keep it isolated in inspection code, fail on truncation, and emit only normalized metadata so policy never depends on TLS parser internals.

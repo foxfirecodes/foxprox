@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use foxprox_core::{
     AttributionConfidence, AttributionSource, Endpoint, FrontendKind, HostnameAttribution,
-    HttpRequest, NormalizedEvent, SandboxId,
+    HttpRequest, NormalizedEvent, SandboxId, SniDnsMismatch, TlsClientHello,
 };
 
 /// Expiring DNS answer cache used for medium-confidence transparent flow
@@ -185,6 +185,159 @@ fn split_host_port(value: &str) -> Result<(String, Option<u16>), HttpInspectErro
     Ok((value.to_ascii_lowercase(), None))
 }
 
+/// TLS ClientHello parsing errors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TlsInspectError {
+    TooShort,
+    NotTlsHandshake,
+    NotClientHello,
+    Truncated,
+    InvalidLength,
+}
+
+impl std::fmt::Display for TlsInspectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooShort => f.write_str("tls-client-hello-too-short"),
+            Self::NotTlsHandshake => f.write_str("tls-record-not-handshake"),
+            Self::NotClientHello => f.write_str("tls-handshake-not-client-hello"),
+            Self::Truncated => f.write_str("tls-client-hello-truncated"),
+            Self::InvalidLength => f.write_str("tls-client-hello-invalid-length"),
+        }
+    }
+}
+
+impl std::error::Error for TlsInspectError {}
+
+/// Parse a TLS ClientHello and emit SNI metadata when present.
+pub fn parse_tls_client_hello(
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    source: Option<Endpoint>,
+    destination: Endpoint,
+    dns_attribution: Option<HostnameAttribution>,
+    bytes: &[u8],
+) -> Result<NormalizedEvent, TlsInspectError> {
+    let sni = parse_tls_sni(bytes)?;
+    let mismatch = match (&sni, &dns_attribution) {
+        (Some(sni), Some(dns)) if normalize_host_for_compare(sni) == dns.hostname => {
+            SniDnsMismatch::Match
+        }
+        (Some(_), Some(_)) => SniDnsMismatch::Mismatch,
+        (None, Some(_)) => SniDnsMismatch::MissingSni,
+        (Some(_), None) => SniDnsMismatch::NotChecked,
+        (None, None) => SniDnsMismatch::MissingSni,
+    };
+
+    Ok(NormalizedEvent::TlsClientHello(TlsClientHello {
+        sandbox_id,
+        frontend,
+        source,
+        destination,
+        sni,
+        dns_attribution,
+        mismatch,
+    }))
+}
+
+fn parse_tls_sni(bytes: &[u8]) -> Result<Option<String>, TlsInspectError> {
+    if bytes.len() < 9 {
+        return Err(TlsInspectError::TooShort);
+    }
+    if bytes[0] != 22 {
+        return Err(TlsInspectError::NotTlsHandshake);
+    }
+    let record_length = usize::from(u16::from_be_bytes([bytes[3], bytes[4]]));
+    if bytes.len() < 5 + record_length {
+        return Err(TlsInspectError::Truncated);
+    }
+    let record = &bytes[5..5 + record_length];
+    if record[0] != 1 {
+        return Err(TlsInspectError::NotClientHello);
+    }
+    let handshake_length =
+        (usize::from(record[1]) << 16) | (usize::from(record[2]) << 8) | usize::from(record[3]);
+    if record.len() < 4 + handshake_length || handshake_length < 38 {
+        return Err(TlsInspectError::InvalidLength);
+    }
+    let body = &record[4..4 + handshake_length];
+    let mut offset = 34; // legacy_version + random
+
+    let session_id_len = *body.get(offset).ok_or(TlsInspectError::Truncated)? as usize;
+    offset += 1 + session_id_len;
+    if offset + 2 > body.len() {
+        return Err(TlsInspectError::Truncated);
+    }
+    let cipher_suites_len = usize::from(u16::from_be_bytes([body[offset], body[offset + 1]]));
+    offset += 2 + cipher_suites_len;
+    if offset >= body.len() {
+        return Err(TlsInspectError::Truncated);
+    }
+    let compression_methods_len = usize::from(body[offset]);
+    offset += 1 + compression_methods_len;
+    if offset == body.len() {
+        return Ok(None);
+    }
+    if offset + 2 > body.len() {
+        return Err(TlsInspectError::Truncated);
+    }
+    let extensions_len = usize::from(u16::from_be_bytes([body[offset], body[offset + 1]]));
+    offset += 2;
+    if offset + extensions_len > body.len() {
+        return Err(TlsInspectError::Truncated);
+    }
+    let extensions_end = offset + extensions_len;
+
+    while offset + 4 <= extensions_end {
+        let extension_type = u16::from_be_bytes([body[offset], body[offset + 1]]);
+        let extension_len = usize::from(u16::from_be_bytes([body[offset + 2], body[offset + 3]]));
+        offset += 4;
+        if offset + extension_len > extensions_end {
+            return Err(TlsInspectError::Truncated);
+        }
+        if extension_type == 0 {
+            return parse_sni_extension(&body[offset..offset + extension_len]);
+        }
+        offset += extension_len;
+    }
+
+    Ok(None)
+}
+
+fn parse_sni_extension(extension: &[u8]) -> Result<Option<String>, TlsInspectError> {
+    if extension.len() < 2 {
+        return Err(TlsInspectError::Truncated);
+    }
+    let list_len = usize::from(u16::from_be_bytes([extension[0], extension[1]]));
+    if 2 + list_len > extension.len() {
+        return Err(TlsInspectError::Truncated);
+    }
+    let mut offset = 2;
+    let end = 2 + list_len;
+    while offset + 3 <= end {
+        let name_type = extension[offset];
+        let name_len = usize::from(u16::from_be_bytes([
+            extension[offset + 1],
+            extension[offset + 2],
+        ]));
+        offset += 3;
+        if offset + name_len > end {
+            return Err(TlsInspectError::Truncated);
+        }
+        if name_type == 0 {
+            let hostname = std::str::from_utf8(&extension[offset..offset + name_len])
+                .map_err(|_| TlsInspectError::InvalidLength)?;
+            return Ok(Some(normalize_host_for_compare(hostname)));
+        }
+        offset += name_len;
+    }
+    Ok(None)
+}
+
+fn normalize_host_for_compare(hostname: &str) -> String {
+    hostname.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,6 +394,50 @@ mod tests {
             &tcp_syn_payload(49152, 443),
         );
         parse_ipv4_packet(&context(), &packet).unwrap()
+    }
+
+    fn tls_client_hello(server_name: Option<&str>) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]);
+        body.extend_from_slice(&[0_u8; 32]);
+        body.push(0); // session id length
+        body.extend_from_slice(&2_u16.to_be_bytes());
+        body.extend_from_slice(&[0x13, 0x01]);
+        body.push(1); // compression methods length
+        body.push(0); // null compression
+
+        let mut extensions = Vec::new();
+        if let Some(name) = server_name {
+            let name = name.as_bytes();
+            let mut sni = Vec::new();
+            let list_len = 3 + name.len();
+            sni.extend_from_slice(&(list_len as u16).to_be_bytes());
+            sni.push(0);
+            sni.extend_from_slice(&(name.len() as u16).to_be_bytes());
+            sni.extend_from_slice(name);
+            extensions.extend_from_slice(&0_u16.to_be_bytes());
+            extensions.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+            extensions.extend_from_slice(&sni);
+        }
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(&extensions);
+
+        let mut handshake = Vec::new();
+        handshake.push(1);
+        let len = body.len();
+        handshake.extend_from_slice(&[
+            ((len >> 16) & 0xff) as u8,
+            ((len >> 8) & 0xff) as u8,
+            (len & 0xff) as u8,
+        ]);
+        handshake.extend_from_slice(&body);
+
+        let mut record = Vec::new();
+        record.push(22);
+        record.extend_from_slice(&[0x03, 0x03]);
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
     }
 
     #[test]
@@ -416,6 +613,104 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, HttpInspectError::MissingHostHeader);
+    }
+
+    #[test]
+    fn tls_client_hello_sni_allows_domain_policy_and_audit() {
+        let event = parse_tls_client_hello(
+            SandboxId::new("tls-test").unwrap(),
+            FrontendKind::Tun,
+            Some(Endpoint::tcp(Ipv4Addr::new(10, 0, 0, 2).into(), 49152)),
+            Endpoint::tcp(Ipv4Addr::new(93, 184, 216, 34).into(), 443),
+            None,
+            &tls_client_hello(Some("WWW.EXAMPLE.COM")),
+        )
+        .unwrap();
+        let rule = PolicyRule::new("allow-tls-example", RuleAction::Allow)
+            .unwrap()
+            .with_protocol(Protocol::TlsClientHello)
+            .with_hostname(HostnamePattern::new(".example.com").unwrap())
+            .with_destination_port(443);
+        let evaluation = PolicyEngine::new(PolicyConfig {
+            rules: vec![rule],
+            ..PolicyConfig::default()
+        })
+        .evaluate(&event);
+
+        assert_eq!(event.hostname(), Some("www.example.com"));
+        assert_eq!(
+            evaluation.decision,
+            PolicyDecision::Allow {
+                rule_id: Some("allow-tls-example".to_owned())
+            }
+        );
+        assert_eq!(
+            evaluation.audit.hostname.as_deref(),
+            Some("www.example.com")
+        );
+    }
+
+    #[test]
+    fn tls_client_hello_dns_sni_mismatch_is_denied_before_allow_rule() {
+        let dns = HostnameAttribution::new(
+            "good.example.com",
+            AttributionSource::DnsCache,
+            AttributionConfidence::Medium,
+        );
+        let event = parse_tls_client_hello(
+            SandboxId::new("tls-test").unwrap(),
+            FrontendKind::Tun,
+            None,
+            Endpoint::tcp(Ipv4Addr::new(93, 184, 216, 34).into(), 443),
+            Some(dns),
+            &tls_client_hello(Some("evil.example.com")),
+        )
+        .unwrap();
+        let allow_all_tls = PolicyRule::new("allow-tls", RuleAction::Allow)
+            .unwrap()
+            .with_protocol(Protocol::TlsClientHello);
+
+        assert_eq!(
+            PolicyEngine::new(PolicyConfig {
+                rules: vec![allow_all_tls],
+                ..PolicyConfig::default()
+            })
+            .evaluate(&event)
+            .decision,
+            PolicyDecision::Deny {
+                behavior: foxprox_core::DenialBehavior::Reset,
+                reason: "tls-sni-dns-mismatch".to_owned(),
+                rule_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn tls_client_hello_missing_sni_is_denied() {
+        let event = parse_tls_client_hello(
+            SandboxId::new("tls-test").unwrap(),
+            FrontendKind::Tun,
+            None,
+            Endpoint::tcp(Ipv4Addr::new(93, 184, 216, 34).into(), 443),
+            None,
+            &tls_client_hello(None),
+        )
+        .unwrap();
+
+        assert_eq!(event.hostname(), None);
+        assert_eq!(
+            PolicyEngine::new(PolicyConfig {
+                default_policy: foxprox_core::DefaultPolicy::Allow,
+                ..PolicyConfig::default()
+            })
+            .evaluate(&event)
+            .decision,
+            PolicyDecision::Deny {
+                behavior: foxprox_core::DenialBehavior::Reset,
+                reason: "tls-sni-missing".to_owned(),
+                rule_id: None,
+            }
+        );
     }
 
     #[test]
