@@ -309,5 +309,5 @@
   - `cargo check --workspace` — passed.
   - `cargo test --workspace` — passed, 50 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
-- Commit hash after commit: pending.
+- Commit hash after commit: b39a70c.
 - Remaining boundary risks: per-flow storage of timeout override and production expiry scheduling remain.
