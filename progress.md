@@ -85,4 +85,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * shared IP attribution remains explicit and ambiguous for later policy review.
 * Audit evidence: not applicable in this commit; DNS cache stores attribution state only. DNS query audit emission remains future frontend/DNS-handler work.
 * Residual risk: no DNS wire parser or upstream resolver exists yet; CNAME chain semantics, DNSSEC, negative caching, and audit emission for DNS answers are not implemented.
-* Commit hash: pending.
+* Commit hash: 54f8f49 bound dns attribution cache.
