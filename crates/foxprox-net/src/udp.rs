@@ -5,8 +5,9 @@
 //! and configured generic UDP forwarding proof ports.
 
 use foxprox_core::{
-    parse_dns_query, parse_dns_response, Attribution, DnsCache, DnsCacheEntry, FlowKey,
-    FlowTimeoutClass, Frontend, NetworkEvent, SandboxId, TransportEndpoint, UdpFlowTable,
+    classify_udp_candidate, parse_dns_query, parse_dns_response, Attribution, DnsCache,
+    DnsCacheEntry, FlowKey, FlowTimeoutClass, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet,
+    Protocol, SandboxId, TransportEndpoint, UdpFlowTable,
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, PacketMeta, TunTapInterface};
@@ -44,8 +45,11 @@ pub struct UdpDnsProofConfig {
     pub udp_forward_ports: Vec<u16>,
     /// Timeout for one generic UDP response read.
     pub udp_forward_timeout: Duration,
+    /// Policy used before host UDP forwarding in the proof runtime.
+    pub policy: PolicyRuleSet,
 }
 
+#[derive(Clone, Copy)]
 struct UdpForwardSocket {
     port: u16,
     handle: smoltcp::iface::SocketHandle,
@@ -83,6 +87,7 @@ impl UdpDnsProofConfig {
             upstream_timeout: Duration::from_secs(5),
             udp_forward_ports: Vec::new(),
             udp_forward_timeout: Duration::from_secs(3),
+            policy: PolicyRuleSet::default(),
         }
     }
 }
@@ -186,12 +191,9 @@ where
             let socket = sockets.get_mut::<udp::Socket>(forward_socket.handle);
             while socket.can_recv() {
                 match socket.recv() {
-                    Ok((payload, metadata)) => forward_received.push((
-                        forward_socket.handle,
-                        forward_socket.port,
-                        payload.to_vec(),
-                        metadata,
-                    )),
+                    Ok((payload, metadata)) => {
+                        forward_received.push((*forward_socket, payload.to_vec(), metadata));
+                    }
                     Err(error) => {
                         eprintln!("foxprox-net: udp forward recv failed: {error}");
                         break;
@@ -199,13 +201,13 @@ where
                 }
             }
         }
-        for (handle, port, payload, metadata) in forward_received {
+        for (forward_socket, payload, metadata) in forward_received {
             if let Err(error) = handle_udp_forward_datagram(
                 &config,
+                &cache,
                 &mut udp_flows,
                 worker_tx.clone(),
-                handle,
-                port,
+                forward_socket,
                 payload,
                 metadata,
             ) {
@@ -220,7 +222,12 @@ where
             dns_handle,
             &worker_rx,
         );
-        for expired in udp_flows.expire(SystemTime::now()) {
+        let now = SystemTime::now();
+        let expired_cache_entries = cache.expire(now);
+        if expired_cache_entries > 0 {
+            eprintln!("foxprox-net: expired {expired_cache_entries} DNS cache entries");
+        }
+        for expired in udp_flows.expire(now) {
             eprintln!(
                 "foxprox-net: udp flow expired destination={}:{} sandbox_to_host={} host_to_sandbox={}",
                 expired.key.destination_ip,
@@ -417,10 +424,10 @@ fn handle_dns_datagram(
 
 fn handle_udp_forward_datagram(
     config: &UdpDnsProofConfig,
+    cache: &DnsCache,
     flows: &mut UdpFlowTable,
     worker_tx: Sender<UdpWorkerResult>,
-    handle: smoltcp::iface::SocketHandle,
-    port: u16,
+    forward_socket: UdpForwardSocket,
     payload: Vec<u8>,
     metadata: udp::UdpMetadata,
 ) -> io::Result<()> {
@@ -430,37 +437,41 @@ fn handle_udp_forward_datagram(
         .transpose()?
         .ok_or_else(|| io::Error::other("udp metadata missing local destination"))?;
     let source = endpoint_to_transport(metadata.endpoint)?;
-    let destination = TransportEndpoint::new(destination_ip, port);
+    let destination = TransportEndpoint::new(destination_ip, forward_socket.port);
     let key = FlowKey::udp(source.ip, source.port, destination.ip, destination.port);
-    let timeout_class = if port == 443 {
-        FlowTimeoutClass::Quic
-    } else {
-        FlowTimeoutClass::GenericUdp
-    };
-    flows.record_sandbox_datagram(
-        key,
-        timeout_class,
-        Attribution::ip_only(),
-        payload.len(),
-        SystemTime::now(),
-    );
+    let (classification, timeout_class) = udp_classification_for_port(destination.port);
+    let now = SystemTime::now();
+    let attribution = udp_attribution_for_destination(config, cache, destination.ip, now);
     let event = NetworkEvent::UdpFlowAttempt {
         sandbox_id: config.sandbox_id.clone(),
         frontend: Frontend::Tun,
         source,
         destination,
-        attribution: Attribution::ip_only(),
-        classification: foxprox_core::Protocol::Udp,
+        attribution: attribution.clone(),
+        classification,
     };
+    let decision = PolicyEngine::new(config.policy.clone()).evaluate(&event);
+    if classification == Protocol::Quic {
+        eprintln!(
+            "foxprox-net: quic candidate flow sandbox={}:{} destination={}:{} attribution={:?} decision={:?}",
+            source.ip, source.port, destination.ip, destination.port, attribution, decision
+        );
+    }
     eprintln!(
-        "foxprox-net: udp forward sandbox={}:{} destination={}:{} len={} event={:?}",
+        "foxprox-net: udp policy sandbox={}:{} destination={}:{} classification={:?} len={} decision={:?} event={:?}",
         source.ip,
         source.port,
         destination.ip,
         destination.port,
+        classification,
         payload.len(),
+        decision,
         event
     );
+    if !decision.is_allowed() {
+        return Ok(());
+    }
+    flows.record_sandbox_datagram(key, timeout_class, attribution, payload.len(), now);
 
     let timeout = config.udp_forward_timeout;
     std::thread::spawn(move || {
@@ -470,7 +481,7 @@ fn handle_udp_forward_datagram(
             timeout,
         );
         let _ = worker_tx.send(UdpWorkerResult::Forward {
-            handle,
+            handle: forward_socket.handle,
             metadata,
             source,
             destination,
@@ -479,6 +490,28 @@ fn handle_udp_forward_datagram(
         });
     });
     Ok(())
+}
+
+fn udp_classification_for_port(port: u16) -> (Protocol, FlowTimeoutClass) {
+    let classification = classify_udp_candidate(port);
+    let timeout_class = if classification == Protocol::Quic {
+        FlowTimeoutClass::Quic
+    } else {
+        FlowTimeoutClass::GenericUdp
+    };
+    (classification, timeout_class)
+}
+
+fn udp_attribution_for_destination(
+    config: &UdpDnsProofConfig,
+    cache: &DnsCache,
+    destination_ip: IpAddr,
+    now: SystemTime,
+) -> Attribution {
+    cache
+        .lookup_address(&config.sandbox_id, destination_ip, now)
+        .map(DnsCacheEntry::attribution)
+        .unwrap_or_else(Attribution::ip_only)
 }
 
 fn send_udp_response(
@@ -591,6 +624,9 @@ fn set_nonblocking(fd: i32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use foxprox_core::{
+        AttributionConfidence, AttributionSource, DnsObservation, DnsQueryType, Hostname,
+    };
 
     #[test]
     fn default_udp_dns_config_is_bounded() {
@@ -601,5 +637,68 @@ mod tests {
         assert!(config.udp_payload_capacity >= 1500);
         assert!(config.upstream_timeout <= Duration::from_secs(5));
         assert!(config.udp_forward_timeout <= Duration::from_secs(3));
+    }
+
+    #[test]
+    fn udp_classification_marks_port_443_as_quic() {
+        assert_eq!(
+            udp_classification_for_port(443),
+            (Protocol::Quic, FlowTimeoutClass::Quic)
+        );
+        assert_eq!(
+            udp_classification_for_port(12345),
+            (Protocol::Udp, FlowTimeoutClass::GenericUdp)
+        );
+    }
+
+    #[test]
+    fn default_udp_policy_denies_host_forwarding_events() {
+        let config = UdpDnsProofConfig::new(SandboxId::new("test").unwrap());
+        let event = NetworkEvent::UdpFlowAttempt {
+            sandbox_id: config.sandbox_id.clone(),
+            frontend: Frontend::Tun,
+            source: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)), 44_444),
+            destination: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443),
+            attribution: Attribution::ip_only(),
+            classification: Protocol::Quic,
+        };
+        assert!(!PolicyEngine::new(config.policy)
+            .evaluate(&event)
+            .is_allowed());
+    }
+
+    #[test]
+    fn udp_attribution_uses_dns_cache_for_destination_ip() {
+        let sandbox_id = SandboxId::new("test").unwrap();
+        let config = UdpDnsProofConfig::new(sandbox_id.clone());
+        let now = SystemTime::now();
+        let observation = DnsObservation {
+            sandbox_id,
+            hostname: Hostname::parse("video.example.com").unwrap(),
+            query_type: DnsQueryType::A,
+            observed_at: now,
+            broker_controlled: true,
+        };
+        let entry = DnsCacheEntry::new(
+            observation,
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let mut cache = DnsCache::default();
+        cache.insert(entry);
+
+        let attribution = udp_attribution_for_destination(
+            &config,
+            &cache,
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            now,
+        );
+        assert_eq!(
+            attribution.hostname.as_ref().unwrap().as_str(),
+            "video.example.com"
+        );
+        assert_eq!(attribution.source, AttributionSource::DnsCache);
+        assert_eq!(attribution.confidence, AttributionConfidence::Medium);
     }
 }

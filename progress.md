@@ -396,3 +396,43 @@
 - Learning ledger updated: recorded the fail-closed bypass-helper review lesson for future policy slices.
 - Current git status summary: source and ledgers modified; review/context artifacts summarized and ready for removal before commit.
 - Next exact action: remove transient `context-build/` and `reviews/` artifacts, commit core policy metadata slice, then start UDP/DNS attribution + QUIC classification in the UDP proof.
+
+## 2026-06-21T22:28:21Z — core policy metadata committed; next objective selected
+
+- Commit created: `b55dd82` (`add core policy metadata matching`).
+- Current objective: start the next Milestone 5 dataplane slice by wiring UDP/DNS proof events to existing DNS cache attribution and QUIC classification.
+- Rationale: context-builder identified this as the smallest follow-on slice because `foxprox-net` UDP/DNS proof already owns a `DnsCache` and UDP flow table in one process, unlike TCP inspection which needs a larger combined runtime and stream buffering gate.
+- Verification plan: update `crates/foxprox-net/src/udp.rs` to use `classify_udp_candidate(destination.port)`, attach medium-confidence DNS-cache attribution on generic UDP flows when `DnsCache::lookup_address` matches, log QUIC candidate distinctions, add focused unit coverage where possible, then run full workspace fmt/check/test/clippy/doc and a live UDP/DNS smoke if practical.
+- Expected commit boundary: `foxprox-net` UDP proof attribution/classification changes plus progress update; no HTTP/TLS TCP inspection or proxy listener work in this slice.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: inspect `UdpDnsProofConfig`/`handle_udp_forward_datagram` and implement cache-backed attribution + QUIC classification.
+
+## 2026-06-21T22:36:51Z — UDP DNS attribution and QUIC policy gate verified
+
+- Current objective: commit the Milestone 5 UDP/DNS attribution + QUIC classification slice.
+- Changes implemented:
+  - `UdpDnsProofConfig` now carries a `PolicyRuleSet`; default proof runtime remains fail-closed because the default policy denies UDP host forwarding.
+  - `foxprox proof-udp-dns --udp-forward-port PORT` now installs an explicit proof allow rule for that port, using `Protocol::Quic` for UDP/443 and `Protocol::Udp` otherwise.
+  - Generic UDP forwarding now reverse-lookups destination IPs in the broker DNS cache and attaches medium-confidence `DnsCache` attribution when available.
+  - UDP/443 forwarding events now classify as QUIC candidates, use `FlowTimeoutClass::Quic`, and log a distinct QUIC candidate flow line.
+  - Host UDP forwarding now evaluates `PolicyEngine` on the attributed `UdpFlowAttempt` before recording the flow or spawning host forwarding, and drops non-allow decisions.
+  - DNS cache expiry is now run in the UDP proof loop alongside UDP flow expiry.
+- Subagents/reviews requested and findings:
+  - `udp-attribution-quic-final` accepted DNS-cache attribution and QUIC classification but found a blocker: UDP forwarding still bypassed policy enforcement. Fixed by adding policy to config/runtime, installing explicit CLI proof allow rules, evaluating before forwarding, and adding a default-deny regression.
+  - `udp-attribution-quic-rereview` found no blockers and confirmed the prior policy-bypass blocker was resolved.
+- Accepted findings and fixes: all concrete reviewer blockers were accepted and fixed.
+- Rejected/deferred findings: full audit sink emission/backpressure, TCP DNS attribution, transparent HTTP/TLS inspection, and explicit proxy frontends remain deferred to later alpha slices.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed after formatting.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-net` passed: 5 tests.
+  - `cargo test --workspace` passed: 45 core tests, 8 device tests, 5 net tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core` still showed only `foxprox-core`.
+  - `cargo tree -p foxprox-net -e features` confirmed the existing smoltcp TCP/UDP/TUN feature set.
+  - Live bwrap/TUN smoke passed: sandbox Python queried broker DNS for `example.com`, then sent UDP to the returned address on port 443; broker logged `quic candidate flow`, `classification=Quic`, DNS-cache medium attribution, and `decision=Allow` via rule `proof-allow-udp-443`.
+- Files changed: `crates/foxprox-net/src/udp.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`, `learnings.md`.
+- Learning ledger updated: recorded the proof-runtime policy gate lesson.
+- Current git status summary: source and ledgers modified; review artifact directory summarized and ready for removal before commit.
+- Next exact action: remove transient `reviews/`, commit UDP attribution/QUIC policy gate, then start the next smallest Milestone 5 slice: likely TCP-side policy enforcement/DNS attribution or transparent HTTP/TLS inspection planning.

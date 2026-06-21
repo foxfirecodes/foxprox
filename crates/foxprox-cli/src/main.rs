@@ -1,4 +1,6 @@
-use foxprox_core::SandboxId;
+use foxprox_core::{
+    classify_udp_candidate, PolicyRule, PortRange, Protocol, RuleEffect, SandboxId,
+};
 use foxprox_device::{
     parse_icmpv4_metadata, parse_ipv4_metadata, synthesize_icmpv4_echo_reply,
     unsupported_event_for_drop,
@@ -205,10 +207,11 @@ where
                 config.upstream_dns =
                     parse_socket_addr(&required_value(&mut args, "--upstream-dns")?)?
             }
-            "--udp-forward-port" => config.udp_forward_ports.push(parse_value(&required_value(
-                &mut args,
-                "--udp-forward-port",
-            )?)?),
+            "--udp-forward-port" => {
+                let port = parse_value(&required_value(&mut args, "--udp-forward-port")?)?;
+                config.udp_forward_ports.push(port);
+                config.policy.rules.push(allow_udp_forward_rule(port));
+            }
             "--help" | "-h" => return Err(io::Error::new(io::ErrorKind::InvalidInput, usage())),
             other => {
                 return Err(io::Error::new(
@@ -240,6 +243,17 @@ where
         config.broker_ip, config.dns_port, config.upstream_dns
     );
     run_udp_dns_proof_with_ready(tun_fd, config, || stream.write_all(b"ready\n"))
+}
+
+fn allow_udp_forward_rule(port: u16) -> PolicyRule {
+    let protocol = if classify_udp_candidate(port) == Protocol::Quic {
+        Protocol::Quic
+    } else {
+        Protocol::Udp
+    };
+    PolicyRule::new(format!("proof-allow-udp-{port}"), RuleEffect::Allow)
+        .with_protocol(protocol)
+        .with_destination_ports(PortRange::single(port))
 }
 
 fn required_value<I>(args: &mut I, flag: &str) -> io::Result<String>

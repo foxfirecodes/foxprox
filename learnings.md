@@ -21,3 +21,8 @@
 
 - When adding new policy rule dimensions, update helper bypass paths as well as normal rule matching; final review caught that hidden-SNI explicit-IP allow detection ignored new HTTP/origin constraints.
 - For core policy slices, include a regression where a rule with irrelevant extra constraints must not satisfy a fail-closed bypass helper.
+
+## 2026-06-21T22:36:51Z — Dataplane proof policy gates
+
+- When a proof runtime adds richer attribution/classification, add a real policy gate in the same slice; otherwise the proof can log correct events while still bypassing fail-closed policy.
+- For proof CLI shortcuts, install explicit allow rules only for user-requested proof ports so default runtime config remains deny-by-default.
