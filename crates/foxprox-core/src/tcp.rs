@@ -58,9 +58,23 @@ impl<E: TcpEgress> TcpForwarder<E> {
             return Ok(result_from_decision(decision, false, ByteCounts::ZERO));
         }
 
-        let to_sandbox = self
+        let to_sandbox = match self
             .egress
-            .connect_and_exchange(key.destination(), from_sandbox)?;
+            .connect_and_exchange(key.destination(), from_sandbox)
+        {
+            Ok(to_sandbox) => to_sandbox,
+            Err(error) => {
+                let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(Protocol::Tcp)
+                    .with_source(key.source())
+                    .with_destination(key.destination())
+                    .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+                    .with_detail("error", tcp_egress_error_detail(&error));
+                let _ = self.broker.append_audit_for(&request, audit);
+                return Err(error);
+            }
+        };
         let byte_counts = ByteCounts {
             from_sandbox: from_sandbox.len() as u64,
             to_sandbox: to_sandbox.len() as u64,
@@ -109,6 +123,13 @@ impl<E: TcpEgress> TcpForwarder<E> {
         );
         request.protocol = Protocol::Tcp;
         request
+    }
+}
+
+fn tcp_egress_error_detail(error: &TcpEgressError) -> &'static str {
+    match error {
+        TcpEgressError::ConnectFailed => "tcp_egress_connect_failed",
+        TcpEgressError::BridgeFailed => "tcp_egress_bridge_failed",
     }
 }
 
@@ -234,6 +255,48 @@ mod tests {
         let record = forwarder.broker().audit().records().next().unwrap();
         assert_eq!(record.kind, AuditKind::TcpConnectDecision);
         assert_eq!(record.reason, Some(DenialReason::DefaultDeny));
+    }
+
+    #[derive(Clone, Debug)]
+    struct FailingTcpEgress(TcpEgressError);
+
+    impl TcpEgress for FailingTcpEgress {
+        fn connect_and_exchange(
+            &mut self,
+            _destination: NetworkEndpoint,
+            _from_sandbox: &[u8],
+        ) -> Result<Vec<u8>, TcpEgressError> {
+            Err(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn tcp_egress_error_is_audited_after_allow() {
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let key = FlowKey::tcp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.42".parse().unwrap(),
+            80,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut forwarder = TcpForwarder::new(
+            "s1",
+            broker,
+            FailingTcpEgress(TcpEgressError::ConnectFailed),
+        );
+
+        let error = forwarder
+            .connect_and_bridge(key, b"hi", 1_000, 1_001)
+            .unwrap_err();
+        assert_eq!(error, TcpEgressError::ConnectFailed);
+        let records: Vec<_> = forwarder.broker().audit().records().collect();
+        assert_eq!(records[0].kind, AuditKind::TcpConnectDecision);
+        assert_eq!(records[1].kind, AuditKind::BrokerError);
+        assert_eq!(records[1].details["error"], "tcp_egress_connect_failed");
     }
 
     #[test]

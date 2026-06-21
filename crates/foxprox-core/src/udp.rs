@@ -67,6 +67,9 @@ impl<E: UdpEgress> UdpForwarder<E> {
         if decision.decision.is_deny() {
             return Ok(result_from_decision(decision, false));
         }
+        if let Some(decision) = self.expire(now_ms).into_iter().next() {
+            return Ok(result_from_decision(decision, false));
+        }
         if self.would_exceed_flow_limit(&key) {
             let resource_decision = PolicyDecision {
                 decision: Decision::DenyDrop,
@@ -105,6 +108,14 @@ impl<E: UdpEgress> UdpForwarder<E> {
 
         if let Err(error) = self.egress.send_datagram(key.destination(), payload) {
             self.flows = previous_flows;
+            let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
+                .with_frontend(Frontend::Tun)
+                .with_protocol(Protocol::Udp)
+                .with_source(key.source())
+                .with_destination(key.destination())
+                .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+                .with_detail("error", "udp_egress_send_failed");
+            let _ = self.broker.append_audit_for(&request, audit);
             return Err(error);
         }
         Ok(UdpForwardResult {
@@ -348,6 +359,52 @@ mod tests {
     }
 
     #[test]
+    fn active_flow_limit_expires_stale_flow_before_denying_new_flow() {
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let first_key = FlowKey::udp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.42".parse().unwrap(),
+            12345,
+        );
+        let second_key = FlowKey::udp(
+            "10.0.2.15".parse().unwrap(),
+            40001,
+            "203.0.113.43".parse().unwrap(),
+            12345,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let mut forwarder = UdpForwarder::new(
+            "s1",
+            broker,
+            InMemoryUdpEgress::default(),
+            UdpTimeoutConfig::default(),
+        )
+        .with_max_active_flows(1);
+
+        assert_eq!(
+            forwarder
+                .handle_outbound_datagram(first_key, b"first", 1_000)
+                .unwrap()
+                .decision,
+            Decision::Allow
+        );
+        let result = forwarder
+            .handle_outbound_datagram(second_key.clone(), b"second", 61_000)
+            .unwrap();
+        assert_eq!(result.decision, Decision::Allow);
+        assert_eq!(forwarder.flows().len(), 1);
+        assert!(forwarder.flows().get(&second_key).is_some());
+        let records: Vec<_> = forwarder.broker().audit().records().collect();
+        assert!(records
+            .iter()
+            .any(|record| record.kind == AuditKind::UdpFlowExpired));
+    }
+
+    #[test]
     fn denied_multicast_udp_does_not_send() {
         let config = PolicyConfig {
             default_decision: Decision::Allow,
@@ -509,5 +566,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(error, UdpEgressError::SendFailed);
         assert!(forwarder.flows().is_empty());
+        let records: Vec<_> = forwarder.broker().audit().records().collect();
+        assert_eq!(records.last().unwrap().kind, AuditKind::BrokerError);
+        assert_eq!(
+            records.last().unwrap().details["error"],
+            "udp_egress_send_failed"
+        );
     }
 }

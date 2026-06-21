@@ -39,3 +39,11 @@ The TUN packet harness originally emitted `packet_observed` and then treated suc
 ## 2026-06-21 — Mutable attribution/flow state must commit after audit success
 
 DNS cache updates and UDP flow byte counts are decision-relevant state. Review caught that both could mutate before audit append succeeded, leaving invisible state after fail-closed outcomes. Future state managers should use prepare-audit/commit or rollback patterns when audit is required for correctness.
+
+## 2026-06-21 — Upstream DNS responses must be validated before attribution
+
+Review caught that parsing returned addresses without matching transaction ID, question, rcode, or answer owner can poison DNS attribution. The DNS handler now validates upstream responses against the original query before releasing a response or committing cache observations; mismatch/malformed responses fail closed with `dns_upstream_error=malformed_response`.
+
+## 2026-06-21 — Egress failures need their own audit event after allow
+
+Policy allow and lifecycle creation are not enough when a host egress operation fails. UDP, TCP, and explicit proxy harnesses now append `broker_error` records for send/connect failures so post-allow errors are inspectable instead of only visible as returned Rust errors.

@@ -1,10 +1,13 @@
+use crate::audit::AuditRecord;
 use crate::broker::BrokerCore;
 use crate::dns::{
     build_refused_response, parse_dns_query, DnsParseError, DnsQueryMetadata, DnsQueryType,
 };
 use crate::flow::{DnsCache, DnsObservation};
 use crate::policy::{PolicyDecision, PolicyRequest};
-use crate::types::{Decision, DenialReason, Frontend, NetworkEndpoint};
+use crate::types::{
+    normalize_hostname, AuditKind, Decision, DenialReason, Frontend, NetworkEndpoint, Protocol,
+};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -93,34 +96,16 @@ impl<U: DnsUpstream> DnsBrokerHandler<U> {
         let response = match self.upstream.exchange(&metadata, packet) {
             Ok(response) => response,
             Err(error) => {
-                let request =
-                    request.with_detail("dns_upstream_error", dns_upstream_error_detail(&error));
-                let decision = PolicyDecision {
-                    decision: Decision::FailClosed,
-                    reason: Some(DenialReason::DnsDenied),
-                    rule_id: None,
-                    audit_kind: crate::types::AuditKind::DnsQueryDecision,
-                };
-                let audit = crate::audit::AuditRecord::new(
-                    crate::types::AuditKind::DnsQueryDecision,
-                    request.sandbox.session_id.clone(),
-                )
-                .with_frontend(Frontend::Tun)
-                .with_protocol(crate::types::Protocol::Dns)
-                .with_destination(request.destination.clone())
-                .with_hostname(metadata.hostname.clone())
-                .with_decision(Decision::FailClosed, Some(DenialReason::DnsDenied))
-                .with_detail("dns_upstream_error", dns_upstream_error_detail(&error));
-                let _ = self.broker.append_audit_for(&request, audit);
-                return DnsHandlerResult {
-                    response: build_refused_response(packet).ok(),
-                    decision,
-                    observed_addresses: Vec::new(),
-                };
+                return self.fail_closed_upstream_error(&request, &metadata, packet, error)
             }
         };
 
-        let answers = parse_dns_response_addresses(&response).unwrap_or_default();
+        let answers = match parse_dns_response_addresses_for(&metadata, &response) {
+            Ok(answers) => answers,
+            Err(error) => {
+                return self.fail_closed_upstream_error(&request, &metadata, packet, error)
+            }
+        };
         let ttl_ms = answers.ttl_ms.unwrap_or(self.fallback_ttl_ms);
         let observation = DnsObservation::new(
             metadata.hostname,
@@ -158,6 +143,43 @@ impl<U: DnsUpstream> DnsBrokerHandler<U> {
     pub fn into_parts(self) -> (BrokerCore, DnsCache, U) {
         (self.broker, self.cache, self.upstream)
     }
+
+    fn fail_closed_upstream_error(
+        &mut self,
+        request: &PolicyRequest,
+        metadata: &DnsQueryMetadata,
+        query_packet: &[u8],
+        error: DnsUpstreamError,
+    ) -> DnsHandlerResult {
+        let request = request
+            .clone()
+            .with_detail("dns_upstream_error", dns_upstream_error_detail(&error));
+        let decision = PolicyDecision {
+            decision: Decision::FailClosed,
+            reason: Some(DenialReason::DnsDenied),
+            rule_id: None,
+            audit_kind: AuditKind::DnsQueryDecision,
+        };
+        let audit = AuditRecord::new(
+            AuditKind::DnsQueryDecision,
+            request.sandbox.session_id.clone(),
+        )
+        .with_frontend(Frontend::Tun)
+        .with_protocol(Protocol::Dns)
+        .with_destination(request.destination.clone())
+        .with_hostname(metadata.hostname.clone())
+        .with_decision(Decision::FailClosed, Some(DenialReason::DnsDenied))
+        .with_detail("dns_upstream_error", dns_upstream_error_detail(&error));
+        let decision = match self.broker.append_audit_for(&request, audit) {
+            Ok(_) => decision,
+            Err(decision) => decision,
+        };
+        DnsHandlerResult {
+            response: build_refused_response(query_packet).ok(),
+            decision,
+            observed_addresses: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -167,30 +189,84 @@ pub struct DnsAnswerSummary {
 }
 
 pub fn parse_dns_response_addresses(packet: &[u8]) -> Result<DnsAnswerSummary, DnsParseError> {
+    parse_dns_response_addresses_inner(None, packet).map_err(|error| match error {
+        DnsResponseValidationError::Parse(error) => error,
+        DnsResponseValidationError::Mismatch => DnsParseError::NotQuery,
+    })
+}
+
+fn parse_dns_response_addresses_for(
+    query: &DnsQueryMetadata,
+    packet: &[u8],
+) -> Result<DnsAnswerSummary, DnsUpstreamError> {
+    parse_dns_response_addresses_inner(Some(query), packet)
+        .map_err(|_| DnsUpstreamError::MalformedResponse)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum DnsResponseValidationError {
+    Parse(DnsParseError),
+    Mismatch,
+}
+
+fn parse_dns_response_addresses_inner(
+    expected_query: Option<&DnsQueryMetadata>,
+    packet: &[u8],
+) -> Result<DnsAnswerSummary, DnsResponseValidationError> {
     if packet.len() < 12 {
-        return Err(DnsParseError::ShortHeader);
+        return Err(DnsResponseValidationError::Parse(
+            DnsParseError::ShortHeader,
+        ));
+    }
+    if let Some(query) = expected_query {
+        let transaction_id = u16::from_be_bytes([packet[0], packet[1]]);
+        if transaction_id != query.transaction_id {
+            return Err(DnsResponseValidationError::Mismatch);
+        }
     }
     let flags = u16::from_be_bytes([packet[2], packet[3]]);
     if flags & 0x8000 == 0 {
-        return Err(DnsParseError::NotQuery);
+        return Err(DnsResponseValidationError::Parse(DnsParseError::NotQuery));
+    }
+    if flags & 0x000f != 0 {
+        return Err(DnsResponseValidationError::Mismatch);
     }
     let qdcount = u16::from_be_bytes([packet[4], packet[5]]);
+    if qdcount != 1 {
+        return Err(DnsResponseValidationError::Mismatch);
+    }
     let ancount = u16::from_be_bytes([packet[6], packet[7]]);
     let mut cursor = 12usize;
-    for _ in 0..qdcount {
-        skip_dns_name(packet, &mut cursor)?;
-        take(packet, &mut cursor, 4)?;
+    let question_name =
+        read_dns_name(packet, &mut cursor).map_err(DnsResponseValidationError::Parse)?;
+    let question_type = read_u16(packet, &mut cursor).map_err(DnsResponseValidationError::Parse)?;
+    let question_class =
+        read_u16(packet, &mut cursor).map_err(DnsResponseValidationError::Parse)?;
+    if let Some(query) = expected_query {
+        if question_name != query.hostname
+            || question_type != query.query_type.code()
+            || question_class != query.query_class
+        {
+            return Err(DnsResponseValidationError::Mismatch);
+        }
     }
 
     let mut addresses = Vec::new();
     let mut min_ttl_ms: Option<u64> = None;
     for _ in 0..ancount {
-        skip_dns_name(packet, &mut cursor)?;
-        let answer_type = read_u16(packet, &mut cursor)?;
-        let _class = read_u16(packet, &mut cursor)?;
-        let ttl_seconds = read_u32(packet, &mut cursor)?;
-        let rdlen = read_u16(packet, &mut cursor)? as usize;
-        let rdata = take(packet, &mut cursor, rdlen)?;
+        let answer_name =
+            read_dns_name(packet, &mut cursor).map_err(DnsResponseValidationError::Parse)?;
+        if expected_query.is_some() && answer_name != question_name {
+            return Err(DnsResponseValidationError::Mismatch);
+        }
+        let answer_type =
+            read_u16(packet, &mut cursor).map_err(DnsResponseValidationError::Parse)?;
+        let _class = read_u16(packet, &mut cursor).map_err(DnsResponseValidationError::Parse)?;
+        let ttl_seconds =
+            read_u32(packet, &mut cursor).map_err(DnsResponseValidationError::Parse)?;
+        let rdlen =
+            read_u16(packet, &mut cursor).map_err(DnsResponseValidationError::Parse)? as usize;
+        let rdata = take(packet, &mut cursor, rdlen).map_err(DnsResponseValidationError::Parse)?;
         min_ttl_ms = Some(
             min_ttl_ms
                 .unwrap_or(u64::MAX)
@@ -215,23 +291,47 @@ pub fn parse_dns_response_addresses(packet: &[u8]) -> Result<DnsAnswerSummary, D
     })
 }
 
-fn skip_dns_name(packet: &[u8], cursor: &mut usize) -> Result<(), DnsParseError> {
+fn read_dns_name(packet: &[u8], cursor: &mut usize) -> Result<String, DnsParseError> {
+    let mut labels = Vec::new();
+    let mut local_cursor = *cursor;
+    let mut jumped = false;
+    let mut jumps = 0usize;
     loop {
-        let Some(&len) = packet.get(*cursor) else {
+        let Some(&len) = packet.get(local_cursor) else {
             return Err(DnsParseError::TruncatedQuestion);
         };
-        *cursor += 1;
+        local_cursor += 1;
         if len == 0 {
-            return Ok(());
+            if !jumped {
+                *cursor = local_cursor;
+            }
+            return Ok(normalize_hostname(&labels.join(".")));
         }
         if len & 0b1100_0000 == 0b1100_0000 {
-            take(packet, cursor, 1)?;
-            return Ok(());
+            let Some(&next) = packet.get(local_cursor) else {
+                return Err(DnsParseError::TruncatedQuestion);
+            };
+            let pointer = (((len & 0x3f) as usize) << 8) | next as usize;
+            if pointer >= packet.len() || jumps > 8 {
+                return Err(DnsParseError::TruncatedQuestion);
+            }
+            if !jumped {
+                *cursor = local_cursor + 1;
+            }
+            local_cursor = pointer;
+            jumped = true;
+            jumps += 1;
+            continue;
         }
         if len & 0b1100_0000 != 0 || len > 63 {
             return Err(DnsParseError::LabelTooLong);
         }
-        take(packet, cursor, len as usize)?;
+        let label = take(packet, &mut local_cursor, len as usize)?;
+        let label = std::str::from_utf8(label).map_err(|_| DnsParseError::TruncatedQuestion)?;
+        labels.push(label.to_string());
+        if !jumped {
+            *cursor = local_cursor;
+        }
     }
 }
 
@@ -389,6 +489,74 @@ mod tests {
         assert_eq!(record.kind, AuditKind::UnsupportedDenied);
         assert_eq!(record.reason, Some(DenialReason::MalformedPacket));
         assert_eq!(record.details["dns_parse_error"], "short_header");
+    }
+
+    #[test]
+    fn mismatched_upstream_response_fails_closed_without_cache_update() {
+        let query = dns_query(0x5555, "Example.COM", 1);
+        let mut response = dns_a_response(&query, [93, 184, 216, 34], 30);
+        response[1] = 0x56;
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-example-dns")
+                .protocol(Protocol::Dns)
+                .hostname("example.com"),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut handler = DnsBrokerHandler::new(
+            broker,
+            MockUpstream { response, calls: 0 },
+            "10.0.2.3".parse().unwrap(),
+        );
+
+        let result = handler.handle_query("s1", &query, 1_000);
+        assert_eq!(result.decision.decision, Decision::FailClosed);
+        assert_eq!(result.decision.reason, Some(DenialReason::DnsDenied));
+        assert_eq!(result.response.unwrap()[3] & 0x0f, 5);
+        assert!(handler
+            .cache()
+            .attribution_for("93.184.216.34".parse().unwrap(), 2_000)
+            .is_none());
+        let records: Vec<_> = handler.broker().audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::DnsQueryDecision);
+        assert_eq!(
+            records[1].details["dns_upstream_error"],
+            "malformed_response"
+        );
+    }
+
+    #[test]
+    fn malformed_upstream_response_fails_closed_without_release() {
+        let query = dns_query(0x6666, "Example.COM", 1);
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-example-dns")
+                .protocol(Protocol::Dns)
+                .hostname("example.com"),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut handler = DnsBrokerHandler::new(
+            broker,
+            MockUpstream {
+                response: vec![0; 11],
+                calls: 0,
+            },
+            "10.0.2.3".parse().unwrap(),
+        );
+
+        let result = handler.handle_query("s1", &query, 1_000);
+        assert_eq!(result.decision.decision, Decision::FailClosed);
+        assert_eq!(result.response.unwrap()[3] & 0x0f, 5);
+        assert!(result.observed_addresses.is_empty());
+        assert!(handler
+            .cache()
+            .attribution_for("93.184.216.34".parse().unwrap(), 2_000)
+            .is_none());
+        let records: Vec<_> = handler.broker().audit().records().collect();
+        assert_eq!(
+            records[1].details["dns_upstream_error"],
+            "malformed_response"
+        );
     }
 
     #[test]

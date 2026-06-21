@@ -41,6 +41,9 @@ impl ParsedIpPacket {
         if total_len < ihl || packet.len() < total_len {
             return Err(IpParseError::MalformedPacket("invalid_ipv4_total_length"));
         }
+        if checksum(&packet[..ihl]) != 0 {
+            return Err(IpParseError::MalformedPacket("invalid_ipv4_checksum"));
+        }
         let flags_fragment = u16::from_be_bytes([packet[6], packet[7]]);
         let more_fragments = flags_fragment & 0x2000 != 0;
         let fragment_offset = flags_fragment & 0x1fff;
@@ -59,6 +62,9 @@ impl ParsedIpPacket {
                 if payload.len() < 4 {
                     return Err(IpParseError::MalformedPacket("short_icmp_header"));
                 }
+                if checksum(payload) != 0 {
+                    return Err(IpParseError::MalformedPacket("invalid_icmp_checksum"));
+                }
                 (
                     Protocol::Icmp,
                     None,
@@ -71,6 +77,10 @@ impl ParsedIpPacket {
                 if payload.len() < 20 {
                     return Err(IpParseError::MalformedPacket("short_tcp_header"));
                 }
+                let data_offset = ((payload[12] >> 4) as usize) * 4;
+                if data_offset < 20 || data_offset > payload.len() {
+                    return Err(IpParseError::MalformedPacket("invalid_tcp_data_offset"));
+                }
                 (
                     Protocol::Tcp,
                     Some(u16::from_be_bytes([payload[0], payload[1]])),
@@ -82,6 +92,10 @@ impl ParsedIpPacket {
             17 => {
                 if payload.len() < 8 {
                     return Err(IpParseError::MalformedPacket("short_udp_header"));
+                }
+                let udp_len = u16::from_be_bytes([payload[4], payload[5]]) as usize;
+                if udp_len < 8 || udp_len > payload.len() {
+                    return Err(IpParseError::MalformedPacket("invalid_udp_length"));
                 }
                 (
                     Protocol::Udp,
@@ -362,6 +376,36 @@ mod tests {
         assert_eq!(
             synthesize_icmpv4_echo_reply(&icmp).unwrap_err(),
             IpParseError::MalformedPacket("short_icmp_header")
+        );
+    }
+
+    #[test]
+    fn malformed_ipv4_checksum_and_transport_lengths_fail_closed() {
+        let mut bad_ip_checksum = ipv4_packet(17, 0, &[0x12, 0x34, 0x00, 0x35, 0, 8, 0, 0]);
+        bad_ip_checksum[10] ^= 0xff;
+        assert_eq!(
+            ParsedIpPacket::parse(&bad_ip_checksum).unwrap_err(),
+            IpParseError::MalformedPacket("invalid_ipv4_checksum")
+        );
+
+        let bad_udp_len = ipv4_packet(17, 0, &[0x12, 0x34, 0x00, 0x35, 0, 7, 0, 0]);
+        assert_eq!(
+            ParsedIpPacket::parse(&bad_udp_len).unwrap_err(),
+            IpParseError::MalformedPacket("invalid_udp_length")
+        );
+
+        let mut tcp = vec![0u8; 20];
+        tcp[12] = 0x10;
+        let bad_tcp_offset = ipv4_packet(6, 0, &tcp);
+        assert_eq!(
+            ParsedIpPacket::parse(&bad_tcp_offset).unwrap_err(),
+            IpParseError::MalformedPacket("invalid_tcp_data_offset")
+        );
+
+        let bad_icmp_checksum = ipv4_packet(1, 0, &[8, 0, 0, 0]);
+        assert_eq!(
+            ParsedIpPacket::parse(&bad_icmp_checksum).unwrap_err(),
+            IpParseError::MalformedPacket("invalid_icmp_checksum")
         );
     }
 

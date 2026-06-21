@@ -459,3 +459,43 @@ UDP forwarding now has an explicit active-flow resource limit with structured de
 
 ### Remaining blind spots
 - Resource limits currently cover UDP active flows only; TCP/proxy concurrency and byte-buffer limits remain future robustness slices.
+
+## 2026-06-21 — Reviewer round 2 DNS/UDP/error-path fixes
+
+### Behavior under work
+Address second-review high-risk gaps: validate upstream DNS responses before releasing/caching attribution, expire UDP flows before applying active-flow limits, and make post-allow egress/upstream failures observable with structured `broker_error` audit records.
+
+### Expected evidence
+- Mismatched/truncated upstream DNS responses return REFUSED, append `dns_upstream_error=malformed_response`, and leave cache empty.
+- UDP active-flow limits ignore expired flows after expiration audit succeeds.
+- UDP/TCP/proxy egress failures append bounded `broker_error` evidence with frontend/protocol/error details.
+
+### Commands run
+- `cargo fmt` — applied formatting for reviewer-round-2 fixes.
+- `cargo test --all-targets --all-features` — passed, 82 unit tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `dns_handler::tests::mismatched_upstream_response_fails_closed_without_cache_update ... ok`
+- `dns_handler::tests::malformed_upstream_response_fails_closed_without_release ... ok`
+- `udp::tests::active_flow_limit_expires_stale_flow_before_denying_new_flow ... ok`
+- `udp::tests::egress_send_failure_rolls_back_flow_state ... ok`
+- `tcp::tests::tcp_egress_error_is_audited_after_allow ... ok`
+- `proxy_frontend::tests::proxy_egress_error_is_audited_after_allow ... ok`
+- `packet::tests::malformed_ipv4_checksum_and_transport_lengths_fail_closed ... ok`
+
+### Interpretation
+Second review findings were addressed for DNS response validation, stale UDP flow limits, egress-error observability, and packet malformed-path validation. DNS upstream responses are validated against transaction ID/question/answer ownership before release or cache commit. UDP active-flow limits now expire stale flows first and fail closed if expiration audit cannot be recorded. UDP/TCP/proxy egress errors now append `broker_error` evidence. IPv4 packet parsing now rejects bad header checksums, invalid UDP lengths, invalid TCP data offsets, and invalid ICMP checksums.
+
+### Changed files
+- `crates/foxprox-core/src/dns_handler.rs`
+- `crates/foxprox-core/src/packet.rs`
+- `crates/foxprox-core/src/proxy_frontend.rs`
+- `crates/foxprox-core/src/tcp.rs`
+- `crates/foxprox-core/src/udp.rs`
+- `progress.md`
+- `learnings.md`
+
+### Remaining blind spots
+- Transparent HTTP/TLS inspection is still parser/policy-unit coverage rather than a reachable TCP harness path. Real smoltcp/socket runtime remains outside the platform-independent harness layer.

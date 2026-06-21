@@ -69,7 +69,19 @@ impl<E: ExplicitProxyEgress> ExplicitProxyFrontend<E> {
         if decision.decision.is_deny() {
             return Ok(result_from_decision(decision, false));
         }
-        self.egress.forward_http(&metadata, bytes)?;
+        if let Err(error) = self.egress.forward_http(&metadata, bytes) {
+            let audit = crate::audit::AuditRecord::new(
+                crate::types::AuditKind::BrokerError,
+                self.sandbox_id.clone(),
+            )
+            .with_frontend(Frontend::HttpProxy)
+            .with_protocol(request.protocol)
+            .with_destination(request.destination.clone())
+            .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+            .with_detail("error", proxy_egress_error_detail(&error));
+            let _ = self.broker.append_audit_for(&request, audit);
+            return Err(error);
+        }
         Ok(ExplicitProxyResult {
             decision: decision.decision,
             reason: decision.reason,
@@ -97,7 +109,19 @@ impl<E: ExplicitProxyEgress> ExplicitProxyFrontend<E> {
         if decision.decision.is_deny() {
             return Ok(result_from_decision(decision, false));
         }
-        self.egress.connect_socks(&metadata, bytes)?;
+        if let Err(error) = self.egress.connect_socks(&metadata, bytes) {
+            let audit = crate::audit::AuditRecord::new(
+                crate::types::AuditKind::BrokerError,
+                self.sandbox_id.clone(),
+            )
+            .with_frontend(Frontend::Socks5Proxy)
+            .with_protocol(request.protocol)
+            .with_destination(request.destination.clone())
+            .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+            .with_detail("error", proxy_egress_error_detail(&error));
+            let _ = self.broker.append_audit_for(&request, audit);
+            return Err(error);
+        }
         Ok(ExplicitProxyResult {
             decision: decision.decision,
             reason: decision.reason,
@@ -115,6 +139,12 @@ impl<E: ExplicitProxyEgress> ExplicitProxyFrontend<E> {
 
     pub fn into_parts(self) -> (BrokerCore, E) {
         (self.broker, self.egress)
+    }
+}
+
+fn proxy_egress_error_detail(error: &ProxyEgressError) -> &'static str {
+    match error {
+        ProxyEgressError::SendFailed => "proxy_egress_send_failed",
     }
 }
 
@@ -230,6 +260,51 @@ mod tests {
         assert_eq!(record.kind, AuditKind::UnsupportedDenied);
         assert_eq!(record.frontend, Some(Frontend::HttpProxy));
         assert_eq!(record.details["proxy_parse_error"], "missing_host");
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct FailingProxyEgress;
+
+    impl ExplicitProxyEgress for FailingProxyEgress {
+        fn forward_http(
+            &mut self,
+            _request: &HttpProxyRequestMetadata,
+            _bytes: &[u8],
+        ) -> Result<(), ProxyEgressError> {
+            Err(ProxyEgressError::SendFailed)
+        }
+
+        fn connect_socks(
+            &mut self,
+            _request: &SocksConnectMetadata,
+            _bytes: &[u8],
+        ) -> Result<(), ProxyEgressError> {
+            Err(ProxyEgressError::SendFailed)
+        }
+    }
+
+    #[test]
+    fn proxy_egress_error_is_audited_after_allow() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-http-proxy")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Http)
+                .origin("http", "example.com", 80),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut frontend = ExplicitProxyFrontend::new("s1", broker, FailingProxyEgress);
+
+        let error = frontend
+            .handle_http_proxy_bytes(
+                b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n",
+            )
+            .unwrap_err();
+        assert_eq!(error, ProxyEgressError::SendFailed);
+        let records: Vec<_> = frontend.broker().audit().records().collect();
+        assert_eq!(records[0].kind, AuditKind::HttpRequestDecision);
+        assert_eq!(records[1].kind, AuditKind::BrokerError);
+        assert_eq!(records[1].details["error"], "proxy_egress_send_failed");
     }
 
     #[test]
