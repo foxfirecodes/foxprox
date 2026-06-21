@@ -157,6 +157,7 @@ fn audit_kind(value: AuditKind) -> &'static str {
     match value {
         AuditKind::TcpConnect => "tcp_connect",
         AuditKind::UdpFlow => "udp_flow",
+        AuditKind::UdpFlowExpired => "udp_flow_expired",
         AuditKind::DnsQuery => "dns_query",
         AuditKind::HttpRequest => "http_request",
         AuditKind::HttpsConnect => "https_connect",
@@ -205,6 +206,7 @@ fn audit_decision(value: AuditDecision) -> &'static str {
         AuditDecision::Allowed => "allowed",
         AuditDecision::Denied => "denied",
         AuditDecision::FailClosed => "fail_closed",
+        AuditDecision::Observed => "observed",
     }
 }
 

@@ -8,7 +8,10 @@
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
-use foxprox_core::{Endpoint, HostnameAttribution, NormalizedEvent, UdpClassification};
+use foxprox_core::{
+    AuditDecision, AuditKind, AuditRecord, Endpoint, FrontendKind, HostnameAttribution,
+    NormalizedEvent, Protocol, SandboxId, UdpClassification,
+};
 
 /// Configurable UDP idle timeouts by protocol class.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,6 +51,8 @@ pub struct UdpFlowKey {
 /// Current UDP pseudo-flow state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UdpFlowState {
+    pub sandbox_id: SandboxId,
+    pub frontend: FrontendKind,
     pub key: UdpFlowKey,
     pub classification: UdpClassification,
     pub attribution: Option<HostnameAttribution>,
@@ -72,6 +77,41 @@ pub enum UdpFlowObservation {
 pub struct ExpiredUdpFlow {
     pub state: UdpFlowState,
     pub expired_at: SystemTime,
+}
+
+impl ExpiredUdpFlow {
+    pub fn audit_record(&self) -> AuditRecord {
+        AuditRecord {
+            timestamp: self.expired_at,
+            kind: AuditKind::UdpFlowExpired,
+            sandbox_id: self.state.sandbox_id.clone(),
+            frontend: self.state.frontend,
+            protocol: protocol_for_classification(self.state.classification),
+            source: Some(self.state.key.source),
+            destination: Some(self.state.key.destination),
+            hostname: self
+                .state
+                .attribution
+                .as_ref()
+                .map(|attribution| attribution.hostname.clone()),
+            hostname_confidence: self.state.attribution.as_ref().map(|attr| attr.confidence),
+            http_method: None,
+            http_path_query: None,
+            decision: AuditDecision::Observed,
+            denial_behavior: None,
+            rule_id: None,
+            reason: Some("idle-timeout".to_owned()),
+            byte_count: Some(self.state.byte_count),
+        }
+    }
+}
+
+fn protocol_for_classification(classification: UdpClassification) -> Protocol {
+    match classification {
+        UdpClassification::Dns => Protocol::Dns,
+        UdpClassification::Generic => Protocol::Udp,
+        UdpClassification::QuicCandidate => Protocol::QuicCandidate,
+    }
 }
 
 /// UDP pseudo-flow table with deterministic expiration behavior.
@@ -116,6 +156,8 @@ impl UdpFlowTable {
         }
 
         let state = UdpFlowState {
+            sandbox_id: input.sandbox_id,
+            frontend: input.frontend,
             key,
             classification: input.classification,
             attribution: input.attribution,
@@ -162,6 +204,8 @@ impl UdpFlowTable {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct UdpFlowInput {
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
     key: Option<UdpFlowKey>,
     classification: UdpClassification,
     attribution: Option<HostnameAttribution>,
@@ -171,6 +215,8 @@ impl UdpFlowInput {
     fn from_event(event: &NormalizedEvent) -> Option<Self> {
         match event {
             NormalizedEvent::UdpFlowAttempt(udp) => Some(Self {
+                sandbox_id: udp.sandbox_id.clone(),
+                frontend: udp.frontend,
                 key: Some(UdpFlowKey {
                     source: udp.source,
                     destination: udp.destination,
@@ -179,6 +225,8 @@ impl UdpFlowInput {
                 attribution: udp.attribution.clone(),
             }),
             NormalizedEvent::DnsQuery(query) => Some(Self {
+                sandbox_id: query.sandbox_id.clone(),
+                frontend: query.frontend,
                 key: query.source.map(|source| UdpFlowKey {
                     source,
                     destination: query.resolver,
@@ -194,11 +242,13 @@ impl UdpFlowInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use foxprox_audit::audit_record_to_json_line;
     use foxprox_core::{
-        AttributionConfidence, AttributionSource, FrontendKind, HostnameAttribution, Protocol,
-        SandboxId,
+        AttributionConfidence, AttributionSource, AuditDecision, AuditKind, FrontendKind,
+        HostnameAttribution, Protocol, SandboxId,
     };
     use foxprox_packet::{parse_ipv4_packet, PacketContext};
+    use serde_json::Value;
     use std::net::Ipv4Addr;
 
     fn context() -> PacketContext {
@@ -259,6 +309,43 @@ mod tests {
         let expired = table.expire(now + Duration::from_secs(120));
         assert_eq!(expired.len(), 1);
         assert!(table.is_empty());
+    }
+
+    #[test]
+    fn expired_udp_flow_emits_structured_audit_record() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_500);
+        let mut table = UdpFlowTable::new(UdpFlowTimeouts {
+            dns: Duration::from_secs(5),
+            generic: Duration::from_secs(30),
+            quic_candidate: Duration::from_secs(60),
+        });
+        let mut event = udp_event(443);
+        match &mut event {
+            NormalizedEvent::UdpFlowAttempt(udp) => {
+                udp.attribution = Some(HostnameAttribution::new(
+                    "video.example.com",
+                    AttributionSource::DnsCache,
+                    AttributionConfidence::Medium,
+                ));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        table.observe_event(&event, now, 128);
+
+        let expired = table.expire(now + Duration::from_secs(60));
+        let audit = expired[0].audit_record();
+        let line = audit_record_to_json_line(&audit).unwrap();
+        let value: Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(audit.kind, AuditKind::UdpFlowExpired);
+        assert_eq!(audit.decision, AuditDecision::Observed);
+        assert_eq!(audit.protocol, Protocol::QuicCandidate);
+        assert_eq!(audit.hostname.as_deref(), Some("video.example.com"));
+        assert_eq!(audit.byte_count, Some(128));
+        assert_eq!(value["kind"], "udp_flow_expired");
+        assert_eq!(value["decision"], "observed");
+        assert_eq!(value["byte_count"], 128);
+        assert_eq!(value["reason"], "idle-timeout");
     }
 
     #[test]

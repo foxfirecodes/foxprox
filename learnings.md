@@ -64,3 +64,7 @@ Core endpoints are hashable but not ordered. Use hash-keyed flow tables for life
 ## 2026-06-21 — keep policy-only config loading as a compatibility wrapper
 
 As runtime config grows beyond policy, expose a combined validated config while retaining a policy-only loader for callers and tests that only need `PolicyConfig`.
+
+## 2026-06-21 — lifecycle audit events need a non-decision state
+
+Flow expiration is observed lifecycle evidence, not an allow/deny decision. Audit schemas should distinguish policy decisions from lifecycle observations to avoid misleading logs.

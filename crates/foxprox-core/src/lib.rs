@@ -905,6 +905,7 @@ pub struct PolicyEvaluation {
 pub enum AuditKind {
     TcpConnect,
     UdpFlow,
+    UdpFlowExpired,
     DnsQuery,
     HttpRequest,
     HttpsConnect,
@@ -920,6 +921,7 @@ pub enum AuditDecision {
     Allowed,
     Denied,
     FailClosed,
+    Observed,
 }
 
 /// Structured audit record emitted by the policy boundary.

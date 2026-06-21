@@ -351,3 +351,25 @@
 - What failed or surprised the agent: adding runtime config while preserving the existing policy-only loader required a small compatibility wrapper so existing CLI/broker tests did not need to know about flow settings yet.
 - What remains unproven: CLI/runtime consumption of the combined config, config reload behavior, source-span diagnostics, resource limits, and expiration audit emission are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — UDP flow expiration → structured audit slice
+
+- Slice attempted: turn UDP pseudo-flow expiration evidence into structured audit records with sandbox/frontend/protocol/byte-count metadata.
+- Why next: flow expiration is tracked but not externally observable; alpha audit requirements include UDP flow expiration and byte counts.
+- Verification plan: extend core/audit kinds for lifecycle observation, retain sandbox/frontend in flow state, emit expiration audit records from `ExpiredUdpFlow`, verify JSON output includes `udp_flow_expired`, byte count, hostname attribution, and idle-timeout reason, then run formatting, clippy, focused flow/audit tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — UDP flow expiration → structured audit
+
+- Slice attempted: emit externally serializable audit records when UDP pseudo-flows expire.
+- Why next: UDP flow state and expiration existed but were not observable as first-class audit output, despite alpha requiring UDP flow expiration audit events and byte counts.
+- What changed: added `AuditKind::UdpFlowExpired` and `AuditDecision::Observed`, serialized them in JSON audit output, retained sandbox/frontend in `UdpFlowState`, added `ExpiredUdpFlow::audit_record`, and included protocol classification, endpoints, hostname attribution, idle-timeout reason, and byte counts in expiration records.
+- Verification:
+  - `cargo fmt --check` passed.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 6 `foxprox-config` tests, 10 `foxprox-core` tests, 5 `foxprox-flow` tests, 18 `foxprox-inspect` tests, 10 `foxprox-packet` tests, and 0 doc tests.
+  - Focused checks passed: `cargo test -p foxprox-flow expired_udp_flow_emits_structured_audit_record` and `cargo test -p foxprox-audit bounded_sink_reports_backpressure_without_accepting_record`.
+  - `cargo fmt --check` passed after focused checks.
+- What failed or surprised the agent: lifecycle audit events need an observed/non-decision audit state; overloading allow/deny/fail-closed would make expiration logs misleading.
+- What remains unproven: runtime scheduling of expiration scans, writing expiration audit to a sink in a live loop, TCP flow close audit, UDP forwarding, and resource-limit enforcement are still absent.
+- Commit: this commit.

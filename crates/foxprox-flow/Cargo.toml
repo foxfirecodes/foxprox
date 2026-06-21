@@ -10,4 +10,6 @@ rust-version.workspace = true
 foxprox-core = { path = "../foxprox-core" }
 
 [dev-dependencies]
+foxprox-audit = { path = "../foxprox-audit" }
 foxprox-packet = { path = "../foxprox-packet" }
+serde_json = { workspace = true }
