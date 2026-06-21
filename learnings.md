@@ -13,3 +13,7 @@ The alpha packet parser should reject IPv4 fragments and IPv6 extension headers 
 ## 2026-06-21 - DNS attribution confidence
 
 DNS cache correlation must stay medium confidence and may produce multiple hostnames for one IP. A shared IP match should not be collapsed into high-confidence uniqueness; policy code must keep source/confidence explicit when deciding domain rules.
+
+## 2026-06-21 - Plaintext HTTP attribution strictness
+
+Plaintext HTTP Host attribution should reject duplicate Host headers and absolute-URI/Host mismatches rather than choosing one source. Header parsing must have an explicit scan limit before any future stream frontend buffers request data.

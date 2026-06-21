@@ -86,3 +86,28 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; DNS cache stores attribution state only. DNS query audit emission remains future frontend/DNS-handler work.
 * Residual risk: no DNS wire parser or upstream resolver exists yet; CNAME chain semantics, DNSSEC, negative caching, and audit emission for DNS answers are not implemented.
 * Commit hash: 54f8f49 bound dns attribution cache.
+
+## 2026-06-21 - Plaintext HTTP host/path attribution parser
+
+* Invariant under work: plaintext HTTP metadata used for policy must be parsed strictly, require unambiguous hostname attribution, reject malformed/conflicting Host information, and bound header scanning.
+* Threat or failure mode addressed: permissive HTTP parsing could allow host-header ambiguity, absolute-URI/Host mismatch, invalid hostnames, or unbounded buffering to bypass domain/path policy.
+* Planned verification: add parser tests for origin-form and absolute-form requests, hostname normalization, default/explicit ports, duplicate/conflicting Host rejection, missing Host rejection, malformed request-line rejection, invalid hostname rejection, and header scan limit enforcement; run `cargo test` and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Plaintext HTTP host/path attribution parser results
+
+* Tests added/updated:
+  * origin-form HTTP/1.1 request parsing with normalized high-confidence Host attribution.
+  * absolute-form HTTP proxy-style request parsing with explicit port extraction.
+  * missing Host, duplicate Host, and absolute-URI/Host mismatch rejection.
+  * malformed request-line, lowercase/invalid method, and unsupported HTTP version rejection.
+  * invalid host, invalid port, and invalid target rejection.
+  * header scan limit and incomplete header enforcement.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 35 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * HTTP Host attribution is high-confidence only after strict Host parsing and normalization.
+  * ambiguous or conflicting host sources are rejected instead of falling back to permissive parsing.
+  * header scanning is bounded by caller-supplied maximum bytes.
+* Audit evidence: not applicable in this commit; parser output feeds future transparent/proxy HTTP policy events.
+* Residual risk: parser currently handles HTTP/1.x request-head metadata only; chunking/body semantics, header folding policy, IPv6/IP-literal Host support, HTTPS CONNECT parsing, and actual stream buffering remain future frontend work.
+* Commit hash: pending.
