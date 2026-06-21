@@ -9,13 +9,19 @@
 
 pub mod audit;
 pub mod config;
+pub mod egress;
 pub mod event;
 pub mod flow;
+pub mod frontend;
 pub mod policy;
 
 pub use audit::{AuditEvent, AuditEventKind, AuditSinkConfig};
 pub use config::{
     BrokerConfig, DnsConfig, ProxyConfig, ProxyEnvironment, TunConfig, UdpTimeoutConfig,
+};
+pub use egress::{
+    DnsEgress, DnsEgressRequest, EgressContext, EgressError, EgressErrorKind, EgressOutcome,
+    TcpEgress, TcpEgressRequest, UdpEgress, UdpEgressRequest,
 };
 pub use event::{
     Attribution, AttributionConfidence, AttributionSource, Frontend, Hostname, HttpMethod,
@@ -23,6 +29,7 @@ pub use event::{
     UnsupportedReason,
 };
 pub use flow::{FlowKey, FlowProtocol, FlowTimeoutClass};
+pub use frontend::{FrontendContext, FrontendError, FrontendErrorKind, NetworkFrontend};
 pub use policy::{
     Cidr, Decision, DecisionAction, DenialReason, PolicyEngine, PolicyRule, PolicyRuleSet,
     PortRange, RuleEffect,

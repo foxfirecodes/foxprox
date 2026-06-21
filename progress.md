@@ -206,3 +206,32 @@
 - Known limitation: this is the TCP forwarding gate with pre-resolved addresses. Literal `curl http://example.com` remains deferred until UDP/DNS foundation work.
 - Current git status summary: uncommitted Milestone 2 proof; context/review artifacts removed.
 - Next exact action: commit, then begin Milestone 3 minimal broker core / Milestone 4 UDP-DNS foundation planning depending on safest serial order.
+
+## 2026-06-21T17:50:30Z — smoltcp proof committed; next objective selected
+
+- Commit created: `15dafce` (`add smoltcp tcp proof`).
+- Current objective: close remaining Minimal Broker Core gaps before deeper UDP/DNS work.
+- Rationale: `foxprox-core` already has normalized events, config schema, audit schema, flow keys, and minimal policy. The remaining Milestone 3-shaped foundation is shared egress/frontend abstraction so future TCP, UDP, DNS, proxy, and TUN adapters can share typed boundaries without leaking implementation details.
+- Verification plan: add dependency-free core traits/types for frontend sources and egress requests/outcomes, unit-test conversion from normalized events where useful, and run full fmt/check/test/clippy/doc plus `cargo tree -p foxprox-core`.
+- Expected commit boundary: small `foxprox-core` abstraction commit and progress update.
+- Subagents/reviews requested: `context-builder` is building next-milestone context to validate/de-risk this choice.
+- Next exact action: add core frontend/egress modules without adding dependencies or touching Linux/smoltcp crates.
+
+## 2026-06-21T18:02:00Z — core frontend/egress abstraction verified
+
+- Current objective: commit the remaining Minimal Broker Core boundary types.
+- Context-builder recommendation: finish and commit Milestone 3 before UDP/DNS; current core already satisfies normalized events, audit schema, config schema, and policy model, leaving shared egress traits and frontend abstraction.
+- Reviewer result: no blockers. Notes addressed before commit:
+  - Removed `FrontendEvent` wrapper so frontend normalization returns plain `NetworkEvent` values and avoids duplicated/mismatched sandbox/frontend identity.
+  - Clarified `EgressContext.decision` semantics and added `EgressContext::is_allowed()` so host egress implementations can fail closed unless policy allowed the request.
+- Added dependency-free `foxprox-core` modules:
+  - `frontend.rs`: `FrontendContext`, `FrontendError`, `FrontendErrorKind`, `NetworkFrontend`.
+  - `egress.rs`: `EgressContext`, TCP/UDP/DNS egress request types, `EgressOutcome`, `EgressError`, `EgressErrorKind`, and TCP/UDP/DNS egress traits.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 27 core tests, 8 device tests, 1 net test.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core` still shows only `foxprox-core`, confirming no dependency creep.
+- Next exact action: remove context/review artifacts and commit `add core frontend and egress abstractions`.
