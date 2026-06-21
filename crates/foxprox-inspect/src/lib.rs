@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use foxprox_core::{
     AttributionConfidence, AttributionSource, Endpoint, FrontendKind, HostnameAttribution,
-    HttpRequest, NormalizedEvent, SandboxId, SniDnsMismatch, TlsClientHello,
+    HttpRequest, HttpsConnect, NormalizedEvent, SandboxId, SniDnsMismatch, TlsClientHello,
 };
 
 /// Expiring DNS answer cache used for medium-confidence transparent flow
@@ -103,6 +103,7 @@ pub enum HttpInspectError {
     MalformedRequestLine,
     MissingHostHeader,
     InvalidHostPort,
+    UnsupportedMethod,
 }
 
 impl std::fmt::Display for HttpInspectError {
@@ -113,6 +114,7 @@ impl std::fmt::Display for HttpInspectError {
             Self::MalformedRequestLine => f.write_str("http-request-line-malformed"),
             Self::MissingHostHeader => f.write_str("http-host-header-missing"),
             Self::InvalidHostPort => f.write_str("http-host-port-invalid"),
+            Self::UnsupportedMethod => f.write_str("http-method-unsupported"),
         }
     }
 }
@@ -166,6 +168,46 @@ pub fn parse_plaintext_http_request(
         host,
         port,
         path_query,
+    }))
+}
+
+/// Parse one HTTP proxy CONNECT request into a normalized HTTPS CONNECT event.
+pub fn parse_https_connect_request(
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    source: Option<Endpoint>,
+    bytes: &[u8],
+) -> Result<NormalizedEvent, HttpInspectError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| HttpInspectError::NotUtf8)?;
+    let request_line = text
+        .lines()
+        .next()
+        .ok_or(HttpInspectError::MissingRequestLine)?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts
+        .next()
+        .ok_or(HttpInspectError::MalformedRequestLine)?;
+    if !method.eq_ignore_ascii_case("CONNECT") {
+        return Err(HttpInspectError::UnsupportedMethod);
+    }
+    let authority = request_parts
+        .next()
+        .ok_or(HttpInspectError::MalformedRequestLine)?;
+    let version = request_parts
+        .next()
+        .ok_or(HttpInspectError::MalformedRequestLine)?;
+    if !version.starts_with("HTTP/") || request_parts.next().is_some() {
+        return Err(HttpInspectError::MalformedRequestLine);
+    }
+    let (host, port) = split_host_port(authority)?;
+
+    Ok(NormalizedEvent::HttpsConnect(HttpsConnect {
+        sandbox_id,
+        frontend,
+        source,
+        destination: None,
+        host,
+        port: port.unwrap_or(443),
     }))
 }
 
@@ -613,6 +655,82 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, HttpInspectError::MissingHostHeader);
+    }
+
+    #[test]
+    fn https_connect_request_parses_to_host_port_policy_event() {
+        let event = parse_https_connect_request(
+            SandboxId::new("connect-test").unwrap(),
+            FrontendKind::HttpProxy,
+            Some(Endpoint::tcp(Ipv4Addr::new(10, 0, 0, 2).into(), 49152)),
+            b"CONNECT Example.COM:443 HTTP/1.1\r\nHost: Example.COM:443\r\n\r\n",
+        )
+        .unwrap();
+        let rule = PolicyRule::new("allow-connect", RuleAction::Allow)
+            .unwrap()
+            .with_protocol(Protocol::HttpsConnect)
+            .with_hostname(HostnamePattern::new("example.com").unwrap())
+            .with_destination_port(443);
+        let evaluation = PolicyEngine::new(PolicyConfig {
+            rules: vec![rule],
+            ..PolicyConfig::default()
+        })
+        .evaluate(&event);
+
+        assert_eq!(event.protocol(), Protocol::HttpsConnect);
+        assert_eq!(event.hostname(), Some("example.com"));
+        assert_eq!(event.destination_port(), Some(443));
+        assert_eq!(
+            evaluation.decision,
+            PolicyDecision::Allow {
+                rule_id: Some("allow-connect".to_owned())
+            }
+        );
+        assert_eq!(evaluation.audit.kind, foxprox_core::AuditKind::HttpsConnect);
+    }
+
+    #[test]
+    fn https_connect_request_defaults_to_port_443_and_denies_wrong_path() {
+        let event = parse_https_connect_request(
+            SandboxId::new("connect-test").unwrap(),
+            FrontendKind::HttpProxy,
+            None,
+            b"CONNECT example.com HTTP/1.1\r\n\r\n",
+        )
+        .unwrap();
+        let rule = PolicyRule::new("allow-other-port", RuleAction::Allow)
+            .unwrap()
+            .with_protocol(Protocol::HttpsConnect)
+            .with_hostname(HostnamePattern::new("example.com").unwrap())
+            .with_destination_port(8443);
+
+        assert_eq!(event.destination_port(), Some(443));
+        assert_eq!(
+            PolicyEngine::new(PolicyConfig {
+                rules: vec![rule],
+                ..PolicyConfig::default()
+            })
+            .evaluate(&event)
+            .decision,
+            PolicyDecision::Deny {
+                behavior: foxprox_core::DenialBehavior::Drop,
+                reason: "default-deny".to_owned(),
+                rule_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn https_connect_rejects_non_connect_method() {
+        let error = parse_https_connect_request(
+            SandboxId::new("connect-test").unwrap(),
+            FrontendKind::HttpProxy,
+            None,
+            b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        )
+        .unwrap_err();
+
+        assert_eq!(error, HttpInspectError::UnsupportedMethod);
     }
 
     #[test]

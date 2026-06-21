@@ -276,6 +276,15 @@ impl NormalizedEvent {
         }
     }
 
+    pub fn destination_port(&self) -> Option<u16> {
+        match self {
+            Self::HttpRequest(event) => Some(event.port),
+            Self::HttpsConnect(event) => Some(event.port),
+            Self::SocksConnect(event) => Some(event.port),
+            _ => self.destination().and_then(|destination| destination.port),
+        }
+    }
+
     pub fn attribution_confidence(&self) -> Option<AttributionConfidence> {
         match self {
             Self::TcpConnectAttempt(event) => {
@@ -683,10 +692,7 @@ impl PolicyRule {
         }
 
         if !self.destination_ports.is_empty() {
-            let Some(destination) = event.destination() else {
-                return false;
-            };
-            let Some(port) = destination.port else {
+            let Some(port) = event.destination_port() else {
                 return false;
             };
             if !self

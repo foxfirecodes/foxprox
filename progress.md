@@ -241,3 +241,25 @@
 - What failed or surprised the agent: a minimal ClientHello parser is enough for SNI evidence but still needs careful length checks at every variable-length TLS field.
 - What remains unproven: fragmented/incremental TLS parsing from real TCP streams, ECH detection beyond missing-SNI policy, GREASE/edge extension coverage, QUIC TLS metadata, and integration with DNS cache in a live flow manager are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — HTTPS CONNECT bytes → proxy policy/audit slice
+
+- Slice attempted: parse explicit HTTP proxy `CONNECT` request bytes into normalized `HttpsConnect` events and prove host/port policy plus audit behavior.
+- Why next: transparent HTTP/TLS metadata is covered; alpha also requires explicit proxy networking, and `CONNECT` is the smallest proxy frontend boundary that can be verified before stream forwarding.
+- Verification plan: add CONNECT request parsing in inspection/frontend-adjacent code, verify host normalization, default port handling, allow/deny policy outcomes, malformed request rejection, then run formatting, clippy, focused tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — HTTPS CONNECT bytes → proxy policy/audit
+
+- Slice attempted: parse explicit HTTP proxy `CONNECT` request bytes into normalized HTTPS CONNECT events and evaluate host/port policy.
+- Why next: transparent HTTP/TLS inspection is proven, but alpha explicit proxy support also needs CONNECT origin visibility through the same policy/audit backend.
+- What changed: added `parse_https_connect_request` to `foxprox-inspect`, normalized CONNECT authority host/port, defaulted omitted CONNECT port to 443, rejected non-CONNECT methods, and updated core port matching so host-only events like `HttpsConnect`, `HttpRequest`, and `SocksConnect` can match destination port rules without requiring an IP endpoint.
+- Verification:
+  - `cargo fmt --check` initially failed on new CONNECT parser formatting; `cargo fmt` was run.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 4 `foxprox-config` tests, 10 `foxprox-core` tests, 13 `foxprox-inspect` tests, 10 `foxprox-packet` tests, and 0 doc tests.
+  - Focused checks passed: `cargo test -p foxprox-inspect https_connect_request_parses_to_host_port_policy_event`, `cargo test -p foxprox-inspect https_connect_request_defaults_to_port_443_and_denies_wrong_path`, and `cargo test -p foxprox-inspect https_connect_rejects_non_connect_method`.
+  - `cargo fmt --check` passed after focused checks.
+- What failed or surprised the agent: the existing port matcher only looked at IP endpoints, so explicit proxy host-only events could not use port rules until core exposed an event-level destination port.
+- What remains unproven: HTTP proxy forwarding, plaintext absolute-form HTTP proxy requests, CONNECT tunnel establishment, proxy error responses, and SOCKS5 CONNECT parsing are still absent.
+- Commit: this commit.

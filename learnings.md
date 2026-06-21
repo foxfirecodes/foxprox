@@ -44,3 +44,7 @@ Adding method/path matching without carrying those fields into structured audit 
 ## 2026-06-21 — TLS metadata parsers must stay length-first
 
 Even a minimal SNI-only ClientHello parser has multiple nested length fields. Keep it isolated in inspection code, fail on truncation, and emit only normalized metadata so policy never depends on TLS parser internals.
+
+## 2026-06-21 — host-only proxy events still need port matching
+
+Policy port rules cannot depend solely on IP endpoints. Explicit proxy events may know host and port before DNS resolution, so core matching should use an event-level destination port abstraction.
