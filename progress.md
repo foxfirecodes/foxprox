@@ -389,3 +389,22 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; normalized policy requests feed existing audit context builders, with requested-port audit coverage still pending.
 * Residual risk: transparent TLS metadata normalization, DNS metadata normalization, requested-port audit fields, and actual frontend wiring remain future work.
 * Commit hash: 61be355 normalize proxy parser metadata for policy.
+
+## 2026-06-21 - Requested-port audit preservation
+
+* Invariant under work: audit records must preserve requested-port metadata for explicit proxy and transparent host/domain decisions so reviewers can distinguish host attribution from the authority/destination port that was authorized or denied.
+* Threat or failure mode addressed: after separating requested ports from IP destination endpoints, audit records without requested-port could hide CONNECT/SOCKS port mismatches or make port-scoped domain policy decisions unverifiable.
+* Planned verification: extend audit schema/context tests to assert requested-port preservation for requests without IP destinations and existing destination/source fields; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Requested-port audit preservation results
+
+* Tests added/updated:
+  * audit context derived from policy requests now preserves requested-port metadata alongside source, destination, hostname attribution, HTTP method/path, decision, reason, and rule ID.
+  * existing audit decision and bounded-buffer tests continue to pass with the expanded schema.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 79 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * audit events can now show the explicit authority/destination port used in domain policy decisions even when no IP destination endpoint exists.
+  * transparent requests still retain both destination endpoint and requested-port metadata.
+* Audit evidence: unit tests assert requested-port preservation in policy-derived audit events.
+* Residual risk: audit serialization/sinks and DNS/flow-specific audit builder coverage remain future work.

@@ -65,3 +65,7 @@ Host/domain policy rules with ports cannot rely only on IP destination endpoints
 ## 2026-06-21 - Normalize parser output before policy decisions
 
 Parser outputs should have first-class conversion paths into normalized policy requests. This avoids hand-built requests that accidentally omit requested ports, frontend source, path/method metadata, or IP-only-vs-hostname attribution distinctions.
+
+## 2026-06-21 - Requested port is audit-relevant metadata
+
+After separating requested authority ports from IP destination endpoints, audit records need the requested-port field too. Otherwise explicit proxy decisions are not independently reviewable when no destination IP endpoint exists yet.

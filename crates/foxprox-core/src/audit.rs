@@ -16,6 +16,7 @@ pub struct AuditEvent {
     pub protocol: Option<Protocol>,
     pub source: Option<Endpoint>,
     pub destination: Option<Endpoint>,
+    pub requested_port: Option<u16>,
     pub hostname: Option<Hostname>,
     pub hostname_source: HostnameSource,
     pub hostname_confidence: HostnameConfidence,
@@ -36,6 +37,7 @@ pub struct AuditPolicyContext {
     pub protocol: Protocol,
     pub source: Option<Endpoint>,
     pub destination: Option<Endpoint>,
+    pub requested_port: Option<u16>,
     pub hostname: Option<Hostname>,
     pub hostname_source: HostnameSource,
     pub hostname_confidence: HostnameConfidence,
@@ -57,6 +59,7 @@ impl AuditPolicyContext {
             protocol: request.protocol,
             source: request.source,
             destination: request.destination,
+            requested_port: request.requested_port,
             hostname: request.attribution.hostname.clone(),
             hostname_source: request.attribution.source,
             hostname_confidence: request.attribution.confidence,
@@ -94,6 +97,7 @@ impl AuditEvent {
             protocol: Some(context.protocol),
             source: context.source,
             destination: context.destination,
+            requested_port: context.requested_port,
             hostname: context.hostname,
             hostname_source: context.hostname_source,
             hostname_confidence: context.hostname_confidence,
@@ -211,6 +215,7 @@ mod tests {
                     IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
                     443,
                 )),
+                requested_port: Some(443),
                 hostname: None,
                 hostname_source: HostnameSource::None,
                 hostname_confidence: HostnameConfidence::None,
@@ -290,6 +295,7 @@ mod tests {
         assert_eq!(event.kind, AuditEventKind::HttpRequest);
         assert_eq!(event.source, request.source);
         assert_eq!(event.destination, request.destination);
+        assert_eq!(event.requested_port, Some(80));
         assert_eq!(event.hostname.as_ref().unwrap().as_str(), "www.example.com");
         assert_eq!(event.hostname_source, HostnameSource::PlaintextHttpHost);
         assert_eq!(event.hostname_confidence, HostnameConfidence::High);
