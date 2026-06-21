@@ -1,10 +1,11 @@
 use crate::audit::AuditRecord;
 use crate::types::{AuditKind, Decision, DenialReason, Frontend, NetworkEndpoint, Protocol};
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParsedIpPacket {
+    pub ip_version: u8,
     pub source: IpAddr,
     pub destination: IpAddr,
     pub protocol: Protocol,
@@ -16,6 +17,17 @@ pub struct ParsedIpPacket {
 }
 
 impl ParsedIpPacket {
+    pub fn parse(packet: &[u8]) -> Result<Self, IpParseError> {
+        let Some(first) = packet.first() else {
+            return Err(IpParseError::MalformedPacket("empty_ip_packet"));
+        };
+        match first >> 4 {
+            4 => Self::parse_ipv4(packet),
+            6 => Self::parse_ipv6(packet),
+            _ => Err(IpParseError::MalformedPacket("unsupported_ip_version")),
+        }
+    }
+
     pub fn parse_ipv4(packet: &[u8]) -> Result<Self, IpParseError> {
         if packet.len() < 20 {
             return Err(IpParseError::MalformedPacket("short_ipv4_header"));
@@ -82,6 +94,86 @@ impl ParsedIpPacket {
             other => return Err(IpParseError::UnsupportedProtocol(other)),
         };
         Ok(Self {
+            ip_version: 4,
+            source,
+            destination,
+            protocol,
+            source_port,
+            destination_port,
+            icmp_type,
+            icmp_code,
+            payload_len: payload.len(),
+        })
+    }
+
+    pub fn parse_ipv6(packet: &[u8]) -> Result<Self, IpParseError> {
+        if packet.len() < 40 {
+            return Err(IpParseError::MalformedPacket("short_ipv6_header"));
+        }
+        let version = packet[0] >> 4;
+        if version != 6 {
+            return Err(IpParseError::MalformedPacket("invalid_ipv6_header"));
+        }
+        let payload_len = u16::from_be_bytes([packet[4], packet[5]]) as usize;
+        let total_len = 40usize.saturating_add(payload_len);
+        if packet.len() < total_len {
+            return Err(IpParseError::MalformedPacket("invalid_ipv6_payload_length"));
+        }
+        let next_header = packet[6];
+        if next_header == 44 {
+            return Err(IpParseError::UnsupportedFragmentation);
+        }
+        if matches!(next_header, 0 | 43 | 50 | 51 | 60) {
+            return Err(IpParseError::UnsupportedProtocol(next_header));
+        }
+        let mut source = [0u8; 16];
+        source.copy_from_slice(&packet[8..24]);
+        let mut destination = [0u8; 16];
+        destination.copy_from_slice(&packet[24..40]);
+        let source = IpAddr::V6(Ipv6Addr::from(source));
+        let destination = IpAddr::V6(Ipv6Addr::from(destination));
+        let payload = &packet[40..total_len];
+        let (protocol, source_port, destination_port, icmp_type, icmp_code) = match next_header {
+            6 => {
+                if payload.len() < 20 {
+                    return Err(IpParseError::MalformedPacket("short_tcp_header"));
+                }
+                (
+                    Protocol::Tcp,
+                    Some(u16::from_be_bytes([payload[0], payload[1]])),
+                    Some(u16::from_be_bytes([payload[2], payload[3]])),
+                    None,
+                    None,
+                )
+            }
+            17 => {
+                if payload.len() < 8 {
+                    return Err(IpParseError::MalformedPacket("short_udp_header"));
+                }
+                (
+                    Protocol::Udp,
+                    Some(u16::from_be_bytes([payload[0], payload[1]])),
+                    Some(u16::from_be_bytes([payload[2], payload[3]])),
+                    None,
+                    None,
+                )
+            }
+            58 => {
+                if payload.len() < 4 {
+                    return Err(IpParseError::MalformedPacket("short_icmpv6_header"));
+                }
+                (
+                    Protocol::Icmp,
+                    None,
+                    None,
+                    Some(payload[0]),
+                    Some(payload[1]),
+                )
+            }
+            other => return Err(IpParseError::UnsupportedProtocol(other)),
+        };
+        Ok(Self {
+            ip_version: 6,
             source,
             destination,
             protocol,
@@ -198,11 +290,58 @@ mod tests {
     fn parses_ipv4_udp_packet_with_ports() {
         let packet = ipv4_packet(17, 0, &[0x12, 0x34, 0x00, 0x35, 0, 8, 0, 0]);
         let parsed = ParsedIpPacket::parse_ipv4(&packet).unwrap();
+        assert_eq!(parsed.ip_version, 4);
         assert_eq!(parsed.protocol, Protocol::Udp);
         assert_eq!(parsed.source_port, Some(0x1234));
         assert_eq!(parsed.destination_port, Some(53));
         assert_eq!(parsed.source, "10.0.2.15".parse::<IpAddr>().unwrap());
         assert_eq!(parsed.destination, "8.8.8.8".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn parses_ipv6_udp_tcp_and_icmpv6_metadata() {
+        let udp = ipv6_packet(17, &[0x12, 0x34, 0x00, 0x35, 0, 8, 0, 0]);
+        let parsed = ParsedIpPacket::parse(&udp).unwrap();
+        assert_eq!(parsed.ip_version, 6);
+        assert_eq!(parsed.protocol, Protocol::Udp);
+        assert_eq!(parsed.source_port, Some(0x1234));
+        assert_eq!(parsed.destination_port, Some(53));
+        assert_eq!(parsed.source, "2001:db8::1".parse::<IpAddr>().unwrap());
+        assert_eq!(parsed.destination, "2001:db8::2".parse::<IpAddr>().unwrap());
+
+        let tcp = ipv6_packet(
+            6,
+            &[
+                0x12, 0x34, 0x00, 0x50, 0, 0, 0, 0, 0, 0, 0, 0, 0x50, 0, 0, 0, 0, 0, 0, 0,
+            ],
+        );
+        let parsed = ParsedIpPacket::parse(&tcp).unwrap();
+        assert_eq!(parsed.protocol, Protocol::Tcp);
+        assert_eq!(parsed.destination_port, Some(80));
+
+        let icmpv6 = ipv6_packet(58, &[128, 0, 0, 0]);
+        let parsed = ParsedIpPacket::parse(&icmpv6).unwrap();
+        assert_eq!(parsed.protocol, Protocol::Icmp);
+        assert_eq!(parsed.icmp_type, Some(128));
+        assert_eq!(parsed.icmp_code, Some(0));
+    }
+
+    #[test]
+    fn ipv6_fragment_and_extension_headers_fail_closed_with_audit() {
+        let fragment = ipv6_packet(44, &[0; 8]);
+        let error = ParsedIpPacket::parse(&fragment).unwrap_err();
+        assert_eq!(error, IpParseError::UnsupportedFragmentation);
+        let audit = error.audit_record("s1");
+        assert_eq!(audit.reason, Some(DenialReason::UnsupportedFragmentation));
+        assert_eq!(audit.details["parse_error"], "unsupported_fragmentation");
+
+        let hop_by_hop = ipv6_packet(0, &[0; 8]);
+        let error = ParsedIpPacket::parse(&hop_by_hop).unwrap_err();
+        assert_eq!(error, IpParseError::UnsupportedProtocol(0));
+        assert_eq!(
+            error.audit_record("s1").details["unsupported_ip_protocol"],
+            "0"
+        );
     }
 
     #[test]
@@ -258,6 +397,18 @@ mod tests {
         assert_eq!(reply[20], 0);
         assert_eq!(checksum(&reply[..20]), 0);
         assert_eq!(checksum(&reply[20..]), 0);
+    }
+
+    fn ipv6_packet(next_header: u8, payload: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0u8; 40 + payload.len()];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        packet[6] = next_header;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&"2001:db8::1".parse::<Ipv6Addr>().unwrap().octets());
+        packet[24..40].copy_from_slice(&"2001:db8::2".parse::<Ipv6Addr>().unwrap().octets());
+        packet[40..].copy_from_slice(payload);
+        packet
     }
 
     fn ipv4_packet(protocol: u8, flags_fragment: u16, payload: &[u8]) -> Vec<u8> {

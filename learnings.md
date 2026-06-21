@@ -27,3 +27,7 @@ For UDP, an allow decision without `udp_flow_created` evidence is insufficient b
 ## 2026-06-21 — TCP close evidence is a separate lifecycle contract from connect policy
 
 A TCP connect allow audit proves host egress was authorized, but it does not prove what bytes crossed or how the flow ended. The TCP forwarding harness now emits `tcp_flow_closed` with byte counts and duration. Close audit backpressure is visible, but real async stream integration must preserve this boundary even when close/error happens after bytes have already moved.
+
+## 2026-06-21 — IP-version dispatch changes malformed-packet evidence
+
+Switching the TUN harness from IPv4-only parsing to IP-version dispatch changed all-zero short packets from `short_ipv4_header` to `unsupported_ip_version`. Tests should assert the structured parse detail produced by the dispatch boundary, not assume every malformed packet entered the IPv4 parser.

@@ -56,7 +56,7 @@ impl<D: PacketDevice> TunPacketHarness<D> {
         packet: &[u8],
         now_ms: u64,
     ) -> Result<TunPacketHarnessResult, DeviceIoError> {
-        let parsed = match ParsedIpPacket::parse_ipv4(packet) {
+        let parsed = match ParsedIpPacket::parse(packet) {
             Ok(parsed) => parsed,
             Err(error) => return Ok(self.record_parse_failure(error, now_ms)),
         };
@@ -72,14 +72,17 @@ impl<D: PacketDevice> TunPacketHarness<D> {
         .with_source(parsed.source_endpoint())
         .with_destination(parsed.destination_endpoint())
         .with_detail("direction", "from_sandbox")
-        .with_detail("ip_version", "4")
+        .with_detail("ip_version", parsed.ip_version.to_string())
         .with_detail("packet_len", packet.len().to_string())
         .with_detail("payload_len", parsed.payload_len.to_string());
         if let Err(decision) = self.broker.append_audit_for(&request, observed) {
             return Ok(result_from_decision(Some(parsed), decision, false));
         }
 
-        if parsed.protocol == Protocol::Icmp && parsed.icmp_type == Some(8) {
+        if parsed.ip_version == 4
+            && parsed.protocol == Protocol::Icmp
+            && parsed.icmp_type == Some(8)
+        {
             let reply = match synthesize_icmpv4_echo_reply(packet) {
                 Ok(reply) => reply,
                 Err(error) => return Ok(self.record_parse_failure(error, now_ms)),
@@ -99,7 +102,7 @@ impl<D: PacketDevice> TunPacketHarness<D> {
             .with_source(reply_parsed.source_endpoint())
             .with_destination(reply_parsed.destination_endpoint())
             .with_detail("direction", "to_sandbox")
-            .with_detail("ip_version", "4")
+            .with_detail("ip_version", reply_parsed.ip_version.to_string())
             .with_detail("packet_len", reply.len().to_string())
             .with_detail("write_back", "icmp_echo_reply");
             if let Err(decision) = self.broker.append_audit_for(&reply_request, write_audit) {
@@ -243,6 +246,22 @@ mod tests {
     }
 
     #[test]
+    fn valid_ipv6_udp_packet_emits_ip_version_six_audit() {
+        let packet = ipv6_packet(17, &[0x12, 0x34, 0x00, 0x35, 0, 8, 0, 0]);
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 4);
+        let device = InMemoryPacketDevice::with_inbound([packet]);
+        let mut harness = TunPacketHarness::new("s1", broker, device);
+
+        let result = harness.process_next_packet(1_500).unwrap().unwrap();
+        assert_eq!(result.decision, Decision::Allow);
+        let record = harness.broker().audit().records().next().unwrap();
+        assert_eq!(record.kind, AuditKind::PacketObserved);
+        assert_eq!(record.protocol, Some(Protocol::Udp));
+        assert_eq!(record.details["ip_version"], "6");
+        assert_eq!(record.destination.as_ref().unwrap().port, Some(53));
+    }
+
+    #[test]
     fn malformed_packet_fails_closed_without_write() {
         let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 4);
         let device = InMemoryPacketDevice::with_inbound([vec![0; 11]]);
@@ -256,7 +275,7 @@ mod tests {
         let record = harness.broker().audit().records().next().unwrap();
         assert_eq!(record.kind, AuditKind::PacketMalformedDenied);
         assert_eq!(record.reason, Some(DenialReason::MalformedPacket));
-        assert_eq!(record.details["parse_error"], "short_ipv4_header");
+        assert_eq!(record.details["parse_error"], "unsupported_ip_version");
     }
 
     #[test]
@@ -303,6 +322,28 @@ mod tests {
         let records: Vec<_> = harness.broker().audit().records().collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, AuditKind::AuditBackpressure);
+    }
+
+    fn ipv6_packet(next_header: u8, payload: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0u8; 40 + payload.len()];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        packet[6] = next_header;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(
+            &"2001:db8::1"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets(),
+        );
+        packet[24..40].copy_from_slice(
+            &"2001:db8::2"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets(),
+        );
+        packet[40..].copy_from_slice(payload);
+        packet
     }
 
     fn ipv4_packet(protocol: u8, flags_fragment: u16, payload: &[u8]) -> Vec<u8> {

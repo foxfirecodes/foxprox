@@ -252,3 +252,41 @@ TCP forwarding now has a deterministic host-egress proof behind a replaceable tr
 
 ### Remaining blind spots
 - This is not a `smoltcp` adapter or host socket runtime yet. It establishes the shared connect/bridge/close evidence contract that smoltcp/async socket integration must satisfy.
+
+### Commit
+- `d5e8f39` — observable TCP forwarding harness.
+
+## 2026-06-21 — IPv6 packet observability cycle
+
+### Behavior under work
+Extend the packet core and TUN harness from IPv4-only parsing to a version-dispatching IP parser with IPv6 TCP/UDP/ICMPv6 endpoint visibility and fail-closed structured audit for unsupported IPv6 extension/fragment paths.
+
+### Expected evidence
+- IPv6 UDP packets parse into source/destination endpoints and emit `packet_observed` with `ip_version=6`.
+- IPv6 TCP/ICMPv6 basic headers expose protocol-specific metadata.
+- IPv6 extension/fragment or malformed packets fail closed with structured parse-error audit and no write-back.
+
+### Commands run
+- `cargo fmt` — applied formatting for packet/TUN updates.
+- `cargo test --all-targets --all-features` — initially found a TUN malformed-packet expectation still assuming IPv4-only parsing; updated it to the version-dispatch parse error.
+- `cargo test --all-targets --all-features` — passed, 62 unit tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `packet::tests::parses_ipv6_udp_tcp_and_icmpv6_metadata ... ok`
+- `packet::tests::ipv6_fragment_and_extension_headers_fail_closed_with_audit ... ok`
+- `tun::tests::valid_ipv6_udp_packet_emits_ip_version_six_audit ... ok`
+- `tun::tests::malformed_packet_fails_closed_without_write ... ok`
+
+### Interpretation
+Packet parsing now dispatches on IP version and exposes IPv6 TCP/UDP/ICMPv6 metadata through the same normalized endpoint model. Unsupported IPv6 fragment/extension paths fail closed with structured audit evidence, and the TUN harness records `ip_version=6` for observable packet provenance.
+
+### Changed files
+- `crates/foxprox-core/src/packet.rs`
+- `crates/foxprox-core/src/tun.rs`
+- `progress.md`
+- `learnings.md`
+
+### Remaining blind spots
+- IPv6 extension headers are intentionally fail-closed rather than walked; ICMPv6 write-back/NDP behavior remains out of this pure parser slice.
