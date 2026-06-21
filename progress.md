@@ -307,3 +307,25 @@
 - What failed or surprised the agent: DNS compression pointers need loop protection even for this narrow response parser; the parser caps pointer jumps and treats loops as attribution-sensitive parse failures.
 - What remains unproven: upstream DNS forwarding, DNS resolver socket behavior, CNAME chain attribution, cache eviction limits, negative responses, response/query transaction matching, and live UDP DNS forwarding are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — UDP event → flow table → expiration slice
+
+- Slice attempted: add a platform-independent UDP pseudo-flow manager that consumes normalized UDP/DNS/QUIC events, applies classification-specific idle timeouts, counts packets/bytes, and emits expiration evidence.
+- Why next: UDP/DNS/QUIC classification and DNS attribution exist, but alpha UDP support also requires pseudo-flow lifecycle and configurable timeouts before forwarding or audit expiration records can be reliable.
+- Verification plan: add a `foxprox-flow` crate, observe normalized UDP/DNS events into flow state, verify QUIC/DNS/generic timeout selection, byte counters, refresh behavior, attribution preservation, and expiration; run formatting, clippy, focused flow tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — UDP event → flow table → expiration
+
+- Slice attempted: platform-independent UDP pseudo-flow lifecycle tracking from normalized UDP/DNS/QUIC events.
+- Why next: packet classification and attribution existed, but UDP alpha behavior needs flow state, byte counters, classification-specific idle timeouts, and expiration evidence before forwarding can be robust.
+- What changed: added `crates/foxprox-flow` with configurable DNS/generic/QUIC idle timeouts, `UdpFlowKey`, `UdpFlowState`, observation results for created/updated/ignored events, byte/packet counters, attribution preservation, timeout refresh, and deterministic expiration removal.
+- Verification:
+  - `cargo fmt --check` initially failed on new flow test formatting; `cargo fmt` was run.
+  - `cargo clippy --workspace --all-targets -- -D warnings` initially failed because `Endpoint` has no `Ord` for `BTreeMap`; switched the flow table to `HashMap`, then clippy passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 4 `foxprox-config` tests, 10 `foxprox-core` tests, 4 `foxprox-flow` tests, 18 `foxprox-inspect` tests, 10 `foxprox-packet` tests, and 0 doc tests.
+  - Focused checks passed: `cargo test -p foxprox-flow quic_candidate_flow_uses_longer_timeout_and_expires`, `cargo test -p foxprox-flow repeated_udp_observation_refreshes_timeout_and_counts_bytes`, and `cargo test -p foxprox-flow dns_query_event_uses_dns_timeout`.
+  - `cargo fmt --check` passed after focused checks.
+- What failed or surprised the agent: `Endpoint` intentionally lacks ordering, so flow state should not require ordered maps unless core endpoint ordering is deliberately added later.
+- What remains unproven: UDP socket forwarding, reply routing to sandbox, expiration audit record emission, configurable timeout loading from TOML, resource limits, and direct multicast/broadcast denial are still absent.
+- Commit: this commit.

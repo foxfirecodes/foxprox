@@ -55,6 +55,14 @@ name = "foxprox-core"
 version = "0.1.0"
 
 [[package]]
+name = "foxprox-flow"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+ "foxprox-packet",
+]
+
+[[package]]
 name = "foxprox-inspect"
 version = "0.1.0"
 dependencies = [

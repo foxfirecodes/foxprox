@@ -56,3 +56,7 @@ Domain-form SOCKS requests feed hostname policy directly, while IP-form requests
 ## 2026-06-21 — DNS response parsing needs compression loop protection
 
 DNS answer names commonly use compression pointers, so response parsing is necessary for realistic cache population. Pointer following must be bounded and fail closed on loops before using any hostname attribution.
+
+## 2026-06-21 — flow tables should not force endpoint ordering
+
+Core endpoints are hashable but not ordered. Use hash-keyed flow tables for lifecycle state rather than adding ordering constraints to core types without a policy reason.
