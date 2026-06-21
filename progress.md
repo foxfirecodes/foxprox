@@ -56,3 +56,15 @@
 - Commit hash when committed: previous proxy parser slice committed as `ed06d5f`; config validation commit pending.
 - Remaining risks: no file-format parser exists yet; callers must construct `PolicyConfig` in memory until a serde-free or serde-backed loader is selected.
 - Exact next step: commit config validation, then add end-to-end normalized decision scenarios that combine DNS/TLS/HTTP/SOCKS metadata with policy decisions and audit records.
+
+## 2026-06-21T17:02:05Z
+- Current objective: add normalized event conversion so transparent and explicit frontends share one policy/audit path.
+- Files changed: `crates/foxprox-core/src/lib.rs`, `crates/foxprox-core/src/event.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially identified formatting in the new event module; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 32 unit tests passed. New scenario tests prove transparent HTTP Host/path metadata, TLS SNI/DNS mismatch, and SOCKS explicit-host metadata all evaluate through the same policy engine and fail closed before allow rules where required.
+- Commit hash when committed: previous config validation slice committed as `02adb85`; normalized event commit pending.
+- Remaining risks: normalized events are in-memory only; packet adapters, proxy listener loops, audit sinks beyond bounded memory, and host egress runtime are still pending.
+- Exact next step: commit normalized event slice, then add egress/frontend abstraction types and a minimal CLI/config-facing crate boundary for future runtime wiring.

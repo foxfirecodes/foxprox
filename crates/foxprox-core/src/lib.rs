@@ -10,6 +10,7 @@
 pub mod audit;
 pub mod config;
 pub mod dns;
+pub mod event;
 pub mod flow;
 pub mod frontend;
 pub mod inspect;
@@ -21,6 +22,7 @@ pub mod types;
 pub use audit::{AuditError, AuditEvent, AuditEventKind, AuditSink, VecAuditSink};
 pub use config::{validate_policy_config, ConfigError};
 pub use dns::{DnsCache, DnsObservation};
+pub use event::{explicit_proxy_attribution, NormalizedEvent};
 pub use flow::{FlowTable, UdpClass, UdpFlow, UdpTimeouts};
 pub use frontend::{
     parse_http_proxy_request_line, parse_socks5_connect, parse_socks5_greeting,
