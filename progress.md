@@ -253,3 +253,22 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; policy decisions continue to feed structured audit events, but audit schema does not yet include HTTP method/path fields.
 * Residual risk: HTTP audit method/path fields, proxy/transparent stream integration, request body handling, and richer origin tuple policy remain future work.
 * Commit hash: b1ccf62 add http method path policy matching.
+
+## 2026-06-21 - HTTP/source audit context preservation
+
+* Invariant under work: audit records for policy decisions must preserve security-relevant request metadata, including source endpoint and HTTP method/path when those dimensions affect allow/deny behavior.
+* Threat or failure mode addressed: policy can now decide on HTTP method/path, but audit records without those fields would make path-scoped allows/denies hard to review and could hide bypass attempts.
+* Planned verification: add audit tests that build context from normalized policy requests and assert source endpoint, hostname attribution, HTTP method/path, decisions, reasons, and bounded-buffer behavior are preserved; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - HTTP/source audit context preservation results
+
+* Tests added/updated:
+  * audit context construction from normalized policy requests preserves source endpoint, destination endpoint, hostname attribution source/confidence, HTTP method, HTTP path/query, decision, reason, and rule ID.
+  * existing audit decision and bounded-buffer backpressure tests continue to pass with the expanded schema.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 62 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * HTTP method/path policy decisions can now be audited with the request metadata that influenced the decision.
+  * source endpoint is no longer dropped when audit context is derived from a normalized policy request.
+* Audit evidence: unit tests assert the expanded audit schema preserves HTTP/source metadata and denial details.
+* Residual risk: audit serialization/sink implementation, DNS query type fields, flow byte/duration accounting, and lifecycle/error event builders remain future audit work.

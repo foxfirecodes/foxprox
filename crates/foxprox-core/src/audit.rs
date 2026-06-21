@@ -2,7 +2,7 @@ use std::collections::VecDeque;
 use std::net::IpAddr;
 
 use crate::attribution::Hostname;
-use crate::policy::{Decision, DenialReason, DenyBehavior};
+use crate::policy::{Decision, DenialReason, DenyBehavior, PolicyRequest};
 use crate::types::{Endpoint, Frontend, HostnameConfidence, HostnameSource, Protocol, SandboxId};
 
 /// Structured audit event. Serialization is intentionally left to outer crates;
@@ -22,6 +22,8 @@ pub struct AuditEvent {
     pub decision: Option<AuditDecision>,
     pub rule_id: Option<String>,
     pub reason: Option<DenialReason>,
+    pub http_method: Option<String>,
+    pub http_path_query: Option<String>,
     pub byte_count: Option<u64>,
 }
 
@@ -32,10 +34,36 @@ pub struct AuditPolicyContext {
     pub kind: AuditEventKind,
     pub frontend: Frontend,
     pub protocol: Protocol,
+    pub source: Option<Endpoint>,
     pub destination: Option<Endpoint>,
     pub hostname: Option<Hostname>,
     pub hostname_source: HostnameSource,
     pub hostname_confidence: HostnameConfidence,
+    pub http_method: Option<String>,
+    pub http_path_query: Option<String>,
+}
+
+impl AuditPolicyContext {
+    pub fn from_request(
+        timestamp_millis: u64,
+        kind: AuditEventKind,
+        request: &PolicyRequest,
+    ) -> Self {
+        Self {
+            timestamp_millis,
+            sandbox_id: request.sandbox_id.clone(),
+            kind,
+            frontend: request.frontend,
+            protocol: request.protocol,
+            source: request.source,
+            destination: request.destination,
+            hostname: request.attribution.hostname.clone(),
+            hostname_source: request.attribution.source,
+            hostname_confidence: request.attribution.confidence,
+            http_method: request.http_method.clone(),
+            http_path_query: request.http_path_query.clone(),
+        }
+    }
 }
 
 impl AuditEvent {
@@ -64,7 +92,7 @@ impl AuditEvent {
             kind: context.kind,
             frontend: Some(context.frontend),
             protocol: Some(context.protocol),
-            source: None,
+            source: context.source,
             destination: context.destination,
             hostname: context.hostname,
             hostname_source: context.hostname_source,
@@ -72,6 +100,8 @@ impl AuditEvent {
             decision: audit_decision,
             rule_id,
             reason,
+            http_method: context.http_method,
+            http_path_query: context.http_path_query,
             byte_count: None,
         }
     }
@@ -176,6 +206,7 @@ mod tests {
                 kind: AuditEventKind::TcpConnect,
                 frontend: Frontend::Tun,
                 protocol: Protocol::Tcp,
+                source: None,
                 destination: Some(Endpoint::tcp(
                     IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
                     443,
@@ -183,6 +214,8 @@ mod tests {
                 hostname: None,
                 hostname_source: HostnameSource::None,
                 hostname_confidence: HostnameConfidence::None,
+                http_method: None,
+                http_path_query: None,
             },
             &decision,
         )
@@ -224,5 +257,48 @@ mod tests {
         );
         assert_eq!(buffer.len(), 1);
         assert_eq!(buffer.capacity(), 1);
+    }
+
+    #[test]
+    fn audit_context_from_policy_request_preserves_source_and_http_metadata() {
+        let request = PolicyRequest::new(Protocol::Http)
+            .with_destination(Endpoint::tcp(
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+                80,
+            ))
+            .with_attribution(crate::attribution::HostAttribution::plaintext_http(
+                Hostname::parse("www.example.com").unwrap(),
+            ))
+            .with_http_metadata("GET", "/v1/resource?debug=false");
+        let request = PolicyRequest {
+            sandbox_id: SandboxId::new("sandbox-http"),
+            source: Some(Endpoint::tcp(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 43210)),
+            ..request
+        };
+
+        let event = AuditEvent::from_policy_decision(
+            AuditPolicyContext::from_request(42, AuditEventKind::HttpRequest, &request),
+            &Decision::Deny {
+                behavior: DenyBehavior::Drop,
+                reason: DenialReason::RuleDeny,
+                rule_id: Some("deny-debug".into()),
+            },
+        );
+
+        assert_eq!(event.timestamp_millis, 42);
+        assert_eq!(event.sandbox_id.as_str(), "sandbox-http");
+        assert_eq!(event.kind, AuditEventKind::HttpRequest);
+        assert_eq!(event.source, request.source);
+        assert_eq!(event.destination, request.destination);
+        assert_eq!(event.hostname.as_ref().unwrap().as_str(), "www.example.com");
+        assert_eq!(event.hostname_source, HostnameSource::PlaintextHttpHost);
+        assert_eq!(event.hostname_confidence, HostnameConfidence::High);
+        assert_eq!(event.http_method.as_deref(), Some("GET"));
+        assert_eq!(
+            event.http_path_query.as_deref(),
+            Some("/v1/resource?debug=false")
+        );
+        assert_eq!(event.reason, Some(DenialReason::RuleDeny));
+        assert_eq!(event.rule_id.as_deref(), Some("deny-debug"));
     }
 }

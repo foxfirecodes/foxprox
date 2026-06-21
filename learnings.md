@@ -41,3 +41,7 @@ DNS address attribution should require every stored A/AAAA answer owner to match
 ## 2026-06-21 - HTTP request metadata must be explicit for path policy
 
 HTTP path/method rules should not act as wildcards when request metadata is absent. Missing parsed method/path must fail to match HTTP-specific rules so generic TCP/domain events cannot accidentally receive path-scoped authorization.
+
+## 2026-06-21 - Audit schema must follow policy dimensions
+
+Whenever policy gains a new security decision dimension, audit context needs a matching field or builder path. HTTP method/path decisions are not reviewable if audit records only retain host and destination metadata.
