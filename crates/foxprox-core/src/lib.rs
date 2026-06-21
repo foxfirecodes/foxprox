@@ -30,7 +30,7 @@ pub use dns::{
     DnsQuestion, DnsRecordType,
 };
 pub use event::{explicit_proxy_attribution, NormalizedEvent};
-pub use flow::{FlowTable, UdpClass, UdpFlow, UdpTimeouts};
+pub use flow::{classify_udp, FlowTable, UdpClass, UdpFlow, UdpTimeouts};
 pub use frontend::{
     parse_http_proxy_request_line, parse_socks5_connect, parse_socks5_greeting,
     protocol_for_http_proxy_line, HttpProxyRequestLine, ProxyParseError, SocksConnectRequest,

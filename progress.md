@@ -292,3 +292,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: DNS responses are parsed/cached only through explicit cache APIs, not yet connected to UDP response handling; resolver forwarding is still absent.
 - Exact next step: commit DNS query event wiring, then add UDP flow table integration for DNS/QUIC/generic packet attempts before adding egress.
+
+## 2026-06-21T23:17:35Z
+- Current objective: integrate UDP packet observations with flow tracking before adding any host UDP egress.
+- Files changed: `crates/foxprox-core/src/lib.rs`, `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 43 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 13 runtime tests, and 7 setup tests passed. New runtime tests prove UDP packet flow recording classifies broker DNS, counts sandbox datagram bytes across repeated packets, and assigns QUIC candidate flows the longer timeout class.
+- Commit hash when committed: pending.
+- Remaining risks: flow recording is not yet invoked by a continuous TUN loop; UDP host egress and DNS response routing remain absent.
+- Exact next step: commit UDP flow tracking integration, then add a minimal broker DNS resolver abstraction that handles parsed DNS query events without opening arbitrary UDP egress.

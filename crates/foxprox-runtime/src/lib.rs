@@ -7,10 +7,10 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    parse_dns_query, parse_ip_packet, synthesize_icmpv4_echo_reply, AuditSink, Decision,
-    DecisionAction, Endpoint, FrontendKind, HostnameAttribution, NormalizedEvent, PacketError,
-    ParsedIpPacket, Protocol, QuicStatus, SandboxId, Udpv4Packet, UnsupportedIpv4Protocol,
-    VerificationKernel,
+    classify_udp, parse_dns_query, parse_ip_packet, synthesize_icmpv4_echo_reply, AuditSink,
+    Decision, DecisionAction, Endpoint, FlowKey, FlowTable, FrontendKind, HostnameAttribution,
+    NormalizedEvent, PacketError, ParsedIpPacket, Protocol, QuicStatus, SandboxId, UdpFlow,
+    Udpv4Packet, UnsupportedIpv4Protocol, VerificationKernel,
 };
 use std::io::{self, Read, Write};
 use std::net::IpAddr;
@@ -256,6 +256,21 @@ fn unsupported_or_malformed_outcome(packet: &[u8]) -> io::Result<TunPacketOutcom
     }
 }
 
+pub fn record_udpv4_flow(
+    table: &mut FlowTable,
+    packet: &Udpv4Packet<'_>,
+    broker_dns: &[IpAddr],
+    now_millis: u128,
+) -> UdpFlow {
+    let source = Endpoint::new(IpAddr::V4(packet.source), packet.source_port);
+    let destination = Endpoint::new(IpAddr::V4(packet.destination), packet.destination_port);
+    let class = classify_udp(&destination, broker_dns);
+    let key = FlowKey::new(Protocol::Udp, source, destination);
+    table
+        .upsert_udp(key, class, now_millis, (8 + packet.payload.len()) as u64)
+        .clone()
+}
+
 pub fn udpv4_packet_to_event(sandbox_id: SandboxId, packet: &Udpv4Packet<'_>) -> NormalizedEvent {
     udpv4_packet_to_event_with_broker_dns(sandbox_id, packet, &[])
 }
@@ -319,7 +334,7 @@ mod tests {
     use super::*;
     use foxprox_core::{
         DecisionAction, DecisionReason, PolicyConfig, PolicyEngine, PolicyRule, RuleSet, SniStatus,
-        VecAuditSink,
+        UdpClass, UdpTimeouts, VecAuditSink,
     };
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -411,6 +426,55 @@ mod tests {
         assert_eq!(&writer[28..], b"ok");
         assert_eq!(checksum(&writer[..20]), 0);
         assert_eq!(checksum(&writer[20..]), 0);
+    }
+
+    #[test]
+    fn udp_flow_recording_classifies_and_counts_datagrams() {
+        let packet = Udpv4Packet {
+            source: Ipv4Addr::new(10, 66, 0, 2),
+            destination: Ipv4Addr::new(10, 66, 0, 1),
+            source_port: 53000,
+            destination_port: 53,
+            payload: b"dns?",
+        };
+        let mut table = FlowTable::new();
+
+        let flow = record_udpv4_flow(
+            &mut table,
+            &packet,
+            &[IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+            100,
+        );
+        assert_eq!(flow.class, UdpClass::BrokerDns);
+        assert_eq!(flow.bytes_from_sandbox, 12);
+
+        let flow = record_udpv4_flow(
+            &mut table,
+            &packet,
+            &[IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+            110,
+        );
+        assert_eq!(flow.bytes_from_sandbox, 24);
+        assert_eq!(flow.last_seen_millis, 110);
+    }
+
+    #[test]
+    fn udp_flow_recording_applies_quic_timeout_class() {
+        let packet = Udpv4Packet {
+            source: Ipv4Addr::new(10, 66, 0, 2),
+            destination: Ipv4Addr::new(93, 184, 216, 34),
+            source_port: 53000,
+            destination_port: 443,
+            payload: b"quic?",
+        };
+        let mut table = FlowTable::new();
+        let flow = record_udpv4_flow(&mut table, &packet, &[], 0);
+        assert_eq!(flow.class, UdpClass::QuicCandidate);
+
+        assert!(table
+            .expire_udp(121_000, &UdpTimeouts::default())
+            .is_empty());
+        assert_eq!(table.expire_udp(181_000, &UdpTimeouts::default()).len(), 1);
     }
 
     #[test]
