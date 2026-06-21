@@ -56,6 +56,8 @@ pub struct EgressOutcome {
     pub bytes_sent: u64,
     pub bytes_received: u64,
     pub message: String,
+    /// Optional response payload to send back through a transparent frontend.
+    pub response_payload: Vec<u8>,
 }
 
 /// Synchronous host egress abstraction. Production crates can wrap async sockets behind a richer adapter.
@@ -195,6 +197,7 @@ mod tests {
                 bytes_sent: 5,
                 bytes_received: 7,
                 message: "mock connected".to_string(),
+                response_payload: Vec::new(),
             },
         );
         let mut harness = BrokerHarness::new(policy, egress);

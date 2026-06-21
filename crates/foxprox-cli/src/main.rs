@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 use std::os::unix::net::UnixListener;
 
 use foxprox_core::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
+use foxprox_core::egress::{EgressBackend, EgressOutcome, EgressRequest};
+use foxprox_core::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule, RuleAction};
+use foxprox_core::runtime::TransparentUdpRuntime;
 use foxprox_core::scenario::{run_scenario, ScenarioName};
 
 fn main() -> ExitCode {
@@ -568,33 +571,11 @@ fn run_writeback_smoke() -> Result<AuditRecord, String> {
 
 fn synthesize_udp_echo_reply(request_packet: &[u8], payload: &[u8]) -> Result<Vec<u8>, String> {
     let parsed = foxprox_core::packet::parse_ipv4(request_packet)?;
-    if parsed.protocol_number != 17 {
-        return Err("not UDP".to_string());
-    }
     let udp = foxprox_core::packet::parse_udp(parsed.payload)?;
     if !matches!(udp.destination_port, 5353 | 5354) || udp.payload != b"probe" {
         return Err("not a harness UDP probe".to_string());
     }
-    let udp_len = 8 + payload.len();
-    let total_len = 20 + udp_len;
-    let mut out = vec![0_u8; total_len];
-    out[0] = 0x45;
-    out[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
-    out[4..6].copy_from_slice(&request_packet[4..6]);
-    out[8] = 64;
-    out[9] = 17;
-    out[12..16].copy_from_slice(&parsed.destination.octets());
-    out[16..20].copy_from_slice(&parsed.source.octets());
-    let header_sum = foxprox_core::packet::checksum(&out[..20]);
-    out[10..12].copy_from_slice(&header_sum.to_be_bytes());
-
-    let udp_out = &mut out[20..];
-    udp_out[0..2].copy_from_slice(&udp.destination_port.to_be_bytes());
-    udp_out[2..4].copy_from_slice(&udp.source_port.to_be_bytes());
-    udp_out[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
-    udp_out[6..8].copy_from_slice(&[0, 0]);
-    udp_out[8..].copy_from_slice(payload);
-    Ok(out)
+    foxprox_core::packet::synthesize_udp_reply(request_packet, payload)
 }
 
 #[cfg(unix)]
@@ -711,11 +692,18 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
 
     let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
     fd_handoff::set_nonblocking(fd)?;
-    let egress = UdpSocket::bind("127.0.0.1:0")
-        .map_err(|err| format!("failed to bind host UDP egress socket: {err}"))?;
-    egress
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|err| format!("failed to set host UDP egress timeout: {err}"))?;
+    let destination_ip = "203.0.113.10"
+        .parse()
+        .map_err(|err| format!("invalid UDP smoke destination IP: {err}"))?;
+    let policy = PolicyEngine::new(
+        PolicyConfig::deny_by_default().with_rule(
+            PolicyRule::new("allow-udp-forward-smoke", RuleAction::Allow)
+                .protocol(Protocol::Udp)
+                .destination(Cidr::host(destination_ip))
+                .port(5354),
+        ),
+    );
+    let mut runtime = TransparentUdpRuntime::new(policy, LocalUdpEgress::new(echo_addr)?);
     let mut buf = [0_u8; 2048];
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut packets_read = 0_u64;
@@ -726,26 +714,10 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
-                if let Ok(parsed) = foxprox_core::packet::parse_ipv4(packet) {
-                    if parsed.protocol_number == 17 {
-                        if let Ok(udp) = foxprox_core::packet::parse_udp(parsed.payload) {
-                            if udp.destination_port == 5354 && udp.payload == b"probe" {
-                                egress
-                                    .send_to(udp.payload, echo_addr)
-                                    .map_err(|err| format!("host UDP egress send failed: {err}"))?;
-                                let mut reply_payload = [0_u8; 2048];
-                                let (reply_len, _) =
-                                    egress.recv_from(&mut reply_payload).map_err(|err| {
-                                        format!("host UDP egress receive failed: {err}")
-                                    })?;
-                                let reply =
-                                    synthesize_udp_echo_reply(packet, &reply_payload[..reply_len])?;
-                                fd_handoff::write_all_fd(fd, &reply)?;
-                                forwarded = true;
-                                break;
-                            }
-                        }
-                    }
+                if let Some(reply) = runtime.handle_ipv4_packet("udp-forward-smoke", packet)? {
+                    fd_handoff::write_all_fd(fd, &reply)?;
+                    forwarded = true;
+                    break;
                 }
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -790,6 +762,7 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
         .map_err(|_| "host UDP echo fixture thread panicked".to_string())?;
     echo_result?;
 
+    let runtime_audit = runtime.audit.last().cloned();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let mut record = AuditRecord::new(
@@ -812,6 +785,16 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
     .with_metadata("packets_read", packets_read.to_string())
     .with_metadata("forwarded", forwarded.to_string())
     .with_metadata("egress_fixture", echo_addr.to_string());
+    if let Some(audit) = runtime_audit {
+        let runtime_audit_json = audit.to_json_line();
+        record = record
+            .with_metadata("policy_decision", audit.decision.as_str())
+            .with_metadata("policy_reason", audit.reason.clone())
+            .with_metadata("runtime_audit", runtime_audit_json);
+        if let Some(rule_id) = audit.rule_id {
+            record = record.with_metadata("rule_id", rule_id);
+        }
+    }
     if !stdout.is_empty() {
         record = record.with_metadata("stdout", stdout);
     }
@@ -819,6 +802,48 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
         record = record.with_metadata("stderr", stderr);
     }
     Ok(record)
+}
+
+#[cfg(unix)]
+struct LocalUdpEgress {
+    socket: UdpSocket,
+    fixture: std::net::SocketAddr,
+}
+
+#[cfg(unix)]
+impl LocalUdpEgress {
+    fn new(fixture: std::net::SocketAddr) -> Result<Self, String> {
+        let socket = UdpSocket::bind("127.0.0.1:0")
+            .map_err(|err| format!("failed to bind host UDP egress socket: {err}"))?;
+        socket
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|err| format!("failed to set host UDP egress timeout: {err}"))?;
+        Ok(Self { socket, fixture })
+    }
+}
+
+#[cfg(unix)]
+impl EgressBackend for LocalUdpEgress {
+    fn execute(&mut self, request: &EgressRequest) -> Result<EgressOutcome, String> {
+        let EgressRequest::UdpDatagram { bytes, .. } = request else {
+            return Err("local UDP egress only supports UDP datagrams".to_string());
+        };
+        self.socket
+            .send_to(bytes, self.fixture)
+            .map_err(|err| format!("host UDP egress send failed: {err}"))?;
+        let mut reply_payload = [0_u8; 2048];
+        let (reply_len, _) = self
+            .socket
+            .recv_from(&mut reply_payload)
+            .map_err(|err| format!("host UDP egress receive failed: {err}"))?;
+        Ok(EgressOutcome {
+            connected: true,
+            bytes_sent: bytes.len() as u64,
+            bytes_received: reply_len as u64,
+            message: "local UDP fixture egress".to_string(),
+            response_payload: reply_payload[..reply_len].to_vec(),
+        })
+    }
 }
 
 #[cfg(unix)]

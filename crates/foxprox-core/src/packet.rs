@@ -160,6 +160,37 @@ pub fn parse_icmp_echo_request(payload: &[u8]) -> Result<IcmpEcho<'_>, String> {
     })
 }
 
+/// Synthesize an IPv4 UDP reply by reversing source/destination and UDP ports.
+///
+/// The alpha harness writes a zero UDP checksum for IPv4, which is permitted and keeps this helper
+/// focused on proving packet directionality rather than pseudo-header checksum edge cases.
+pub fn synthesize_udp_reply(request_packet: &[u8], payload: &[u8]) -> Result<Vec<u8>, String> {
+    let parsed = parse_ipv4(request_packet)?;
+    if parsed.protocol_number != 17 {
+        return Err("not UDP".to_string());
+    }
+    let udp = parse_udp(parsed.payload)?;
+    let udp_len = 8 + payload.len();
+    let total_len = 20 + udp_len;
+    let mut out = vec![0u8; total_len];
+    out[0] = 0x45;
+    out[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+    out[4..6].copy_from_slice(&request_packet[4..6]);
+    out[8] = 64;
+    out[9] = 17;
+    out[12..16].copy_from_slice(&parsed.destination.octets());
+    out[16..20].copy_from_slice(&parsed.source.octets());
+    let header_sum = checksum(&out[..20]);
+    out[10..12].copy_from_slice(&header_sum.to_be_bytes());
+
+    let udp_out = &mut out[20..];
+    udp_out[0..2].copy_from_slice(&udp.destination_port.to_be_bytes());
+    udp_out[2..4].copy_from_slice(&udp.source_port.to_be_bytes());
+    udp_out[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    udp_out[8..].copy_from_slice(payload);
+    Ok(out)
+}
+
 /// Synthesize an IPv4 ICMP echo reply by reversing source/destination and recalculating checksums.
 pub fn synthesize_icmp_echo_reply(request_packet: &[u8]) -> Result<Vec<u8>, String> {
     let parsed = parse_ipv4(request_packet)?;
@@ -252,6 +283,24 @@ mod tests {
         let sum = checksum(&packet[..20]);
         packet[10..12].copy_from_slice(&sum.to_be_bytes());
         assert!(parse_ipv4(&packet).unwrap_err().contains("fragmentation"));
+    }
+
+    #[test]
+    fn synthesizes_valid_udp_reply() {
+        let request = ipv4_packet(
+            17,
+            &[
+                0xc0, 0x00, 0x14, 0xea, 0x00, 0x0d, 0, 0, b'p', b'r', b'o', b'b', b'e',
+            ],
+        );
+        let reply = synthesize_udp_reply(&request, b"response").unwrap();
+        let ipv4 = parse_ipv4(&reply).unwrap();
+        let udp = parse_udp(ipv4.payload).unwrap();
+        assert_eq!(ipv4.source, Ipv4Addr::new(10, 0, 2, 1));
+        assert_eq!(ipv4.destination, Ipv4Addr::new(10, 0, 2, 2));
+        assert_eq!(udp.source_port, 5354);
+        assert_eq!(udp.destination_port, 49152);
+        assert_eq!(udp.payload, b"response");
     }
 
     #[test]

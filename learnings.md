@@ -25,3 +25,7 @@
 ## 2026-06-21 — Packet write-back smoke constraints
 
 - `ping` inside the bwrap target failed before sending traffic because the target lacked `CAP_NET_RAW`/setuid ping privileges after setup capability drop (`/usr/bin/ping: socket: Operation not permitted`). For unprivileged write-back smoke in this environment, a UDP socket probe is a better reusable pattern than ICMP ping. Keep ICMP synthesis covered by deterministic packet fixtures until a safe ping capability strategy is defined.
+
+## 2026-06-21 — Transparent UDP runtime boundary
+
+- Keep Linux fd handoff/read/write code in the CLI or future device crate, but keep packet parsing, policy-before-egress, audit generation, and UDP reply synthesis in platform-independent core runtime code. This makes environment smokes smaller and gives deterministic tests for allow/deny behavior before involving bwrap.

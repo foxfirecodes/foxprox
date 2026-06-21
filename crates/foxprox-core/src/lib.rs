@@ -15,6 +15,7 @@ pub mod integration;
 pub mod origin;
 pub mod packet;
 pub mod policy;
+pub mod runtime;
 pub mod scenario;
 
 /// Stable crate marker used by scaffold tests and downstream workspace checks.

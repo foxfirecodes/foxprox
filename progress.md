@@ -179,3 +179,27 @@
 - Interpretation: Milestone 4 has a first local UDP forwarding proof: not just synthetic write-back, but a sandbox datagram bridged through a host UDP socket and returned over the broker-owned TUN fd. This is still harness code, not the final broker runtime abstraction.
 - Next verification gap: move the repeated TUN fd read/UDP reply logic into a reusable broker runtime/helper boundary and add policy/audit decisions around the environment smoke forwarding path.
 - Commit hash after commit: pending.
+
+## 2026-06-21T14:50:00Z — UDP forwarding smoke commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs progress.md && git commit -m "Add local UDP forwarding smoke"`
+- Environment assumptions: UDP forwarding smoke and workspace tests above were verified before commit.
+- Expected result: commit captures local UDP forwarding proof over the handed-off TUN fd.
+- Observed result: commit `d7e8d3b` created with 3 files changed.
+- Relevant output excerpt: `[harness-lab d7e8d3b] Add local UDP forwarding smoke`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: UDP forwarding proof checkpoint is preserved.
+- Next verification gap: reusable broker runtime/helper boundary plus policy/audit around environment smoke forwarding.
+- Commit hash after commit: d7e8d3b.
+
+## 2026-06-21T15:20:00Z — Reusable transparent UDP runtime boundary
+
+- Command executed: `cargo fmt --all && cargo test --all`; `cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run udp-forward-smoke`; `target/debug/foxprox-lab run writeback-smoke`
+- Environment assumptions: deterministic runtime tests do not require privileges; environment smoke still requires bwrap, `/dev/net/tun`, local Python, and Unix fd handoff support.
+- Expected result: introduce a platform-independent runtime boundary for one TUN IPv4/UDP packet that evaluates policy, calls egress only when allowed, emits structured audit, and returns an optional TUN reply packet; preserve the existing environment UDP forwarding and write-back smoke behavior.
+- Observed result: pass. `foxprox-core` increased to 33 tests; `foxprox-cli` remained 2 tests; `foxproxsetup` remained 7 tests. `udp-forward-smoke` emitted `decision":"allow"` with `policy_decision":"allow"`, `policy_reason":"matched allow rule"`, and `rule_id":"allow-udp-forward-smoke"`. `writeback-smoke` still emitted `decision":"allow"`.
+- Relevant output excerpt: `runtime::tests::allowed_udp_packet_reaches_egress_and_returns_tun_reply ... ok`; `"runtime_audit":"{...\"frontend\":\"tun\",\"protocol\":\"udp\",\"source\":\"10.0.2.2:58140\",\"destination\":\"203.0.113.10:5354\",...}"`.
+- Changed files: `crates/foxprox-core/src/{lib.rs,packet.rs,egress.rs,runtime.rs}`, `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`, `learnings.md`.
+- Interpretation: UDP forwarding is no longer just ad hoc CLI harness logic. The core now has a reusable transparent UDP runtime that proves policy-before-egress, denied-no-egress, audit emission, and packet reply synthesis without Linux dependencies; the bwrap smoke uses that runtime for the environment proof.
+- Next verification gap: add a negative environment smoke that proves denied UDP traffic from the sandbox does not reach the host egress fixture and times out/fails closed with an audit denial.
+- Commit hash after commit: pending.
