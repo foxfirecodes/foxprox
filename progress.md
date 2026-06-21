@@ -44,3 +44,15 @@
 - Commit hash when committed: previous packet proof committed as `67e6bf2`; proxy parser commit pending.
 - Remaining risks: this is parser/kernel behavior only; no listener sockets, proxy forwarding loops, host egress sockets, or malformed-request fuzzing yet.
 - Exact next step: commit parser slice, then add config validation and deny-by-default examples that connect parsed proxy/TUN metadata to policy decisions.
+
+## 2026-06-21T16:58:10Z
+- Current objective: add explicit policy configuration validation so invalid defaults and ambiguous domain rules fail before runtime.
+- Files changed: `crates/foxprox-core/src/lib.rs`, `crates/foxprox-core/src/config.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 29 unit tests passed. New tests prove duplicate rule IDs, global `RequireBrokerDns` defaults, and domain rules without explicit attribution confidence are rejected, while a valid domain rule with broker DNS passes.
+- Commit hash when committed: previous proxy parser slice committed as `ed06d5f`; config validation commit pending.
+- Remaining risks: no file-format parser exists yet; callers must construct `PolicyConfig` in memory until a serde-free or serde-backed loader is selected.
+- Exact next step: commit config validation, then add end-to-end normalized decision scenarios that combine DNS/TLS/HTTP/SOCKS metadata with policy decisions and audit records.

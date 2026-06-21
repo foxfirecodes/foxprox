@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod audit;
+pub mod config;
 pub mod dns;
 pub mod flow;
 pub mod frontend;
@@ -18,6 +19,7 @@ pub mod policy;
 pub mod types;
 
 pub use audit::{AuditError, AuditEvent, AuditEventKind, AuditSink, VecAuditSink};
+pub use config::{validate_policy_config, ConfigError};
 pub use dns::{DnsCache, DnsObservation};
 pub use flow::{FlowTable, UdpClass, UdpFlow, UdpTimeouts};
 pub use frontend::{
