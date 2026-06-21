@@ -31,6 +31,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
                 println!("{name}");
             }
             println!("env-smoke");
+            println!("tun-smoke");
             Ok(())
         }
         [cmd, scenario] if cmd == "run" => run_named_scenario(scenario),
@@ -44,6 +45,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
 fn run_named_scenario(scenario: &str) -> Result<(), String> {
     let records = if scenario == "env-smoke" {
         env_smoke_records()
+    } else if scenario == "tun-smoke" {
+        tun_smoke_records()
     } else {
         run_scenario(ScenarioName::parse(scenario)?)
     };
@@ -55,7 +58,7 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke>",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke>",
         ScenarioName::list().join("|")
     );
 }
@@ -107,6 +110,77 @@ fn env_smoke_records() -> Vec<AuditRecord> {
         .with_frontend(Frontend::Harness)
         .with_metadata("bwrap_version", bwrap_text),
     ]
+}
+
+fn tun_smoke_records() -> Vec<AuditRecord> {
+    let output = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--proc",
+            "/proc",
+            "--",
+            "/bin/sh",
+            "-lc",
+            "ip tuntap add dev foxprox0 mode tun && ip addr add 10.0.2.2/24 dev foxprox0 && ip link set foxprox0 up && ip -o addr show dev foxprox0",
+        ])
+        .output();
+
+    match output {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let mut record = AuditRecord::new(
+                EventKind::TunConfigured,
+                "tun-smoke",
+                if output.status.success() {
+                    Decision::Allow
+                } else {
+                    Decision::FailClosed
+                },
+                if output.status.success() {
+                    "bwrap namespace TUN setup command succeeded"
+                } else {
+                    "bwrap namespace TUN setup command failed"
+                },
+            )
+            .with_frontend(Frontend::Harness)
+            .with_protocol(Protocol::Unsupported)
+            .with_metadata("status", output.status.to_string());
+            if !stdout.is_empty() {
+                record = record.with_metadata("stdout", stdout);
+            }
+            if !stderr.is_empty() {
+                record = record.with_metadata("stderr", stderr);
+            }
+            vec![record]
+        }
+        Err(err) => vec![AuditRecord::new(
+            EventKind::TunConfigured,
+            "tun-smoke",
+            Decision::FailClosed,
+            format!("failed to execute bwrap TUN smoke: {err}"),
+        )
+        .with_frontend(Frontend::Harness)
+        .with_protocol(Protocol::Unsupported)],
+    }
 }
 
 #[cfg(test)]

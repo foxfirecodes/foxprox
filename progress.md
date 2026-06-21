@@ -47,3 +47,15 @@
 - Interpretation: the foundation checkpoint is preserved; this follow-up ledger note records the actual commit hash.
 - Next verification gap: real namespace/TUN setup helper and smoltcp-backed forwarding proof.
 - Commit hash after commit: 9f0a657.
+
+## 2026-06-21T00:25:00Z — Environment-dependent bwrap/TUN smoke command
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run tun-smoke`
+- Environment assumptions: local system has `bwrap`, `/dev/net/tun`, `/usr/bin/ip`, and user-namespace-compatible temporary `CAP_NET_ADMIN` inside `bwrap --unshare-net`.
+- Expected result: deterministic tests still pass; `tun-smoke` attempts real TUN creation/configuration inside a throwaway bwrap network namespace and reports structured audit output.
+- Observed result: pass. Tests remained green (`foxprox-core` 30 tests, `foxprox-cli` 2 tests). `tun-smoke` returned `decision":"allow"` and `status":"exit status: 0"`.
+- Relevant output excerpt: `"reason":"bwrap namespace TUN setup command succeeded"`; `"stdout":"2: foxprox0    inet 10.0.2.2/24 scope global foxprox0..."`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: Milestone 0 environment capability is now reproducible by a local harness command, although it uses shell/ip as the setup action rather than the future `foxproxsetup` binary and does not perform fd handoff.
+- Next verification gap: implement a real setup-helper binary or integration crate that performs TUN setup and fd handoff without shelling out to `ip`.
+- Commit hash after commit: pending.
