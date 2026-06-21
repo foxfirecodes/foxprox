@@ -26,8 +26,8 @@ pub use audit::{
 };
 pub use config::{validate_policy_config, ConfigError};
 pub use dns::{
-    parse_dns_query, parse_dns_response_observation, DnsCache, DnsObservation, DnsParseError,
-    DnsQuestion, DnsRecordType,
+    parse_dns_query, parse_dns_response_observation, synthesize_dns_response, DnsCache,
+    DnsObservation, DnsParseError, DnsQuestion, DnsRecordType,
 };
 pub use event::{explicit_proxy_attribution, NormalizedEvent};
 pub use flow::{classify_udp, FlowTable, UdpClass, UdpFlow, UdpTimeouts};

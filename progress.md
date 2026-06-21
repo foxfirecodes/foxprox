@@ -304,3 +304,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: flow recording is not yet invoked by a continuous TUN loop; UDP host egress and DNS response routing remain absent.
 - Exact next step: commit UDP flow tracking integration, then add a minimal broker DNS resolver abstraction that handles parsed DNS query events without opening arbitrary UDP egress.
+
+## 2026-06-21T23:24:45Z
+- Current objective: add minimal DNS response synthesis for broker-controlled resolver behavior without arbitrary UDP egress.
+- Files changed: `crates/foxprox-core/src/dns.rs`, `crates/foxprox-core/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on formatting for new DNS synthesis tests; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 45 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 13 runtime tests, and 7 setup tests passed. New DNS tests prove query-type-filtered response synthesis for A records, empty successful responses when no address matches the requested type, and parseability/cacheability of synthesized responses.
+- Commit hash when committed: pending.
+- Remaining risks: resolver backing data is not yet configured, denied DNS answers are not represented, and synthesized DNS packets are not yet written back through TUN/UDP packet synthesis.
+- Exact next step: commit DNS response synthesis, then add a static broker DNS resolver component that maps parsed DNS queries to synthesized allowed/empty responses and cache observations.

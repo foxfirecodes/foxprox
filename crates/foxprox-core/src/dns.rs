@@ -121,6 +121,59 @@ pub enum DnsParseError {
 }
 
 pub fn parse_dns_query(packet: &[u8]) -> Result<DnsQuestion, DnsParseError> {
+    parse_dns_query_with_question_end(packet).map(|(question, _)| question)
+}
+
+pub fn synthesize_dns_response(
+    query_packet: &[u8],
+    addresses: &[IpAddr],
+    ttl_secs: u32,
+) -> Result<Vec<u8>, DnsParseError> {
+    let (question, question_end) = parse_dns_query_with_question_end(query_packet)?;
+    let matching_addresses: Vec<IpAddr> = addresses
+        .iter()
+        .copied()
+        .filter(|address| {
+            matches!(
+                (question.record_type, address),
+                (DnsRecordType::A, IpAddr::V4(_)) | (DnsRecordType::Aaaa, IpAddr::V6(_))
+            )
+        })
+        .collect();
+
+    let mut response = Vec::with_capacity(question_end + 16 * matching_addresses.len());
+    response.extend_from_slice(&query_packet[..2]);
+    response.extend_from_slice(&0x8180u16.to_be_bytes());
+    response.extend_from_slice(&1u16.to_be_bytes());
+    response.extend_from_slice(&(matching_addresses.len() as u16).to_be_bytes());
+    response.extend_from_slice(&0u16.to_be_bytes());
+    response.extend_from_slice(&0u16.to_be_bytes());
+    response.extend_from_slice(&query_packet[12..question_end]);
+
+    for address in matching_addresses {
+        response.extend_from_slice(&[0xc0, 0x0c]);
+        match address {
+            IpAddr::V4(ip) => {
+                response.extend_from_slice(&1u16.to_be_bytes());
+                response.extend_from_slice(&1u16.to_be_bytes());
+                response.extend_from_slice(&ttl_secs.to_be_bytes());
+                response.extend_from_slice(&4u16.to_be_bytes());
+                response.extend_from_slice(&ip.octets());
+            }
+            IpAddr::V6(ip) => {
+                response.extend_from_slice(&28u16.to_be_bytes());
+                response.extend_from_slice(&1u16.to_be_bytes());
+                response.extend_from_slice(&ttl_secs.to_be_bytes());
+                response.extend_from_slice(&16u16.to_be_bytes());
+                response.extend_from_slice(&ip.octets());
+            }
+        }
+    }
+
+    Ok(response)
+}
+
+fn parse_dns_query_with_question_end(packet: &[u8]) -> Result<(DnsQuestion, usize), DnsParseError> {
     let header = DnsHeader::parse(packet)?;
     if header.is_response {
         return Err(DnsParseError::NotAQuery);
@@ -136,9 +189,14 @@ pub fn parse_dns_query(packet: &[u8]) -> Result<DnsQuestion, DnsParseError> {
         });
     }
     let (hostname, offset) = parse_name(packet, 12)?;
-    parse_question_tail(packet, offset).map(|(record_type, _)| DnsQuestion {
-        hostname,
-        record_type,
+    parse_question_tail(packet, offset).map(|(record_type, end)| {
+        (
+            DnsQuestion {
+                hostname,
+                record_type,
+            },
+            end,
+        )
     })
 }
 
@@ -367,6 +425,41 @@ mod tests {
             parse_dns_query(&build_query(0x0100, 2)),
             Err(DnsParseError::QuestionCountNotOne { count: 2 })
         );
+    }
+
+    #[test]
+    fn synthesizes_dns_response_for_matching_query_type() {
+        let query = build_query(0x0100, 1);
+        let response = synthesize_dns_response(
+            &query,
+            &[
+                IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+            ],
+            60,
+        )
+        .unwrap();
+        let observation = parse_dns_response_observation(&response, 100)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(observation.hostname.as_str(), "example.com");
+        assert_eq!(
+            observation.addresses,
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
+        );
+        assert_eq!(observation.ttl_millis, 60_000);
+    }
+
+    #[test]
+    fn synthesizes_empty_dns_response_when_no_record_type_matches() {
+        let query = build_query(0x0100, 1);
+        let response =
+            synthesize_dns_response(&query, &[IpAddr::V6(Ipv6Addr::LOCALHOST)], 60).unwrap();
+        assert_eq!(&response[6..8], &0u16.to_be_bytes());
+        assert!(parse_dns_response_observation(&response, 100)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
