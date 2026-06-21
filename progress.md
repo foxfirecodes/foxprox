@@ -388,3 +388,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * port-scoped explicit proxy domain rules deny normalized requests with the wrong requested port.
 * Audit evidence: not applicable in this commit; normalized policy requests feed existing audit context builders, with requested-port audit coverage still pending.
 * Residual risk: transparent TLS metadata normalization, DNS metadata normalization, requested-port audit fields, and actual frontend wiring remain future work.
+* Commit hash: 61be355 normalize proxy parser metadata for policy.
