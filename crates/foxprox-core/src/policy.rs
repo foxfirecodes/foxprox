@@ -231,6 +231,109 @@ pub struct PolicyConfig {
     pub rules: Vec<PolicyRule>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyConfigError {
+    pub code: String,
+    pub field: String,
+    pub detail: String,
+}
+
+impl PolicyConfigError {
+    fn new(code: impl Into<String>, field: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            field: field.into(),
+            detail: detail.into(),
+        }
+    }
+}
+
+impl PolicyConfig {
+    pub fn validate(&self) -> Result<(), Vec<PolicyConfigError>> {
+        let mut errors = Vec::new();
+        if self.broker_dns.is_empty() {
+            errors.push(PolicyConfigError::new(
+                "broker_dns_empty",
+                "broker_dns",
+                "at least one broker DNS resolver address is required",
+            ));
+        }
+        if self.default_decision == Decision::RequireBrokerDns {
+            errors.push(PolicyConfigError::new(
+                "invalid_default_decision",
+                "default_decision",
+                "require_broker_dns is not a terminal default policy decision",
+            ));
+        }
+        for (field, value) in [
+            ("udp_timeouts.dns_ms", self.udp_timeouts.dns_ms),
+            ("udp_timeouts.generic_ms", self.udp_timeouts.generic_ms),
+            ("udp_timeouts.quic_ms", self.udp_timeouts.quic_ms),
+            ("udp_timeouts.one_shot_ms", self.udp_timeouts.one_shot_ms),
+        ] {
+            if value == 0 {
+                errors.push(PolicyConfigError::new(
+                    "udp_timeout_zero",
+                    field,
+                    "UDP timeout must be greater than zero milliseconds",
+                ));
+            }
+        }
+        for (index, rule) in self.rules.iter().enumerate() {
+            if rule.id.trim().is_empty() {
+                errors.push(PolicyConfigError::new(
+                    "rule_id_empty",
+                    format!("rules[{index}].id"),
+                    "policy rule IDs must be stable non-empty audit identifiers",
+                ));
+            }
+            if let Some(cidr) = &rule.destination_cidr {
+                let valid = match cidr.network {
+                    IpAddr::V4(_) => cidr.prefix <= 32,
+                    IpAddr::V6(_) => cidr.prefix <= 128,
+                };
+                if !valid {
+                    errors.push(PolicyConfigError::new(
+                        "cidr_prefix_invalid",
+                        format!("rules[{index}].destination_cidr.prefix"),
+                        format!("prefix {} is invalid for {}", cidr.prefix, cidr.network),
+                    ));
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    pub fn reload_audit(&self, sandbox_id: impl Into<String>) -> AuditRecord {
+        let sandbox_id = sandbox_id.into();
+        match self.validate() {
+            Ok(()) => AuditRecord::new(AuditKind::PolicyReload, sandbox_id)
+                .with_frontend(Frontend::Core)
+                .with_decision(Decision::Allow, None)
+                .with_detail("rule_count", self.rules.len().to_string())
+                .with_detail("default_decision", decision_name(self.default_decision))
+                .with_detail("allow_quic", self.allow_quic.to_string())
+                .with_detail("broker_dns_count", self.broker_dns.len().to_string()),
+            Err(errors) => AuditRecord::new(AuditKind::PolicyReload, sandbox_id)
+                .with_frontend(Frontend::Core)
+                .with_decision(Decision::FailClosed, Some(DenialReason::PolicyConfig))
+                .with_detail(
+                    "error_codes",
+                    errors
+                        .iter()
+                        .map(|error| error.code.as_str())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                )
+                .with_detail("error_count", errors.len().to_string()),
+        }
+    }
+}
+
 impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
@@ -616,6 +719,17 @@ impl PolicyEngine {
     }
 }
 
+fn decision_name(decision: Decision) -> &'static str {
+    match decision {
+        Decision::Allow => "allow",
+        Decision::DenyDrop => "deny_drop",
+        Decision::DenyReset => "deny_reset",
+        Decision::DenyIcmpUnreachable => "deny_icmp_unreachable",
+        Decision::RequireBrokerDns => "require_broker_dns",
+        Decision::FailClosed => "fail_closed",
+    }
+}
+
 fn audit_kind_for(request: &PolicyRequest) -> AuditKind {
     match (request.frontend, request.protocol) {
         (_, Protocol::Dns) => AuditKind::DnsQueryDecision,
@@ -657,6 +771,48 @@ mod tests {
 
     fn socket(ip: &str, port: u16) -> NetworkEndpoint {
         NetworkEndpoint::socket(ip.parse().unwrap(), port)
+    }
+
+    #[test]
+    fn policy_config_validation_reports_structured_errors() {
+        let mut config = PolicyConfig {
+            broker_dns: Vec::new(),
+            default_decision: Decision::RequireBrokerDns,
+            ..PolicyConfig::default()
+        };
+        config.udp_timeouts.quic_ms = 0;
+        config.rules.push(
+            PolicyRule::allow("").destination_cidr(Cidr::new("2001:db8::".parse().unwrap(), 129)),
+        );
+
+        let errors = config.validate().unwrap_err();
+        let codes: Vec<_> = errors.iter().map(|error| error.code.as_str()).collect();
+        assert!(codes.contains(&"broker_dns_empty"));
+        assert!(codes.contains(&"invalid_default_decision"));
+        assert!(codes.contains(&"udp_timeout_zero"));
+        assert!(codes.contains(&"rule_id_empty"));
+        assert!(codes.contains(&"cidr_prefix_invalid"));
+
+        let audit = config.reload_audit("s1");
+        assert_eq!(audit.kind, AuditKind::PolicyReload);
+        assert_eq!(audit.decision, Some(Decision::FailClosed));
+        assert_eq!(audit.reason, Some(DenialReason::PolicyConfig));
+        assert!(audit.details["error_codes"].contains("broker_dns_empty"));
+    }
+
+    #[test]
+    fn valid_policy_config_reload_audit_summarizes_runtime_settings() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(PolicyRule::allow("allow-doc"));
+        config.validate().unwrap();
+        let audit = config.reload_audit("s1");
+        assert_eq!(audit.kind, AuditKind::PolicyReload);
+        assert_eq!(audit.frontend, Some(Frontend::Core));
+        assert_eq!(audit.decision, Some(Decision::Allow));
+        assert_eq!(audit.details["rule_count"], "1");
+        assert_eq!(audit.details["default_decision"], "deny_drop");
+        assert_eq!(audit.details["allow_quic"], "true");
+        assert_eq!(audit.details["broker_dns_count"], "1");
     }
 
     #[test]

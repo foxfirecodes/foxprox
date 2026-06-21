@@ -290,3 +290,37 @@ Packet parsing now dispatches on IP version and exposes IPv6 TCP/UDP/ICMPv6 meta
 
 ### Remaining blind spots
 - IPv6 extension headers are intentionally fail-closed rather than walked; ICMPv6 write-back/NDP behavior remains out of this pure parser slice.
+
+### Commit
+- `3ff222e` — observable IPv6 packet parsing.
+
+## 2026-06-21 — Policy config validation observability cycle
+
+### Behavior under work
+Add explicit policy configuration validation and reload audit evidence so malformed rule/default/timeout/DNS settings fail closed with structured reasons before a broker runtime starts using them.
+
+### Expected evidence
+- Invalid CIDR prefixes, missing broker DNS resolvers, empty rule IDs, invalid default decisions, and zero UDP timeouts are reported as structured validation errors.
+- Valid configs produce `policy_reload` audit records with rule count/default/QUIC/DNS settings.
+- Invalid configs produce `policy_reload` fail-closed audit records with stable error codes.
+
+### Commands run
+- `cargo fmt` — applied formatting for policy validation changes.
+- `cargo test --all-targets --all-features` — passed, 64 unit tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `policy::tests::policy_config_validation_reports_structured_errors ... ok`
+- `policy::tests::valid_policy_config_reload_audit_summarizes_runtime_settings ... ok`
+
+### Interpretation
+Policy configuration now has an explicit validation surface and structured reload audit evidence. Invalid default decisions, empty DNS resolver sets, zero UDP timeouts, empty rule IDs, and invalid CIDR prefixes fail closed with stable error codes before runtime use; valid reloads record rule count and key default settings.
+
+### Changed files
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-core/src/policy.rs`
+- `progress.md`
+
+### Remaining blind spots
+- The repo still lacks a CLI/config-file loader; validation is available as the core contract that a launcher/runtime must call before applying policy.

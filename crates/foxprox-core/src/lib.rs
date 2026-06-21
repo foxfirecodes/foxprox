@@ -34,7 +34,9 @@ pub use dns_handler::{
 };
 pub use flow::{DnsCache, FlowKey, FlowProtocol, UdpFlowManager, UdpTimeoutConfig};
 pub use packet::{IpParseError, ParsedIpPacket};
-pub use policy::{Cidr, PolicyConfig, PolicyDecision, PolicyEngine, PolicyRequest, PolicyRule};
+pub use policy::{
+    Cidr, PolicyConfig, PolicyConfigError, PolicyDecision, PolicyEngine, PolicyRequest, PolicyRule,
+};
 pub use proxy::{
     malformed_proxy_request, parse_http_proxy_request, parse_socks5_connect_request,
     HttpProxyRequestMetadata, ProxyParseError, SocksConnectMetadata,
