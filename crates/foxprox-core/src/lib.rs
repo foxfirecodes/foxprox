@@ -12,6 +12,7 @@ pub mod dns;
 pub mod http;
 pub mod packet;
 pub mod policy;
+pub mod tls;
 pub mod types;
 
 pub use attribution::{HostAttribution, Hostname, HostnameError};
@@ -23,6 +24,7 @@ pub use dns::{DnsAttributionCache, DnsAttributionEntry, ObserveOutcome};
 pub use http::{parse_http_request_head, HttpParseError, HttpRequestMetadata};
 pub use packet::{parse_ip_packet, PacketParseError, PacketSummary};
 pub use policy::{Decision, DenialReason, DenyBehavior, PolicyEngine, PolicyRequest};
+pub use tls::{parse_tls_client_hello, TlsClientHelloMetadata, TlsParseError};
 pub use types::{
     Endpoint, Frontend, HostnameConfidence, HostnameSource, IcmpMessage, Protocol, SandboxId,
 };

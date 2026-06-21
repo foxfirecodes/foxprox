@@ -17,3 +17,7 @@ DNS cache correlation must stay medium confidence and may produce multiple hostn
 ## 2026-06-21 - Plaintext HTTP attribution strictness
 
 Plaintext HTTP Host attribution should reject duplicate Host headers and absolute-URI/Host mismatches rather than choosing one source. Header parsing must have an explicit scan limit before any future stream frontend buffers request data.
+
+## 2026-06-21 - TLS hidden-SNI representation
+
+TLS inspection should distinguish valid SNI attribution from hidden-SNI states. Missing SNI or ECH presence must be surfaced explicitly so policy can apply the documented deny-unless-explicit-IP rule instead of silently falling back to domain rules.

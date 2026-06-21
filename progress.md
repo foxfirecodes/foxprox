@@ -111,3 +111,29 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; parser output feeds future transparent/proxy HTTP policy events.
 * Residual risk: parser currently handles HTTP/1.x request-head metadata only; chunking/body semantics, header folding policy, IPv6/IP-literal Host support, HTTPS CONNECT parsing, and actual stream buffering remain future frontend work.
 * Commit hash: bed2ddf strict plaintext http attribution parsing.
+
+## 2026-06-21 - TLS ClientHello SNI parser foundation
+
+* Invariant under work: transparent HTTPS hostname attribution must come only from strictly parsed TLS ClientHello SNI, with missing/hidden SNI represented explicitly and malformed ClientHello inputs rejected.
+* Threat or failure mode addressed: permissive TLS parsing could allow malformed handshakes, duplicate SNI ambiguity, oversized ClientHello buffering, or ECH/hidden-SNI cases to bypass hostname attribution policy.
+* Planned verification: add unit tests for valid SNI extraction, missing SNI, ECH extension detection, duplicate SNI rejection, malformed/truncated record rejection, non-ClientHello rejection, invalid SNI rejection, and configured size-limit enforcement; run `cargo test` and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - TLS ClientHello SNI parser foundation results
+
+* Tests added/updated:
+  * valid ClientHello SNI extraction with normalized high-confidence TLS SNI attribution.
+  * missing SNI represented as explicit hidden-SNI metadata.
+  * ECH extension detection marks hidden-SNI even when a plaintext SNI is present.
+  * duplicate SNI, invalid hostname SNI, and IP-literal SNI rejection.
+  * non-handshake TLS records and non-ClientHello handshakes rejected.
+  * truncated, invalid-length, and oversized ClientHello inputs rejected.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` passed tests but clippy flagged test vector initialization style.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 41 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * TLS SNI attribution is high-confidence only after a strict ClientHello parse.
+  * missing SNI and ECH are explicit hidden-SNI states for policy denial unless explicit IP/CIDR allow exists.
+  * malformed ClientHello data returns structured parse errors rather than falling back to IP-only domain authorization.
+* Audit evidence: not applicable in this commit; TLS metadata feeds future transparent HTTPS policy/audit events.
+* Residual risk: parser handles single-record ClientHello only; GREASE nuances, fragmented TLS records, QUIC TLS metadata, and stream reassembly remain future frontend/inspection work.
+* Commit hash: pending.
