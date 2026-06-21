@@ -43,3 +43,25 @@
 - What failed or surprised the agent: no packet parsing dependency was needed for the minimal IPv4 evidence; checksum validation remains intentionally unproven.
 - What remains unproven: IPv6 parsing, checksum validation, TCP stream state, UDP forwarding, DNS payload parsing, ICMP reply synthesis, TUN read/write, runtime audit sinks, and host egress are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — ICMP echo reply packet write-back slice
+
+- Slice attempted: add a minimal packet write-back proof by synthesizing an IPv4 ICMP echo reply from a parsed echo request fixture.
+- Why next: this addresses the documented packet write-back milestone at the packet-core boundary before introducing privileged TUN IO.
+- Verification plan: add checksum-covered tests that parse an echo request, synthesize a reply with source/destination reversal and ICMP type change, parse the reply back into a normalized ICMP event, and run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — ICMP echo reply packet write-back
+
+- Slice attempted: minimal packet write-back proof for IPv4 ICMP echo requests.
+- Why next: it validates source/destination reversal and checksum synthesis before privileged TUN write-back is introduced.
+- What changed: added `synthesize_icmp_echo_reply`, packet-build errors, Internet checksum calculation, and focused tests proving echo reply synthesis, parse-back normalization, checksum validity, and refusal to synthesize from non-echo ICMP requests.
+- Verification:
+  - `cargo fmt --check` initially failed before formatting; `cargo fmt` was run.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 9 `foxprox-core` tests, 9 `foxprox-packet` tests, and 0 doc tests.
+  - `cargo fmt --check` passed after formatting.
+  - Focused checks passed: `cargo test -p foxprox-packet synthesizes_icmp_echo_reply_with_reversed_addresses_and_checksums` and `cargo test -p foxprox-packet refuses_to_synthesize_icmp_reply_from_non_echo_request`.
+- What failed or surprised the agent: the focused verification briefly waited on Cargo's package-cache lock but completed successfully.
+- What remains unproven: actual TUN fd write-back, ping inside a sandbox, ICMP policy allow/deny behavior, IPv4 checksum validation on ingress, and broader ICMP error synthesis.
+- Commit: this commit.

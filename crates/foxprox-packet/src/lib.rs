@@ -111,6 +111,44 @@ impl fmt::Display for PacketParseError {
 
 impl std::error::Error for PacketParseError {}
 
+/// Packet synthesis failure for reply/write-back paths.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PacketBuildError {
+    Parse(PacketParseError),
+    NotIcmp { protocol: u8 },
+    IcmpEchoTooShort { actual: usize },
+    NotEchoRequest { icmp_type: u8, icmp_code: u8 },
+    ReplyTooLarge { total_length: usize },
+}
+
+impl fmt::Display for PacketBuildError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parse(error) => write!(f, "cannot-parse-request: {error}"),
+            Self::NotIcmp { protocol } => write!(f, "not-icmp: protocol={protocol}"),
+            Self::IcmpEchoTooShort { actual } => write!(f, "icmp-echo-too-short: actual={actual}"),
+            Self::NotEchoRequest {
+                icmp_type,
+                icmp_code,
+            } => write!(
+                f,
+                "not-icmp-echo-request: type={icmp_type} code={icmp_code}"
+            ),
+            Self::ReplyTooLarge { total_length } => {
+                write!(f, "icmp-echo-reply-too-large: total_length={total_length}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PacketBuildError {}
+
+impl From<PacketParseError> for PacketBuildError {
+    fn from(value: PacketParseError) -> Self {
+        Self::Parse(value)
+    }
+}
+
 /// Parse one IPv4 packet into a normalized event.
 ///
 /// Unsupported protocol numbers and non-connect TCP packets become explicit
@@ -322,6 +360,75 @@ impl Ipv4Header {
     }
 }
 
+/// Synthesize an IPv4 ICMP echo reply from an IPv4 ICMP echo request.
+///
+/// This is the minimal packet write-back proof path. It reverses IPv4
+/// source/destination addresses, converts ICMP type 8 to type 0, and recomputes
+/// IPv4 and ICMP checksums.
+pub fn synthesize_icmp_echo_reply(request_packet: &[u8]) -> Result<Vec<u8>, PacketBuildError> {
+    let request_header = Ipv4Header::parse(request_packet)?;
+    if request_header.protocol != 1 {
+        return Err(PacketBuildError::NotIcmp {
+            protocol: request_header.protocol,
+        });
+    }
+
+    let request_icmp = &request_packet[request_header.header_length..request_header.total_length];
+    if request_icmp.len() < 8 {
+        return Err(PacketBuildError::IcmpEchoTooShort {
+            actual: request_icmp.len(),
+        });
+    }
+    if request_icmp[0] != 8 || request_icmp[1] != 0 {
+        return Err(PacketBuildError::NotEchoRequest {
+            icmp_type: request_icmp[0],
+            icmp_code: request_icmp[1],
+        });
+    }
+
+    let total_length = 20 + request_icmp.len();
+    if total_length > usize::from(u16::MAX) {
+        return Err(PacketBuildError::ReplyTooLarge { total_length });
+    }
+
+    let mut reply = vec![0_u8; total_length];
+    reply[0] = 0x45;
+    reply[2..4].copy_from_slice(&(total_length as u16).to_be_bytes());
+    reply[8] = 64;
+    reply[9] = 1;
+    reply[12..16].copy_from_slice(&request_header.destination.octets());
+    reply[16..20].copy_from_slice(&request_header.source.octets());
+
+    reply[20..].copy_from_slice(request_icmp);
+    reply[20] = 0;
+    reply[21] = 0;
+    reply[22] = 0;
+    reply[23] = 0;
+    let icmp_checksum = internet_checksum(&reply[20..]);
+    reply[22..24].copy_from_slice(&icmp_checksum.to_be_bytes());
+
+    let ipv4_checksum = internet_checksum(&reply[..20]);
+    reply[10..12].copy_from_slice(&ipv4_checksum.to_be_bytes());
+
+    Ok(reply)
+}
+
+fn internet_checksum(bytes: &[u8]) -> u16 {
+    let mut sum = 0_u32;
+    for chunk in bytes.chunks(2) {
+        let word = if chunk.len() == 2 {
+            u16::from_be_bytes([chunk[0], chunk[1]])
+        } else {
+            u16::from(chunk[0]) << 8
+        };
+        sum += u32::from(word);
+        while sum > 0xffff {
+            sum = (sum & 0xffff) + (sum >> 16);
+        }
+    }
+    !(sum as u16)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +468,13 @@ mod tests {
         payload[0..2].copy_from_slice(&source_port.to_be_bytes());
         payload[2..4].copy_from_slice(&destination_port.to_be_bytes());
         payload[4..6].copy_from_slice(&(8_u16).to_be_bytes());
+        payload
+    }
+
+    fn icmp_echo_request_payload() -> Vec<u8> {
+        let mut payload = b"\x08\x00\x00\x00\x12\x34\x00\x01foxprox".to_vec();
+        let checksum = internet_checksum(&payload);
+        payload[2..4].copy_from_slice(&checksum.to_be_bytes());
         payload
     }
 
@@ -474,6 +588,55 @@ mod tests {
                 reason: "unsupported-network-event: ipv4-packet-too-short: actual=4 minimum=20"
                     .to_owned()
             }
+        );
+    }
+
+    #[test]
+    fn synthesizes_icmp_echo_reply_with_reversed_addresses_and_checksums() {
+        let request = ipv4_packet(
+            1,
+            [10, 0, 0, 2],
+            [203, 0, 113, 10],
+            &icmp_echo_request_payload(),
+        );
+
+        let reply = synthesize_icmp_echo_reply(&request).unwrap();
+        let event = parse_ipv4_packet(&context(), &reply).unwrap();
+
+        assert_eq!(internet_checksum(&reply[..20]), 0);
+        assert_eq!(internet_checksum(&reply[20..]), 0);
+        assert_eq!(
+            event.source(),
+            Some(Endpoint::new(Ipv4Addr::new(203, 0, 113, 10).into(), None))
+        );
+        assert_eq!(
+            event.destination(),
+            Some(Endpoint::new(Ipv4Addr::new(10, 0, 0, 2).into(), None))
+        );
+        match event {
+            NormalizedEvent::IcmpMessage(message) => {
+                assert_eq!(message.icmp_type, 0);
+                assert_eq!(message.icmp_code, 0);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refuses_to_synthesize_icmp_reply_from_non_echo_request() {
+        let packet = ipv4_packet(
+            1,
+            [10, 0, 0, 2],
+            [203, 0, 113, 10],
+            &[3, 0, 0, 0, 0, 0, 0, 0],
+        );
+
+        assert_eq!(
+            synthesize_icmp_echo_reply(&packet),
+            Err(PacketBuildError::NotEchoRequest {
+                icmp_type: 3,
+                icmp_code: 0,
+            })
         );
     }
 
