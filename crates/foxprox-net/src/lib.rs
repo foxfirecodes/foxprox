@@ -7,6 +7,10 @@
 
 #![deny(missing_docs)]
 
+mod udp;
+
+pub use udp::{run_udp_dns_proof, run_udp_dns_proof_with_ready, UdpDnsProofConfig};
+
 use foxprox_core::{Attribution, Frontend, NetworkEvent, SandboxId, TransportEndpoint};
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, TunTapInterface};

@@ -278,3 +278,60 @@
   - `cargo tree -p foxprox-core` still shows only `foxprox-core`, confirming no dependency creep.
 - Commit boundary: core DNS parser/audit metadata only; no smoltcp UDP changes.
 - Next exact action: commit, then implement `foxprox-net` UDP/DNS proof with `socket-udp` and CLI command.
+
+## 2026-06-21T18:36:00Z — UDP/DNS proof implemented and validated pending review
+
+- Current objective: commit Milestone 4 live UDP/DNS proof after final blocker review.
+- Added `foxprox-net` UDP/DNS proof:
+  - Enabled smoltcp `socket-udp` feature.
+  - Added `UdpDnsProofConfig` and `run_udp_dns_proof_with_ready`.
+  - Bound a broker DNS UDP socket on port 53 after stack setup and sends `ready\n` only after sockets are installed.
+  - Broker DNS path parses sandbox DNS queries, forwards raw UDP DNS to configured upstream, parses/cache-logs A/AAAA responses, and sends the unmodified response back to the sandbox from `10.255.0.1:53`.
+  - Direct external DNS attempts to non-broker destination IPs on port 53 are logged as direct DNS bypass and dropped (no host UDP socket opened).
+  - Added configured generic UDP proof ports via repeatable `--udp-forward-port`; each configured port forwards datagrams to the original destination and returns one host response, recording UDP pseudo-flow bytes.
+- Added CLI command: `foxprox proof-udp-dns --setup-socket PATH [--upstream-dns IP:PORT] [--udp-forward-port PORT]...`.
+- Deterministic validation:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 35 core tests, 8 device tests, 2 net tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net -e features` confirms smoltcp `socket-udp` alongside `socket-tcp`, `medium-ip`, and `proto-ipv4`.
+- Live validation:
+  - Broker DNS positive: sandbox Python UDP DNS client queried `@10.255.0.1 example.com A`; received a DNS response from `10.255.0.1:53` with `ANCOUNT=2`; broker logged query, cached A answers, and response.
+  - Direct external DNS negative: sandbox Python UDP DNS client queried `@1.1.1.1 example.com A`; client timed out as expected; broker logged `deny direct DNS bypass` for destination `1.1.1.1:53`.
+  - Generic UDP forwarding positive: host Python UDP echo on host IP port 12345 plus broker `--udp-forward-port 12345`; sandbox Python UDP client received `echo:hello` from the original host IP/port; broker logged UDP forward and response byte counts.
+- Known limitations:
+  - DNS live validation uses a small Python UDP client because `dig`/`nslookup` abort inside this bwrap environment (`uv.c` fd runtime check) and installed libcurl lacks usable `--dns-servers` support.
+  - Generic UDP proof is one-response-per-datagram and proof-scoped, not a production async UDP socket manager yet.
+- Final review requested: `reviews/udp-dns-final-blockers.md`.
+
+## 2026-06-21T21:57:00Z — UDP/DNS final review blockers fixed
+
+- Reviewer retry was run with `gpt-5.5` after provider/auth failures with other model overrides.
+- Final reviewer blockers accepted and fixed:
+  - Host UDP/DNS forwarding no longer blocks the smoltcp poll loop. DNS upstream forwarding and generic UDP host forwarding now run in per-datagram worker threads and return results over an `mpsc` channel while the broker continues polling the TUN/smoltcp stack.
+  - Per-datagram errors no longer terminate the proof broker. Datagram handler errors, host UDP/DNS errors, oversized/full smoltcp UDP send failures, and unsupported response-address cases are logged and dropped; the broker loop continues.
+- Re-validation after fixes:
+  - Broker DNS positive: sandbox Python UDP DNS client queried `@10.255.0.1 example.com A`, received a DNS response from `10.255.0.1:53` with `ANCOUNT=2`, and broker logged DNS cache answers.
+  - Direct external DNS negative: sandbox Python UDP DNS client queried `@1.1.1.1 example.com A`, timed out as expected, and broker logged `deny direct DNS bypass` without opening host UDP forwarding.
+  - Generic UDP forwarding positive: host Python UDP echo on host IP port 12345 plus broker `--udp-forward-port 12345`; sandbox Python UDP client received `echo:hello` from original host IP/port and broker logged UDP forward/response.
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 35 core tests, 8 device tests, 2 net tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net -e features` confirms smoltcp `socket-udp` alongside existing TCP/TUN/IP features.
+- Remaining known limitation: UDP worker concurrency is proof-scoped and unbounded; production resource limits are Milestone 7 work.
+
+## 2026-06-21T22:01:00Z — UDP/DNS proof rereview passed
+
+- Final rereview result: no blockers.
+- Reviewer confirmed:
+  - Host UDP/DNS blocking I/O is isolated in worker threads, not the smoltcp poll loop.
+  - Per-datagram host/send errors are logged/dropped and do not terminate the broker.
+  - smoltcp UDP metadata/source handling is correct for broker DNS and generic UDP responses.
+  - Direct external DNS fails closed before host UDP forwarding.
+  - Readiness is signaled only after UDP sockets are bound/added.
+  - `cargo +1.80.0 check -p foxprox-net`, workspace check/test/clippy, and net dependency review passed.
+- Next exact action: remove review artifacts and commit the Milestone 4 UDP/DNS proof.

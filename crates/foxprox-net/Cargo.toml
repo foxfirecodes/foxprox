@@ -18,4 +18,5 @@ smoltcp = { version = "=0.12.0", default-features = false, features = [
     "phy-tuntap_interface",
     "proto-ipv4",
     "socket-tcp",
+    "socket-udp",
 ] }
