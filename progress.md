@@ -32,3 +32,15 @@
 - Commit hash when committed: previous verified core slice committed as `7762592`; packet proof commit pending.
 - Remaining risks: packet parsing currently covers only the minimal IPv4/ICMP proof path; TCP/UDP parsing, IPv6, fuzzing, and real TUN write-back are not implemented yet.
 - Exact next step: commit packet proof, then add normalized proxy frontend parsers for HTTP CONNECT/SOCKS and config validation around the shared policy engine.
+
+## 2026-06-21T16:55:20Z
+- Current objective: add explicit proxy request parsing to feed the same normalized policy/audit kernel.
+- Files changed: `crates/foxprox-core/src/lib.rs`, `crates/foxprox-core/src/frontend.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially identified rustfmt changes in the new frontend parser; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 25 unit tests passed. New tests prove SOCKS5 no-auth negotiation is explicit, unsupported SOCKS UDP ASSOCIATE is rejected, SOCKS domain destinations produce high-confidence explicit-proxy attribution, HTTP proxy CONNECT is origin-only, and HTTP absolute-form requests preserve plaintext paths for policy.
+- Commit hash when committed: previous packet proof committed as `67e6bf2`; proxy parser commit pending.
+- Remaining risks: this is parser/kernel behavior only; no listener sockets, proxy forwarding loops, host egress sockets, or malformed-request fuzzing yet.
+- Exact next step: commit parser slice, then add config validation and deny-by-default examples that connect parsed proxy/TUN metadata to policy decisions.

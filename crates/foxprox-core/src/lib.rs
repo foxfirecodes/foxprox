@@ -10,6 +10,7 @@
 pub mod audit;
 pub mod dns;
 pub mod flow;
+pub mod frontend;
 pub mod inspect;
 pub mod origin;
 pub mod packet;
@@ -19,6 +20,11 @@ pub mod types;
 pub use audit::{AuditError, AuditEvent, AuditEventKind, AuditSink, VecAuditSink};
 pub use dns::{DnsCache, DnsObservation};
 pub use flow::{FlowTable, UdpClass, UdpFlow, UdpTimeouts};
+pub use frontend::{
+    parse_http_proxy_request_line, parse_socks5_connect, parse_socks5_greeting,
+    protocol_for_http_proxy_line, HttpProxyRequestLine, ProxyParseError, SocksConnectRequest,
+    SocksDestination, SocksGreeting,
+};
 pub use inspect::{parse_http_request, parse_tls_client_hello_sni, InspectError, TlsClientHello};
 pub use origin::{parse_connect_target, parse_http_origin, OriginError};
 pub use packet::{
