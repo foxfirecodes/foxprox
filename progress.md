@@ -62,4 +62,4 @@ The alpha core now exposes decision-relevant behavior through structured audit r
 ### Commit
 - `7b462c2` — observable alpha broker core foundation.
 - `7227fce` — reviewer fixes for packet validation, timestamps, ICMP defaults, flow audit semantics, setup fd modeling, and backpressure evidence.
-- _pending_ — DNS query parser and refused-response foundation.
+- `5d1aa6d` — DNS query parser and refused-response foundation.
