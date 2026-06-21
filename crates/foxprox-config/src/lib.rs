@@ -9,11 +9,13 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::str::FromStr;
+use std::time::Duration;
 
 use foxprox_core::{
     AttributionConfidence, DefaultPolicy, DenialBehavior, DenyReason, DnsPolicy, Endpoint, IpCidr,
     PolicyConfig, PolicyRule, PortRange, Protocol, RuleAction,
 };
+use foxprox_flow::UdpFlowTimeouts;
 use serde::Deserialize;
 
 /// Configuration load/validation error.
@@ -27,6 +29,7 @@ pub enum ConfigError {
     InvalidConfidence(String),
     InvalidEndpoint(String),
     InvalidCidr(String),
+    InvalidTimeout(String),
     InvalidCore(String),
 }
 
@@ -41,6 +44,7 @@ impl fmt::Display for ConfigError {
             Self::InvalidConfidence(value) => write!(f, "invalid-confidence: {value}"),
             Self::InvalidEndpoint(value) => write!(f, "invalid-endpoint: {value}"),
             Self::InvalidCidr(value) => write!(f, "invalid-cidr: {value}"),
+            Self::InvalidTimeout(value) => write!(f, "invalid-timeout: {value}"),
             Self::InvalidCore(value) => write!(f, "invalid-core-policy: {value}"),
         }
     }
@@ -48,11 +52,23 @@ impl fmt::Display for ConfigError {
 
 impl std::error::Error for ConfigError {}
 
-/// Parse TOML policy configuration into validated core policy config.
-pub fn policy_config_from_toml(input: &str) -> Result<PolicyConfig, ConfigError> {
+/// Validated user-facing configuration used by runtime components.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FoxproxConfig {
+    pub policy: PolicyConfig,
+    pub udp_flow_timeouts: UdpFlowTimeouts,
+}
+
+/// Parse TOML configuration into validated runtime config.
+pub fn config_from_toml(input: &str) -> Result<FoxproxConfig, ConfigError> {
     let raw: RawPolicyConfig =
         toml::from_str(input).map_err(|error| ConfigError::Toml(error.to_string()))?;
     raw.try_into()
+}
+
+/// Parse TOML policy configuration into validated core policy config.
+pub fn policy_config_from_toml(input: &str) -> Result<PolicyConfig, ConfigError> {
+    config_from_toml(input).map(|config| config.policy)
 }
 
 #[derive(Deserialize)]
@@ -65,10 +81,12 @@ struct RawPolicyConfig {
     #[serde(default)]
     dns: RawDnsPolicy,
     #[serde(default)]
+    udp_timeouts: RawUdpFlowTimeouts,
+    #[serde(default)]
     rules: Vec<RawPolicyRule>,
 }
 
-impl TryFrom<RawPolicyConfig> for PolicyConfig {
+impl TryFrom<RawPolicyConfig> for FoxproxConfig {
     type Error = ConfigError;
 
     fn try_from(value: RawPolicyConfig) -> Result<Self, Self::Error> {
@@ -91,10 +109,16 @@ impl TryFrom<RawPolicyConfig> for PolicyConfig {
             .map(PolicyRule::try_from)
             .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Self {
+        let policy = PolicyConfig {
             default_policy,
             dns,
             rules,
+        };
+        let udp_flow_timeouts = parse_udp_flow_timeouts(value.udp_timeouts)?;
+
+        Ok(Self {
+            policy,
+            udp_flow_timeouts,
         })
     }
 }
@@ -106,6 +130,17 @@ struct RawDnsPolicy {
     broker_resolvers: Vec<String>,
     #[serde(default)]
     deny_direct_external_dns: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawUdpFlowTimeouts {
+    #[serde(default)]
+    dns_seconds: Option<u64>,
+    #[serde(default)]
+    generic_seconds: Option<u64>,
+    #[serde(default)]
+    quic_candidate_seconds: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -227,6 +262,35 @@ fn parse_confidence(value: &str) -> Result<AttributionConfidence, ConfigError> {
     }
 }
 
+fn parse_udp_flow_timeouts(value: RawUdpFlowTimeouts) -> Result<UdpFlowTimeouts, ConfigError> {
+    let defaults = UdpFlowTimeouts::default();
+    Ok(UdpFlowTimeouts {
+        dns: timeout_seconds(value.dns_seconds, defaults.dns, "udp_timeouts.dns_seconds")?,
+        generic: timeout_seconds(
+            value.generic_seconds,
+            defaults.generic,
+            "udp_timeouts.generic_seconds",
+        )?,
+        quic_candidate: timeout_seconds(
+            value.quic_candidate_seconds,
+            defaults.quic_candidate,
+            "udp_timeouts.quic_candidate_seconds",
+        )?,
+    })
+}
+
+fn timeout_seconds(
+    value: Option<u64>,
+    default: Duration,
+    field: &'static str,
+) -> Result<Duration, ConfigError> {
+    match value {
+        Some(0) => Err(ConfigError::InvalidTimeout(format!("{field} must be > 0"))),
+        Some(seconds) => Ok(Duration::from_secs(seconds)),
+        None => Ok(default),
+    }
+}
+
 fn parse_endpoint(value: &str) -> Result<Endpoint, ConfigError> {
     let socket =
         SocketAddr::from_str(value).map_err(|_| ConfigError::InvalidEndpoint(value.to_owned()))?;
@@ -253,9 +317,10 @@ mod tests {
     use super::*;
     use foxprox_broker::Ipv4PacketBroker;
     use foxprox_core::{
-        AuditDecision, Endpoint, FrontendKind, HttpRequest, NormalizedEvent, PolicyDecision,
-        PolicyEngine, Protocol, SandboxId,
+        AuditDecision, DnsQuery, Endpoint, FrontendKind, HttpRequest, NormalizedEvent,
+        PolicyDecision, PolicyEngine, Protocol, SandboxId,
     };
+    use foxprox_flow::{UdpFlowObservation, UdpFlowTable};
     use foxprox_packet::PacketContext;
 
     fn context() -> PacketContext {
@@ -396,6 +461,54 @@ mod tests {
         assert_eq!(
             evaluation.audit.http_path_query.as_deref(),
             Some("/public/index.html")
+        );
+    }
+
+    #[test]
+    fn loaded_udp_timeouts_drive_flow_expiration() {
+        let config = config_from_toml(
+            r#"
+            [udp_timeouts]
+            dns_seconds = 3
+            generic_seconds = 11
+            quic_candidate_seconds = 29
+            "#,
+        )
+        .unwrap();
+        let now = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let mut table = UdpFlowTable::new(config.udp_flow_timeouts);
+        let event = NormalizedEvent::DnsQuery(DnsQuery {
+            sandbox_id: SandboxId::new("config-flow-test").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: Some(Endpoint::udp("10.0.0.2".parse().unwrap(), 53000)),
+            resolver: Endpoint::udp("10.0.0.1".parse().unwrap(), 53),
+            hostname: "example.com".to_owned(),
+            query_type: "A".to_owned(),
+        });
+
+        let observation = table.observe_event(&event, now, 40);
+
+        let UdpFlowObservation::Created(state) = observation else {
+            panic!("expected DNS flow creation");
+        };
+        assert_eq!(state.expires_at, now + Duration::from_secs(3));
+        assert!(table.expire(now + Duration::from_secs(2)).is_empty());
+        assert_eq!(table.expire(now + Duration::from_secs(3)).len(), 1);
+    }
+
+    #[test]
+    fn zero_udp_timeout_is_rejected() {
+        let error = config_from_toml(
+            r#"
+            [udp_timeouts]
+            dns_seconds = 0
+            "#,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            ConfigError::InvalidTimeout("udp_timeouts.dns_seconds must be > 0".to_owned())
         );
     }
 

@@ -329,3 +329,25 @@
 - What failed or surprised the agent: `Endpoint` intentionally lacks ordering, so flow state should not require ordered maps unless core endpoint ordering is deliberately added later.
 - What remains unproven: UDP socket forwarding, reply routing to sandbox, expiration audit record emission, configurable timeout loading from TOML, resource limits, and direct multicast/broadcast denial are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — TOML UDP timeouts → flow table behavior slice
+
+- Slice attempted: load UDP pseudo-flow idle timeouts from user-facing TOML and prove they drive flow expiration behavior.
+- Why next: UDP flow tracking has hard-coded defaults; alpha requires UDP/DNS/QUIC timeouts to be configurable before runtime forwarding relies on them.
+- Verification plan: extend `foxprox-config` with a validated combined config carrying `UdpFlowTimeouts`, reject zero timeout values, verify a loaded DNS timeout expires a flow at the configured deadline, then run formatting, clippy, focused config tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — TOML UDP timeouts → flow table behavior
+
+- Slice attempted: load UDP pseudo-flow idle timeouts from TOML and prove they control flow expiration behavior.
+- Why next: UDP flow tracking existed with defaults only; alpha requires DNS/generic/QUIC timeouts to be configurable.
+- What changed: added `FoxproxConfig` and `config_from_toml` to `foxprox-config`, retained `policy_config_from_toml` compatibility, parsed `[udp_timeouts]` values into `UdpFlowTimeouts`, applied defaults for omitted values, and rejected zero-second timeouts.
+- Verification:
+  - `cargo fmt --check` passed.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 6 `foxprox-config` tests, 10 `foxprox-core` tests, 4 `foxprox-flow` tests, 18 `foxprox-inspect` tests, 10 `foxprox-packet` tests, and 0 doc tests.
+  - Focused checks passed: `cargo test -p foxprox-config loaded_udp_timeouts_drive_flow_expiration` and `cargo test -p foxprox-config zero_udp_timeout_is_rejected`.
+  - `cargo fmt --check` passed after focused checks.
+- What failed or surprised the agent: adding runtime config while preserving the existing policy-only loader required a small compatibility wrapper so existing CLI/broker tests did not need to know about flow settings yet.
+- What remains unproven: CLI/runtime consumption of the combined config, config reload behavior, source-span diagnostics, resource limits, and expiration audit emission are still absent.
+- Commit: this commit.

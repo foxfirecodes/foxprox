@@ -45,6 +45,7 @@ version = "0.1.0"
 dependencies = [
  "foxprox-broker",
  "foxprox-core",
+ "foxprox-flow",
  "foxprox-packet",
  "serde",
  "toml",

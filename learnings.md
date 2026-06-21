@@ -60,3 +60,7 @@ DNS answer names commonly use compression pointers, so response parsing is neces
 ## 2026-06-21 — flow tables should not force endpoint ordering
 
 Core endpoints are hashable but not ordered. Use hash-keyed flow tables for lifecycle state rather than adding ordering constraints to core types without a policy reason.
+
+## 2026-06-21 — keep policy-only config loading as a compatibility wrapper
+
+As runtime config grows beyond policy, expose a combined validated config while retaining a policy-only loader for callers and tests that only need `PolicyConfig`.
