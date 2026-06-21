@@ -430,3 +430,32 @@ Explicit proxy requests now have a frontend harness, not just parsers. HTTP prox
 
 ### Remaining blind spots
 - This is not a socket listener or HTTP runtime yet; it defines the observable parse→policy→egress contract that listener code must implement.
+
+## 2026-06-21 — UDP resource limit observability cycle
+
+### Behavior under work
+Add an explicit UDP active-flow resource limit to the forwarding harness so resource exhaustion is denied and audited before additional flow state or egress sends occur.
+
+### Expected evidence
+- When the active-flow limit is reached, a new UDP flow returns `deny_drop` with `resource_limit`, appends a structured `udp_packet_decision` audit record, and does not send to egress.
+- Existing flows may continue under the limit without creating additional flow state.
+
+### Commands run
+- `cargo fmt` — applied formatting for UDP limit changes.
+- `cargo test --all-targets --all-features` — passed, 76 unit tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `udp::tests::active_flow_limit_denies_new_flow_without_egress ... ok`
+- `udp::tests::active_flow_limit_allows_existing_flow_updates ... ok`
+
+### Interpretation
+UDP forwarding now has an explicit active-flow resource limit with structured denial evidence. New flows beyond the configured limit are blocked before state mutation or egress, while existing flows can continue updating byte counts under the limit.
+
+### Changed files
+- `crates/foxprox-core/src/udp.rs`
+- `progress.md`
+
+### Remaining blind spots
+- Resource limits currently cover UDP active flows only; TCP/proxy concurrency and byte-buffer limits remain future robustness slices.

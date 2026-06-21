@@ -1,7 +1,8 @@
+use crate::audit::AuditRecord;
 use crate::broker::BrokerCore;
 use crate::flow::{FlowKey, UdpFlowManager, UdpTimeoutConfig};
 use crate::policy::{PolicyDecision, PolicyRequest};
-use crate::types::{Decision, DenialReason, Frontend, NetworkEndpoint, Protocol};
+use crate::types::{AuditKind, Decision, DenialReason, Frontend, NetworkEndpoint, Protocol};
 use serde::{Deserialize, Serialize};
 
 pub trait UdpEgress {
@@ -30,6 +31,7 @@ pub struct UdpForwarder<E> {
     broker: BrokerCore,
     flows: UdpFlowManager,
     egress: E,
+    max_active_flows: Option<usize>,
 }
 
 impl<E: UdpEgress> UdpForwarder<E> {
@@ -45,7 +47,13 @@ impl<E: UdpEgress> UdpForwarder<E> {
             sandbox_id,
             broker,
             egress,
+            max_active_flows: None,
         }
+    }
+
+    pub fn with_max_active_flows(mut self, max_active_flows: usize) -> Self {
+        self.max_active_flows = Some(max_active_flows);
+        self
     }
 
     pub fn handle_outbound_datagram(
@@ -58,6 +66,30 @@ impl<E: UdpEgress> UdpForwarder<E> {
         let decision = self.broker.evaluate(&request);
         if decision.decision.is_deny() {
             return Ok(result_from_decision(decision, false));
+        }
+        if self.would_exceed_flow_limit(&key) {
+            let resource_decision = PolicyDecision {
+                decision: Decision::DenyDrop,
+                reason: Some(DenialReason::ResourceLimit),
+                rule_id: None,
+                audit_kind: AuditKind::UdpPacketDecision,
+            };
+            let audit = AuditRecord::new(AuditKind::UdpPacketDecision, self.sandbox_id.clone())
+                .with_frontend(Frontend::Tun)
+                .with_protocol(Protocol::Udp)
+                .with_source(key.source())
+                .with_destination(key.destination())
+                .with_decision(Decision::DenyDrop, Some(DenialReason::ResourceLimit))
+                .with_detail("resource", "udp_active_flows")
+                .with_detail("active_flows", self.flows.len().to_string())
+                .with_detail(
+                    "limit",
+                    self.max_active_flows.unwrap_or_default().to_string(),
+                );
+            return match self.broker.append_audit_for(&request, audit) {
+                Ok(_) => Ok(result_from_decision(resource_decision, false)),
+                Err(decision) => Ok(result_from_decision(decision, false)),
+            };
         }
 
         let previous_flows = self.flows.clone();
@@ -115,6 +147,11 @@ impl<E: UdpEgress> UdpForwarder<E> {
 
     pub fn into_parts(self) -> (BrokerCore, UdpFlowManager, E) {
         (self.broker, self.flows, self.egress)
+    }
+
+    fn would_exceed_flow_limit(&self, key: &FlowKey) -> bool {
+        self.max_active_flows
+            .is_some_and(|limit| self.flows.get(key).is_none() && self.flows.len() >= limit)
     }
 
     fn request_for_key(&self, key: &FlowKey) -> PolicyRequest {
@@ -212,6 +249,102 @@ mod tests {
         assert_eq!(records[0].decision, Some(Decision::Allow));
         assert_eq!(records[1].kind, AuditKind::UdpFlowCreated);
         assert_eq!(records[1].details["classification"], "generic");
+    }
+
+    #[test]
+    fn active_flow_limit_denies_new_flow_without_egress() {
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let first_key = FlowKey::udp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.42".parse().unwrap(),
+            12345,
+        );
+        let second_key = FlowKey::udp(
+            "10.0.2.15".parse().unwrap(),
+            40001,
+            "203.0.113.43".parse().unwrap(),
+            12345,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let mut forwarder = UdpForwarder::new(
+            "s1",
+            broker,
+            InMemoryUdpEgress::default(),
+            UdpTimeoutConfig::default(),
+        )
+        .with_max_active_flows(1);
+
+        assert_eq!(
+            forwarder
+                .handle_outbound_datagram(first_key.clone(), b"first", 1_000)
+                .unwrap()
+                .decision,
+            Decision::Allow
+        );
+        let result = forwarder
+            .handle_outbound_datagram(second_key, b"second", 1_100)
+            .unwrap();
+        assert_eq!(result.decision, Decision::DenyDrop);
+        assert_eq!(result.reason, Some(DenialReason::ResourceLimit));
+        assert_eq!(forwarder.egress().sent().len(), 1);
+        assert_eq!(forwarder.flows().len(), 1);
+        let records: Vec<_> = forwarder.broker().audit().records().collect();
+        let resource_record = records.last().unwrap();
+        assert_eq!(resource_record.kind, AuditKind::UdpPacketDecision);
+        assert_eq!(resource_record.reason, Some(DenialReason::ResourceLimit));
+        assert_eq!(resource_record.details["resource"], "udp_active_flows");
+        assert_eq!(resource_record.details["limit"], "1");
+    }
+
+    #[test]
+    fn active_flow_limit_allows_existing_flow_updates() {
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let key = FlowKey::udp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.42".parse().unwrap(),
+            12345,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let mut forwarder = UdpForwarder::new(
+            "s1",
+            broker,
+            InMemoryUdpEgress::default(),
+            UdpTimeoutConfig::default(),
+        )
+        .with_max_active_flows(1);
+
+        assert_eq!(
+            forwarder
+                .handle_outbound_datagram(key.clone(), b"first", 1_000)
+                .unwrap()
+                .decision,
+            Decision::Allow
+        );
+        assert_eq!(
+            forwarder
+                .handle_outbound_datagram(key.clone(), b"second", 1_100)
+                .unwrap()
+                .decision,
+            Decision::Allow
+        );
+        assert_eq!(forwarder.egress().sent().len(), 2);
+        assert_eq!(
+            forwarder
+                .flows()
+                .get(&key)
+                .unwrap()
+                .byte_counts
+                .from_sandbox,
+            11
+        );
     }
 
     #[test]
