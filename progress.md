@@ -364,3 +364,20 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: 0a735c3.
 - Remaining boundary risks: header matching, production proxy forwarding, and transparent HTTP stream reassembly remain.
+
+## 2026-06-21 — Boundary objective: HTTP audit metadata contract
+
+- Boundary under work: structured audit fields for normalized HTTP method, scheme, and path/query metadata.
+- Allowed dependency direction: `foxprox-audit` reads only `foxprox-core::HttpRequest` normalized fields; it must not parse raw HTTP bytes or depend on frontend parser structs.
+- Dependency-risk assessment: origin/path-aware policy is hard to review if audit records collapse HTTP requests to only host/port, so visible method/scheme/path must be schema fields.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: audit schema now includes HTTP method, scheme, and path/query fields populated from normalized `HttpRequest`; all verification passed.
+- Changed files:
+  - `crates/foxprox-audit/src/lib.rs`
+  - `progress.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 53 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: selected header audit policy, production request/response byte counts, and sensitive header redaction remain.

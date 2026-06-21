@@ -72,3 +72,7 @@
 ## 2026-06-21 — HTTP scheme matcher boundary
 
 - Origin-aware HTTP policy needs scheme as a typed matcher alongside host/port/path; otherwise explicit proxy absolute-form requests could not distinguish `http` and `https` origins without parser-specific shortcuts.
+
+## 2026-06-21 — HTTP audit metadata
+
+- Audit schema must expose method/scheme/path as structured normalized fields for HTTP decisions; otherwise path-aware policy would be enforced but not reviewable from audit output.

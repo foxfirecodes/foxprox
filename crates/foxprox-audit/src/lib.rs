@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use foxprox_core::{
     ByteCounts, DecisionReason, FrontendKind, Hostname, HostnameAttributionSource,
-    HostnameConfidence, NormalizedEvent, PolicyDecision, Protocol, SandboxId,
+    HostnameConfidence, HttpMethod, HttpScheme, NormalizedEvent, PolicyDecision, Protocol,
+    SandboxId,
 };
 
 /// Stable audit event kind vocabulary.
@@ -65,6 +66,9 @@ pub struct AuditRecord {
     pub hostname: Option<Hostname>,
     pub hostname_attribution_source: Option<HostnameAttributionSource>,
     pub hostname_confidence: Option<HostnameConfidence>,
+    pub http_method: Option<HttpMethod>,
+    pub http_scheme: Option<HttpScheme>,
+    pub http_path_query: Option<String>,
     pub decision: AuditDecision,
     pub rule_id: Option<String>,
     pub reason: Option<DecisionReason>,
@@ -92,6 +96,9 @@ impl AuditRecord {
             hostname: event.explicit_hostname().cloned(),
             hostname_attribution_source: attribution.map(|value| value.source()),
             hostname_confidence: attribution.map(|value| value.confidence()),
+            http_method: http_method(event),
+            http_scheme: http_scheme(event),
+            http_path_query: http_path_query(event),
             decision: AuditDecision::from(decision),
             rule_id: rule_id(decision),
             reason: decision.reason().cloned(),
@@ -115,6 +122,9 @@ impl AuditRecord {
             hostname: None,
             hostname_attribution_source: None,
             hostname_confidence: None,
+            http_method: None,
+            http_scheme: None,
+            http_path_query: None,
             decision: AuditDecision::Allow,
             rule_id: None,
             reason: Some("flow lifecycle closed".into()),
@@ -138,6 +148,9 @@ impl AuditRecord {
             "hostname",
             "hostname_attribution_source",
             "hostname_confidence",
+            "http_method",
+            "http_scheme",
+            "http_path_query",
             "decision",
             "rule_id",
             "reason",
@@ -201,6 +214,27 @@ fn source_string(event: &NormalizedEvent) -> Option<String> {
         NormalizedEvent::UdpFlowAttempt(event) => Some(event.source.to_string()),
         NormalizedEvent::DnsQuery(event) => Some(event.source.to_string()),
         NormalizedEvent::IcmpMessage(event) => Some(event.source.to_string()),
+        _ => None,
+    }
+}
+
+fn http_method(event: &NormalizedEvent) -> Option<HttpMethod> {
+    match event {
+        NormalizedEvent::HttpRequest(event) => Some(event.method.clone()),
+        _ => None,
+    }
+}
+
+fn http_scheme(event: &NormalizedEvent) -> Option<HttpScheme> {
+    match event {
+        NormalizedEvent::HttpRequest(event) => Some(event.scheme),
+        _ => None,
+    }
+}
+
+fn http_path_query(event: &NormalizedEvent) -> Option<String> {
+    match event {
+        NormalizedEvent::HttpRequest(event) => Some(event.path_query.clone()),
         _ => None,
     }
 }
@@ -293,8 +327,8 @@ impl std::error::Error for AuditError {}
 mod tests {
     use super::*;
     use foxprox_core::{
-        DenialAction, DenyDecision, FrontendKind, Hostname, HostnameAttribution,
-        HostnameAttributionSource, HostnameConfidence, SandboxId, TcpConnectAttempt,
+        DenialAction, DenyDecision, DestinationHost, FrontendKind, Hostname, HostnameAttribution,
+        HostnameAttributionSource, HostnameConfidence, HttpRequest, SandboxId, TcpConnectAttempt,
     };
 
     #[test]
@@ -313,6 +347,9 @@ mod tests {
                 "hostname",
                 "hostname_attribution_source",
                 "hostname_confidence",
+                "http_method",
+                "http_scheme",
+                "http_path_query",
                 "decision",
                 "rule_id",
                 "reason",
@@ -346,6 +383,30 @@ mod tests {
         assert_eq!(record.decision, AuditDecision::DenyReset);
         assert_eq!(record.hostname.unwrap().as_str(), "example.com");
         assert_eq!(record.hostname_confidence, Some(HostnameConfidence::Medium));
+    }
+
+    #[test]
+    fn http_audit_record_includes_visible_request_metadata() {
+        let event = NormalizedEvent::HttpRequest(HttpRequest {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::HttpProxy,
+            method: HttpMethod::Post,
+            scheme: HttpScheme::Http,
+            host: DestinationHost::Hostname(Hostname::new("example.com").unwrap()),
+            port: 80,
+            path_query: "/submit?x=1".to_string(),
+        });
+        let decision = PolicyDecision::Allow(foxprox_core::AllowDecision {
+            rule_id: None,
+            timeout_override: None,
+            reason: Some("allowed".into()),
+        });
+
+        let record = AuditRecord::from_event(8, 1234, &event, &decision);
+        assert_eq!(record.kind, AuditKind::HttpRequest);
+        assert_eq!(record.http_method, Some(HttpMethod::Post));
+        assert_eq!(record.http_scheme, Some(HttpScheme::Http));
+        assert_eq!(record.http_path_query.as_deref(), Some("/submit?x=1"));
     }
 
     #[test]
@@ -384,6 +445,9 @@ mod tests {
             hostname: None,
             hostname_attribution_source: None,
             hostname_confidence: None,
+            http_method: None,
+            http_scheme: None,
+            http_path_query: None,
             decision: AuditDecision::Allow,
             rule_id: None,
             reason: None,
