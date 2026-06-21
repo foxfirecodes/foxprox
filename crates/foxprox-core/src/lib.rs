@@ -19,7 +19,8 @@ pub mod policy;
 
 pub use audit::{AuditBackpressure, AuditBuffer, AuditEvent, AuditEventKind, AuditSinkConfig};
 pub use config::{
-    BrokerConfig, DnsConfig, ProxyConfig, ProxyEnvironment, TunConfig, UdpTimeoutConfig,
+    BrokerConfig, DnsConfig, ProxyConfig, ProxyEnvironment, ResourceLimitConfig,
+    ResourceLimitError, TunConfig, UdpTimeoutConfig,
 };
 pub use dns::{
     parse_dns_query, parse_dns_response, DnsAddressRecord, DnsCache, DnsCacheEntry, DnsObservation,

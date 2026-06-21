@@ -740,3 +740,25 @@
 - Files changed: `Cargo.toml`, `Cargo.lock`, `crates/foxprox-proxy/Cargo.toml`, `crates/foxprox-proxy/src/lib.rs`, `progress.md`.
 - Current git status summary: proxy crate/workspace/progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit proxy parser foundation, then start live explicit proxy listener/egress proof slice.
+
+## 2026-06-21T23:24:35Z — core resource limits verified
+
+- Current objective: commit dependency-free resource limit config for Milestone 7.
+- Changes implemented:
+  - Added `ResourceLimitConfig` to `BrokerConfig` with bounded defaults for TCP flows, UDP pseudo-flows, proxy connections, per-flow buffered bytes, and audit queue capacity.
+  - Added non-zero validation via `ResourceLimitConfig::validate` and `ResourceLimitError`.
+  - Exported resource limit types from `foxprox-core` for runtime integration.
+  - Added tests that broker defaults validate and zero limits fail closed.
+- Subagents/reviews requested and findings:
+  - `resource-limits-final` found no blockers and confirmed safe finite defaults, validation semantics, no dependency creep, and public API clarity.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-core` passed: 49 core tests.
+  - `cargo test --workspace` passed: 49 core tests, 8 device tests, 8 net tests, 15 proxy tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core` showed no dependencies.
+- Files changed: `crates/foxprox-core/src/config.rs`, `crates/foxprox-core/src/lib.rs`, `progress.md`.
+- Current git status summary: core config source and progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit resource limit config, then wire audit/resource-limit primitives into proof runtimes.

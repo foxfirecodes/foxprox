@@ -24,6 +24,8 @@ pub struct BrokerConfig {
     pub policy: PolicyRuleSet,
     /// Audit sink configuration.
     pub audit: AuditSinkConfig,
+    /// Resource limits for bounded alpha runtime behavior.
+    pub resource_limits: ResourceLimitConfig,
 }
 
 impl BrokerConfig {
@@ -42,6 +44,7 @@ impl BrokerConfig {
             udp_timeouts: UdpTimeoutConfig::default(),
             policy,
             audit: AuditSinkConfig::default(),
+            resource_limits: ResourceLimitConfig::default(),
         }
     }
 }
@@ -158,6 +161,62 @@ pub struct ProxyEnvironment {
     pub no_proxy: Option<String>,
 }
 
+/// Runtime resource limits used by proof and production backends.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ResourceLimitConfig {
+    /// Maximum simultaneous TCP flows.
+    pub max_tcp_flows: usize,
+    /// Maximum simultaneous UDP pseudo-flows.
+    pub max_udp_flows: usize,
+    /// Maximum simultaneous explicit proxy connections.
+    pub max_proxy_connections: usize,
+    /// Maximum buffered bytes per flow direction.
+    pub max_buffered_bytes_per_flow: usize,
+    /// Maximum queued audit events before backpressure is reported.
+    pub audit_queue_capacity: usize,
+}
+
+impl ResourceLimitConfig {
+    /// Validates that all limits are non-zero.
+    pub const fn validate(self) -> Result<(), ResourceLimitError> {
+        if self.max_tcp_flows == 0 {
+            return Err(ResourceLimitError::ZeroLimit("max_tcp_flows"));
+        }
+        if self.max_udp_flows == 0 {
+            return Err(ResourceLimitError::ZeroLimit("max_udp_flows"));
+        }
+        if self.max_proxy_connections == 0 {
+            return Err(ResourceLimitError::ZeroLimit("max_proxy_connections"));
+        }
+        if self.max_buffered_bytes_per_flow == 0 {
+            return Err(ResourceLimitError::ZeroLimit("max_buffered_bytes_per_flow"));
+        }
+        if self.audit_queue_capacity == 0 {
+            return Err(ResourceLimitError::ZeroLimit("audit_queue_capacity"));
+        }
+        Ok(())
+    }
+}
+
+impl Default for ResourceLimitConfig {
+    fn default() -> Self {
+        Self {
+            max_tcp_flows: 1024,
+            max_udp_flows: 4096,
+            max_proxy_connections: 1024,
+            max_buffered_bytes_per_flow: 256 * 1024,
+            audit_queue_capacity: 8192,
+        }
+    }
+}
+
+/// Resource limit validation error.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum ResourceLimitError {
+    /// A required limit was zero.
+    ZeroLimit(&'static str),
+}
+
 /// UDP pseudo-flow timeout settings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct UdpTimeoutConfig {
@@ -208,6 +267,19 @@ mod tests {
             .policy
             .broadcast_addresses
             .contains(&IpAddr::from([10, 255, 0, 255])));
+        assert_eq!(config.resource_limits.validate(), Ok(()));
+    }
+
+    #[test]
+    fn resource_limits_reject_zero_values() {
+        let invalid = ResourceLimitConfig {
+            max_tcp_flows: 0,
+            ..ResourceLimitConfig::default()
+        };
+        assert_eq!(
+            invalid.validate(),
+            Err(ResourceLimitError::ZeroLimit("max_tcp_flows"))
+        );
     }
 
     #[test]
