@@ -364,3 +364,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: the TUN session still does not perform policy/audit before DNS write-back, and DNS records remain static; no host upstream resolver exists.
 - Exact next step: commit DNS TUN write-back, then gate broker DNS write-back through the verification kernel so malformed/denied DNS events are audited before any response is emitted.
+
+## 2026-06-21T23:59:30Z
+- Current objective: gate broker DNS TUN write-back through the verification kernel so policy/audit decisions happen before responses are emitted.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings` (initially failed on too many function arguments; fixed by introducing `BrokerDnsRuntime` context)
+  - `cargo test --all-targets --all-features` (initially failed because the deny-by-default test omitted broker DNS config and hit `RequireBrokerDns`; fixed the test config to model broker DNS plus default deny)
+- Observed result: final verification passed; 48 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 19 runtime tests, and 7 setup tests passed. New tests prove broker DNS TUN packets are audited/denied before write-back by default and only synthesize/cache responses after an explicit DNS allow rule passes.
+- Commit hash when committed: pending.
+- Remaining risks: the policy-gated DNS handler uses a placeholder sandbox ID and is not yet part of a full session context; static DNS records still lack config loading.
+- Exact next step: commit policy-gated DNS write-back, then add a session context carrying sandbox ID/broker DNS/resolver/cache so packet handlers do not use placeholder identity.

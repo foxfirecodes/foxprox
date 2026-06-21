@@ -14,3 +14,6 @@
 
 ## 2026-06-21T23:02:50Z
 - Minimal DNS response caching should use the minimum TTL among accepted A/AAAA records for a hostname so attribution cannot outlive the shortest observed address binding.
+
+## 2026-06-21T23:59:30Z
+- Broker-directed DNS tests must configure the same broker DNS IP in `PolicyConfig`; otherwise DNS policy correctly treats even broker-address packets as `RequireBrokerDns` direct-bypass attempts.

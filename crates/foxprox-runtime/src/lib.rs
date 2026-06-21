@@ -213,6 +213,9 @@ pub enum TunPacketOutcome {
         bytes: usize,
         cached: bool,
     },
+    PolicyDenied {
+        decision: Decision,
+    },
 }
 
 pub fn handle_one_tun_packet<R: Read, W: Write>(
@@ -228,6 +231,75 @@ pub fn handle_one_tun_packet<R: Read, W: Write>(
             Ok(TunPacketOutcome::EchoReplyWritten { bytes: reply.len() })
         }
         Ok(None) => unsupported_or_malformed_outcome(packet),
+        Err(error) => Ok(TunPacketOutcome::DroppedMalformed { error }),
+    }
+}
+
+pub struct BrokerDnsRuntime<'a, S> {
+    pub resolver: &'a StaticDnsResolver,
+    pub cache: &'a mut DnsCache,
+    pub broker_dns: &'a [IpAddr],
+    pub kernel: &'a mut VerificationKernel<S>,
+}
+
+pub fn handle_one_tun_packet_with_dns_policy<R: Read, W: Write, S: AuditSink>(
+    reader: &mut R,
+    writer: &mut W,
+    buffer: &mut [u8],
+    dns: &mut BrokerDnsRuntime<'_, S>,
+    timestamp_millis: u128,
+) -> io::Result<TunPacketOutcome> {
+    let bytes_read = reader.read(buffer)?;
+    let packet = &buffer[..bytes_read];
+    match parse_ip_packet(packet) {
+        Ok(ParsedIpPacket::Udpv4Packet(udp)) if udp.destination_port == 53 => {
+            let event = udpv4_packet_to_event_with_broker_dns(
+                SandboxId::new("tun-dns").expect("static sandbox id is valid"),
+                &udp,
+                dns.broker_dns,
+            );
+            let decision = dns.kernel.decide_and_audit(&event, timestamp_millis);
+            if decision.action != DecisionAction::Allow {
+                return Ok(TunPacketOutcome::PolicyDenied { decision });
+            }
+            if matches!(event, NormalizedEvent::DnsQuery { .. }) {
+                return match handle_broker_dns_udp_packet(
+                    &udp,
+                    dns.resolver,
+                    dns.cache,
+                    timestamp_millis,
+                ) {
+                    Ok(response) => {
+                        writer.write_all(&response.packet)?;
+                        Ok(TunPacketOutcome::DnsResponseWritten {
+                            bytes: response.packet.len(),
+                            cached: response.cached,
+                        })
+                    }
+                    Err(_) => Ok(TunPacketOutcome::DroppedMalformedDns),
+                };
+            }
+            Ok(TunPacketOutcome::UdpObserved {
+                source: IpAddr::V4(udp.source),
+                destination: IpAddr::V4(udp.destination),
+                source_port: udp.source_port,
+                destination_port: udp.destination_port,
+                payload_len: udp.payload.len(),
+            })
+        }
+        Ok(ParsedIpPacket::Udpv4Packet(udp)) => Ok(TunPacketOutcome::UdpObserved {
+            source: IpAddr::V4(udp.source),
+            destination: IpAddr::V4(udp.destination),
+            source_port: udp.source_port,
+            destination_port: udp.destination_port,
+            payload_len: udp.payload.len(),
+        }),
+        Ok(ParsedIpPacket::Icmpv4EchoRequest(request)) => {
+            let reply = synthesize_icmpv4_echo_reply(&request);
+            writer.write_all(&reply)?;
+            Ok(TunPacketOutcome::EchoReplyWritten { bytes: reply.len() })
+        }
+        Ok(ParsedIpPacket::UnsupportedIpv4Protocol(_)) => unsupported_or_malformed_outcome(packet),
         Err(error) => Ok(TunPacketOutcome::DroppedMalformed { error }),
     }
 }
@@ -495,6 +567,94 @@ mod tests {
         assert_eq!(&writer[28..], b"ok");
         assert_eq!(checksum(&writer[..20]), 0);
         assert_eq!(checksum(&writer[20..]), 0);
+    }
+
+    #[test]
+    fn dns_tun_policy_gate_denies_before_writeback_by_default() {
+        let request = build_dns_udp_ipv4_packet();
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+        let resolver = StaticDnsResolver::new(30);
+        let mut cache = DnsCache::new();
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                broker_dns: vec![IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(4),
+        );
+        let mut dns = BrokerDnsRuntime {
+            resolver: &resolver,
+            cache: &mut cache,
+            broker_dns: &[IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+            kernel: &mut kernel,
+        };
+
+        let outcome = handle_one_tun_packet_with_dns_policy(
+            &mut reader,
+            &mut writer,
+            &mut buffer,
+            &mut dns,
+            100,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            TunPacketOutcome::PolicyDenied { decision }
+                if decision.action == DecisionAction::DenyDrop
+        ));
+        assert!(writer.is_empty());
+        assert_eq!(kernel.audit_sink().events().len(), 1);
+    }
+
+    #[test]
+    fn dns_tun_policy_gate_allows_then_writes_response() {
+        let request = build_dns_udp_ipv4_packet();
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+        let mut resolver = StaticDnsResolver::new(30);
+        resolver.insert(
+            Hostname::normalize("example.com").unwrap(),
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+        );
+        let mut cache = DnsCache::new();
+        let mut rules = RuleSet::default();
+        let mut rule = PolicyRule::allow("allow-broker-dns");
+        rule.protocol = Some(Protocol::Dns);
+        rules.push(rule);
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                broker_dns: vec![IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(4),
+        );
+        let mut dns = BrokerDnsRuntime {
+            resolver: &resolver,
+            cache: &mut cache,
+            broker_dns: &[IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+            kernel: &mut kernel,
+        };
+
+        let outcome = handle_one_tun_packet_with_dns_policy(
+            &mut reader,
+            &mut writer,
+            &mut buffer,
+            &mut dns,
+            100,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            TunPacketOutcome::DnsResponseWritten { cached: true, .. }
+        ));
+        assert!(!writer.is_empty());
+        assert_eq!(kernel.audit_sink().events().len(), 1);
     }
 
     #[test]
@@ -832,6 +992,17 @@ mod tests {
         let outcome = runtime.handle_event(&tcp_event(), 1);
         assert!(matches!(outcome, RuntimeOutcome::Denied { .. }));
         assert_eq!(runtime.egress().tcp_attempts, 0);
+    }
+
+    fn build_dns_udp_ipv4_packet() -> Vec<u8> {
+        let dns_payload = dns_query_payload();
+        let mut udp_payload = Vec::new();
+        udp_payload.extend_from_slice(&53000u16.to_be_bytes());
+        udp_payload.extend_from_slice(&53u16.to_be_bytes());
+        udp_payload.extend_from_slice(&((8 + dns_payload.len()) as u16).to_be_bytes());
+        udp_payload.extend_from_slice(&0u16.to_be_bytes());
+        udp_payload.extend_from_slice(&dns_payload);
+        build_ipv4_packet(17, &udp_payload)
     }
 
     fn dns_query_payload() -> Vec<u8> {
