@@ -152,3 +152,26 @@
 - What failed or surprised the agent: stdout must remain JSON-only, so synthesized binary packet output is written to an explicit file rather than mixed with audit output.
 - What remains unproven: no long-running TUN loop, no file/stdout audit sink trait in the runtime, no live bwrap setup helper, no TCP/UDP egress, and no DNS payload handling yet.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — UDP DNS payload → DNS query audit slice
+
+- Slice attempted: parse a real UDP/IPv4 DNS query payload into a normalized `DnsQuery` event and prove policy/audit records include the queried hostname.
+- Why next: DNS is currently only classified by UDP/53 port; alpha requires broker DNS observations and hostname attribution foundations, so DNS payload parsing is the next narrow parser-to-policy/audit gap.
+- Verification plan: add minimal DNS question parsing for uncompressed query names, qtype mapping, malformed DNS fail-closed behavior, update affected direct-DNS tests to use real query fixtures, and run formatting, clippy, focused packet/config tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — UDP DNS payload → DNS query audit
+
+- Slice attempted: parse UDP/IPv4 DNS question payloads into normalized `DnsQuery` events with hostname/query type and feed them through policy/audit.
+- Why next: UDP/53 was previously only port-classified; alpha DNS observations need hostnames in structured audit before cache/correlation and broker resolver behavior can be meaningful.
+- What changed: `foxprox-packet` now validates UDP length, parses uncompressed DNS question names, maps common qtypes, emits `NormalizedEvent::DnsQuery`, and treats malformed DNS payloads as fail-closed parse errors. Existing DNS bypass tests now use real DNS query fixtures, and config-to-broker DNS denial still passes through the new parser path.
+- Verification:
+  - `cargo fmt --check` passed.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 2 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 3 `foxprox-config` tests, 9 `foxprox-core` tests, 10 `foxprox-packet` tests, and 0 doc tests.
+  - Focused check attempt `cargo test -p foxprox-packet parses_udp_dns_query_packet_and_policy_denies_direct_external_dns malformed_dns_query_can_be_converted_to_fail_closed_event` failed because Cargo accepts only one test filter before `--`.
+  - Focused checks then passed separately: `cargo test -p foxprox-packet parses_udp_dns_query_packet_and_policy_denies_direct_external_dns`, `cargo test -p foxprox-packet malformed_dns_query_can_be_converted_to_fail_closed_event`, and `cargo test -p foxprox-config loaded_dns_resolver_preserves_direct_dns_bypass_denial`.
+  - `cargo fmt --check` passed after focused checks.
+- What failed or surprised the agent: Cargo's test CLI does not accept multiple bare test filters; use separate commands or broader substring filters.
+- What remains unproven: DNS response parsing/cache, upstream DNS forwarding, broker resolver socket, DNS answer audit records, compression-pointer support, and hostname-to-flow attribution are still absent.
+- Commit: this commit.

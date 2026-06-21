@@ -264,6 +264,30 @@ mod tests {
         packet
     }
 
+    fn udp_payload_with_body(source_port: u16, destination_port: u16, body: &[u8]) -> Vec<u8> {
+        let udp_length = 8 + body.len();
+        let mut payload = vec![0_u8; udp_length];
+        payload[0..2].copy_from_slice(&source_port.to_be_bytes());
+        payload[2..4].copy_from_slice(&destination_port.to_be_bytes());
+        payload[4..6].copy_from_slice(&(udp_length as u16).to_be_bytes());
+        payload[8..].copy_from_slice(body);
+        payload
+    }
+
+    fn dns_query_body(hostname: &str) -> Vec<u8> {
+        let mut body = vec![
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        for label in hostname.split('.') {
+            body.push(label.len() as u8);
+            body.extend_from_slice(label.as_bytes());
+        }
+        body.push(0);
+        body.extend_from_slice(&1_u16.to_be_bytes());
+        body.extend_from_slice(&1_u16.to_be_bytes());
+        body
+    }
+
     #[test]
     fn loaded_icmp_rule_allows_broker_echo_reply() {
         let config = policy_config_from_toml(
@@ -310,8 +334,8 @@ mod tests {
         )
         .unwrap();
         let broker = Ipv4PacketBroker::new(PolicyEngine::new(config));
-        let udp_dns_payload = b"\xc3\x50\x00\x35\x00\x08\x00\x00";
-        let packet = ipv4_packet(17, [10, 0, 0, 2], [8, 8, 8, 8], udp_dns_payload);
+        let udp_dns_payload = udp_payload_with_body(50000, 53, &dns_query_body("example.com"));
+        let packet = ipv4_packet(17, [10, 0, 0, 2], [8, 8, 8, 8], &udp_dns_payload);
 
         let result = broker.process_packet(&context(), &packet);
 

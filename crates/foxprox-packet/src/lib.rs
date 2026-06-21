@@ -10,7 +10,7 @@ use std::fmt;
 use std::net::Ipv4Addr;
 
 use foxprox_core::{
-    Endpoint, FrontendKind, IcmpMessage, NormalizedEvent, SandboxId, TcpConnectAttempt,
+    DnsQuery, Endpoint, FrontendKind, IcmpMessage, NormalizedEvent, SandboxId, TcpConnectAttempt,
     UdpClassification, UdpFlowAttempt, UnsupportedNetworkEvent,
 };
 
@@ -60,6 +60,20 @@ pub enum PacketParseError {
     UdpHeaderTooShort {
         actual: usize,
     },
+    InvalidUdpLength {
+        udp_length: usize,
+        actual: usize,
+    },
+    DnsHeaderTooShort {
+        actual: usize,
+    },
+    DnsQuestionCountZero,
+    DnsNameTooLong,
+    DnsNameTruncated,
+    DnsCompressionPointerUnsupported,
+    DnsQuestionTooShort {
+        remaining: usize,
+    },
     IcmpHeaderTooShort {
         actual: usize,
     },
@@ -95,6 +109,21 @@ impl PacketParseError {
             }
             Self::UdpHeaderTooShort { actual } => {
                 format!("udp-header-too-short: actual={actual}")
+            }
+            Self::InvalidUdpLength { udp_length, actual } => {
+                format!("invalid-udp-length: udp_length={udp_length} actual={actual}")
+            }
+            Self::DnsHeaderTooShort { actual } => {
+                format!("dns-header-too-short: actual={actual}")
+            }
+            Self::DnsQuestionCountZero => "dns-question-count-zero".to_owned(),
+            Self::DnsNameTooLong => "dns-name-too-long".to_owned(),
+            Self::DnsNameTruncated => "dns-name-truncated".to_owned(),
+            Self::DnsCompressionPointerUnsupported => {
+                "dns-compression-pointer-unsupported".to_owned()
+            }
+            Self::DnsQuestionTooShort { remaining } => {
+                format!("dns-question-too-short: remaining={remaining}")
             }
             Self::IcmpHeaderTooShort { actual } => {
                 format!("icmp-header-too-short: actual={actual}")
@@ -232,8 +261,28 @@ fn parse_udp(
 
     let source_port = u16::from_be_bytes([payload[0], payload[1]]);
     let destination_port = u16::from_be_bytes([payload[2], payload[3]]);
+    let udp_length = usize::from(u16::from_be_bytes([payload[4], payload[5]]));
+    if udp_length < 8 || udp_length > payload.len() {
+        return Err(PacketParseError::InvalidUdpLength {
+            udp_length,
+            actual: payload.len(),
+        });
+    }
+    let udp_body = &payload[8..udp_length];
+
+    if destination_port == 53 {
+        let query = parse_dns_question(udp_body)?;
+        return Ok(NormalizedEvent::DnsQuery(DnsQuery {
+            sandbox_id: context.sandbox_id.clone(),
+            frontend: context.frontend,
+            source: Some(header.source_endpoint(Some(source_port))),
+            resolver: header.destination_endpoint(Some(destination_port)),
+            hostname: query.hostname,
+            query_type: query.query_type,
+        }));
+    }
+
     let classification = match destination_port {
-        53 => UdpClassification::Dns,
         443 => UdpClassification::QuicCandidate,
         _ => UdpClassification::Generic,
     };
@@ -246,6 +295,78 @@ fn parse_udp(
         classification,
         attribution: None,
     }))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedDnsQuestion {
+    hostname: String,
+    query_type: String,
+}
+
+fn parse_dns_question(payload: &[u8]) -> Result<ParsedDnsQuestion, PacketParseError> {
+    if payload.len() < 12 {
+        return Err(PacketParseError::DnsHeaderTooShort {
+            actual: payload.len(),
+        });
+    }
+
+    let question_count = u16::from_be_bytes([payload[4], payload[5]]);
+    if question_count == 0 {
+        return Err(PacketParseError::DnsQuestionCountZero);
+    }
+
+    let mut offset = 12;
+    let mut labels = Vec::new();
+    loop {
+        if offset >= payload.len() {
+            return Err(PacketParseError::DnsNameTruncated);
+        }
+        let length = payload[offset];
+        offset += 1;
+
+        if length & 0xc0 != 0 {
+            return Err(PacketParseError::DnsCompressionPointerUnsupported);
+        }
+        if length == 0 {
+            break;
+        }
+        let length = usize::from(length);
+        if length > 63 {
+            return Err(PacketParseError::DnsNameTooLong);
+        }
+        if offset + length > payload.len() {
+            return Err(PacketParseError::DnsNameTruncated);
+        }
+        let label = std::str::from_utf8(&payload[offset..offset + length])
+            .map_err(|_| PacketParseError::DnsNameTruncated)?;
+        labels.push(label.to_ascii_lowercase());
+        offset += length;
+    }
+
+    if payload.len() - offset < 4 {
+        return Err(PacketParseError::DnsQuestionTooShort {
+            remaining: payload.len() - offset,
+        });
+    }
+    let qtype = u16::from_be_bytes([payload[offset], payload[offset + 1]]);
+
+    Ok(ParsedDnsQuestion {
+        hostname: labels.join("."),
+        query_type: dns_query_type(qtype).to_owned(),
+    })
+}
+
+fn dns_query_type(qtype: u16) -> &'static str {
+    match qtype {
+        1 => "A",
+        2 => "NS",
+        5 => "CNAME",
+        15 => "MX",
+        16 => "TXT",
+        28 => "AAAA",
+        65 => "HTTPS",
+        _ => "UNKNOWN",
+    }
 }
 
 fn parse_icmp(
@@ -471,6 +592,35 @@ mod tests {
         payload
     }
 
+    fn udp_payload_with_body(source_port: u16, destination_port: u16, body: &[u8]) -> Vec<u8> {
+        let udp_length = 8 + body.len();
+        let mut payload = vec![0_u8; udp_length];
+        payload[0..2].copy_from_slice(&source_port.to_be_bytes());
+        payload[2..4].copy_from_slice(&destination_port.to_be_bytes());
+        payload[4..6].copy_from_slice(&(udp_length as u16).to_be_bytes());
+        payload[8..].copy_from_slice(body);
+        payload
+    }
+
+    fn dns_query_body(hostname: &str, qtype: u16) -> Vec<u8> {
+        let mut body = vec![
+            0x12, 0x34, // ID
+            0x01, 0x00, // standard recursive query
+            0x00, 0x01, // QDCOUNT
+            0x00, 0x00, // ANCOUNT
+            0x00, 0x00, // NSCOUNT
+            0x00, 0x00, // ARCOUNT
+        ];
+        for label in hostname.split('.') {
+            body.push(label.len() as u8);
+            body.extend_from_slice(label.as_bytes());
+        }
+        body.push(0);
+        body.extend_from_slice(&qtype.to_be_bytes());
+        body.extend_from_slice(&1_u16.to_be_bytes()); // IN
+        body
+    }
+
     fn icmp_echo_request_payload() -> Vec<u8> {
         let mut payload = b"\x08\x00\x00\x00\x12\x34\x00\x01foxprox".to_vec();
         let checksum = internet_checksum(&payload);
@@ -501,8 +651,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_udp_dns_packet_and_policy_denies_direct_external_dns() {
-        let packet = ipv4_packet(17, [10, 0, 0, 2], [8, 8, 8, 8], &udp_payload(53000, 53));
+    fn parses_udp_dns_query_packet_and_policy_denies_direct_external_dns() {
+        let packet = ipv4_packet(
+            17,
+            [10, 0, 0, 2],
+            [8, 8, 8, 8],
+            &udp_payload_with_body(53000, 53, &dns_query_body("Example.COM", 1)),
+        );
         let event = parse_ipv4_packet(&context(), &packet).unwrap();
         let engine = PolicyEngine::new(PolicyConfig {
             default_policy: DefaultPolicy::Allow,
@@ -516,6 +671,11 @@ mod tests {
         let evaluation = engine.evaluate(&event);
 
         assert_eq!(event.protocol(), Protocol::Dns);
+        assert_eq!(event.hostname(), Some("example.com"));
+        match &event {
+            NormalizedEvent::DnsQuery(query) => assert_eq!(query.query_type, "A"),
+            other => panic!("unexpected event: {other:?}"),
+        }
         assert_eq!(
             evaluation.decision,
             PolicyDecision::Deny {
@@ -524,7 +684,8 @@ mod tests {
                 rule_id: None,
             }
         );
-        assert_eq!(evaluation.audit.kind, AuditKind::UdpFlow);
+        assert_eq!(evaluation.audit.kind, AuditKind::DnsQuery);
+        assert_eq!(evaluation.audit.hostname.as_deref(), Some("example.com"));
         assert_eq!(evaluation.audit.decision, AuditDecision::Denied);
     }
 
@@ -637,6 +798,32 @@ mod tests {
                 icmp_type: 3,
                 icmp_code: 0,
             })
+        );
+    }
+
+    #[test]
+    fn malformed_dns_query_can_be_converted_to_fail_closed_event() {
+        let packet = ipv4_packet(
+            17,
+            [10, 0, 0, 2],
+            [10, 0, 0, 1],
+            &udp_payload_with_body(53000, 53, &[0x12, 0x34]),
+        );
+
+        assert_eq!(
+            parse_ipv4_packet(&context(), &packet),
+            Err(PacketParseError::DnsHeaderTooShort { actual: 2 })
+        );
+        let event = parse_ipv4_packet_fail_closed(&context(), &packet);
+        let evaluation = PolicyEngine::new(PolicyConfig::default()).evaluate(&event);
+
+        assert_eq!(event.protocol(), Protocol::Unsupported);
+        assert_eq!(evaluation.audit.decision, AuditDecision::FailClosed);
+        assert_eq!(
+            evaluation.decision,
+            PolicyDecision::FailClosed {
+                reason: "unsupported-network-event: dns-header-too-short: actual=2".to_owned()
+            }
         );
     }
 

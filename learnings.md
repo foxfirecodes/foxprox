@@ -28,3 +28,7 @@ The TOML config layer is safest when it validates strings at the edge and return
 ## 2026-06-21 — keep CLI audit stdout separate from packet bytes
 
 The first process-boundary harness should emit JSON Lines audit on stdout and write synthesized packet bytes only to an explicit output target. Mixing binary write-back with audit stdout would make runtime evidence and downstream log collection ambiguous.
+
+## 2026-06-21 — DNS observations need payload fixtures, not just UDP/53
+
+Port-based DNS classification is enough for direct-bypass denial, but hostname attribution requires real DNS question fixtures. Minimal uncompressed QNAME parsing gives useful audit evidence now while leaving compression and response caching for a later DNS subsystem slice.
