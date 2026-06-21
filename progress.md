@@ -256,3 +256,25 @@
   - `cargo tree -p foxprox-core` still shows only `foxprox-core`, confirming no dependency creep.
 - Commit boundary: core UDP pseudo-flow and DNS cache shape only; no live smoltcp UDP/DNS proof yet.
 - Next exact action: commit, then implement broker-reachable DNS/UDP proof in `foxprox-net` and CLI.
+
+## 2026-06-21T18:18:00Z — DNS parser and audit metadata verified
+
+- Current objective: complete the core-only half of Milestone 4 before live UDP/DNS proof.
+- Planner recommendation received: add dependency-free DNS wire parsing and DNS audit metadata before `foxprox-net` UDP socket work.
+- Added core DNS wire parsing:
+  - `parse_dns_query` for single-question UDP DNS queries.
+  - `parse_dns_response` for UDP DNS responses with bounded compressed-name parsing and A/AAAA answer extraction.
+  - `DnsQuestion`, `DnsResponseObservation`, `DnsAddressRecord`, and `DnsParseError`.
+  - Tests for A query parsing, compressed A response parsing, malformed/truncated packet rejection, and compression-pointer loop rejection.
+- Extended audit schema with DNS metadata fields and `with_dns_metadata` builder:
+  - `dns_query_type`, `dns_rcode`, and `dns_answers`.
+- Updated `DnsQueryType` to retain unknown wire types by numeric RR type code.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 35 core tests, 8 device tests, 1 net test.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core` still shows only `foxprox-core`, confirming no dependency creep.
+- Commit boundary: core DNS parser/audit metadata only; no smoltcp UDP changes.
+- Next exact action: commit, then implement `foxprox-net` UDP/DNS proof with `socket-udp` and CLI command.

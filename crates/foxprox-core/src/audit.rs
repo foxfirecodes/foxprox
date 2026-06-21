@@ -4,6 +4,7 @@ use crate::event::{
     Attribution, Frontend, Hostname, HttpMethod, Origin, Protocol, SandboxId, TransportEndpoint,
 };
 use crate::policy::Decision;
+use std::net::IpAddr;
 use std::time::{Duration, SystemTime};
 
 /// Type of broker event recorded by audit output.
@@ -86,6 +87,12 @@ pub struct AuditEvent {
     pub path_and_query: Option<String>,
     /// Policy decision, when the event records a policy evaluation.
     pub decision: Option<Decision>,
+    /// DNS query type, when applicable.
+    pub dns_query_type: Option<String>,
+    /// DNS response code, when applicable.
+    pub dns_rcode: Option<u8>,
+    /// DNS answer addresses observed by the broker.
+    pub dns_answers: Vec<IpAddr>,
     /// Bytes read from the sandbox side.
     pub bytes_from_sandbox: u64,
     /// Bytes written back to the sandbox side.
@@ -113,6 +120,9 @@ impl AuditEvent {
             http_method: None,
             path_and_query: None,
             decision: None,
+            dns_query_type: None,
+            dns_rcode: None,
+            dns_answers: Vec::new(),
             bytes_from_sandbox: 0,
             bytes_to_sandbox: 0,
             flow_duration: None,
@@ -129,6 +139,19 @@ impl AuditEvent {
     /// Returns a copy with a policy decision attached.
     pub fn with_decision(mut self, decision: Decision) -> Self {
         self.decision = Some(decision);
+        self
+    }
+
+    /// Returns a copy with DNS metadata attached.
+    pub fn with_dns_metadata(
+        mut self,
+        query_type: impl Into<String>,
+        rcode: Option<u8>,
+        answers: Vec<IpAddr>,
+    ) -> Self {
+        self.dns_query_type = Some(query_type.into());
+        self.dns_rcode = rcode;
+        self.dns_answers = answers;
         self
     }
 
@@ -195,5 +218,19 @@ mod tests {
             event.decision.as_ref().map(|decision| decision.action),
             Some(DecisionAction::DenyReset)
         );
+    }
+
+    #[test]
+    fn audit_event_builder_attaches_dns_metadata() {
+        let answer = "93.184.216.34".parse().unwrap();
+        let event = AuditEvent::new(Frontend::Tun, AuditEventKind::DnsQuery).with_dns_metadata(
+            "A",
+            Some(0),
+            vec![answer],
+        );
+
+        assert_eq!(event.dns_query_type.as_deref(), Some("A"));
+        assert_eq!(event.dns_rcode, Some(0));
+        assert_eq!(event.dns_answers, vec![answer]);
     }
 }

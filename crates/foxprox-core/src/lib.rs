@@ -20,7 +20,10 @@ pub use audit::{AuditEvent, AuditEventKind, AuditSinkConfig};
 pub use config::{
     BrokerConfig, DnsConfig, ProxyConfig, ProxyEnvironment, TunConfig, UdpTimeoutConfig,
 };
-pub use dns::{DnsCache, DnsCacheEntry, DnsObservation, DnsQueryType};
+pub use dns::{
+    parse_dns_query, parse_dns_response, DnsAddressRecord, DnsCache, DnsCacheEntry, DnsObservation,
+    DnsParseError, DnsQueryType, DnsQuestion, DnsResponseObservation,
+};
 pub use egress::{
     DnsEgress, DnsEgressRequest, EgressContext, EgressError, EgressErrorKind, EgressOutcome,
     TcpEgress, TcpEgressRequest, UdpEgress, UdpEgressRequest,
