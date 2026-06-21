@@ -5,6 +5,7 @@ members = [
     "crates/foxprox-broker",
     "crates/foxprox-audit",
     "crates/foxprox-config",
+    "crates/foxprox-cli",
 ]
 resolver = "2"
 

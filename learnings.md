@@ -24,3 +24,7 @@ The audit output crate can avoid coupling serialization derives into `foxprox-co
 ## 2026-06-21 — config parsing should terminate in core types
 
 The TOML config layer is safest when it validates strings at the edge and returns `PolicyConfig`; broker code does not need to know whether policy came from tests, TOML, or a future live reload source.
+
+## 2026-06-21 — keep CLI audit stdout separate from packet bytes
+
+The first process-boundary harness should emit JSON Lines audit on stdout and write synthesized packet bytes only to an explicit output target. Mixing binary write-back with audit stdout would make runtime evidence and downstream log collection ambiguous.

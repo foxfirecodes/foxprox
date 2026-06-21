@@ -28,6 +28,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "foxprox-cli"
+version = "0.1.0"
+dependencies = [
+ "foxprox-audit",
+ "foxprox-broker",
+ "foxprox-config",
+ "foxprox-core",
+ "foxprox-packet",
+ "serde_json",
+]
+
+[[package]]
 name = "foxprox-config"
 version = "0.1.0"
 dependencies = [

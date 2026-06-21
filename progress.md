@@ -130,3 +130,25 @@
 - What failed or surprised the agent: adding TOML introduced additional parser dependencies, but config validation could still map into existing core types without changing core serialization.
 - What remains unproven: config file discovery/CLI loading, richer rule schema, user-facing diagnostics with source spans, reload behavior, and integration with a long-running runtime are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — CLI config → packet handler → audit JSON slice
+
+- Slice attempted: add a minimal runtime harness that loads policy config from a file, reads one IPv4 packet from stdin, processes it through the broker, and emits JSON Lines audit plus optional outbound packet bytes.
+- Why next: config loading, broker packet handling, and audit serialization are individually proven but not yet crossed through a user-facing process boundary; this reduces CLI/runtime integration risk before privileged TUN IO.
+- Verification plan: add a `foxprox-cli` crate with a `packet-once` command, focused unit tests for config-controlled ICMP reply/audit output and default-deny behavior, run a real `cargo run -p foxprox-cli -- packet-once ...` fixture command, then run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — CLI config → packet handler → audit JSON
+
+- Slice attempted: a user-facing `packet-once` runtime harness that loads TOML policy, reads one IPv4 packet from stdin, processes it through broker policy/audit/write-back, emits JSON Lines audit on stdout, and writes optional outbound packet bytes separately.
+- Why next: config, broker packet handling, and audit JSON were proven independently; this crossed the process/CLI boundary before adding privileged long-running TUN IO.
+- What changed: added `crates/foxprox-cli` with a `packet-once` command, reusable `process_packet_once` function, manual CLI parsing, config-file loading, stdin packet reading, JSON audit stdout, optional outbound packet file output, and focused tests for config-allowed ICMP replies, default-deny audit-only behavior, and invalid sandbox IDs.
+- Verification:
+  - `cargo fmt --check` initially failed for new CLI formatting; `cargo fmt` was run.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 2 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 3 `foxprox-config` tests, 9 `foxprox-core` tests, 9 `foxprox-packet` tests, and 0 doc tests.
+  - Runtime proof passed: `cargo run -q -p foxprox-cli -- packet-once --config "$tmpdir/policy.toml" --sandbox runtime-proof --outbound "$tmpdir/reply.bin" < "$tmpdir/request.bin" > "$tmpdir/audit.jsonl"` emitted an allowed `icmp_message` JSON audit with rule `allow-icmp` and wrote a 35-byte outbound reply packet.
+  - `cargo fmt --check` passed after formatting.
+- What failed or surprised the agent: stdout must remain JSON-only, so synthesized binary packet output is written to an explicit file rather than mixed with audit output.
+- What remains unproven: no long-running TUN loop, no file/stdout audit sink trait in the runtime, no live bwrap setup helper, no TCP/UDP egress, and no DNS payload handling yet.
+- Commit: this commit.
