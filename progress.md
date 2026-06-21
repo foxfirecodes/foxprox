@@ -92,3 +92,15 @@
 - Commit hash when committed: previous audit kernel slice committed as `dc88fa8`; runtime boundary commit pending.
 - Remaining risks: host egress trait is not yet backed by real TCP/UDP sockets; there is no smoltcp adapter, device frontend, bwrap setup helper, or network namespace integration.
 - Exact next step: commit runtime boundary, then add device/setup backend abstractions and fail-early setup planning types for TUN/bwrap integration.
+
+## 2026-06-21T17:10:05Z
+- Current objective: add fail-early integration planning types for bwrap-compatible TUN setup without putting bwrap semantics into core policy.
+- Files changed: `Cargo.toml`, `Cargo.lock`, `crates/foxprox-integrations/Cargo.toml`, `crates/foxprox-integrations/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially identified formatting in integration code; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 34 core tests, 3 integration tests, and 2 runtime tests passed. Integration tests prove the bwrap command plan includes `--unshare-net`, temporary `CAP_NET_ADMIN`, `/dev/net/tun`, and `foxproxsetup`, and rejects missing targets or invalid MTU before execution.
+- Commit hash when committed: previous runtime boundary slice committed as `e94aa21`; integration planning commit pending.
+- Remaining risks: the integration crate only plans command/setup shape; it does not execute bwrap, create/configure TUN, pass file descriptors, drop capabilities, or validate kernel features.
+- Exact next step: commit integration planning, then add an audit file sink or CLI-facing smoke entry point to make verification outputs durable outside tests.

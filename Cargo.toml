@@ -1,5 +1,9 @@
 [workspace]
-members = ["crates/foxprox-core", "crates/foxprox-runtime"]
+members = [
+    "crates/foxprox-core",
+    "crates/foxprox-integrations",
+    "crates/foxprox-runtime",
+]
 resolver = "2"
 
 [workspace.package]
