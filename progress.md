@@ -175,3 +175,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: fd handoff is verified in-process but not yet through an inherited bwrap control socket; `foxproxsetup` still does not drop setup capabilities or write DNS resolver configuration.
 - Exact next step: commit fd-handoff verification, then add fail-closed capability-drop/resolver setup sequencing in `foxproxsetup` before target exec.
+
+## 2026-06-21T23:17:15Z
+- Current objective: add fail-closed DNS resolver setup and CAP_NET_ADMIN drop sequencing before `foxproxsetup` target exec.
+- Files changed: `crates/foxprox-setup/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 35 core tests, 5 device tests, 3 integration tests, 2 runtime tests, and 7 setup tests passed. New tests prove resolver config contents are deterministic and setup sequencing is TUN create/configure, DNS config, fd handoff, capability drop, then exec; pure capability-bit tests prove CAP_NET_ADMIN is removed from effective/permitted/inheritable sets before the Linux `capset` call.
+- Commit hash when committed: pending.
+- Remaining risks: capability drop is compiled and bit-tested but not exercised with real elevated capabilities in this worktree; bwrap invocation and inherited control socket are still not smoke-tested end-to-end.
+- Exact next step: commit setup hardening, then implement host-side setup control socket receiving the TUN fd so the broker side can pair with `foxproxsetup` handoff.
