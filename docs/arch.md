@@ -295,26 +295,36 @@ Defaults:
 
 ## Interaction With bwrap
 
+Alpha bwrap integration uses a setup helper as the initial bwrap command.
+
 The launcher should:
 
-* create or prepare network namespace
+* start the host-side broker
+* launch bwrap with `--unshare-user`, `--unshare-net`, temporary `--cap-add CAP_NET_ADMIN`, and access to `/dev/net/tun`
+* run `foxproxsetup -- target args...` as the bwrap command
+* pass a setup control socket or inherited fd for TUN fd handoff
+* inject proxy environment variables when desired
+* apply mount namespace policy through bwrap arguments
+* leave final application seccomp to `foxproxsetup` when setup syscalls would otherwise be blocked
+
+`foxproxsetup` should:
+
 * create TUN device in the sandbox network namespace
-* assign sandbox-side IP address
+* assign sandbox-side IP address and MTU
 * configure route through TUN
 * configure DNS to broker resolver
-* start broker with TUN fd or namespace/device reference
-* launch bwrap with `--unshare-net`
-* apply mount namespace policy
-* apply Landlock policy
-* apply seccomp policy
+* configure proxy listener reachability
+* send the TUN fd to the host-side broker
+* drop setup capabilities, especially `CAP_NET_ADMIN`
+* close setup-only fds
 * exec target application
 
 The broker should not depend on bwrap-specific assumptions. It should only require:
 
-* a network namespace target
-* a TUN device or permission to create one
+* a TUN fd or an integration backend that can produce one
 * routing/DNS configuration
 * a sandbox identity label
+* a host-side egress environment
 
 ## Non-bwrap Backend Support
 
@@ -325,7 +335,9 @@ Possible backends:
 * bwrap backend:
 
   * launcher uses bwrap
-  * broker receives TUN fd or namespace path
+  * bwrap command is `foxproxsetup -- target args...`
+  * setup helper creates/configures TUN inside the sandbox network namespace
+  * broker receives TUN fd from setup helper
 
 * rootful namespace backend:
 
@@ -348,18 +360,27 @@ Architecture rule:
 
 ## TUN Setup Model
 
-Preferred setup:
+Preferred alpha setup:
 
-* launcher creates network namespace
-* launcher creates TUN device inside namespace
-* launcher configures:
+* bwrap creates the sandbox user/network namespaces
+* bwrap retains temporary `CAP_NET_ADMIN` for `foxproxsetup`
+* `foxproxsetup` creates TUN inside the sandbox network namespace
+* `foxproxsetup` configures:
 
   * interface address
   * route
   * MTU
   * DNS resolver target
-* launcher passes TUN fd to broker
-* broker drops unnecessary privileges after setup
+* `foxproxsetup` passes TUN fd to the host-side broker
+* `foxproxsetup` drops setup capabilities before target exec
+* host-side broker performs forwarding through host sockets
+
+Future setup-helper hook:
+
+* a small bwrap fork can temporarily read-only bind a trusted setup helper into the sandbox
+* the hook runs during bwrap setup before final capability drop/seccomp/app exec
+* the helper is unmounted immediately after setup
+* setup failure prevents target execution
 
 Alternative setup:
 

@@ -52,28 +52,38 @@ It supports two network access modes:
 
 The same policy engine, audit subsystem, DNS subsystem, and host egress backend must be shared by both modes.
 
-Supported alpha features:
+Alpha implementation is staged around a small forwarding proof before richer policy features.
 
-* TUN-based transparent networking
-* transparent hostname-aware HTTP/HTTPS filtering
+Foundation alpha features:
+
+* TUN device creation/configuration inside a sandbox network namespace
+* packet logging from the TUN fd
+* packet write-back proof, such as synthetic ICMP echo replies
+* `smoltcp`-based TUN TCP forwarding proof
+* unfiltered TCP forwarding through host sockets
+* minimal UDP forwarding proof
+* DNS handling sufficient for transparent traffic tests
+* structured audit/log output for packet, flow, and setup events
+* bwrap-compatible setup using a `foxproxsetup` command with temporary `CAP_NET_ADMIN`
+* backend design not hardwired to bwrap
+* fail-closed behavior for malformed or unsupported packet paths
+
+Richer alpha features after the forwarding proof:
+
+* configurable default network policy
+* IP/CIDR/port allow and deny rules
 * transparent DNS correlation
+* hostname/domain policy when attribution exists
+* transparent hostname-aware HTTP/HTTPS filtering
 * plaintext HTTP Host/method/path inspection
 * TLS ClientHello SNI parsing for direct HTTPS
 * best-effort QUIC metadata classification
 * HTTP proxy support
 * HTTPS `CONNECT` support
 * SOCKS5 TCP `CONNECT` support
-* TCP forwarding
-* UDP forwarding
-* DNS handling
-* ICMP basics
+* ICMP basics beyond the packet write-back proof
 * QUIC-over-UDP support
 * configurable UDP flow timeouts
-* configurable default network policy
-* structured audit logging
-* bwrap-compatible network namespace integration
-* backend design not hardwired to bwrap
-* fail-closed behavior for unsupported edge cases
 
 ## Non-Goals
 
@@ -295,7 +305,7 @@ Policy code operates on normalized request/flow events, not raw packet buffers o
 
 ## Network Namespace and Device Integration Layer
 
-The broker must support attaching network mediation to an existing sandbox network namespace.
+The broker must support mediation through a TUN device associated with a sandbox network namespace.
 
 Initial device type:
 
@@ -303,11 +313,11 @@ Initial device type:
 
 Initial namespace integration mode:
 
-* bwrap-compatible network namespace attachment
+* bwrap-compatible setup helper: bwrap runs `foxproxsetup -- target args...` with temporary `CAP_NET_ADMIN`; `foxproxsetup` configures networking inside the sandbox network namespace, hands the TUN fd to the host broker, drops setup privileges, and execs the target app
 
 The broker should not require bwrap specifically. It should support a generic model where another launcher/runtime provides:
 
-* network namespace path or fd
+* TUN fd, network namespace path/fd, or setup helper handoff channel
 * sandbox/session ID
 * desired TUN device config
 * desired broker listener config
@@ -316,20 +326,20 @@ The broker should not require bwrap specifically. It should support a generic mo
 
 The broker integration layer is responsible for:
 
-* entering or targeting the sandbox network namespace only for network setup
-* creating the TUN device in the sandbox network namespace
+* creating or receiving the TUN device for the sandbox network namespace
 * configuring sandbox-side IP addressing
 * configuring routes needed to send traffic through the TUN device
 * configuring broker DNS address inside the namespace
 * creating proxy listener addresses reachable from the sandbox
 * passing or retaining the TUN fd needed by the broker
 * returning network environment values to the caller when needed
+* dropping setup-only privileges before target application exec when using a setup helper
 
 The broker integration layer is not responsible for:
 
-* creating the full sandbox
-* choosing filesystem mounts
-* launching the target application unless explicitly used as a thin wrapper mode
+* choosing application filesystem mounts except setup-helper requirements
+* keeping network setup capabilities available to the target app
+* applying final application seccomp before network setup completes
 * applying non-network security policy
 
 ## Frontend Layer
@@ -494,6 +504,8 @@ Preferred approach:
 Primary candidate:
 
 * `smoltcp`
+
+The `smoltcp` integration is an early alpha gate. The broker must prove that a TUN fd can feed a userspace TCP/IP stack, accept sandbox TCP connections, open host TCP sockets, bridge bytes in both directions, and emit outbound IP packets back to the sandbox before the policy model grows beyond minimal allow-all/deny-all behavior.
 
 The adapter owns integration between TUN packets and the userspace stack.
 
@@ -820,15 +832,19 @@ Network forwarding must not allow unbounded memory growth when audit output is s
 
 The broker should support multiple integration backends.
 
-### bwrap-Compatible Network Namespace Backend
+### bwrap-Compatible Setup Backend
 
-This backend is responsible only for broker/network setup against a network namespace associated with a bwrap-created sandbox.
+This backend uses bwrap for sandbox namespace/mount setup and runs `foxproxsetup` as the initial bwrap command. bwrap retains temporary `CAP_NET_ADMIN` for `foxproxsetup`; the helper creates/configures the TUN device, configures sandbox-side IP/route/DNS/proxy reachability, hands the TUN fd to the host broker, drops setup privileges, closes setup-only file descriptors, and execs the target app.
 
 Responsibilities:
 
-* locate or receive the sandbox network namespace reference
-* create/configure TUN inside that network namespace
-* configure sandbox-side IP address and route
+* construct or receive the bwrap command line
+* include `--unshare-net`, user namespace setup, and temporary `--cap-add CAP_NET_ADMIN`
+* make `/dev/net/tun` available to the setup helper
+* start the host-side broker before the target app is released
+* provide a setup control socket or inherited fd for TUN fd handoff
+* run `foxproxsetup` as the bwrap command
+* configure sandbox-side IP address and route from inside the sandbox network namespace
 * configure broker DNS address
 * configure proxy listener reachability
 * return proxy environment values to the caller
@@ -837,11 +853,11 @@ Responsibilities:
 
 Non-responsibilities:
 
-* creating the bwrap sandbox
-* choosing bwrap mount options
-* applying filesystem policy
-* applying syscall policy
-* launching the target app unless explicitly used in a thin wrapper mode
+* defining application filesystem policy beyond helper requirements
+* applying final application seccomp before network setup completes
+* keeping `CAP_NET_ADMIN` available after `foxproxsetup` execs the target app
+
+A small bwrap fork can provide a setup-helper hook later. That hook runs a trusted helper during bwrap setup, before final capability drop/seccomp/app exec, and removes the need for the target command wrapper form.
 
 ### External Network Namespace Backend
 
@@ -869,19 +885,21 @@ This backend is not alpha-required.
 
 ## bwrap-Compatible Network Setup
 
-Expected network-only interaction with a bwrap-created sandbox:
+Expected alpha command shape:
 
-* sandbox already exists or is being created by an external launcher
-* sandbox uses its own network namespace
-* broker backend receives a namespace fd/path or an equivalent handle
-* broker creates TUN inside that namespace
-* sandbox default route points through TUN
-* sandbox DNS points to broker resolver
-* HTTP/SOCKS proxy listeners are reachable inside sandbox
+* host launcher starts the host-side broker
+* host launcher starts bwrap with `--unshare-user`, `--unshare-net`, temporary `--cap-add CAP_NET_ADMIN`, and access to `/dev/net/tun`
+* bwrap command is `foxproxsetup -- target args...`
+* `foxproxsetup` creates/configures TUN inside the bwrap network namespace
+* `foxproxsetup` configures sandbox default route through TUN
+* `foxproxsetup` configures sandbox DNS to point at the broker resolver
+* `foxproxsetup` configures HTTP/SOCKS proxy listener reachability
+* `foxproxsetup` sends the TUN fd to the host broker
+* host broker owns host-side forwarding
+* `foxproxsetup` drops `CAP_NET_ADMIN`, closes setup-only fds, and execs the target app
 * caller injects proxy env vars if desired
-* broker owns host-side forwarding
 
-The broker does not define the rest of the bwrap command.
+The broker core does not depend on bwrap. The bwrap-compatible backend owns bwrap command construction, setup-helper conventions, and setup privilege lifecycle.
 
 ## Rust Module Sketch
 
@@ -1033,78 +1051,87 @@ Dependency categories:
 
 ## Alpha Milestones
 
-### Milestone 1: Broker Core
+### Milestone 0: TUN Setup Proof
+
+Required:
+
+* bwrap command runs `foxproxsetup` with temporary `CAP_NET_ADMIN`
+* `/dev/net/tun` is available to the setup helper
+* setup helper creates a TUN device inside the sandbox network namespace
+* setup helper assigns address/MTU and brings the interface up
+* setup helper configures a route that sends test traffic through TUN
+* broker or helper logs inbound IP packets from the TUN fd
+* setup helper drops `CAP_NET_ADMIN` before target exec
+
+Validation:
+
+* ping, curl, or a small test program inside the sandbox causes packets to appear in TUN logs
+
+### Milestone 1: Packet Write-Back Proof
+
+Required:
+
+* broker writes packets back to the TUN fd
+* minimal packet synthesis exists for one simple path, such as ICMP echo reply
+* checksums and source/destination reversal are correct for the proof path
+
+Validation:
+
+* sandbox `ping` can receive a synthetic reply through TUN
+
+### Milestone 2: `smoltcp` TCP Forwarding Gate
+
+Required:
+
+* TUN fd feeds `smoltcp` or the selected userspace TCP/IP stack
+* sandbox TCP connect attempts become userspace stream events
+* broker opens host TCP sockets for allowed flows
+* broker bridges bytes between sandbox TCP streams and host TCP sockets
+* outbound packets are emitted back through TUN
+* initial policy is minimal allow-all or deny-all
+
+Validation:
+
+* sandbox `curl http://example.com` works through unfiltered broker forwarding
+* connection open/close/error events are logged
+
+### Milestone 3: Minimal Broker Core
 
 Required:
 
 * normalized event model
-* hostname attribution model
-* shared policy engine
 * shared audit schema
 * shared egress traits
-* config schema
+* minimal config schema
 * frontend abstraction
+* minimal policy model with default allow/deny and IP/CIDR/port rules
 
-### Milestone 2: Network Namespace + TUN Integration
-
-Required:
-
-* attach to caller-provided network namespace
-* create/configure TUN
-* configure sandbox-side IP/route/DNS for broker use
-* expose proxy listener config
-* return env/config values needed by caller
-
-### Milestone 3: Transparent TUN Networking
+### Milestone 4: UDP and DNS Foundation
 
 Required:
 
-* read/write IP packets
-* TCP forwarding
-* UDP forwarding
-* DNS broker
-* DNS correlation
-* plaintext HTTP inspection
+* UDP pseudo-flow tracking
+* unfiltered UDP forwarding proof
+* DNS broker reachable from the sandbox
+* direct external DNS denied by default
+* DNS observations logged
+* DNS cache shape suitable for later hostname attribution
+
+### Milestone 5: Transparent Policy and Attribution
+
+Required:
+
+* hostname attribution model
+* DNS-to-flow correlation for TUN traffic
+* hostname/domain rules when attribution exists
+* transparent plaintext HTTP Host/method/path inspection
 * TLS ClientHello SNI parsing
-* ICMP basics
-* QUIC-over-UDP classification
-* audit logs
+* SNI/DNS mismatch handling
+* hidden-SNI/ECH handling
+* QUIC candidate classification
+* clear audit differences between IP/port, DNS-correlated, HTTP Host/path, HTTPS SNI, and QUIC-candidate decisions
 
-### Milestone 4: bwrap-Compatible Backend
-
-Required:
-
-* accept a network namespace reference associated with a bwrap-created sandbox
-* create/configure TUN inside that namespace
-* configure sandbox-side IP address
-* configure sandbox-side default route through TUN
-* configure sandbox DNS to use broker resolver
-* configure HTTP/SOCKS proxy listener reachability
-* return proxy environment values to the caller
-* connect the TUN fd to broker runtime
-* clean up broker-owned network resources when the session ends
-* document expected caller responsibilities
-
-Non-responsibilities:
-
-* creating the bwrap sandbox
-* defining the bwrap command
-* choosing bind mounts
-* applying filesystem policy
-* applying Landlock policy
-* applying seccomp policy
-* launching the target application, except optional thin wrapper mode
-
-Validation:
-
-* works with a bwrap sandbox that already has its own network namespace
-* sandbox can resolve DNS through broker
-* sandbox can send TCP/UDP through broker-controlled TUN path
-* sandbox can reach HTTP/SOCKS proxy listeners when configured
-* broker teardown removes/cleans broker-owned network resources
-
-
-### Milestone 5: Explicit Proxy Networking
+### Milestone 6: Explicit Proxy Networking
 
 Required:
 
@@ -1115,32 +1142,13 @@ Required:
 * shared audit logging
 * origin-aware allow/deny rules
 
-Deferred:
+Not in alpha scope:
 
 * SOCKS UDP ASSOCIATE
 * proxy authentication
 * TLS MITM
 * custom CA
 * HTTP/3 semantic inspection
-
-### Milestone 6: Policy Hardening
-
-Required:
-
-* consistent decisions across TUN and proxy paths
-* DNS-to-flow correlation for TUN traffic
-* SNI/DNS mismatch handling
-* hidden-SNI/ECH handling
-* origin-based rules for proxy traffic
-* clear audit differences between:
-
-  * transparent IP/port decision
-  * DNS-correlated decision
-  * transparent HTTP Host/path decision
-  * transparent HTTPS SNI decision
-  * explicit HTTP origin decision
-  * explicit HTTPS CONNECT decision
-  * SOCKS destination decision
 
 ### Milestone 7: Robustness
 
