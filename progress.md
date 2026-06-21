@@ -86,3 +86,25 @@
 - What failed or surprised the agent: clippy caught an unused import in the new broker tests; no behavior changes were needed.
 - What remains unproven: no real TUN reader/writer, async runtime loop, sandbox ping, TCP/UDP host egress, DNS server, or audit sink backpressure yet.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — audit record → JSON sink slice
+
+- Slice attempted: turn structured in-memory audit records into externally observable JSON Lines with bounded sink behavior.
+- Why next: audit logs are first-class alpha output, and this proves policy/audit evidence can cross a process/output boundary before runtime forwarding grows.
+- Verification plan: add a `foxprox-audit` crate that serializes `AuditRecord` to JSON Lines, enforces bounded buffering/backpressure, verifies broker-produced ICMP audit output, and run `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace`.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — audit record → JSON sink
+
+- Slice attempted: serialize structured audit records to externally observable JSON Lines and enforce bounded audit buffering.
+- Why next: alpha requires structured audit/log output and audit backpressure; this proves the policy/audit records can cross an output boundary.
+- What changed: added `crates/foxprox-audit`, workspace serde/serde_json dependencies, `audit_record_to_json_line`, and `BoundedJsonAuditSink` with explicit backpressure errors. Tests serialize a broker-produced ICMP audit event and verify bounded sink behavior.
+- Verification:
+  - `cargo fmt --check` initially failed before formatting; `cargo fmt` was run.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 2 `foxprox-audit` tests, 4 `foxprox-broker` tests, 9 `foxprox-core` tests, 9 `foxprox-packet` tests, and 0 doc tests.
+  - `cargo fmt --check` passed after formatting.
+  - Focused checks passed: `cargo test -p foxprox-audit serializes_broker_audit_record_as_json_line` and `cargo test -p foxprox-audit bounded_sink_reports_backpressure_without_accepting_record`.
+- What failed or surprised the agent: adding serde introduced 11 lockfile packages; no core serde derives were needed because the audit crate maps core records into a stable output schema.
+- What remains unproven: file/stdout sinks, async audit flushing, integration with a runtime loop, and backpressure policy for live forwarding are still absent.
+- Commit: this commit.

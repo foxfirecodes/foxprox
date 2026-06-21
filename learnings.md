@@ -16,3 +16,7 @@ ICMP echo reply synthesis gives useful checksum and source/destination reversal 
 ## 2026-06-21 — broker orchestration can stay platform-independent
 
 A single-packet broker handler can prove parser → policy/audit → write-back behavior without importing Linux or async IO. This gives the eventual TUN frontend a narrow contract: supply packet bytes and write returned outbound packets.
+
+## 2026-06-21 — stable audit output can map from core records
+
+The audit output crate can avoid coupling serialization derives into `foxprox-core` by mapping `AuditRecord` into a JSON-specific schema. This keeps the core boundary typed and allows audit output format to evolve independently.
