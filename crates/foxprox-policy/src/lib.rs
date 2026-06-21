@@ -76,6 +76,16 @@ impl PolicyEngine {
                     "TLS SNI does not match DNS attribution",
                 );
             }
+            if tls.sni.is_none() {
+                if let Some(decision) = self.match_configured_rule(event) {
+                    return decision;
+                }
+                return deny(
+                    DenialAction::Reset,
+                    None,
+                    "TLS SNI is unavailable; explicit IP/port allow rule required",
+                );
+            }
         }
 
         if let Some(decision) = self.match_configured_rule(event) {
@@ -212,8 +222,8 @@ mod tests {
     use foxprox_core::{
         DestinationHost, DnsQuery, DnsQueryType, DomainSuffix, FrontendKind, Hostname,
         HostnameAttribution, HostnameAttributionSource, HttpMethod, HttpRequest, HttpScheme,
-        IpCidr, RuleId, SandboxId, TcpConnectAttempt, UdpFlowAttempt, UnsupportedNetworkEvent,
-        UnsupportedReason,
+        IpCidr, RuleId, SandboxId, TcpConnectAttempt, TlsClientHello, UdpFlowAttempt,
+        UnsupportedNetworkEvent, UnsupportedReason,
     };
 
     fn sandbox() -> SandboxId {
@@ -360,6 +370,30 @@ mod tests {
 
         assert_eq!(event.protocol(), Protocol::HttpsConnect);
         assert_eq!(event.explicit_hostname().unwrap().as_str(), "example.com");
+    }
+
+    #[test]
+    fn tls_without_sni_requires_explicit_ip_allow_even_when_default_allows() {
+        let event = NormalizedEvent::TlsClientHello(TlsClientHello {
+            sandbox_id: sandbox(),
+            frontend: FrontendKind::Tun,
+            destination: "203.0.113.10:443".parse().unwrap(),
+            sni: None,
+            dns_hostname: None,
+            mismatch: HostnameMismatch::Unavailable,
+        });
+
+        let denied = PolicyEngine::new(RuntimeConfig::allow_by_default()).decide(&event);
+        assert!(matches!(denied, PolicyDecision::Deny(_)));
+
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut rule = PolicyRule::allow(RuleId::new("ip-https").unwrap());
+        rule.protocol = ProtocolMatcher::Exact(Protocol::TlsClientHello);
+        rule.destination = DestinationMatcher::Ip("203.0.113.10".parse().unwrap());
+        rule.port = foxprox_core::PortMatcher::Exact(443);
+        config.rules.push(rule);
+
+        assert!(PolicyEngine::new(config).decide(&event).is_allowed());
     }
 
     #[test]

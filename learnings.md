@@ -44,3 +44,7 @@
 
 - Allowed plaintext `HttpRequest` events must dispatch through shared egress; treating them as `UnsupportedAllowedEvent` would make explicit HTTP proxy support incomplete and tempt frontend-local forwarding.
 - The egress dispatch outcome type should be aliased as the trait grows so the public contract stays readable and clippy-clean without suppressions.
+
+## 2026-06-21 — Hidden-SNI policy guard
+
+- Default-allow cannot apply blindly to transparent TLS when SNI/hostname attribution is unavailable; policy needs a pre-default guard while still permitting explicit IP/port allow rules for intentional hidden-SNI cases.

@@ -240,3 +240,20 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: d1b9a42.
 - Remaining boundary risks: production HTTP request IO, response streaming/backpressure, CONNECT byte bridging, and transparent stream reassembly remain.
+
+## 2026-06-21 — Boundary objective: hidden-SNI TLS policy fail-closed
+
+- Boundary under work: transparent TLS ClientHello policy handling when SNI/hostname attribution is unavailable.
+- Allowed dependency direction: `foxprox-policy` consumes only normalized `TlsClientHello` metadata from `foxprox-core`; TLS parser/ECH details remain in `foxprox-inspect` or unsupported normalized events.
+- Dependency-risk assessment: default-allow policies could accidentally permit hidden-SNI/ECH-like HTTPS flows unless policy has a pre-default fail-closed guard with an explicit IP/port rule escape hatch.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: TLS ClientHello events without SNI now bypass default-allow and are denied unless an explicit IP/port rule matches; all verification passed.
+- Changed files:
+  - `crates/foxprox-policy/src/lib.rs`
+  - `progress.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 46 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: production stream reassembly, ECH detection hardening, and richer TLS parser fuzzing remain.
