@@ -207,3 +207,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * invalid DNS names never feed hostname attribution or audit metadata.
 * Audit evidence: not applicable in this commit; DNS query metadata feeds future DNS handler policy/audit events.
 * Residual risk: DNS response parsing, EDNS(0), CNAME answer handling, upstream forwarding, DNS response synthesis, and DNS query audit emission remain future DNS-handler work.
+* Commit hash: bdcc7be strict dns query parsing.
