@@ -33,3 +33,7 @@
 ## 2026-06-21 — DNS smoke pattern
 
 - A minimal raw DNS A query from sandbox Python is sufficient to prove broker-local DNS response and cache attribution over the handed-off TUN fd. This avoids depending on `/etc/resolv.conf` mutation or external upstream DNS while still exercising real UDP packets through the sandbox route.
+
+## 2026-06-21 — Unix socket path limits in bwrap smokes
+
+- Long handoff socket paths under the nested worktree can exceed `SUN_LEN` for Unix domain sockets. Use short names under the already-mounted `target/debug` directory (for example `fxdns-<pid>/s`) for new environment smokes that need host/sandbox Unix sockets.

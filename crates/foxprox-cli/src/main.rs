@@ -47,6 +47,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("udp-forward-smoke");
             println!("udp-deny-smoke");
             println!("dns-smoke");
+            println!("dns-attribution-smoke");
             Ok(())
         }
         [cmd, scenario] if cmd == "run" => run_named_scenario(scenario),
@@ -74,6 +75,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         udp_deny_smoke_records()
     } else if scenario == "dns-smoke" {
         dns_smoke_records()
+    } else if scenario == "dns-attribution-smoke" {
+        dns_attribution_smoke_records()
     } else {
         run_scenario(ScenarioName::parse(scenario)?)
     };
@@ -85,7 +88,7 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke>",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke>",
         ScenarioName::list().join("|")
     );
 }
@@ -1005,6 +1008,260 @@ fn run_dns_smoke() -> Result<AuditRecord, String> {
     .with_metadata("packets_read", packets_read.to_string())
     .with_metadata("answer", answer_ip.to_string())
     .with_metadata("attribution_cached", attribution.is_some().to_string());
+    if !stdout.is_empty() {
+        record = record.with_metadata("stdout", stdout);
+    }
+    if !stderr.is_empty() {
+        record = record.with_metadata("stderr", stderr);
+    }
+    Ok(record)
+}
+
+#[cfg(unix)]
+fn dns_attribution_smoke_records() -> Vec<AuditRecord> {
+    match run_dns_attribution_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::UdpFlowCreated,
+            "dns-attribution-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::Harness)
+        .with_protocol(Protocol::Udp)],
+    }
+}
+
+#[cfg(not(unix))]
+fn dns_attribution_smoke_records() -> Vec<AuditRecord> {
+    vec![AuditRecord::new(
+        EventKind::UdpFlowCreated,
+        "dns-attribution-smoke",
+        Decision::FailClosed,
+        "DNS attribution smoke is only supported on Unix",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Udp)]
+}
+
+#[cfg(unix)]
+fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
+    let echo = UdpSocket::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind DNS attribution echo fixture: {err}"))?;
+    let echo_addr = echo
+        .local_addr()
+        .map_err(|err| format!("failed to inspect DNS attribution echo fixture: {err}"))?;
+    echo.set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|err| format!("failed to set DNS attribution echo timeout: {err}"))?;
+    let echo_thread = std::thread::spawn(move || -> Result<(), String> {
+        let mut buf = [0_u8; 2048];
+        let (n, peer) = echo.recv_from(&mut buf).map_err(|err| {
+            format!("DNS attribution echo fixture did not receive egress datagram: {err}")
+        })?;
+        let mut response = b"egress:".to_vec();
+        response.extend_from_slice(&buf[..n]);
+        echo.send_to(&response, peer)
+            .map_err(|err| format!("DNS attribution echo fixture failed to reply: {err}"))?;
+        Ok(())
+    });
+
+    let helper = setup_helper_path()?;
+    let target_dir = helper
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| {
+            format!(
+                "could not derive target directory from {}",
+                helper.display()
+            )
+        })?
+        .to_path_buf();
+    let socket_dir = target_dir.join(format!("fxdns-{}", std::process::id()));
+    let socket_path = socket_dir.join("s");
+    let _ = std::fs::remove_file(&socket_path);
+    std::fs::create_dir_all(&socket_dir)
+        .map_err(|err| format!("failed to create DNS attribution smoke socket dir: {err}"))?;
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|err| format!("failed to bind DNS attribution smoke socket: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make DNS attribution listener nonblocking: {err}"))?;
+
+    let mut child = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--ro-bind",
+        ])
+        .arg(&target_dir)
+        .arg(&target_dir)
+        .args(["--bind"])
+        .arg(&socket_dir)
+        .arg(&socket_dir)
+        .args(["--proc", "/proc", "--"])
+        .env("FOXPROX_SETUP_SOCKET", &socket_path)
+        .arg(&helper)
+        .args([
+            "--",
+            "/usr/bin/python3",
+            "-c",
+            "import socket,sys; q=b'\\x12\\x34\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00' + b'\\x03lab\\x07example\\x00' + b'\\x00\\x01\\x00\\x01'; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(5); s.sendto(q,('10.0.2.1',53)); data,_=s.recvfrom(512);\nassert data[:2]==b'\\x12\\x34' and b'\\xcb\\x00\\x71\\x4d' in data\ns.sendto(b'probe',('203.0.113.77',5354)); data,_=s.recvfrom(64); sys.exit(0 if data==b'egress:probe' else 3)",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn bwrap DNS attribution smoke: {err}"))?;
+
+    let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
+    fd_handoff::set_nonblocking(fd)?;
+    let answer_ip = "203.0.113.77"
+        .parse()
+        .map_err(|err| format!("invalid DNS attribution answer IP: {err}"))?;
+    let policy = PolicyEngine::new(
+        PolicyConfig::deny_by_default().with_rule(
+            PolicyRule::new("allow-dns-attributed-example", RuleAction::Allow)
+                .protocol(Protocol::Udp)
+                .domain_suffix("example")
+                .port(5354)
+                .require_hostname_attribution(),
+        ),
+    );
+    let mut runtime = TransparentUdpRuntime::new(policy, LocalUdpEgress::new(echo_addr)?);
+    let mut buf = [0_u8; 2048];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut packets_read = 0_u64;
+    let mut dns_answered = false;
+    let mut forwarded = false;
+    while Instant::now() < deadline {
+        match fd_handoff::read_fd(fd, &mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                packets_read += 1;
+                let packet = &buf[..n];
+                let parsed = match foxprox_core::packet::parse_ipv4(packet) {
+                    Ok(parsed) => parsed,
+                    Err(_) => continue,
+                };
+                if parsed.protocol_number != 17 {
+                    continue;
+                }
+                let udp = match foxprox_core::packet::parse_udp(parsed.payload) {
+                    Ok(udp) => udp,
+                    Err(_) => continue,
+                };
+                if udp.destination_port == 53 {
+                    let query = parse_dns_query(udp.payload)?;
+                    let dns_response = synthesize_a_response(udp.payload, answer_ip, 60)?;
+                    let reply = foxprox_core::packet::synthesize_udp_reply(packet, &dns_response)?;
+                    fd_handoff::write_all_fd(fd, &reply)?;
+                    runtime.dns_cache.observe_response(
+                        &query.hostname,
+                        [std::net::IpAddr::V4(answer_ip)],
+                        1,
+                        60,
+                    )?;
+                    runtime.now_tick = 2;
+                    dns_answered = true;
+                } else if let Some(reply) =
+                    runtime.handle_ipv4_packet("dns-attribution-smoke", packet)?
+                {
+                    fd_handoff::write_all_fd(fd, &reply)?;
+                    forwarded = true;
+                    break;
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to read TUN fd during DNS attribution smoke: {err}"
+                ))
+            }
+        }
+        if child
+            .try_wait()
+            .map_err(|err| format!("failed to poll bwrap DNS attribution smoke: {err}"))?
+            .is_some()
+        {
+            let output = child
+                .wait_with_output()
+                .map_err(|err| format!("failed to collect early DNS attribution output: {err}"))?;
+            return Err(format!(
+                "DNS attribution target exited before UDP reply: {}; stdout={:?}; stderr={:?}",
+                output.status,
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !forwarded {
+        return Err("timed out waiting for DNS-attributed UDP flow".to_string());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for bwrap DNS attribution smoke: {err}"))?;
+    fd_handoff::close_fd(fd);
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir(&socket_dir);
+    let echo_result = echo_thread
+        .join()
+        .map_err(|_| "DNS attribution echo fixture thread panicked".to_string())?;
+    echo_result?;
+    let runtime_audit = runtime.audit.last().cloned();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut record = AuditRecord::new(
+        EventKind::UdpFlowCreated,
+        "dns-attribution-smoke",
+        if output.status.success() {
+            Decision::Allow
+        } else {
+            Decision::FailClosed
+        },
+        if output.status.success() {
+            "DNS cache attribution allowed subsequent sandbox UDP flow"
+        } else {
+            "DNS-attributed UDP reply was written but sandbox command failed"
+        },
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Udp)
+    .with_metadata("status", output.status.to_string())
+    .with_metadata("packets_read", packets_read.to_string())
+    .with_metadata("dns_answered", dns_answered.to_string())
+    .with_metadata("forwarded", forwarded.to_string());
+    if let Some(audit) = runtime_audit {
+        let runtime_audit_json = audit.to_json_line();
+        record = record
+            .with_metadata("policy_decision", audit.decision.as_str())
+            .with_metadata("policy_reason", audit.reason.clone())
+            .with_metadata("runtime_audit", runtime_audit_json);
+        if let Some(hostname) = audit.hostname {
+            record = record.with_metadata("attributed_hostname", hostname);
+        }
+        if let Some(rule_id) = audit.rule_id {
+            record = record.with_metadata("rule_id", rule_id);
+        }
+    }
     if !stdout.is_empty() {
         record = record.with_metadata("stdout", stdout);
     }

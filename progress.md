@@ -275,3 +275,27 @@
 - Interpretation: the core transparent UDP runtime now supports DNS-cache hostname attribution for subsequent flow policy decisions. This provides the deterministic foundation needed for transparent hostname-aware UDP/QUIC policy.
 - Next verification gap: environment smoke that performs DNS query and attributed UDP flow in one sandbox session, or begin TCP forwarding gate scaffolding.
 - Commit hash after commit: pending.
+
+## 2026-06-21T16:50:00Z — DNS attribution runtime commit recorded
+
+- Command executed: `git add crates/foxprox-core/src/runtime.rs progress.md && git commit -m "Add DNS cache attribution to UDP runtime"`
+- Environment assumptions: deterministic runtime attribution test and existing smokes above were verified before commit.
+- Expected result: commit captures DNS cache attribution support in the transparent UDP runtime.
+- Observed result: commit `174a447` created with 2 files changed.
+- Relevant output excerpt: `[harness-lab 174a447] Add DNS cache attribution to UDP runtime`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: DNS attribution in core runtime checkpoint is preserved.
+- Next verification gap: one-session environment smoke for DNS query followed by attributed UDP allow.
+- Commit hash after commit: 174a447.
+
+## 2026-06-21T17:10:00Z — One-session DNS attribution environment smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run dns-attribution-smoke`; rerun after shortening the handoff socket path: `cargo fmt --all && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run dns-attribution-smoke`; final check: `cargo test --all`.
+- Environment assumptions: Unix domain socket paths have a length limit; the DNS-attribution smoke uses a short `target/debug/fxdns-*/s` socket path. Sandbox Python performs a raw DNS A query, then sends UDP to the returned IP in the same bwrap/TUN session.
+- Expected result: DNS query is answered locally, runtime cache is populated, subsequent UDP packet to `203.0.113.77:5354` is allowed only because the DNS cache attributes it to `lab.example`, and host egress receives the datagram.
+- Observed result: pass after shortening socket path. Initial run failed with `path must be shorter than SUN_LEN`; after using a short path, `dns-attribution-smoke` emitted `decision":"allow"`. Final `cargo test --all` passed (`foxprox-core` 36, `foxprox-cli` 2, `foxproxsetup` 7).
+- Relevant output excerpt: `"reason":"DNS cache attribution allowed subsequent sandbox UDP flow"`; `"attributed_hostname":"lab.example"`; `"rule_id":"allow-dns-attributed-example"`; `"dns_answered":"true"`; `"forwarded":"true"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`, `learnings.md`.
+- Interpretation: hostname attribution is now proven end-to-end in an environment-dependent bwrap/TUN session: DNS observation in the harness changes the policy outcome for a later transparent UDP flow.
+- Next verification gap: TCP forwarding gate scaffolding, likely starting with deterministic TCP SYN parsing/policy/audit and then a userspace stack or minimal local smoke path.
+- Commit hash after commit: pending.
