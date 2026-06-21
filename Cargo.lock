@@ -3,5 +3,12 @@
 version = 3
 
 [[package]]
+name = "foxprox-cli"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+]
+
+[[package]]
 name = "foxprox-core"
 version = "0.1.0"

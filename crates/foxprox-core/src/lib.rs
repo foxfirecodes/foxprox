@@ -1,10 +1,21 @@
-//! Core, platform-independent types for foxprox.
+//! Core, platform-independent types and deterministic harness helpers for foxprox.
 //!
-//! This crate is intentionally minimal for now. It is the home for broker
-//! concepts that must not depend on Linux, TUN, bwrap, smoltcp, or any concrete
-//! frontend/backend implementation.
+//! The production broker will have Linux/TUN/smoltcp integration crates around
+//! this crate. This crate deliberately keeps policy, audit, parsing, attribution,
+//! and mock-flow behavior free of OS-specific code so the harness can prove the
+//! semantics without requiring network namespace privileges.
 
 #![forbid(unsafe_code)]
+
+pub mod audit;
+pub mod dns;
+pub mod egress;
+pub mod flow;
+pub mod integration;
+pub mod origin;
+pub mod packet;
+pub mod policy;
+pub mod scenario;
 
 /// Stable crate marker used by scaffold tests and downstream workspace checks.
 pub const CRATE_NAME: &str = "foxprox-core";
