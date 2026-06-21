@@ -3,5 +3,50 @@
 version = 3
 
 [[package]]
+name = "foxprox-audit"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+]
+
+[[package]]
 name = "foxprox-core"
 version = "0.1.0"
+
+[[package]]
+name = "foxprox-egress"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+]
+
+[[package]]
+name = "foxprox-frontends"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+]
+
+[[package]]
+name = "foxprox-integrations"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+]
+
+[[package]]
+name = "foxprox-net"
+version = "0.1.0"
+dependencies = [
+ "foxprox-audit",
+ "foxprox-core",
+ "foxprox-egress",
+ "foxprox-policy",
+]
+
+[[package]]
+name = "foxprox-policy"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+]
