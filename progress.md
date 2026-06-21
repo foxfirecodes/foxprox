@@ -161,4 +161,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * CONNECT header scanning remains bounded by caller-supplied maximum bytes.
 * Audit evidence: not applicable in this commit; CONNECT parser output feeds future proxy frontend policy/audit events.
 * Residual risk: actual proxy accept loop, CONNECT tunneling, SOCKS5 parser, proxy response synthesis, and shared egress backend are not implemented yet.
-* Commit hash: pending.
+* Commit hash: 80f7973 strict https connect authority parsing.
