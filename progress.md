@@ -297,3 +297,25 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; flow expiration/byte counts feed future UDP audit events.
 * Residual risk: actual UDP socket forwarding, reply routing, audit emission for flow creation/expiration, and policy-decision caching are not implemented yet.
 * Commit hash: 7aa848b bound udp pseudo flow tracking.
+
+## 2026-06-21 - QUIC candidate header parser foundation
+
+* Invariant under work: QUIC candidate classification must parse only bounded, structurally valid QUIC header metadata and treat malformed UDP/443 payloads as unsupported metadata rather than trusted hostname attribution.
+* Threat or failure mode addressed: loose QUIC detection could misclassify arbitrary UDP as QUIC, over-read connection ID lengths, or imply decrypted HTTP/3 visibility that the architecture explicitly forbids.
+* Planned verification: add parser tests for valid long-header Initial metadata, short-header candidate classification, malformed fixed-bit/version/connection-ID lengths, oversized packets, unsupported versions being represented explicitly, and absence of hostname attribution; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - QUIC candidate header parser foundation results
+
+* Tests added/updated:
+  * valid QUIC long-header Initial metadata extracts packet type, version support status, and bounded connection ID lengths.
+  * short-header candidates are classified without claiming version or hostname metadata.
+  * unsupported long-header versions are represented explicitly instead of treated as supported v1.
+  * empty packets, missing fixed bit, oversized packets, truncated long headers, and invalid connection ID lengths are rejected.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 72 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * QUIC parsing does not infer hostname or HTTP/3 semantics.
+  * malformed UDP payloads cannot produce trusted QUIC metadata.
+  * unsupported versions stay explicit for future policy/audit review.
+* Audit evidence: not applicable in this commit; QUIC metadata feeds future UDP/QUIC inspection and audit events.
+* Residual risk: QUIC varint/token/packet number parsing, TLS CRYPTO frame extraction, SNI/ECH visibility, and UDP flow integration remain future work.

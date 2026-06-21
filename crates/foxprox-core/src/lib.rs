@@ -13,6 +13,7 @@ pub mod flow;
 pub mod http;
 pub mod packet;
 pub mod policy;
+pub mod quic;
 pub mod socks;
 pub mod tls;
 pub mod types;
@@ -36,6 +37,9 @@ pub use http::{
 };
 pub use packet::{parse_ip_packet, PacketParseError, PacketSummary};
 pub use policy::{Decision, DenialReason, DenyBehavior, PolicyEngine, PolicyRequest};
+pub use quic::{
+    parse_quic_candidate, QuicHeaderForm, QuicLongPacketType, QuicPacketMetadata, QuicParseError,
+};
 pub use socks::{
     parse_socks5_connect_request, parse_socks5_greeting, Socks5AuthMethod, Socks5ConnectMetadata,
     Socks5Destination, Socks5Greeting, Socks5ParseError,

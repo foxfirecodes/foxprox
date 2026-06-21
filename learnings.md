@@ -49,3 +49,7 @@ Whenever policy gains a new security decision dimension, audit context needs a m
 ## 2026-06-21 - UDP flow state requires independent bounds
 
 UDP pseudo-flow tracking needs both capacity limits and protocol-class timeouts. QUIC, DNS, generic UDP, and NTP-like traffic have materially different safe lifetimes, and byte counters should saturate rather than overflow under hostile traffic.
+
+## 2026-06-21 - QUIC metadata must not imply HTTP/3 visibility
+
+QUIC candidate parsing should be explicit about what is known: header form, packet type, version, and connection ID lengths. It must not imply hostname or HTTP/3 request visibility unless future TLS/QUIC parsing safely extracts that metadata.
