@@ -335,3 +335,21 @@
   - Readiness is signaled only after UDP sockets are bound/added.
   - `cargo +1.80.0 check -p foxprox-net`, workspace check/test/clippy, and net dependency review passed.
 - Next exact action: remove review artifacts and commit the Milestone 4 UDP/DNS proof.
+
+## 2026-06-21T22:09:00Z — transparent inspection core verified
+
+- Current objective: start Milestone 5 Transparent Policy and Attribution with dependency-free inspection helpers.
+- Added `foxprox-core::inspection`:
+  - `parse_http_request_head` extracts HTTP method, Host-origin, path/query, and high-confidence Host-header attribution.
+  - `parse_tls_client_hello` extracts visible TLS SNI and detects ECH extension presence for hidden-SNI policy paths.
+  - `TlsClientHelloInspection::mismatches_dns` supports SNI/DNS mismatch decisions.
+  - `classify_udp_candidate` classifies UDP/443 as a QUIC candidate.
+- Added tests for HTTP Host/method/path parsing, missing Host fail-closed behavior, TLS SNI/ECH parsing, SNI/DNS mismatch comparison, and QUIC candidate classification.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 40 core tests, 8 device tests, 2 net tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core` still shows only `foxprox-core`, confirming no dependency creep.
+- Commit boundary: core transparent inspection helpers only; no dataplane integration yet.

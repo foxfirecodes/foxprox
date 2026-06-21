@@ -14,6 +14,7 @@ pub mod egress;
 pub mod event;
 pub mod flow;
 pub mod frontend;
+pub mod inspection;
 pub mod policy;
 
 pub use audit::{AuditEvent, AuditEventKind, AuditSinkConfig};
@@ -35,6 +36,10 @@ pub use event::{
 };
 pub use flow::{FlowKey, FlowProtocol, FlowTimeoutClass, UdpFlowRecord, UdpFlowTable};
 pub use frontend::{FrontendContext, FrontendError, FrontendErrorKind, NetworkFrontend};
+pub use inspection::{
+    classify_udp_candidate, parse_http_request_head, parse_tls_client_hello, HttpInspection,
+    InspectionError, TlsClientHelloInspection,
+};
 pub use policy::{
     Cidr, Decision, DecisionAction, DenialReason, PolicyEngine, PolicyRule, PolicyRuleSet,
     PortRange, RuleEffect,
