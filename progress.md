@@ -328,3 +328,20 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: 1e67f79.
 - Remaining boundary risks: production timers, egress handle cleanup, and lifecycle audit emission from the scheduler remain.
+
+## 2026-06-21 — Boundary objective: CNAME-aware DNS attribution contract
+
+- Boundary under work: DNS response normalization for CNAME-to-address alias chains.
+- Allowed dependency direction: CNAME wire parsing remains in `foxprox-dns`; `foxprox-net` continues to consume only normalized hostname/IP/TTL address records.
+- Dependency-risk assessment: hostnames often resolve through aliases, and ignoring CNAME chains can silently drop domain attribution even though DNS observed a valid hostname-to-IP relationship.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: DNS response parsing now follows CNAME answers to add alias hostname/IP/TTL attribution records while still exporting only normalized address records. All verification passed.
+- Changed files:
+  - `crates/foxprox-dns/src/lib.rs`
+  - `progress.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 52 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: multi-response cache merging, negative DNS caching, and DNSSEC/authority metadata remain.

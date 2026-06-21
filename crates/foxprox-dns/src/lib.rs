@@ -198,6 +198,7 @@ pub fn parse_address_records(packet: &[u8]) -> Result<Vec<DnsAddressRecord>, Dns
     }
 
     let mut records = Vec::new();
+    let mut cname_edges = Vec::new();
     for _ in 0..ancount {
         let (hostname, after_name) = parse_qname(packet, offset)?;
         if packet.len() < after_name + 10 {
@@ -222,32 +223,76 @@ pub fn parse_address_records(packet: &[u8]) -> Result<Vec<DnsAddressRecord>, Dns
         }
 
         if class == 1 {
-            let addr = match (answer_type, rdlen) {
-                (1, 4) => Some(IpAddr::V4(Ipv4Addr::new(
-                    packet[rdata_offset],
-                    packet[rdata_offset + 1],
-                    packet[rdata_offset + 2],
-                    packet[rdata_offset + 3],
-                ))),
+            match (answer_type, rdlen) {
+                (1, 4) => records.push(DnsAddressRecord {
+                    hostname,
+                    addr: IpAddr::V4(Ipv4Addr::new(
+                        packet[rdata_offset],
+                        packet[rdata_offset + 1],
+                        packet[rdata_offset + 2],
+                        packet[rdata_offset + 3],
+                    )),
+                    ttl: Duration::from_secs(u64::from(ttl)),
+                }),
                 (28, 16) => {
                     let mut octets = [0_u8; 16];
                     octets.copy_from_slice(&packet[rdata_offset..next_offset]);
-                    Some(IpAddr::V6(Ipv6Addr::from(octets)))
+                    records.push(DnsAddressRecord {
+                        hostname,
+                        addr: IpAddr::V6(Ipv6Addr::from(octets)),
+                        ttl: Duration::from_secs(u64::from(ttl)),
+                    });
                 }
-                _ => None,
-            };
-            if let Some(addr) = addr {
-                records.push(DnsAddressRecord {
-                    hostname,
-                    addr,
-                    ttl: Duration::from_secs(u64::from(ttl)),
-                });
+                (5, _) => {
+                    let (target, _) = parse_qname(packet, rdata_offset)?;
+                    cname_edges.push((hostname, target, Duration::from_secs(u64::from(ttl))));
+                }
+                _ => {}
             }
         }
         offset = next_offset;
     }
 
+    add_cname_address_records(&mut records, &cname_edges);
     Ok(records)
+}
+
+fn add_cname_address_records(
+    records: &mut Vec<DnsAddressRecord>,
+    cname_edges: &[(Hostname, Hostname, Duration)],
+) {
+    let direct_records = records.clone();
+    for record in direct_records {
+        for (alias, _, ttl) in aliases_for(&record.hostname, cname_edges) {
+            if !records
+                .iter()
+                .any(|existing| existing.hostname == alias && existing.addr == record.addr)
+            {
+                records.push(DnsAddressRecord {
+                    hostname: alias,
+                    addr: record.addr,
+                    ttl: record.ttl.min(ttl),
+                });
+            }
+        }
+    }
+}
+
+fn aliases_for(
+    target: &Hostname,
+    cname_edges: &[(Hostname, Hostname, Duration)],
+) -> Vec<(Hostname, Hostname, Duration)> {
+    let mut aliases = Vec::new();
+    let mut stack = vec![target.clone()];
+    while let Some(current) = stack.pop() {
+        for (alias, canonical, ttl) in cname_edges {
+            if canonical == &current && !aliases.iter().any(|(seen, _, _)| seen == alias) {
+                aliases.push((alias.clone(), canonical.clone(), *ttl));
+                stack.push(alias.clone());
+            }
+        }
+    }
+    aliases
 }
 
 /// Build a DNS REFUSED response that echoes the original first question.
@@ -370,6 +415,30 @@ mod tests {
     }
 
     #[test]
+    fn cname_response_adds_alias_address_attribution() {
+        let response = cname_response_packet(
+            0xbeef,
+            "example.com",
+            "edge.example.net",
+            60,
+            300,
+            &[203, 0, 113, 10],
+        );
+        let records = parse_address_records(&response).unwrap();
+
+        assert!(records
+            .iter()
+            .any(|record| record.hostname.as_str() == "edge.example.net"
+                && record.addr == "203.0.113.10".parse::<IpAddr>().unwrap()
+                && record.ttl == Duration::from_secs(300)));
+        assert!(records
+            .iter()
+            .any(|record| record.hostname.as_str() == "example.com"
+                && record.addr == "203.0.113.10".parse::<IpAddr>().unwrap()
+                && record.ttl == Duration::from_secs(60)));
+    }
+
+    #[test]
     fn malformed_dns_response_is_rejected_for_fail_closed_callers() {
         let query = dns_query_packet(0xbeef, "example.com", 1);
         let error = parse_address_records(&query).unwrap_err();
@@ -395,12 +464,37 @@ mod tests {
         packet[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
         packet[6..8].copy_from_slice(&1_u16.to_be_bytes());
         packet.extend_from_slice(&[0xc0, 0x0c]); // answer name pointer to question
+        append_answer_tail(&mut packet, qtype, ttl, rdata);
+        packet
+    }
+
+    fn cname_response_packet(
+        id: u16,
+        hostname: &str,
+        canonical: &str,
+        cname_ttl: u32,
+        addr_ttl: u32,
+        addr: &[u8],
+    ) -> Vec<u8> {
+        let mut packet = dns_query_packet(id, hostname, 1);
+        packet[2..4].copy_from_slice(&0x8180_u16.to_be_bytes());
+        packet[6..8].copy_from_slice(&2_u16.to_be_bytes());
+
+        let mut cname_rdata = Vec::new();
+        append_qname(&mut cname_rdata, canonical);
+        packet.extend_from_slice(&[0xc0, 0x0c]);
+        append_answer_tail(&mut packet, 5, cname_ttl, &cname_rdata);
+        append_qname(&mut packet, canonical);
+        append_answer_tail(&mut packet, 1, addr_ttl, addr);
+        packet
+    }
+
+    fn append_answer_tail(packet: &mut Vec<u8>, qtype: u16, ttl: u32, rdata: &[u8]) {
         packet.extend_from_slice(&qtype.to_be_bytes());
         packet.extend_from_slice(&1_u16.to_be_bytes()); // IN
         packet.extend_from_slice(&ttl.to_be_bytes());
         packet.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
         packet.extend_from_slice(rdata);
-        packet
     }
 
     fn append_qname(packet: &mut Vec<u8>, hostname: &str) {

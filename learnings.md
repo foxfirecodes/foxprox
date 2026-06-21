@@ -64,3 +64,7 @@
 ## 2026-06-21 — Per-flow timeout storage
 
 - Flow timeouts need to be stored on `FlowState` at creation time; recomputing from global UDP classification later would ignore per-rule policy overrides and make QUIC/DNS expiry behavior drift from policy decisions.
+
+## 2026-06-21 — CNAME attribution boundary
+
+- CNAME expansion can stay inside DNS normalization by emitting extra hostname/IP records for aliases; downstream attribution cache still does not need DNS RR or compression-pointer details.
