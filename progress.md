@@ -867,3 +867,70 @@
 - Files changed: `crates/foxprox-core/src/audit.rs`, `crates/foxprox-proxy/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
 - Current git status summary: core/proxy/CLI/progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit proxy audit/backpressure integration, then continue with transparent TUN audit integration.
+
+## 2026-06-21T23:41:26Z — proxy audit/backpressure committed; next objective selected
+
+- Commit created: `fc4b16a` (`audit explicit proxy decisions`).
+- Current objective: integrate bounded audit event emission into transparent TCP proof decisions.
+- Rationale: explicit proxy proof paths now audit policy decisions and fail closed on audit backpressure. Transparent TCP proof paths still only print policy decisions for TCP connect, HTTP inspection, and TLS inspection; alpha success criteria require TUN traffic to use the same policy/audit backend and denied traffic to be audited.
+- Expected commit boundary: transparent TCP proof audit buffer/config/helper integration and focused unit tests only; UDP/DNS audit integration can follow.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: add bounded audit event emission to transparent TCP connect/HTTP/TLS decision points in `foxprox-net`.
+
+## 2026-06-21T23:45:30Z — transparent TCP audit/backpressure pending review
+
+- Current objective: commit bounded audit event emission for transparent TCP proof decisions.
+- Changes implemented:
+  - Added `audit_queue_capacity` to `TcpProofConfig`, defaulting to 8192 queued events.
+  - `run_tcp_proof_with_ready` now creates a bounded `AuditBuffer` before TUN/smoltcp setup and rejects zero capacity with `InvalidInput`.
+  - Transparent TCP connect, plaintext HTTP inspection, and TLS ClientHello policy decisions now emit structured `AuditEvent`s before host egress.
+  - Audit enqueue backpressure returns `WouldBlock`, aborting the sandbox socket before host egress.
+  - TCP audit records include source/destination endpoints and IP-only attribution; transparent HTTP audit records include origin/method/path and HTTP Host attribution; transparent TLS audit records include destination endpoint, SNI hostname when present, and TLS SNI attribution.
+  - CLI `proof-tcp` exposes `--audit-queue-capacity` and validates it as non-zero before proof startup.
+  - Tests cover TCP endpoint audit metadata, HTTP origin metadata, TLS SNI metadata, enqueue backpressure, and zero-capacity rejection.
+- Subagents/reviews requested: `tcp-audit-backpressure-final` is running.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-net -- --nocapture` passed: 13 net tests.
+  - `cargo test --workspace` passed: 49 core tests, 8 device tests, 13 net tests, 21 proxy tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net` and `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-net/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: net/CLI/progress modified; review artifact pending.
+- Next exact action: read transparent TCP audit/backpressure review, fix blockers if any, then commit.
+
+## 2026-06-21T23:48:21Z — transparent TCP audit attribution fixed pending rereview
+
+- Current objective: commit bounded audit event emission for transparent TCP proof decisions after rereview.
+- Review findings accepted and fixed:
+  - TLS audit events mislabeled DNS-correlated `dns_hostname` as `AttributionSource::TlsSni` when no visible SNI was present. Fixed by branching attribution: visible SNI uses `TlsSni` with high confidence; DNS-only hostname uses `DnsCache` with medium confidence; absent hostname uses `IpOnly`.
+- Additional test added:
+  - `transparent_tls_audit_uses_dns_cache_source_when_sni_is_absent` verifies `sni: None` plus `dns_hostname: Some(...)` emits `DnsCache`/medium attribution rather than `TlsSni`.
+- Verification commands and outcomes after fix:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-net -- --nocapture` passed: 14 net tests.
+  - `cargo test --workspace` passed: 49 core tests, 8 device tests, 14 net tests, 21 proxy tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net` and `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Subagents/reviews requested: `tcp-audit-backpressure-rereview` is running.
+- Files changed: `crates/foxprox-net/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: net/CLI/progress modified; review artifacts pending rereview/removal.
+- Next exact action: read transparent TCP audit/backpressure rereview, fix blockers if any, remove `reviews/`, and commit.
+
+## 2026-06-21T23:49:44Z — transparent TCP audit/backpressure rereview passed
+
+- Current objective: commit bounded audit event emission for transparent TCP proof decisions.
+- Rereview result: `tcp-audit-backpressure-rereview` found no blockers.
+- Confirmed fixes:
+  - TLS audit attribution uses `TlsSni` only for visible SNI and `DnsCache`/medium confidence when only DNS-correlated hostname exists.
+  - TCP connect, transparent HTTP, and transparent TLS policy decisions emit structured audit events.
+  - Audit backpressure fails closed before host egress.
+  - CLI `proof-tcp --audit-queue-capacity` validates non-zero capacity.
+- Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed; net tests now cover 14 cases.
+- Files changed: `crates/foxprox-net/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: net/CLI/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit transparent TCP audit/backpressure integration, then continue with UDP/DNS audit integration.

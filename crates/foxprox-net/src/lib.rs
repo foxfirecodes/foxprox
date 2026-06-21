@@ -12,8 +12,9 @@ mod udp;
 pub use udp::{run_udp_dns_proof, run_udp_dns_proof_with_ready, UdpDnsProofConfig};
 
 use foxprox_core::{
-    parse_http_request_head, parse_tls_client_hello, Attribution, Frontend, NetworkEvent,
-    PolicyEngine, PolicyRuleSet, SandboxId, TransportEndpoint,
+    parse_http_request_head, parse_tls_client_hello, Attribution, AttributionConfidence,
+    AttributionSource, AuditBackpressure, AuditBuffer, AuditEvent, AuditEventKind, Decision,
+    Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, SandboxId, TransportEndpoint,
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, TunTapInterface};
@@ -47,6 +48,8 @@ pub struct TcpProofConfig {
     pub idle_timeout: Duration,
     /// Policy used before host TCP connect in the proof runtime.
     pub policy: PolicyRuleSet,
+    /// Maximum queued audit events before TCP proof paths fail closed.
+    pub audit_queue_capacity: usize,
 }
 
 impl TcpProofConfig {
@@ -62,6 +65,7 @@ impl TcpProofConfig {
             pending_buffer_limit: 256 * 1024,
             idle_timeout: Duration::from_secs(30),
             policy: PolicyRuleSet::default(),
+            audit_queue_capacity: 8192,
         }
     }
 }
@@ -80,6 +84,7 @@ pub fn run_tcp_proof_with_ready<F>(
 where
     F: FnOnce() -> io::Result<()>,
 {
+    let mut audit = audit_buffer(config.audit_queue_capacity)?;
     set_nonblocking(tun_fd.as_raw_fd())?;
     let raw_fd = tun_fd.into_raw_fd();
     let mut device = TunTapInterface::from_fd(raw_fd, Medium::Ip, config.mtu).map_err(|error| {
@@ -156,7 +161,10 @@ where
                     };
                     let decision = PolicyEngine::new(config.policy.clone()).evaluate(&event);
                     eprintln!("foxprox-net: tcp policy decision={decision:?} event={event:?}");
-                    if decision.is_allowed() {
+                    if let Err(error) = emit_tcp_audit(&mut audit, &event, decision.clone()) {
+                        eprintln!("foxprox-net: tcp audit backpressure: {error}");
+                        socket.abort();
+                    } else if decision.is_allowed() {
                         flow = Some(if should_inspect_http(destination.port()) {
                             FlowState::InspectingHttp(InspectingHttpFlow::new(source, destination))
                         } else if should_inspect_tls(destination.port()) {
@@ -184,6 +192,7 @@ where
                         socket,
                         &config.sandbox_id,
                         &config.policy,
+                        &mut audit,
                         config.pending_buffer_limit,
                         config.connect_timeout,
                     ) {
@@ -210,6 +219,7 @@ where
                         socket,
                         &config.sandbox_id,
                         &config.policy,
+                        &mut audit,
                         config.pending_buffer_limit,
                         config.connect_timeout,
                     ) {
@@ -288,6 +298,106 @@ where
     }
 }
 
+fn audit_buffer(capacity: usize) -> io::Result<AuditBuffer> {
+    if capacity == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "audit queue capacity must be non-zero",
+        ));
+    }
+    Ok(AuditBuffer::new(capacity))
+}
+
+fn emit_tcp_audit(
+    audit: &mut AuditBuffer,
+    event: &NetworkEvent,
+    decision: Decision,
+) -> io::Result<()> {
+    let audit_event = transparent_tcp_audit_event(event, decision);
+    audit
+        .try_push(audit_event.clone())
+        .map_err(audit_backpressure_error)?;
+    eprintln!("foxprox-net: audit event={audit_event:?}");
+    Ok(())
+}
+
+fn audit_backpressure_error(error: AuditBackpressure) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!("audit queue backpressure: {error:?}"),
+    )
+}
+
+fn transparent_tcp_audit_event(event: &NetworkEvent, decision: Decision) -> AuditEvent {
+    let kind = match event {
+        NetworkEvent::TcpConnectAttempt { .. } => AuditEventKind::TcpConnect,
+        NetworkEvent::HttpRequest { .. } => AuditEventKind::TransparentHttpRequest,
+        NetworkEvent::TlsClientHello { .. } => AuditEventKind::TlsClientHello,
+        _ => AuditEventKind::UnsupportedDenied,
+    };
+    let mut audit = AuditEvent::new(Frontend::Tun, kind).with_decision(decision);
+    if let Some(sandbox_id) = event.sandbox_id() {
+        audit = audit.with_sandbox_id(sandbox_id.clone());
+    }
+    audit.protocol = Some(event.protocol());
+    match event {
+        NetworkEvent::TcpConnectAttempt {
+            source,
+            destination,
+            attribution,
+            ..
+        } => {
+            audit = audit.with_endpoints(*source, Some(*destination));
+            audit.attribution = Some(attribution.clone());
+            audit.hostname = attribution.hostname.clone();
+        }
+        NetworkEvent::HttpRequest {
+            origin,
+            method,
+            path_and_query,
+            ..
+        } => {
+            audit.hostname = Some(origin.host.clone());
+            audit.destination_port = Some(origin.port);
+            audit.attribution = Some(Attribution {
+                hostname: Some(origin.host.clone()),
+                source: AttributionSource::HttpHostHeader,
+                confidence: AttributionConfidence::High,
+            });
+            audit.origin = Some(origin.clone());
+            audit.http_method = Some(method.clone());
+            audit.path_and_query = Some(path_and_query.clone());
+        }
+        NetworkEvent::TlsClientHello {
+            destination,
+            sni,
+            dns_hostname,
+            ..
+        } => {
+            audit = audit.with_endpoints(None, Some(*destination));
+            if let Some(sni) = sni.clone() {
+                audit.hostname = Some(sni.clone());
+                audit.attribution = Some(Attribution {
+                    hostname: Some(sni),
+                    source: AttributionSource::TlsSni,
+                    confidence: AttributionConfidence::High,
+                });
+            } else if let Some(dns_hostname) = dns_hostname.clone() {
+                audit.hostname = Some(dns_hostname.clone());
+                audit.attribution = Some(Attribution {
+                    hostname: Some(dns_hostname),
+                    source: AttributionSource::DnsCache,
+                    confidence: AttributionConfidence::Medium,
+                });
+            } else {
+                audit.attribution = Some(Attribution::ip_only());
+            }
+        }
+        _ => {}
+    }
+    audit
+}
+
 enum FlowState {
     InspectingHttp(InspectingHttpFlow),
     InspectingTls(InspectingTlsFlow),
@@ -320,6 +430,7 @@ impl InspectingHttpFlow {
         socket: &mut tcp::Socket<'_>,
         sandbox_id: &SandboxId,
         policy: &PolicyRuleSet,
+        audit: &mut AuditBuffer,
         pending_limit: usize,
         connect_timeout: Duration,
     ) -> io::Result<Option<ConnectingFlow>> {
@@ -348,6 +459,7 @@ impl InspectingHttpFlow {
         };
         let decision = PolicyEngine::new(policy.clone()).evaluate(&event);
         eprintln!("foxprox-net: transparent HTTP policy decision={decision:?} event={event:?}");
+        emit_tcp_audit(audit, &event, decision.clone())?;
         if !decision.is_allowed() {
             return Err(io::Error::other("transparent HTTP policy denied request"));
         }
@@ -389,6 +501,7 @@ impl InspectingTlsFlow {
         socket: &mut tcp::Socket<'_>,
         sandbox_id: &SandboxId,
         policy: &PolicyRuleSet,
+        audit: &mut AuditBuffer,
         pending_limit: usize,
         connect_timeout: Duration,
     ) -> io::Result<Option<ConnectingFlow>> {
@@ -418,6 +531,7 @@ impl InspectingTlsFlow {
         };
         let decision = PolicyEngine::new(policy.clone()).evaluate(&event);
         eprintln!("foxprox-net: transparent TLS policy decision={decision:?} event={event:?}");
+        emit_tcp_audit(audit, &event, decision.clone())?;
         if !decision.is_allowed() {
             return Err(io::Error::other(
                 "transparent TLS policy denied ClientHello",
@@ -687,6 +801,7 @@ fn set_nonblocking(fd: i32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use foxprox_core::{Hostname, HttpMethod, Origin, Protocol};
 
     #[test]
     fn default_config_is_bounded() {
@@ -695,6 +810,7 @@ mod tests {
         assert!(config.connect_timeout <= Duration::from_secs(5));
         assert!(config.idle_timeout <= Duration::from_secs(30));
         assert_eq!(config.pending_buffer_limit, 256 * 1024);
+        assert!(config.audit_queue_capacity > 0);
     }
 
     #[test]
@@ -725,5 +841,122 @@ mod tests {
         assert!(!PolicyEngine::new(config.policy)
             .evaluate(&event)
             .is_allowed());
+    }
+
+    #[test]
+    fn transparent_tcp_audit_event_records_endpoints_and_decision() {
+        let event = NetworkEvent::TcpConnectAttempt {
+            sandbox_id: SandboxId::new("test").unwrap(),
+            frontend: Frontend::Tun,
+            source: Some(TransportEndpoint::new(
+                IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)),
+                44_444,
+            )),
+            destination: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 80),
+            attribution: Attribution::ip_only(),
+        };
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let audit = transparent_tcp_audit_event(&event, decision);
+
+        assert_eq!(audit.kind, AuditEventKind::TcpConnect);
+        assert_eq!(audit.protocol, Some(Protocol::Tcp));
+        assert_eq!(audit.source.unwrap().port, 44_444);
+        assert_eq!(audit.destination.unwrap().port, 80);
+        assert_eq!(audit.destination_port, Some(80));
+        assert!(audit.decision.is_some());
+    }
+
+    #[test]
+    fn transparent_http_audit_event_records_origin_metadata() {
+        let event = NetworkEvent::HttpRequest {
+            sandbox_id: SandboxId::new("test").unwrap(),
+            frontend: Frontend::Tun,
+            method: HttpMethod::parse("GET").unwrap(),
+            origin: Origin {
+                scheme: "http".to_string(),
+                host: Hostname::parse("example.com").unwrap(),
+                port: 80,
+            },
+            path_and_query: "/proof?q=1".to_string(),
+        };
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let audit = transparent_tcp_audit_event(&event, decision);
+
+        assert_eq!(audit.kind, AuditEventKind::TransparentHttpRequest);
+        assert_eq!(audit.protocol, Some(Protocol::Http));
+        assert_eq!(audit.hostname.unwrap().as_str(), "example.com");
+        assert_eq!(audit.destination_port, Some(80));
+        assert_eq!(audit.path_and_query.as_deref(), Some("/proof?q=1"));
+        assert_eq!(
+            audit.attribution.unwrap().source,
+            AttributionSource::HttpHostHeader
+        );
+    }
+
+    #[test]
+    fn transparent_tls_audit_event_records_sni_and_endpoint() {
+        let event = NetworkEvent::TlsClientHello {
+            sandbox_id: SandboxId::new("test").unwrap(),
+            frontend: Frontend::Tun,
+            destination: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443),
+            sni: Some(Hostname::parse("example.com").unwrap()),
+            ech_present: false,
+            dns_hostname: None,
+            mismatch: false,
+        };
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let audit = transparent_tcp_audit_event(&event, decision);
+
+        assert_eq!(audit.kind, AuditEventKind::TlsClientHello);
+        assert_eq!(audit.protocol, Some(Protocol::Tls));
+        assert_eq!(audit.hostname.unwrap().as_str(), "example.com");
+        assert_eq!(audit.destination.unwrap().port, 443);
+        assert_eq!(audit.destination_port, Some(443));
+        assert_eq!(audit.attribution.unwrap().source, AttributionSource::TlsSni);
+    }
+
+    #[test]
+    fn transparent_tls_audit_uses_dns_cache_source_when_sni_is_absent() {
+        let event = NetworkEvent::TlsClientHello {
+            sandbox_id: SandboxId::new("test").unwrap(),
+            frontend: Frontend::Tun,
+            destination: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443),
+            sni: None,
+            ech_present: true,
+            dns_hostname: Some(Hostname::parse("dns.example.com").unwrap()),
+            mismatch: false,
+        };
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let audit = transparent_tcp_audit_event(&event, decision);
+        let attribution = audit.attribution.unwrap();
+
+        assert_eq!(audit.hostname.unwrap().as_str(), "dns.example.com");
+        assert_eq!(attribution.source, AttributionSource::DnsCache);
+        assert_eq!(attribution.confidence, AttributionConfidence::Medium);
+    }
+
+    #[test]
+    fn transparent_tcp_audit_enqueue_reports_backpressure() {
+        let event = NetworkEvent::TcpConnectAttempt {
+            sandbox_id: SandboxId::new("test").unwrap(),
+            frontend: Frontend::Tun,
+            source: None,
+            destination: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 80),
+            attribution: Attribution::ip_only(),
+        };
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let mut audit = audit_buffer(1).unwrap();
+
+        emit_tcp_audit(&mut audit, &event, decision.clone()).unwrap();
+        let error = emit_tcp_audit(&mut audit, &event, decision).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn transparent_tcp_audit_rejects_zero_capacity() {
+        assert_eq!(
+            audit_buffer(0).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 }
