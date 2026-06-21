@@ -52,3 +52,7 @@
 ## 2026-06-21 — ICMP policy defaults
 
 - ICMP needs explicit policy defaults independent of the broad default allow/deny switch: essential error messages are broker mechanics, ping is user-configurable, and unusual ICMP should fail closed.
+
+## 2026-06-21 — Flow lifecycle audit boundary
+
+- Flow close/expiry audit constructors should accept a normalized input struct, not stack adapter objects or long parameter lists; this keeps lifecycle schema explicit and prevents audit from depending on flow-manager internals.

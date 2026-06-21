@@ -274,3 +274,21 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: f17ddb8.
 - Remaining boundary risks: ICMPv6 packet normalization, synthesized unreachable responses for denied UDP, and path-MTU integration remain.
+
+## 2026-06-21 — Boundary objective: flow lifecycle audit contract
+
+- Boundary under work: normalized audit records for TCP/UDP flow close and expiry lifecycle events.
+- Allowed dependency direction: `foxprox-audit` defines lifecycle record constructors from normalized core fields only; `foxprox-net` may translate flow state into audit records, but audit must not depend on network adapter structs.
+- Dependency-risk assessment: flow lifecycle logging can drift toward stack-specific flow objects; this boundary keeps audit records schema-stable with protocol/source/destination/byte-count/duration fields.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: initial clippy rejected a many-argument audit constructor, so the lifecycle input was narrowed into `FlowClosedAudit`; all verification passed.
+- Changed files:
+  - `crates/foxprox-audit/src/lib.rs`
+  - `crates/foxprox-net/src/lib.rs`
+  - `progress.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 49 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: production TCP close hooks, UDP expiry scheduler, and stream byte accounting integration remain.

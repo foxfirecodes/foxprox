@@ -10,11 +10,11 @@ use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
-use foxprox_audit::{AuditRecord, AuditSink};
+use foxprox_audit::{AuditRecord, AuditSink, FlowClosedAudit};
 use foxprox_core::{
-    DenialAction, DestinationHost, DnsQuery, Hostname, HostnameAttribution,
-    HostnameAttributionSource, HostnameConfidence, NormalizedEvent, PolicyDecision, SandboxId,
-    UdpClassification, UdpTimeouts,
+    DenialAction, DestinationHost, DnsQuery, FrontendKind, Hostname, HostnameAttribution,
+    HostnameAttributionSource, HostnameConfidence, NormalizedEvent, PolicyDecision, Protocol,
+    SandboxId, UdpClassification, UdpTimeouts,
 };
 use foxprox_egress::{dispatch_allowed_event, EgressError, HostEgress};
 use foxprox_policy::PolicyEngine;
@@ -255,6 +255,39 @@ where
     }
 }
 
+/// Record a flow lifecycle close/expiry without exposing adapter-specific flow
+/// state to the audit crate.
+pub fn record_flow_closed<A>(
+    audit: &mut A,
+    sequence: u64,
+    timestamp_millis: u64,
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    state: &FlowState,
+    closed_at: Instant,
+) -> Result<(), BrokerError>
+where
+    A: AuditSink,
+{
+    let protocol = match state.key.protocol {
+        FlowProtocol::Tcp => Protocol::Tcp,
+        FlowProtocol::Udp => Protocol::Udp,
+    };
+    let duration = closed_at.duration_since(state.created_at);
+    let record = AuditRecord::flow_closed(FlowClosedAudit {
+        sequence,
+        timestamp_millis,
+        sandbox_id,
+        frontend,
+        protocol,
+        source: state.key.source,
+        destination: state.key.destination,
+        byte_counts: state.byte_counts,
+        duration,
+    });
+    audit.record(record).map_err(BrokerError::Audit)
+}
+
 fn decision_denial_action(decision: &PolicyDecision) -> Option<DenialAction> {
     match decision {
         PolicyDecision::Deny(deny) => Some(deny.action),
@@ -359,6 +392,48 @@ mod tests {
             .unwrap();
         assert_eq!(attribution.hostname().as_str(), "example.com");
         assert_eq!(attribution.confidence(), HostnameConfidence::Medium);
+    }
+
+    #[test]
+    fn flow_closed_records_lifecycle_audit_without_adapter_types() {
+        let now = Instant::now();
+        let state = FlowState {
+            key: FlowKey {
+                source: "10.0.0.2:50000".parse().unwrap(),
+                destination: "203.0.113.10:443".parse().unwrap(),
+                protocol: FlowProtocol::Tcp,
+            },
+            hostname: None,
+            created_at: now,
+            last_seen: now + Duration::from_secs(1),
+            byte_counts: foxprox_core::ByteCounts::new(100, 200),
+            decision: PolicyDecision::Allow(foxprox_core::AllowDecision {
+                rule_id: None,
+                timeout_override: None,
+                reason: Some("test".into()),
+            }),
+        };
+        let mut audit = BoundedAuditSink::new(4);
+
+        record_flow_closed(
+            &mut audit,
+            2,
+            2000,
+            SandboxId::new("s1").unwrap(),
+            FrontendKind::Tun,
+            &state,
+            now + Duration::from_secs(3),
+        )
+        .unwrap();
+
+        let record = audit.records().front().unwrap();
+        assert_eq!(record.kind, foxprox_audit::AuditKind::FlowClosed);
+        assert_eq!(record.protocol, Protocol::Tcp);
+        assert_eq!(
+            record.byte_counts,
+            Some(foxprox_core::ByteCounts::new(100, 200))
+        );
+        assert_eq!(record.flow_duration_millis, Some(3000));
     }
 
     #[test]

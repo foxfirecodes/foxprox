@@ -8,6 +8,8 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::net::SocketAddr;
+use std::time::Duration;
 
 use foxprox_core::{
     ByteCounts, DecisionReason, FrontendKind, Hostname, HostnameAttributionSource,
@@ -98,6 +100,29 @@ impl AuditRecord {
         }
     }
 
+    /// Build a flow lifecycle audit record from normalized flow fields. Network
+    /// stack adapter objects must be translated before calling this constructor.
+    pub fn flow_closed(input: FlowClosedAudit) -> Self {
+        Self {
+            sequence: input.sequence,
+            timestamp_millis: input.timestamp_millis,
+            sandbox_id: input.sandbox_id,
+            kind: AuditKind::FlowClosed,
+            frontend: input.frontend,
+            protocol: input.protocol,
+            source: Some(input.source.to_string()),
+            destination: Some(input.destination.to_string()),
+            hostname: None,
+            hostname_attribution_source: None,
+            hostname_confidence: None,
+            decision: AuditDecision::Allow,
+            rule_id: None,
+            reason: Some("flow lifecycle closed".into()),
+            byte_counts: Some(input.byte_counts),
+            flow_duration_millis: Some(input.duration.as_millis().min(u128::from(u64::MAX)) as u64),
+        }
+    }
+
     /// Field names are intentionally stable; tests use this as a schema snapshot
     /// without pulling in a serialization dependency.
     pub fn schema_fields() -> &'static [&'static str] {
@@ -120,6 +145,19 @@ impl AuditRecord {
             "flow_duration_millis",
         ]
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FlowClosedAudit {
+    pub sequence: u64,
+    pub timestamp_millis: u64,
+    pub sandbox_id: SandboxId,
+    pub frontend: FrontendKind,
+    pub protocol: Protocol,
+    pub source: SocketAddr,
+    pub destination: SocketAddr,
+    pub byte_counts: ByteCounts,
+    pub duration: Duration,
 }
 
 impl From<&PolicyDecision> for AuditDecision {
@@ -308,6 +346,27 @@ mod tests {
         assert_eq!(record.decision, AuditDecision::DenyReset);
         assert_eq!(record.hostname.unwrap().as_str(), "example.com");
         assert_eq!(record.hostname_confidence, Some(HostnameConfidence::Medium));
+    }
+
+    #[test]
+    fn flow_lifecycle_record_uses_normalized_fields() {
+        let record = AuditRecord::flow_closed(FlowClosedAudit {
+            sequence: 9,
+            timestamp_millis: 1234,
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            protocol: Protocol::Tcp,
+            source: "10.0.0.2:50000".parse().unwrap(),
+            destination: "203.0.113.10:443".parse().unwrap(),
+            byte_counts: ByteCounts::new(10, 20),
+            duration: Duration::from_millis(2500),
+        });
+
+        assert_eq!(record.kind, AuditKind::FlowClosed);
+        assert_eq!(record.source.as_deref(), Some("10.0.0.2:50000"));
+        assert_eq!(record.destination.as_deref(), Some("203.0.113.10:443"));
+        assert_eq!(record.byte_counts, Some(ByteCounts::new(10, 20)));
+        assert_eq!(record.flow_duration_millis, Some(2500));
     }
 
     #[test]
