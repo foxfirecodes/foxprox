@@ -502,3 +502,36 @@
 - Files changed: `crates/foxprox-net/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
 - Current git status summary: source and progress ledger modified; review artifact directory summarized and ready for removal before commit.
 - Next exact action: remove transient `reviews/`, commit transparent HTTP inspection proof, then start the next alpha slice: TLS ClientHello inspection on transparent TCP port 443 or explicit proxy frontend planning.
+
+## 2026-06-21T22:47:28Z — HTTP inspection committed; next objective selected
+
+- Commit created: `55e2061` (`inspect transparent http before tcp egress`).
+- Current objective: add transparent TLS ClientHello inspection before host connect for TCP port 443.
+- Rationale: Milestone 5 requires direct HTTPS evaluation by TLS SNI and hidden-SNI/ECH handling. HTTP first-byte inspection established the state-machine pattern; TLS ClientHello inspection can reuse that bounded pre-egress gate before larger DNS-to-TCP attribution or proxy frontend work.
+- Verification plan: add a TLS inspection state for port 443, emit `TlsClientHello` with visible SNI/ECH metadata, evaluate policy before host connect, preserve proof CLI usability with an explicit TLS allow rule for `--tcp-port 443`, add focused tests for the port selector/default policy where possible, run full workspace verification and a live TLS smoke if practical.
+- Expected commit boundary: TCP proof TLS ClientHello inspection gate only; no TLS MITM, no full HTTPS URL/path visibility, and no DNS attribution integration yet.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: implement bounded TLS ClientHello inspection in `crates/foxprox-net/src/lib.rs` and proof CLI TLS allow rule wiring.
+
+## 2026-06-21T22:51:29Z — transparent TLS inspection proof verified
+
+- Current objective: commit transparent TLS ClientHello inspection for the TCP proof.
+- Changes implemented:
+  - TCP proof now routes allowed port-443 TCP connects through an `InspectingTlsFlow` state before opening the host socket.
+  - The inspection state buffers sandbox bytes up to the existing pending buffer limit, parses a complete TLS ClientHello with `parse_tls_client_hello`, emits a normalized `TlsClientHello` event with SNI/ECH metadata, evaluates `PolicyEngine`, and only then creates `ConnectingFlow` with buffered ClientHello bytes preserved.
+  - Malformed, unsupported, denied, timed-out, or closed TLS inspection cases abort before host connect.
+  - `foxprox proof-tcp` now installs an explicit `Protocol::Tls` proof allow rule for `--tcp-port 443` in addition to the TCP connect proof allow rule.
+  - Added focused test coverage that transparent TLS inspection is limited to default HTTPS port 443.
+- Subagents/reviews requested and findings:
+  - `tls-inspection-final` found no blockers after inspecting the diff and running targeted tests.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed after formatting.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-net` passed: 8 tests.
+  - `cargo test --workspace` passed: 45 core tests, 8 device tests, 8 net tests, CLI/setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - Live bwrap/TUN TLS smoke passed with sandbox Python `ssl` client to resolved `example.com:443`; broker logged both `tcp policy decision=Decision { action: Allow, rule_id: Some("proof-allow-tcp-443"), reason: None }` and `transparent TLS policy decision=Decision { action: Allow, rule_id: Some("proof-allow-tls-443"), reason: None }` with `sni: Some(Hostname("example.com"))`; client negotiated TLSv1.3.
+- Files changed: `crates/foxprox-net/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: source and progress ledger modified; review artifact directory summarized and ready for removal before commit.
+- Next exact action: remove transient `reviews/`, commit transparent TLS inspection proof, then select the next alpha slice: combined DNS-to-TCP attribution or explicit proxy frontend foundation.

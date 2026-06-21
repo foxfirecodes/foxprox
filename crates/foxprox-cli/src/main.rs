@@ -168,6 +168,12 @@ where
             .rules
             .push(allow_http_forward_rule(config.tcp_port));
     }
+    if config.tcp_port == 443 {
+        config
+            .policy
+            .rules
+            .push(allow_tls_forward_rule(config.tcp_port));
+    }
 
     let setup_socket = setup_socket.ok_or_else(|| {
         io::Error::new(
@@ -265,6 +271,12 @@ fn allow_tcp_forward_rule(port: u16) -> PolicyRule {
 fn allow_http_forward_rule(port: u16) -> PolicyRule {
     PolicyRule::new(format!("proof-allow-http-{port}"), RuleEffect::Allow)
         .with_protocol(Protocol::Http)
+        .with_destination_ports(PortRange::single(port))
+}
+
+fn allow_tls_forward_rule(port: u16) -> PolicyRule {
+    PolicyRule::new(format!("proof-allow-tls-{port}"), RuleEffect::Allow)
+        .with_protocol(Protocol::Tls)
         .with_destination_ports(PortRange::single(port))
 }
 

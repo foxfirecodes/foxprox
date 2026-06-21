@@ -12,8 +12,8 @@ mod udp;
 pub use udp::{run_udp_dns_proof, run_udp_dns_proof_with_ready, UdpDnsProofConfig};
 
 use foxprox_core::{
-    parse_http_request_head, Attribution, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet,
-    SandboxId, TransportEndpoint,
+    parse_http_request_head, parse_tls_client_hello, Attribution, Frontend, NetworkEvent,
+    PolicyEngine, PolicyRuleSet, SandboxId, TransportEndpoint,
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, TunTapInterface};
@@ -159,6 +159,8 @@ where
                     if decision.is_allowed() {
                         flow = Some(if should_inspect_http(destination.port()) {
                             FlowState::InspectingHttp(InspectingHttpFlow::new(source, destination))
+                        } else if should_inspect_tls(destination.port()) {
+                            FlowState::InspectingTls(InspectingTlsFlow::new(source, destination))
                         } else {
                             FlowState::Connecting(ConnectingFlow::new(
                                 source,
@@ -198,6 +200,30 @@ where
                         }
                         Err(error) => {
                             eprintln!("foxprox-net: HTTP inspection denied/failed: {error}");
+                            socket.abort();
+                            clear_flow = true;
+                        }
+                    }
+                }
+                FlowState::InspectingTls(inspecting) => {
+                    match inspecting.pump(
+                        socket,
+                        &config.sandbox_id,
+                        &config.policy,
+                        config.pending_buffer_limit,
+                        config.connect_timeout,
+                    ) {
+                        Ok(Some(connecting)) => *state = FlowState::Connecting(connecting),
+                        Ok(None) => {
+                            if inspecting.is_expired(config.connect_timeout) || !socket.is_active()
+                            {
+                                eprintln!("foxprox-net: TLS inspection timed out or socket closed");
+                                socket.abort();
+                                clear_flow = true;
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("foxprox-net: TLS inspection denied/failed: {error}");
                             socket.abort();
                             clear_flow = true;
                         }
@@ -264,6 +290,7 @@ where
 
 enum FlowState {
     InspectingHttp(InspectingHttpFlow),
+    InspectingTls(InspectingTlsFlow),
     Connecting(ConnectingFlow),
     Active(ActiveFlow),
 }
@@ -323,6 +350,78 @@ impl InspectingHttpFlow {
         eprintln!("foxprox-net: transparent HTTP policy decision={decision:?} event={event:?}");
         if !decision.is_allowed() {
             return Err(io::Error::other("transparent HTTP policy denied request"));
+        }
+        Ok(Some(ConnectingFlow::new_with_pending(
+            self.source,
+            self.destination,
+            connect_timeout,
+            std::mem::take(&mut self.pending_to_host),
+        )))
+    }
+
+    fn is_expired(&self, timeout: Duration) -> bool {
+        self.started_at.elapsed() > timeout
+    }
+}
+
+struct InspectingTlsFlow {
+    source: TransportEndpoint,
+    destination: SocketAddr,
+    pending_to_host: Vec<u8>,
+    started_at: StdInstant,
+    last_activity: StdInstant,
+}
+
+impl InspectingTlsFlow {
+    fn new(source: TransportEndpoint, destination: SocketAddr) -> Self {
+        let now = StdInstant::now();
+        Self {
+            source,
+            destination,
+            pending_to_host: Vec::new(),
+            started_at: now,
+            last_activity: now,
+        }
+    }
+
+    fn pump(
+        &mut self,
+        socket: &mut tcp::Socket<'_>,
+        sandbox_id: &SandboxId,
+        policy: &PolicyRuleSet,
+        pending_limit: usize,
+        connect_timeout: Duration,
+    ) -> io::Result<Option<ConnectingFlow>> {
+        recv_socket_to_vec(
+            socket,
+            &mut self.pending_to_host,
+            pending_limit,
+            &mut self.last_activity,
+        )?;
+        let inspection = match parse_tls_client_hello(&self.pending_to_host) {
+            Ok(inspection) => inspection,
+            Err(foxprox_core::InspectionError::Truncated) => return Ok(None),
+            Err(error) => {
+                return Err(io::Error::other(format!(
+                    "malformed or unsupported TLS ClientHello: {error:?}"
+                )))
+            }
+        };
+        let event = NetworkEvent::TlsClientHello {
+            sandbox_id: sandbox_id.clone(),
+            frontend: Frontend::Tun,
+            destination: TransportEndpoint::from(self.destination),
+            sni: inspection.sni,
+            ech_present: inspection.ech_present,
+            dns_hostname: None,
+            mismatch: false,
+        };
+        let decision = PolicyEngine::new(policy.clone()).evaluate(&event);
+        eprintln!("foxprox-net: transparent TLS policy decision={decision:?} event={event:?}");
+        if !decision.is_allowed() {
+            return Err(io::Error::other(
+                "transparent TLS policy denied ClientHello",
+            ));
         }
         Ok(Some(ConnectingFlow::new_with_pending(
             self.source,
@@ -547,6 +646,10 @@ fn should_inspect_http(port: u16) -> bool {
     port == 80
 }
 
+fn should_inspect_tls(port: u16) -> bool {
+    port == 443
+}
+
 fn endpoint_to_socket_addr(endpoint: smoltcp::wire::IpEndpoint) -> io::Result<SocketAddr> {
     Ok(SocketAddr::new(ip_to_std(endpoint.addr)?, endpoint.port))
 }
@@ -598,6 +701,12 @@ mod tests {
     fn transparent_http_inspection_is_limited_to_default_http_port() {
         assert!(should_inspect_http(80));
         assert!(!should_inspect_http(443));
+    }
+
+    #[test]
+    fn transparent_tls_inspection_is_limited_to_default_https_port() {
+        assert!(should_inspect_tls(443));
+        assert!(!should_inspect_tls(80));
     }
 
     #[test]
