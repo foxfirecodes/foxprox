@@ -272,3 +272,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * source endpoint is no longer dropped when audit context is derived from a normalized policy request.
 * Audit evidence: unit tests assert the expanded audit schema preserves HTTP/source metadata and denial details.
 * Residual risk: audit serialization/sink implementation, DNS query type fields, flow byte/duration accounting, and lifecycle/error event builders remain future audit work.
+* Commit hash: 380353f preserve http source audit context.
