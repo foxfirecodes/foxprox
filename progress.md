@@ -61,3 +61,28 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; parser output feeds policy/audit layers but does not emit audit directly.
 * Residual risk: packet checksums are not validated yet; TCP flags/state, IPv4 options semantics, IPv6 extension handling, and MTU/error synthesis remain future packet-core work.
 * Commit hash: e75b509 fail closed packet metadata parsing.
+
+## 2026-06-21 - DNS attribution cache bounds and confidence
+
+* Invariant under work: DNS observations used for transparent hostname attribution must be normalized, medium-confidence only, TTL-bound, and capacity-bound so hostile DNS traffic cannot create unbounded memory growth or high-confidence domain authorization.
+* Threat or failure mode addressed: DNS cache poisoning/over-attribution, stale hostname-to-IP decisions, and unbounded DNS answer accumulation could cause incorrect domain allows or resource exhaustion.
+* Planned verification: add unit tests for hostname normalization, medium-confidence attribution, TTL expiry, capacity eviction, multiple hostnames on shared IPs, and invalid hostname rejection; run `cargo test` and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - DNS attribution cache bounds and confidence results
+
+* Tests added/updated:
+  * DNS observations normalize hostnames and return only medium-confidence `DnsCache` attribution.
+  * invalid hostnames are rejected without storing cache entries.
+  * entries expire according to DNS TTL and configured maximum TTL clamp.
+  * cache capacity is fixed and evicts oldest entries when full.
+  * shared IPs can return multiple medium-confidence hostnames instead of pretending high-confidence uniqueness.
+  * zero capacity, zero max TTL, and zero DNS TTL store no attribution.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 29 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * DNS cache never upgrades attribution above medium confidence.
+  * stale, invalid, or capacity-exhausted DNS observations are not available for domain policy matching.
+  * shared IP attribution remains explicit and ambiguous for later policy review.
+* Audit evidence: not applicable in this commit; DNS cache stores attribution state only. DNS query audit emission remains future frontend/DNS-handler work.
+* Residual risk: no DNS wire parser or upstream resolver exists yet; CNAME chain semantics, DNSSEC, negative caching, and audit emission for DNS answers are not implemented.
+* Commit hash: pending.

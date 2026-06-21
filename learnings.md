@@ -9,3 +9,7 @@ A DNS bypass check that only considers a dedicated DNS event class is insufficie
 ## 2026-06-21 - Packet parser fail-closed scope
 
 The alpha packet parser should reject IPv4 fragments and IPv6 extension headers until the broker has explicit reassembly/extension semantics. Classifying UDP/53 as DNS and UDP/443 as QUIC candidate at the normalized metadata boundary helps policy apply DNS-bypass and QUIC-default invariants consistently.
+
+## 2026-06-21 - DNS attribution confidence
+
+DNS cache correlation must stay medium confidence and may produce multiple hostnames for one IP. A shared IP match should not be collapsed into high-confidence uniqueness; policy code must keep source/confidence explicit when deciding domain rules.
