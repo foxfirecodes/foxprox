@@ -1,6 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
+use crate::dns::DnsCache;
 use crate::egress::{EgressBackend, EgressRequest};
 use crate::packet::{parse_ipv4, parse_udp, synthesize_udp_reply};
 use crate::policy::{PolicyEngine, PolicyRequest};
@@ -15,6 +16,8 @@ pub struct TransparentUdpRuntime<B> {
     pub policy: PolicyEngine,
     pub egress: B,
     pub audit: Vec<AuditRecord>,
+    pub dns_cache: DnsCache,
+    pub now_tick: u64,
 }
 
 impl<B: EgressBackend> TransparentUdpRuntime<B> {
@@ -23,7 +26,15 @@ impl<B: EgressBackend> TransparentUdpRuntime<B> {
             policy,
             egress,
             audit: Vec::new(),
+            dns_cache: DnsCache::new(),
+            now_tick: 0,
         }
+    }
+
+    pub fn with_dns_cache(mut self, dns_cache: DnsCache, now_tick: u64) -> Self {
+        self.dns_cache = dns_cache;
+        self.now_tick = now_tick;
+        self
     }
 
     pub fn handle_ipv4_packet(
@@ -83,6 +94,12 @@ impl<B: EgressBackend> TransparentUdpRuntime<B> {
         let mut request = PolicyRequest::new(&sandbox_id, Frontend::Tun, Protocol::Udp)
             .with_source(source.ip(), source.port())
             .with_destination(destination.ip(), destination.port());
+        let attribution = self
+            .dns_cache
+            .attribution_for(destination.ip(), self.now_tick);
+        if let Some(attr) = &attribution {
+            request = request.with_hostname(&attr.hostname, attr.confidence);
+        }
         request.is_multicast_or_broadcast = is_multicast_or_broadcast(parsed.destination);
         request.quic_candidate = udp.class == crate::flow::UdpClass::QuicCandidate;
 
@@ -97,6 +114,9 @@ impl<B: EgressBackend> TransparentUdpRuntime<B> {
         .with_protocol(Protocol::Udp)
         .with_addresses(Some(source), Some(destination))
         .with_rule(outcome.rule_id.clone());
+        if let Some(attr) = attribution {
+            record = record.with_hostname(Some(attr.hostname), attr.source, attr.confidence);
+        }
 
         if !outcome.decision.is_allow() {
             self.audit.push(record);
@@ -177,6 +197,44 @@ mod tests {
         assert_eq!(runtime.egress.requests.len(), 1);
         assert_eq!(runtime.audit[0].decision, Decision::Allow);
         assert_eq!(runtime.audit[0].bytes_out, 12);
+    }
+
+    #[test]
+    fn dns_cache_attribution_can_allow_domain_udp_rule() {
+        let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 77)), 5354);
+        let policy = PolicyEngine::new(
+            PolicyConfig::deny_by_default().with_rule(
+                PolicyRule::new("allow-attributed-example", RuleAction::Allow)
+                    .protocol(Protocol::Udp)
+                    .domain_suffix("example")
+                    .port(destination.port())
+                    .require_hostname_attribution(),
+            ),
+        );
+        let egress = MockEgressBackend::new().with_response(
+            destination,
+            EgressOutcome {
+                connected: true,
+                bytes_sent: 5,
+                bytes_received: 12,
+                message: "mock UDP forwarded".to_string(),
+                response_payload: b"egress:probe".to_vec(),
+            },
+        );
+        let mut cache = DnsCache::new();
+        cache
+            .observe_response("lab.example", [destination.ip()], 1, 60)
+            .unwrap();
+        let mut runtime = TransparentUdpRuntime::new(policy, egress).with_dns_cache(cache, 2);
+        let packet = udp_probe_packet(destination.ip(), destination.port(), b"probe");
+        let reply = runtime.handle_ipv4_packet("lab", &packet).unwrap();
+        assert!(reply.is_some());
+        assert_eq!(runtime.audit[0].hostname.as_deref(), Some("lab.example"));
+        assert_eq!(runtime.audit[0].decision, Decision::Allow);
+        assert_eq!(
+            runtime.audit[0].rule_id.as_deref(),
+            Some("allow-attributed-example")
+        );
     }
 
     #[test]

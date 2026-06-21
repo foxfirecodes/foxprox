@@ -251,3 +251,27 @@
 - Interpretation: the harness now has a local DNS broker proof on the same bwrap/TUN fd path: DNS can be answered without external network access and results can feed attribution cache state.
 - Next verification gap: use the DNS cache result to attribute a subsequent transparent UDP/TCP flow in an environment smoke, or begin TCP stack/forwarding proof scaffolding.
 - Commit hash after commit: pending.
+
+## 2026-06-21T16:30:00Z — DNS smoke commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs crates/foxprox-core/src/dns.rs learnings.md progress.md && git commit -m "Add transparent DNS smoke harness"`
+- Environment assumptions: DNS smoke and deterministic DNS tests above were verified before commit.
+- Expected result: commit captures DNS wire parser/synthesizer and bwrap/TUN DNS smoke.
+- Observed result: commit `9c03387` created with 5 files changed.
+- Relevant output excerpt: `[harness-lab 9c03387] Add transparent DNS smoke harness`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: transparent DNS broker foundation checkpoint is preserved.
+- Next verification gap: DNS cache attribution applied to subsequent transparent flows.
+- Commit hash after commit: 9c03387.
+
+## 2026-06-21T16:45:00Z — DNS cache attribution in transparent UDP runtime
+
+- Command executed: `cargo fmt --all && cargo test --all`; `target/debug/foxprox-lab run dns-smoke && target/debug/foxprox-lab run udp-forward-smoke`
+- Environment assumptions: deterministic runtime attribution test uses tick-based DNS cache time; environment smokes reused existing built binaries from the prior DNS cycle.
+- Expected result: transparent UDP runtime can consult DNS cache for destination attribution before policy evaluation, allowing domain-suffix rules that require hostname attribution. Existing DNS and UDP environment smokes continue to pass.
+- Observed result: pass. `foxprox-core` increased to 36 tests. Runtime test `dns_cache_attribution_can_allow_domain_udp_rule` passed, and both `dns-smoke` and `udp-forward-smoke` emitted `decision":"allow"`.
+- Relevant output excerpt: `runtime::tests::dns_cache_attribution_can_allow_domain_udp_rule ... ok`; DNS smoke `"attribution_cached":"true"`; UDP forward smoke `"policy_decision":"allow"`.
+- Changed files: `crates/foxprox-core/src/runtime.rs`, `progress.md`.
+- Interpretation: the core transparent UDP runtime now supports DNS-cache hostname attribution for subsequent flow policy decisions. This provides the deterministic foundation needed for transparent hostname-aware UDP/QUIC policy.
+- Next verification gap: environment smoke that performs DNS query and attributed UDP flow in one sandbox session, or begin TCP forwarding gate scaffolding.
+- Commit hash after commit: pending.
