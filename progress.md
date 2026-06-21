@@ -102,5 +102,5 @@
   - `crates/foxprox-inspect/Cargo.toml`
   - `crates/foxprox-inspect/src/lib.rs`
   - `progress.md`
-- Commit hash after commit: pending.
+- Commit hash after commit: 867407d.
 - Remaining boundary risks: fuzzing malformed TLS inputs, production QUIC metadata extraction, and transparent stream reassembly remain to be implemented.
