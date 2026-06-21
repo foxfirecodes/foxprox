@@ -83,3 +83,15 @@
 - Interpretation: helper command-line contract and plan output are now harnessed, but actual TUN setup from the Rust helper cannot safely rely on shelling out inside bwrap in this environment. This validates the implementation approach directive to turn unknowns into runnable checks and record limitations.
 - Next verification gap: implement setup helper TUN configuration using direct syscalls/netlink/ioctl instead of child process spawning, then rerun the bwrap configure-only smoke.
 - Commit hash after commit: pending.
+
+## 2026-06-21T00:48:00Z — foxproxsetup scaffold commit recorded
+
+- Command executed: `git add Cargo.lock Cargo.toml README.md crates/foxprox-setup learnings.md progress.md && git commit -m "Add foxproxsetup planning scaffold"`
+- Environment assumptions: helper parser/plan behavior was verified; bwrap configure failure is intentionally recorded as a limitation.
+- Expected result: commit captures the setup-helper scaffold and the observed bwrap spawning limitation.
+- Observed result: commit `2bb815f` created with 7 files changed.
+- Relevant output excerpt: `[harness-lab 2bb815f] Add foxproxsetup planning scaffold`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: setup-helper planning checkpoint is preserved.
+- Next verification gap: direct syscall/netlink/ioctl TUN setup from helper.
+- Commit hash after commit: 2bb815f.
