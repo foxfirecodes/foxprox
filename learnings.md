@@ -169,3 +169,7 @@ Synthetic ICMP replies should be generated only after the packet parser validate
 ## 2026-06-21 - Lifecycle audit events should not masquerade as policy decisions
 
 Startup/setup/shutdown audit records should preserve sandbox and frontend context with null decision fields, while actual broker errors should use explicit fail-closed decisions and typed denial reasons. This keeps lifecycle review separate from allow/deny policy review.
+
+## 2026-06-21 - TCP flow expiration boundaries should be explicit
+
+TCP flow expiry uses `expires_at_millis <= now` semantics, matching UDP flow cleanup. Tests and runtime cleanup should account for the exact boundary so flow state is not retained past its configured idle timeout.

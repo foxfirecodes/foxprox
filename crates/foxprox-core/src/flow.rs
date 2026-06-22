@@ -3,6 +3,171 @@ use std::collections::VecDeque;
 use crate::types::{Endpoint, Protocol};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct TcpFlowKey {
+    pub source: Endpoint,
+    pub destination: Endpoint,
+}
+
+impl TcpFlowKey {
+    pub fn new(source: Endpoint, destination: Endpoint) -> Self {
+        Self {
+            source,
+            destination,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TcpFlowEntry {
+    pub key: TcpFlowKey,
+    pub created_at_millis: u64,
+    pub last_seen_millis: u64,
+    pub expires_at_millis: u64,
+    pub bytes_from_sandbox: u64,
+    pub bytes_from_host: u64,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum TcpFlowObserveStatus {
+    Created,
+    Updated,
+    RejectedNoCapacity,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct TcpFlowObserveOutcome {
+    pub status: TcpFlowObserveStatus,
+    pub evicted: usize,
+    pub expired: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct TcpFlowTable {
+    max_flows: usize,
+    idle_timeout_millis: u64,
+    flows: VecDeque<TcpFlowEntry>,
+}
+
+impl TcpFlowTable {
+    pub fn new(max_flows: usize, idle_timeout_millis: u64) -> Self {
+        Self {
+            max_flows,
+            idle_timeout_millis,
+            flows: VecDeque::with_capacity(max_flows),
+        }
+    }
+
+    pub fn observe_from_sandbox(
+        &mut self,
+        key: TcpFlowKey,
+        byte_count: u64,
+        now_millis: u64,
+    ) -> TcpFlowObserveOutcome {
+        self.observe(key, byte_count, 0, now_millis)
+    }
+
+    pub fn observe_from_host(
+        &mut self,
+        key: TcpFlowKey,
+        byte_count: u64,
+        now_millis: u64,
+    ) -> TcpFlowObserveOutcome {
+        self.observe(key, 0, byte_count, now_millis)
+    }
+
+    fn observe(
+        &mut self,
+        key: TcpFlowKey,
+        sandbox_bytes: u64,
+        host_bytes: u64,
+        now_millis: u64,
+    ) -> TcpFlowObserveOutcome {
+        let expired = self.expire(now_millis);
+        if let Some(entry) = self.flows.iter_mut().find(|entry| entry.key == key) {
+            entry.last_seen_millis = now_millis;
+            entry.expires_at_millis = now_millis.saturating_add(self.idle_timeout_millis);
+            entry.bytes_from_sandbox = entry.bytes_from_sandbox.saturating_add(sandbox_bytes);
+            entry.bytes_from_host = entry.bytes_from_host.saturating_add(host_bytes);
+            return TcpFlowObserveOutcome {
+                status: TcpFlowObserveStatus::Updated,
+                evicted: 0,
+                expired,
+            };
+        }
+
+        if self.max_flows == 0 || self.idle_timeout_millis == 0 {
+            return TcpFlowObserveOutcome {
+                status: TcpFlowObserveStatus::RejectedNoCapacity,
+                evicted: 0,
+                expired,
+            };
+        }
+
+        let mut evicted = 0;
+        while self.flows.len() >= self.max_flows {
+            self.flows.pop_front();
+            evicted += 1;
+        }
+
+        self.flows.push_back(TcpFlowEntry {
+            key,
+            created_at_millis: now_millis,
+            last_seen_millis: now_millis,
+            expires_at_millis: now_millis.saturating_add(self.idle_timeout_millis),
+            bytes_from_sandbox: sandbox_bytes,
+            bytes_from_host: host_bytes,
+        });
+
+        TcpFlowObserveOutcome {
+            status: TcpFlowObserveStatus::Created,
+            evicted,
+            expired,
+        }
+    }
+
+    pub fn close(&mut self, key: TcpFlowKey) -> Option<TcpFlowEntry> {
+        let index = self.flows.iter().position(|entry| entry.key == key)?;
+        self.flows.remove(index)
+    }
+
+    pub fn expire(&mut self, now_millis: u64) -> usize {
+        self.expire_collect(now_millis).len()
+    }
+
+    pub fn expire_collect(&mut self, now_millis: u64) -> Vec<TcpFlowEntry> {
+        let mut retained = VecDeque::with_capacity(self.max_flows);
+        let mut expired = Vec::new();
+
+        while let Some(entry) = self.flows.pop_front() {
+            if entry.expires_at_millis <= now_millis {
+                expired.push(entry);
+            } else {
+                retained.push_back(entry);
+            }
+        }
+
+        self.flows = retained;
+        expired
+    }
+
+    pub fn get(&self, key: TcpFlowKey) -> Option<&TcpFlowEntry> {
+        self.flows.iter().find(|entry| entry.key == key)
+    }
+
+    pub fn len(&self) -> usize {
+        self.flows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.flows.is_empty()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.max_flows
+    }
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct UdpFlowKey {
     pub source: Endpoint,
     pub destination: Endpoint,
@@ -207,6 +372,100 @@ mod tests {
 
     fn key(source_port: u16, destination: Endpoint) -> UdpFlowKey {
         UdpFlowKey::new(endpoint([10, 0, 0, 2], source_port), destination)
+    }
+
+    fn tcp_endpoint(octets: [u8; 4], port: u16) -> Endpoint {
+        Endpoint::tcp(IpAddr::V4(Ipv4Addr::from(octets)), port)
+    }
+
+    fn tcp_key(source_port: u16, destination_port: u16) -> TcpFlowKey {
+        TcpFlowKey::new(
+            tcp_endpoint([10, 0, 0, 2], source_port),
+            tcp_endpoint([203, 0, 113, 10], destination_port),
+        )
+    }
+
+    #[test]
+    fn tcp_flow_table_tracks_lifecycle_and_saturating_counters() {
+        let flow = tcp_key(40000, 443);
+        let mut table = TcpFlowTable::new(4, 30);
+
+        assert_eq!(
+            table.observe_from_sandbox(flow, 10, 1),
+            TcpFlowObserveOutcome {
+                status: TcpFlowObserveStatus::Created,
+                evicted: 0,
+                expired: 0,
+            }
+        );
+        assert_eq!(
+            table.observe_from_host(flow, 20, 5),
+            TcpFlowObserveOutcome {
+                status: TcpFlowObserveStatus::Updated,
+                evicted: 0,
+                expired: 0,
+            }
+        );
+        table.observe_from_sandbox(flow, u64::MAX, 6);
+
+        let entry = table.get(flow).unwrap();
+        assert_eq!(entry.created_at_millis, 1);
+        assert_eq!(entry.last_seen_millis, 6);
+        assert_eq!(entry.expires_at_millis, 36);
+        assert_eq!(entry.bytes_from_sandbox, u64::MAX);
+        assert_eq!(entry.bytes_from_host, 20);
+
+        let closed = table.close(flow).unwrap();
+        assert_eq!(closed.key, flow);
+        assert!(table.is_empty());
+    }
+
+    #[test]
+    fn tcp_flow_table_bounds_capacity_and_expiration() {
+        let mut table = TcpFlowTable::new(2, 10);
+        let first = tcp_key(40000, 80);
+        let second = tcp_key(40001, 80);
+        let third = tcp_key(40002, 80);
+
+        table.observe_from_sandbox(first, 1, 0);
+        table.observe_from_sandbox(second, 1, 1);
+        assert_eq!(
+            table.observe_from_sandbox(third, 1, 2),
+            TcpFlowObserveOutcome {
+                status: TcpFlowObserveStatus::Created,
+                evicted: 1,
+                expired: 0,
+            }
+        );
+        assert!(table.get(first).is_none());
+        assert!(table.get(second).is_some());
+        assert!(table.get(third).is_some());
+
+        let expired = table.expire_collect(11);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].key, second);
+        assert!(table.get(third).is_some());
+    }
+
+    #[test]
+    fn tcp_flow_table_rejects_zero_capacity_or_zero_timeout() {
+        let flow = tcp_key(40000, 443);
+        assert_eq!(
+            TcpFlowTable::new(0, 30).observe_from_sandbox(flow, 1, 0),
+            TcpFlowObserveOutcome {
+                status: TcpFlowObserveStatus::RejectedNoCapacity,
+                evicted: 0,
+                expired: 0,
+            }
+        );
+        assert_eq!(
+            TcpFlowTable::new(4, 0).observe_from_sandbox(flow, 1, 0),
+            TcpFlowObserveOutcome {
+                status: TcpFlowObserveStatus::RejectedNoCapacity,
+                evicted: 0,
+                expired: 0,
+            }
+        );
     }
 
     #[test]

@@ -930,3 +930,25 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * broker error paths can be represented as fail-closed audit records with typed reasons instead of ad hoc text.
 * Audit evidence: unit tests assert lifecycle/error fields and deterministic JSON fragments for `tun_configured` and `broker_error` events.
 * Residual risk: runtime code still needs to call these constructors during actual broker startup, setup-helper TUN configuration, policy reload, and shutdown/error paths.
+
+## 2026-06-21 - Bounded TCP flow lifecycle foundation
+
+* Invariant under work: TCP flow state must be capacity-bounded, timeout-bounded, and preserve byte/lifecycle counters so hostile connect churn cannot create unbounded memory or unauditable stale state.
+* Threat or failure mode addressed: a future TCP forwarder could accumulate unlimited flow entries or lose lifecycle byte/duration evidence needed for close/error audit records.
+* Planned verification: add TCP flow table tests for create/update/close/expire, oldest eviction, zero-capacity rejection, saturating byte counters, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Bounded TCP flow lifecycle foundation results
+
+* Tests added/updated:
+  * TCP flow table creates and updates flows with stable creation time, refreshed last-seen/expiry, and independent saturating byte counters for sandbox-to-host and host-to-sandbox traffic.
+  * closing a TCP flow returns the consumed entry so lifecycle audit can preserve endpoints, byte counts, and duration without retaining stale state.
+  * table capacity is fixed, oldest flows are evicted deterministically, expired flows can be collected with state, and zero-capacity/zero-timeout configurations reject new entries.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` found a test boundary error where both old and new TCP flows expired at the exact `<=` expiration instant.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 135 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * TCP flow state is now bounded by both capacity and idle timeout in the core flow manager.
+  * stale or closed TCP flow state can be removed while returning auditable endpoint/counter data.
+  * byte counters saturate rather than overflowing under hostile traffic volume.
+* Audit evidence: no TCP audit builder was added in this cycle; the returned `TcpFlowEntry` data is structured for future TCP close/error audit constructors.
+* Residual risk: TCP flow close audit builders, smoltcp/host-socket forwarding, policy-decision caching, and automatic runtime expiration/cleanup coupling remain future work.

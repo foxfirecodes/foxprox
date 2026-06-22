@@ -42,6 +42,7 @@ pub use dns_handler::{
     BrokerDnsResponseOutcome,
 };
 pub use flow::{
+    TcpFlowEntry, TcpFlowKey, TcpFlowObserveOutcome, TcpFlowObserveStatus, TcpFlowTable,
     UdpFlowClass, UdpFlowEntry, UdpFlowKey, UdpFlowObserveOutcome, UdpFlowObserveStatus,
     UdpFlowTable, UdpFlowTimeouts,
 };
