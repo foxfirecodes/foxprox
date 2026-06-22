@@ -8,12 +8,13 @@
 
 use foxprox_core::{
     classify_udp, parse_dns_query, parse_http_proxy_request_line, parse_http_request,
-    parse_ip_packet, parse_tls_client_hello_sni, synthesize_icmpv4_echo_reply,
-    synthesize_udpv4_response, AttributionConfidence, AttributionSource, AuditSink, Decision,
-    DecisionAction, DecisionReason, DnsCache, DnsParseError, Endpoint, FlowKey, FlowTable,
-    FrontendKind, HostnameAttribution, HttpProxyRequestLine, HttpRequestMetadata, InspectError,
-    NormalizedEvent, PacketError, ParsedIpPacket, Protocol, ProxyParseError, QuicStatus, SandboxId,
-    SniStatus, StaticDnsResolver, Tcpv4Segment, UdpFlow, Udpv4Packet, UnsupportedIpv4Protocol,
+    parse_ip_packet, parse_socks5_connect, parse_tls_client_hello_sni,
+    synthesize_icmpv4_echo_reply, synthesize_udpv4_response, AttributionConfidence,
+    AttributionSource, AuditSink, Decision, DecisionAction, DecisionReason, DnsCache,
+    DnsParseError, Endpoint, FlowKey, FlowTable, FrontendKind, HostnameAttribution,
+    HttpProxyRequestLine, HttpRequestMetadata, InspectError, NormalizedEvent, PacketError,
+    ParsedIpPacket, Protocol, ProxyParseError, QuicStatus, SandboxId, SniStatus, SocksDestination,
+    StaticDnsResolver, Tcpv4Segment, UdpFlow, Udpv4Packet, UnsupportedIpv4Protocol,
     VerificationKernel,
 };
 use std::io::{self, Read, Write};
@@ -311,6 +312,117 @@ fn http_proxy_line_to_event_and_destination(
                 },
                 destination,
             )
+        }
+    }
+}
+
+pub struct SocksRuntime<E, S> {
+    egress: E,
+    kernel: VerificationKernel<S>,
+    sandbox_id: SandboxId,
+}
+
+impl<E, S> SocksRuntime<E, S> {
+    pub fn new(egress: E, kernel: VerificationKernel<S>, sandbox_id: SandboxId) -> Self {
+        Self {
+            egress,
+            kernel,
+            sandbox_id,
+        }
+    }
+
+    pub fn egress(&self) -> &E {
+        &self.egress
+    }
+
+    pub fn kernel(&self) -> &VerificationKernel<S> {
+        &self.kernel
+    }
+}
+
+impl<E: HostEgress, S: AuditSink> SocksRuntime<E, S> {
+    pub fn handle_connect_request(
+        &mut self,
+        bytes: &[u8],
+        resolved_ip: Option<IpAddr>,
+        timestamp_millis: u128,
+    ) -> Result<SocksOutcome, SocksRuntimeError> {
+        let request = parse_socks5_connect(bytes).map_err(SocksRuntimeError::Parse)?;
+        let (event, destination) = socks_connect_to_event_and_destination(
+            self.sandbox_id.clone(),
+            request.destination,
+            resolved_ip,
+        )?;
+        let decision = self.kernel.decide_and_audit(&event, timestamp_millis);
+        if decision.action != DecisionAction::Allow {
+            return Ok(SocksOutcome::Denied { decision, event });
+        }
+        match self.egress.open_tcp(TcpConnectRequest {
+            frontend: FrontendKind::Socks5,
+            destination,
+        }) {
+            Ok(()) => Ok(SocksOutcome::HostConnectOpened { decision, event }),
+            Err(error) => Ok(SocksOutcome::HostConnectFailed {
+                decision,
+                event,
+                error,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SocksRuntimeError {
+    Parse(ProxyParseError),
+    MissingResolvedIp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SocksOutcome {
+    Denied {
+        decision: Decision,
+        event: NormalizedEvent,
+    },
+    HostConnectOpened {
+        decision: Decision,
+        event: NormalizedEvent,
+    },
+    HostConnectFailed {
+        decision: Decision,
+        event: NormalizedEvent,
+        error: EgressError,
+    },
+}
+
+fn socks_connect_to_event_and_destination(
+    sandbox_id: SandboxId,
+    destination: SocksDestination,
+    resolved_ip: Option<IpAddr>,
+) -> Result<(NormalizedEvent, Endpoint), SocksRuntimeError> {
+    match destination {
+        SocksDestination::Ip(endpoint) => Ok((
+            NormalizedEvent::SocksConnect {
+                sandbox_id,
+                hostname: None,
+                destination: Some(endpoint.clone()),
+                port: endpoint.port,
+            },
+            endpoint,
+        )),
+        SocksDestination::Host { host, port } => {
+            let endpoint = Endpoint::new(
+                resolved_ip.ok_or(SocksRuntimeError::MissingResolvedIp)?,
+                port,
+            );
+            Ok((
+                NormalizedEvent::SocksConnect {
+                    sandbox_id,
+                    hostname: Some(HostnameAttribution::explicit_proxy(host)),
+                    destination: Some(endpoint.clone()),
+                    port,
+                },
+                endpoint,
+            ))
         }
     }
 }
@@ -1478,6 +1590,94 @@ mod tests {
                 443
             ))
         );
+    }
+
+    #[test]
+    fn socks_runtime_denies_ip_connect_before_host_egress_by_default() {
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = SocksRuntime::new(
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("socks-deny").unwrap(),
+        );
+        let request = [5, 1, 0, 1, 93, 184, 216, 34, 0x01, 0xbb];
+
+        let outcome = runtime.handle_connect_request(&request, None, 100).unwrap();
+
+        assert!(matches!(outcome, SocksOutcome::Denied { .. }));
+        assert_eq!(runtime.egress().tcp_attempts, 0);
+        assert_eq!(runtime.kernel().audit_sink().events().len(), 1);
+    }
+
+    #[test]
+    fn socks_runtime_opens_host_connect_after_domain_policy_allows() {
+        let mut rule = PolicyRule::allow("allow-socks-origin");
+        rule.protocol = Some(Protocol::Socks);
+        rule.destination_port = Some(foxprox_core::PortMatcher::Exact(443));
+        rule.domain_suffix = Some(Hostname::normalize("example.com").unwrap());
+        rule.minimum_confidence = Some(AttributionConfidence::High);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = SocksRuntime::new(
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("socks-allow").unwrap(),
+        );
+        let mut request = vec![5, 1, 0, 3, 15];
+        request.extend_from_slice(b"api.example.com");
+        request.extend_from_slice(&443u16.to_be_bytes());
+
+        let outcome = runtime
+            .handle_connect_request(
+                &request,
+                Some(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))),
+                100,
+            )
+            .unwrap();
+
+        assert!(matches!(outcome, SocksOutcome::HostConnectOpened { .. }));
+        assert_eq!(runtime.egress().tcp_attempts, 1);
+        assert_eq!(
+            runtime.egress().last_tcp_destination,
+            Some(Endpoint::new(
+                IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+                443
+            ))
+        );
+    }
+
+    #[test]
+    fn socks_runtime_rejects_domain_connect_without_resolved_ip_before_audit() {
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = SocksRuntime::new(
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("socks-missing-resolution").unwrap(),
+        );
+        let mut request = vec![5, 1, 0, 3, 11];
+        request.extend_from_slice(b"example.com");
+        request.extend_from_slice(&443u16.to_be_bytes());
+
+        let error = runtime
+            .handle_connect_request(&request, None, 100)
+            .unwrap_err();
+
+        assert_eq!(error, SocksRuntimeError::MissingResolvedIp);
+        assert_eq!(runtime.egress().tcp_attempts, 0);
+        assert!(runtime.kernel().audit_sink().events().is_empty());
     }
 
     #[test]

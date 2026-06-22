@@ -634,3 +634,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: the runtime accepts a caller-resolved IP for now; it does not yet run a listener, resolve proxy hostnames, forward request bytes, bridge CONNECT streams, or support SOCKS runtime handling.
 - Exact next step: commit the HTTP proxy runtime slice, then add SOCKS5 CONNECT runtime gating through the shared policy and host egress boundary.
+
+## 2026-06-22T01:29:10Z
+- Current objective: continue after HTTP proxy runtime gating toward SOCKS5 explicit proxy alpha behavior.
+- Git status summary: clean worktree after commit `75e27d0`.
+- Intended slice: add minimal SOCKS5 CONNECT runtime gating that parses CONNECT requests into normalized policy events and opens host TCP egress only after audit-backed policy approval.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with deterministic fake egress.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this slice should not add a full SOCKS listener, greeting response IO, stream bridging, UDP ASSOCIATE, or proxy authentication.
+- Exact next step: implement SOCKS CONNECT policy/eager parse handling for IP and hostname destinations behind the existing host egress trait.
+
+## 2026-06-22T01:36:50Z
+- Current objective: add minimal SOCKS5 CONNECT runtime gating through the shared policy/audit and host egress boundary.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on rustfmt wrapping; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 54 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 51 runtime tests, and 7 setup tests passed. New runtime tests prove SOCKS5 CONNECT requests are denied before host egress by default, domain CONNECT requests can open host TCP egress only after domain policy approval, and unresolved domain CONNECT requests fail before audit or egress.
+- Commit hash when committed: pending.
+- Remaining risks: SOCKS runtime does not yet include greeting response IO, listener loops, stream bridging, UDP ASSOCIATE support, or integrated DNS resolution for hostnames.
+- Exact next step: commit SOCKS runtime gating, then add minimal config-to-runtime construction so static DNS records/proxy/runtime policy can be loaded from validated configuration rather than only in-memory tests.
