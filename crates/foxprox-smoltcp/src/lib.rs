@@ -229,6 +229,28 @@ impl SmoltcpIpLoopback {
             .map(|payload| payload.bytes)
     }
 
+    pub fn send_to_sandbox_on_flow(
+        &mut self,
+        flow: &FlowKey,
+        bytes: &[u8],
+    ) -> Result<usize, SmoltcpAdapterError> {
+        for handle in &self.tcp_handles {
+            let socket = self.sockets.get_mut::<tcp::Socket>(*handle);
+            let Some(local) = socket.local_endpoint().and_then(endpoint_to_foxprox) else {
+                continue;
+            };
+            let Some(remote) = socket.remote_endpoint().and_then(endpoint_to_foxprox) else {
+                continue;
+            };
+            if local == flow.destination && remote == flow.source {
+                return socket
+                    .send_slice(bytes)
+                    .map_err(|_| SmoltcpAdapterError::TcpSendRejected);
+            }
+        }
+        Err(SmoltcpAdapterError::NoMatchingTcpSocket)
+    }
+
     pub fn recv_on_listener_port_with_flow(
         &mut self,
         port: u16,
@@ -670,7 +692,7 @@ mod tests {
         adapter
     }
 
-    fn packet_pumped_listener_payload(bytes: &[u8]) -> SmoltcpTcpPayload {
+    fn packet_pumped_adapter_with_payload(bytes: &[u8]) -> (SmoltcpIpLoopback, SmoltcpTcpPayload) {
         let mut adapter = SmoltcpIpLoopback::new(
             SmoltcpIpConfig {
                 address: Ipv4Addr::new(10, 66, 0, 1),
@@ -719,7 +741,12 @@ mod tests {
             3,
         )
         .unwrap();
-        adapter.recv_on_listener_port_with_flow(8080, 64).unwrap()
+        let payload = adapter.recv_on_listener_port_with_flow(8080, 64).unwrap();
+        (adapter, payload)
+    }
+
+    fn packet_pumped_listener_payload(bytes: &[u8]) -> SmoltcpTcpPayload {
+        packet_pumped_adapter_with_payload(bytes).1
     }
 
     #[test]
@@ -947,6 +974,32 @@ mod tests {
             .unwrap();
 
         assert_eq!(server.join().unwrap(), b"tun-host".to_vec());
+    }
+
+    #[test]
+    fn host_bytes_on_packet_pumped_flow_emit_sandbox_ip_packet() {
+        let (mut adapter, payload) = packet_pumped_adapter_with_payload(b"sandbox-request");
+
+        let sent = adapter
+            .send_to_sandbox_on_flow(&payload.flow, b"host-response")
+            .unwrap();
+        adapter.poll_once(4);
+        let outbound = adapter
+            .next_outbound_ip_packet()
+            .expect("host bytes should emit an outbound TCP packet");
+
+        assert_eq!(sent, b"host-response".len());
+        match parse_ip_packet(&outbound).unwrap() {
+            ParsedIpPacket::Tcpv4Segment(segment) => {
+                assert_eq!(segment.source, Ipv4Addr::new(10, 66, 0, 1));
+                assert_eq!(segment.destination, Ipv4Addr::new(10, 66, 0, 2));
+                assert_eq!(segment.source_port, 8080);
+                assert_eq!(segment.destination_port, 50001);
+                assert!(segment.ack);
+                assert_eq!(segment.payload, b"host-response");
+            }
+            other => panic!("expected TCP payload packet, got {other:?}"),
+        }
     }
 
     #[test]

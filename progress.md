@@ -1514,3 +1514,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: reverse host-to-sandbox bytes are still not packetized through smoltcp; no continuous live TUN fd loop exists.
 - Exact next step: commit packet-pumped host bridge handoff, then add an adapter helper that writes host bytes into the accepted smoltcp socket and emits outbound IP packets for sandbox delivery.
+
+## 2026-06-22T22:30:35Z
+- Current objective: continue after packet-pumped host bridge handoff toward reverse host-to-sandbox packet emission.
+- Git status summary: clean worktree after commit `ff23c06`.
+- Intended slice: add a smoltcp adapter helper that writes host-side bytes into an accepted TCP flow and verify smoltcp emits a valid outbound IP packet back toward the sandbox endpoint.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: this will prove packet emission from a test-established flow, not a continuous host-read/TUN-write loop.
+- Exact next step: add reverse-flow send helper and outbound packet assertion.
+
+## 2026-06-22T22:31:05Z
+- Current objective: emit sandbox-bound IP packets for host bytes on packet-pumped smoltcp flows.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on helper signature formatting; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 24 smoltcp adapter tests passed. New helper sends host-side bytes into the accepted smoltcp flow and a regression proves polling emits a checksum-validated TCP payload packet from broker/listener endpoint back to the sandbox endpoint.
+- Commit hash when committed: pending.
+- Remaining risks: host bytes are injected by a test helper rather than a real `TcpFlowRuntime` host-read pump; no continuous TUN writer loop or TCP close packet lifecycle exists.
+- Exact next step: commit host-to-sandbox smoltcp packet emission, then add a small integrated pump that combines host-read bytes from `TcpFlowRuntime` with `send_to_sandbox_on_flow` and writes emitted packets to a TUN-like writer.
