@@ -268,3 +268,8 @@
 
 - UDP response routing needs runtime to retain the exact `HostUdpFlow` handle opened by shared egress after the initial allowed payload send; dropping it prevents later sandbox reply synthesis.
 - Preserve packet-policy boundaries by returning the egress handle from net orchestration while policy/audit continue seeing only normalized `UdpFlowAttempt` data.
+
+## 2026-06-22 — UDP response write-back
+
+- UDP reply packet construction belongs in `foxprox-packet`; runtime should only map normalized UDP flow keys plus host reply bytes into opaque outbound packets.
+- Minimal IPv4 UDP response synthesis can use zero UDP checksum for the forwarding proof while keeping future checksum hardening isolated to packet code.

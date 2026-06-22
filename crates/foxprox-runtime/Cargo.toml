@@ -15,7 +15,5 @@ foxprox-core = { path = "../foxprox-core" }
 foxprox-device = { path = "../foxprox-device" }
 foxprox-egress = { path = "../foxprox-egress" }
 foxprox-net = { path = "../foxprox-net" }
-foxprox-policy = { path = "../foxprox-policy" }
-
-[dev-dependencies]
 foxprox-packet = { path = "../foxprox-packet" }
+foxprox-policy = { path = "../foxprox-policy" }

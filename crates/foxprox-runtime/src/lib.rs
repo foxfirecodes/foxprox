@@ -124,6 +124,57 @@ impl<U> UdpBridgeTable<U> {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UdpBridgeReadOutcome {
+    pub udp_flows_read: usize,
+    pub udp_bytes_read_from_egress: usize,
+    pub outbound_packets_written: usize,
+}
+
+/// Read host UDP replies from retained flow handles, synthesize opaque IPv4 UDP
+/// packets, and write them to the device.
+pub fn flush_udp_bridge_reads_to_device<D, U>(
+    device: &mut D,
+    bridges: &mut UdpBridgeTable<U>,
+    max_bytes_per_flow: usize,
+) -> Result<UdpBridgeReadOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    U: HostUdpFlow,
+{
+    let mut replies = Vec::new();
+    for (key, flow) in &mut bridges.flows {
+        let bytes = flow
+            .recv_to_sandbox(max_bytes_per_flow)
+            .map_err(BrokerError::Egress)
+            .map_err(RuntimeError::Broker)?;
+        if !bytes.is_empty() {
+            replies.push((key.clone(), bytes));
+        }
+    }
+
+    let udp_flows_read = replies.len();
+    let mut udp_bytes_read_from_egress = 0;
+    let mut outbound_packets_written = 0;
+    for (key, bytes) in replies {
+        udp_bytes_read_from_egress += bytes.len();
+        let packet =
+            foxprox_packet::synthesize_udp_ipv4_response(key.source, key.destination, &bytes)
+                .map_err(BrokerError::Packet)
+                .map_err(RuntimeError::Broker)?;
+        let outbound =
+            OutboundIpPacket::new(packet.bytes().to_vec()).map_err(RuntimeError::Stack)?;
+        write_outbound_packets(device, &[outbound])?;
+        outbound_packets_written += 1;
+    }
+
+    Ok(UdpBridgeReadOutcome {
+        udp_flows_read,
+        udp_bytes_read_from_egress,
+        outbound_packets_written,
+    })
+}
+
 /// Context for processing one IPv4 packet while retaining UDP egress handles.
 pub struct DevicePacketStepWithUdp<'a, E, A>
 where
@@ -728,6 +779,33 @@ mod tests {
     }
 
     #[test]
+    fn udp_bridge_reads_host_reply_and_writes_sandbox_packet() {
+        let cursor = Cursor::new(Vec::new());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let key = UdpFlowKey {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:53000".parse().unwrap(),
+            destination: "203.0.113.10:12345".parse().unwrap(),
+        };
+        let mut bridges = UdpBridgeTable::default();
+        bridges.insert(key, ReadableUdpFlow::new(vec![b"pong".to_vec()].into()));
+
+        let outcome = flush_udp_bridge_reads_to_device(&mut device, &mut bridges, 1024).unwrap();
+
+        assert_eq!(outcome.udp_flows_read, 1);
+        assert_eq!(outcome.udp_bytes_read_from_egress, 4);
+        assert_eq!(outcome.outbound_packets_written, 1);
+        let bytes = device.into_inner().into_inner();
+        assert_eq!(bytes[9], 17);
+        assert_eq!(&bytes[12..16], &[203, 0, 113, 10]);
+        assert_eq!(&bytes[16..20], &[10, 0, 0, 2]);
+        assert_eq!(u16::from_be_bytes([bytes[20], bytes[21]]), 12345);
+        assert_eq!(u16::from_be_bytes([bytes[22], bytes[23]]), 53000);
+        assert_eq!(&bytes[28..], b"pong");
+    }
+
+    #[test]
     fn one_step_runtime_records_stack_flow_close_audit() {
         let inbound = vec![0x45, 0, 0, 20];
         let cursor = Cursor::new(inbound);
@@ -1167,6 +1245,30 @@ mod tests {
 
         fn recv_to_sandbox(&mut self, _max_bytes: usize) -> Result<Vec<u8>, EgressError> {
             Ok(Vec::new())
+        }
+    }
+
+    struct ReadableUdpFlow {
+        reads: std::collections::VecDeque<Vec<u8>>,
+    }
+
+    impl ReadableUdpFlow {
+        fn new(reads: std::collections::VecDeque<Vec<u8>>) -> Self {
+            Self { reads }
+        }
+    }
+
+    impl HostUdpFlow for ReadableUdpFlow {
+        fn send_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
+            Ok(bytes.len())
+        }
+
+        fn recv_to_sandbox(&mut self, max_bytes: usize) -> Result<Vec<u8>, EgressError> {
+            let Some(mut bytes) = self.reads.pop_front() else {
+                return Ok(Vec::new());
+            };
+            bytes.truncate(max_bytes);
+            Ok(bytes)
         }
     }
 

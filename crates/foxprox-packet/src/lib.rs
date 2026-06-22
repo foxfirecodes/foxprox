@@ -225,6 +225,46 @@ fn inspect_udp_packet(
     })
 }
 
+/// Synthesize an IPv4 UDP packet carrying host response bytes back to the
+/// original sandbox source. The caller supplies the normalized original UDP flow
+/// endpoints; raw IPv4/UDP formatting stays in the packet boundary.
+pub fn synthesize_udp_ipv4_response(
+    original_source: SocketAddr,
+    original_destination: SocketAddr,
+    payload: &[u8],
+) -> Result<SyntheticIpPacket, PacketError> {
+    let (IpAddr::V4(source_ip), IpAddr::V4(destination_ip)) =
+        (original_source.ip(), original_destination.ip())
+    else {
+        return Err(PacketError::malformed(
+            "UDP IPv4 response requires IPv4 endpoints",
+        ));
+    };
+    let total_len = 28 + payload.len();
+    if total_len > u16::MAX as usize {
+        return Err(PacketError::malformed(
+            "UDP IPv4 response exceeds IPv4 length",
+        ));
+    }
+    let udp_len = 8 + payload.len();
+    let mut packet = vec![0_u8; total_len];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 17;
+    packet[12..16].copy_from_slice(&destination_ip.octets());
+    packet[16..20].copy_from_slice(&source_ip.octets());
+    packet[20..22].copy_from_slice(&original_destination.port().to_be_bytes());
+    packet[22..24].copy_from_slice(&original_source.port().to_be_bytes());
+    packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    // UDP checksum is optional for IPv4. Keep it zero for this minimal response
+    // proof; checksum enforcement can be added without changing policy/audit.
+    packet[28..].copy_from_slice(payload);
+    let ip_checksum = internet_checksum(&packet[..20]);
+    packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+    Ok(SyntheticIpPacket { bytes: packet })
+}
+
 fn synthesize_echo_reply(bytes: &[u8], header: Ipv4Header) -> Vec<u8> {
     let mut reply = bytes[..header.total_len].to_vec();
 
@@ -452,6 +492,24 @@ mod tests {
             panic!("expected unsupported");
         };
         assert_eq!(event.reason, UnsupportedReason::UnsupportedFragmentation);
+    }
+
+    #[test]
+    fn udp_ipv4_response_synthesis_swaps_original_flow_endpoints() {
+        let packet = synthesize_udp_ipv4_response(
+            "10.0.0.2:53000".parse().unwrap(),
+            "203.0.113.10:12345".parse().unwrap(),
+            b"pong",
+        )
+        .unwrap();
+        let bytes = packet.bytes();
+
+        assert_eq!(bytes[9], 17);
+        assert_eq!(&bytes[12..16], &[203, 0, 113, 10]);
+        assert_eq!(&bytes[16..20], &[10, 0, 0, 2]);
+        assert_eq!(u16::from_be_bytes([bytes[20], bytes[21]]), 12345);
+        assert_eq!(u16::from_be_bytes([bytes[22], bytes[23]]), 53000);
+        assert_eq!(&bytes[28..], b"pong");
     }
 
     #[test]

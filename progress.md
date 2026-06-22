@@ -1153,3 +1153,26 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 8afeb78.
 - Remaining boundary risks: UDP response packet synthesis, idle expiry, per-flow limits, ICMP errors, and rate limiting remain.
+
+## 2026-06-22 — Boundary objective: UDP response write-back proof
+
+- Boundary under work: route host UDP reply bytes from retained egress handles back to the sandbox as opaque IPv4 UDP packets.
+- Allowed dependency direction: runtime reads only `HostUdpFlow` handles and asks `foxprox-packet` to synthesize packet bytes; packet crate owns IPv4/UDP wire formatting; policy/audit remain normalized-event only.
+- Dependency-risk assessment: UDP egress handles are now retained, but without response synthesis UDP forwarding is one-way. Adding a narrow packet synthesis helper keeps raw IPv4/UDP details out of runtime and preserves future TAP compatibility.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for packet/runtime/audit.
+- Observed results: added `foxprox_packet::synthesize_udp_ipv4_response` to build opaque IPv4 UDP reply packets from normalized original flow endpoints and host reply bytes, and added runtime `flush_udp_bridge_reads_to_device` to read retained `HostUdpFlow` handles, synthesize replies, and write them to the device. Added packet and runtime tests proving endpoint/port swapping and host `pong` response write-back. All verification passed.
+- Changed files:
+  - `crates/foxprox-packet/src/lib.rs`
+  - `crates/foxprox-runtime/Cargo.toml`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 105 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-packet` — packet remains core-only.
+  - `cargo tree -p foxprox-runtime` — runtime depends on packet for packet synthesis, not raw formatting.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: UDP idle expiry, IPv6 UDP responses, UDP checksums, ICMP errors, and rate limiting remain.
