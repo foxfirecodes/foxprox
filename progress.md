@@ -371,3 +371,27 @@
 - Interpretation: the project now has a reusable deterministic smoltcp gate proving that the selected userspace TCP/IP stack can operate on IP-medium/TUN-shaped packets. This still needs to be wired to the handed-off TUN fd and host TCP byte bridging for the full Milestone 2 forwarding proof.
 - Next verification gap: build a TUN-fd smoltcp smoke that writes the emitted SYN-ACK back to the sandbox, then extend it into local TCP byte bridging.
 - Commit hash after commit: pending.
+
+## 2026-06-22T00:30:00Z — smoltcp gate commit recorded
+
+- Command executed: `git add Cargo.lock README.md crates/foxprox-core/Cargo.toml crates/foxprox-core/src/lib.rs crates/foxprox-core/src/packet.rs crates/foxprox-core/src/scenario.rs crates/foxprox-core/src/smoltcp_gate.rs learnings.md progress.md && git commit -m "Add deterministic smoltcp TCP gate"`
+- Environment assumptions: deterministic smoltcp gate and `foxprox-lab run stack` output above were verified before commit.
+- Expected result: commit captures smoltcp dependency, in-memory IP-medium device gate, SYN/SYN-ACK fixture tests, and harness documentation.
+- Observed result: commit `cf79595` created with 9 files changed.
+- Relevant output excerpt: `[harness-lab cf79595] Add deterministic smoltcp TCP gate`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: deterministic smoltcp stack-gate checkpoint is preserved.
+- Next verification gap: TUN-fd smoltcp smoke that writes smoltcp's emitted SYN-ACK back to the sandbox.
+- Commit hash after commit: cf79595.
+
+## 2026-06-22T00:45:00Z — smoltcp SYN-ACK write-back smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run tcp-synack-smoke`
+- Environment assumptions: bwrap, `/dev/net/tun`, Python, and Unix fd handoff are available. The smoke handles only the TCP handshake proof: a sandbox connect succeeds after smoltcp emits a SYN-ACK, but no application bytes are bridged yet.
+- Expected result: tests remain green; sandbox TCP SYN is read from the handed-off TUN fd, fed into the smoltcp IP-medium gate, emitted SYN-ACK is written back to TUN, and sandbox `connect()` exits successfully.
+- Observed result: pass. `foxprox-core` ran 40 tests, `foxprox-cli` ran 2 tests, `foxproxsetup` ran 7 tests, and `tcp-synack-smoke` emitted `decision":"allow"`, `syn_ack_written":"true"`, `emitted_packets":"1"`, and `status":"exit status: 0"`.
+- Relevant output excerpt: `"reason":"smoltcp SYN-ACK written to TUN completed the sandbox TCP connect"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: the smoltcp gate is now proven against a real sandbox SYN and real TUN write-back, closing part of the gap between deterministic stack proof and environment integration. It is still not full TCP forwarding because smoltcp state is one-shot and there is no host stream byte bridge.
+- Next verification gap: maintain smoltcp interface/socket state across ACK and data packets and bridge received sandbox bytes to a local host TCP fixture.
+- Commit hash after commit: pending.

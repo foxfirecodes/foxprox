@@ -13,6 +13,7 @@ use foxprox_core::egress::{EgressBackend, EgressOutcome, EgressRequest};
 use foxprox_core::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule, RuleAction};
 use foxprox_core::runtime::{TransparentTcpRuntime, TransparentUdpRuntime};
 use foxprox_core::scenario::{run_scenario, ScenarioName};
+use foxprox_core::smoltcp_gate::feed_tcp_syn_to_smoltcp_listener;
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -49,6 +50,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("dns-smoke");
             println!("dns-attribution-smoke");
             println!("tcp-syn-smoke");
+            println!("tcp-synack-smoke");
             Ok(())
         }
         [cmd, scenario] if cmd == "run" => run_named_scenario(scenario),
@@ -80,6 +82,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         dns_attribution_smoke_records()
     } else if scenario == "tcp-syn-smoke" {
         tcp_syn_smoke_records()
+    } else if scenario == "tcp-synack-smoke" {
+        tcp_synack_smoke_records()
     } else {
         run_scenario(ScenarioName::parse(scenario)?)
     };
@@ -91,7 +95,7 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke>",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke>",
         ScenarioName::list().join("|")
     );
 }
@@ -1504,6 +1508,211 @@ fn run_tcp_syn_smoke() -> Result<AuditRecord, String> {
             record = record.with_metadata("rule_id", rule_id);
         }
     }
+    if !stdout.is_empty() {
+        record = record.with_metadata("stdout", stdout);
+    }
+    if !stderr.is_empty() {
+        record = record.with_metadata("stderr", stderr);
+    }
+    Ok(record)
+}
+
+#[cfg(unix)]
+fn tcp_synack_smoke_records() -> Vec<AuditRecord> {
+    match run_tcp_synack_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::TcpConnectAttempt,
+            "tcp-synack-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::Harness)
+        .with_protocol(Protocol::Tcp)],
+    }
+}
+
+#[cfg(not(unix))]
+fn tcp_synack_smoke_records() -> Vec<AuditRecord> {
+    vec![AuditRecord::new(
+        EventKind::TcpConnectAttempt,
+        "tcp-synack-smoke",
+        Decision::FailClosed,
+        "TCP SYN-ACK smoke is only supported on Unix",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Tcp)]
+}
+
+#[cfg(unix)]
+fn run_tcp_synack_smoke() -> Result<AuditRecord, String> {
+    let helper = setup_helper_path()?;
+    let target_dir = helper
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| {
+            format!(
+                "could not derive target directory from {}",
+                helper.display()
+            )
+        })?
+        .to_path_buf();
+    let socket_dir = target_dir.join(format!("fxsak-{}", std::process::id()));
+    let socket_path = socket_dir.join("s");
+    let _ = std::fs::remove_file(&socket_path);
+    std::fs::create_dir_all(&socket_dir)
+        .map_err(|err| format!("failed to create TCP SYN-ACK smoke socket dir: {err}"))?;
+    let handoff_listener = UnixListener::bind(&socket_path)
+        .map_err(|err| format!("failed to bind TCP SYN-ACK smoke handoff socket: {err}"))?;
+    handoff_listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make TCP SYN-ACK handoff listener nonblocking: {err}"))?;
+
+    let mut child = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--ro-bind",
+        ])
+        .arg(&target_dir)
+        .arg(&target_dir)
+        .args(["--bind"])
+        .arg(&socket_dir)
+        .arg(&socket_dir)
+        .args(["--proc", "/proc", "--"])
+        .env("FOXPROX_SETUP_SOCKET", &socket_path)
+        .arg(&helper)
+        .args([
+            "--",
+            "/usr/bin/python3",
+            "-c",
+            "import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.settimeout(3);\ntry:\n s.connect(('203.0.113.21',8081)); s.close(); sys.exit(0)\nexcept Exception as e:\n print(repr(e)); sys.exit(3)",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn bwrap TCP SYN-ACK smoke: {err}"))?;
+
+    let fd = accept_handoff_fd(&handoff_listener, &mut child, Duration::from_secs(10))?;
+    fd_handoff::set_nonblocking(fd)?;
+    let mut buf = [0_u8; 2048];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut packets_read = 0_u64;
+    let mut emitted_packets = 0_usize;
+    let mut syn_ack_written = false;
+    while Instant::now() < deadline {
+        match fd_handoff::read_fd(fd, &mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                packets_read += 1;
+                let packet = &buf[..n];
+                let parsed = match foxprox_core::packet::parse_ipv4(packet) {
+                    Ok(parsed) => parsed,
+                    Err(_) => continue,
+                };
+                if parsed.protocol_number != 6 {
+                    continue;
+                }
+                let tcp = match foxprox_core::packet::parse_tcp(parsed.payload) {
+                    Ok(tcp) => tcp,
+                    Err(_) => continue,
+                };
+                if tcp.destination_port != 8081 || !tcp.syn || tcp.ack {
+                    continue;
+                }
+                let result = feed_tcp_syn_to_smoltcp_listener(
+                    packet.to_vec(),
+                    parsed.destination,
+                    tcp.destination_port,
+                )?;
+                emitted_packets = result.emitted_packets.len();
+                for emitted in &result.emitted_packets {
+                    if let Ok(reply_ip) = foxprox_core::packet::parse_ipv4(emitted) {
+                        if let Ok(reply_tcp) = foxprox_core::packet::parse_tcp(reply_ip.payload) {
+                            if reply_ip.source == parsed.destination
+                                && reply_ip.destination == parsed.source
+                                && reply_tcp.source_port == tcp.destination_port
+                                && reply_tcp.destination_port == tcp.source_port
+                                && reply_tcp.syn
+                                && reply_tcp.ack
+                            {
+                                syn_ack_written = true;
+                            }
+                        }
+                    }
+                    fd_handoff::write_all_fd(fd, emitted)?;
+                }
+                break;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to read TUN fd during TCP SYN-ACK smoke: {err}"
+                ))
+            }
+        }
+        if child
+            .try_wait()
+            .map_err(|err| format!("failed to poll bwrap TCP SYN-ACK smoke: {err}"))?
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !syn_ack_written {
+        return Err(
+            "timed out before writing a smoltcp SYN-ACK to the handed-off TUN fd".to_string(),
+        );
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for bwrap TCP SYN-ACK smoke: {err}"))?;
+    fd_handoff::close_fd(fd);
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir(&socket_dir);
+    let success = output.status.success() && syn_ack_written;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut record = AuditRecord::new(
+        EventKind::TcpConnectAttempt,
+        "tcp-synack-smoke",
+        if success {
+            Decision::Allow
+        } else {
+            Decision::FailClosed
+        },
+        if success {
+            "smoltcp SYN-ACK written to TUN completed the sandbox TCP connect"
+        } else {
+            "smoltcp SYN-ACK was written but the sandbox TCP connect failed"
+        },
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Tcp)
+    .with_metadata("status", output.status.to_string())
+    .with_metadata("packets_read", packets_read.to_string())
+    .with_metadata("emitted_packets", emitted_packets.to_string())
+    .with_metadata("syn_ack_written", syn_ack_written.to_string());
     if !stdout.is_empty() {
         record = record.with_metadata("stdout", stdout);
     }
