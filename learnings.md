@@ -107,3 +107,8 @@
 
 - SOCKS5 method selection and reply-code bytes are frontend wire concerns; keeping them out of `foxprox-core` preserves the normalized policy contract around only the eventual `SocksConnect` intent.
 - The alpha SOCKS helper can advertise no-auth only and synthesize standard CONNECT replies without requiring egress or policy crates to know SOCKS reply codes.
+
+## 2026-06-21 — TLS mismatch audit schema
+
+- SNI/DNS mismatch needs a stable audit field instead of relying on denial reason strings; otherwise reviewers cannot reliably distinguish mismatch, unavailable attribution, and unchecked TLS cases.
+- Audit can safely expose the normalized `HostnameMismatch` enum because TLS parser internals and raw ClientHello bytes still terminate in the inspect boundary.

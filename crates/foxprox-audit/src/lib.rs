@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use foxprox_core::{
     ByteCounts, DecisionReason, FrontendKind, Hostname, HostnameAttributionSource,
-    HostnameConfidence, HttpMethod, HttpScheme, NormalizedEvent, PolicyDecision, Protocol,
-    SandboxId,
+    HostnameConfidence, HostnameMismatch, HttpMethod, HttpScheme, NormalizedEvent, PolicyDecision,
+    Protocol, SandboxId,
 };
 
 /// Stable audit event kind vocabulary.
@@ -69,6 +69,7 @@ pub struct AuditRecord {
     pub http_method: Option<HttpMethod>,
     pub http_scheme: Option<HttpScheme>,
     pub http_path_query: Option<String>,
+    pub hostname_mismatch: Option<HostnameMismatch>,
     pub decision: AuditDecision,
     pub rule_id: Option<String>,
     pub reason: Option<DecisionReason>,
@@ -99,6 +100,7 @@ impl AuditRecord {
             http_method: http_method(event),
             http_scheme: http_scheme(event),
             http_path_query: http_path_query(event),
+            hostname_mismatch: hostname_mismatch(event),
             decision: AuditDecision::from(decision),
             rule_id: rule_id(decision),
             reason: decision.reason().cloned(),
@@ -125,6 +127,7 @@ impl AuditRecord {
             http_method: None,
             http_scheme: None,
             http_path_query: None,
+            hostname_mismatch: None,
             decision: AuditDecision::Allow,
             rule_id: None,
             reason: Some("flow lifecycle closed".into()),
@@ -151,6 +154,7 @@ impl AuditRecord {
             "http_method",
             "http_scheme",
             "http_path_query",
+            "hostname_mismatch",
             "decision",
             "rule_id",
             "reason",
@@ -235,6 +239,13 @@ fn http_scheme(event: &NormalizedEvent) -> Option<HttpScheme> {
 fn http_path_query(event: &NormalizedEvent) -> Option<String> {
     match event {
         NormalizedEvent::HttpRequest(event) => Some(event.path_query.clone()),
+        _ => None,
+    }
+}
+
+fn hostname_mismatch(event: &NormalizedEvent) -> Option<HostnameMismatch> {
+    match event {
+        NormalizedEvent::TlsClientHello(event) => Some(event.mismatch),
         _ => None,
     }
 }
@@ -328,7 +339,8 @@ mod tests {
     use super::*;
     use foxprox_core::{
         DenialAction, DenyDecision, DestinationHost, FrontendKind, Hostname, HostnameAttribution,
-        HostnameAttributionSource, HostnameConfidence, HttpRequest, SandboxId, TcpConnectAttempt,
+        HostnameAttributionSource, HostnameConfidence, HostnameMismatch, HttpRequest, SandboxId,
+        TcpConnectAttempt, TlsClientHello,
     };
 
     #[test]
@@ -350,6 +362,7 @@ mod tests {
                 "http_method",
                 "http_scheme",
                 "http_path_query",
+                "hostname_mismatch",
                 "decision",
                 "rule_id",
                 "reason",
@@ -410,6 +423,33 @@ mod tests {
     }
 
     #[test]
+    fn tls_audit_record_includes_mismatch_state() {
+        let event = NormalizedEvent::TlsClientHello(TlsClientHello {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            destination: "203.0.113.10:443".parse().unwrap(),
+            sni: Some(Hostname::new("evil.example").unwrap()),
+            dns_hostname: Some(HostnameAttribution::new(
+                Hostname::new("expected.example").unwrap(),
+                HostnameAttributionSource::BrokerDns,
+                HostnameConfidence::Medium,
+            )),
+            mismatch: HostnameMismatch::Mismatch,
+        });
+        let decision = PolicyDecision::Deny(DenyDecision {
+            action: DenialAction::Reset,
+            rule_id: None,
+            reason: "SNI mismatch".into(),
+        });
+
+        let record = AuditRecord::from_event(9, 1234, &event, &decision);
+        assert_eq!(record.kind, AuditKind::TlsClientHello);
+        assert_eq!(record.hostname.unwrap().as_str(), "evil.example");
+        assert_eq!(record.hostname_mismatch, Some(HostnameMismatch::Mismatch));
+        assert_eq!(record.hostname_confidence, Some(HostnameConfidence::Medium));
+    }
+
+    #[test]
     fn flow_lifecycle_record_uses_normalized_fields() {
         let record = AuditRecord::flow_closed(FlowClosedAudit {
             sequence: 9,
@@ -448,6 +488,7 @@ mod tests {
             http_method: None,
             http_scheme: None,
             http_path_query: None,
+            hostname_mismatch: None,
             decision: AuditDecision::Allow,
             rule_id: None,
             reason: None,

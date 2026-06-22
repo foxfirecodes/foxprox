@@ -494,3 +494,21 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: 7e22cf3.
 - Remaining boundary risks: production SOCKS listener state machine, handshake/read timeouts, CONNECT stream bridging, and policy-to-reply-code mapping remain.
+
+## 2026-06-21 — Boundary objective: TLS mismatch audit schema
+
+- Boundary under work: structured audit field for transparent TLS SNI/DNS mismatch state.
+- Allowed dependency direction: audit consumes only normalized `TlsClientHello.mismatch` state from `foxprox-core`; TLS parser details remain in `foxprox-inspect`.
+- Dependency-risk assessment: policy can deny SNI/DNS mismatch, but without a stable audit field reviewers must infer the cause from reason strings. The audit schema should expose the normalized mismatch enum without raw TLS inputs.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: all verification passed.
+- Changed files:
+  - `crates/foxprox-audit/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 65 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: audit serialization compatibility, hidden-SNI/ECH audit detail, and production TLS stream reassembly remain.
