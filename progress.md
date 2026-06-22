@@ -1940,3 +1940,26 @@
   - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
   - Dependency checks passed: `cargo tree -p foxprox-core`, `cargo tree -p foxprox-setup`.
 - Removed transient review artifact before commit.
+
+## 2026-06-22T23:00:18Z — start final alpha reassessment after setup proxy env
+
+- Current objective: reassess alpha completion after setup proxy env injection commit `dacd69b`.
+- Context: previously identified P0 minimum audit events and P1 setup proxy env gaps are now addressed and verified; remaining planner notes were live combined smoke evidence and documented QUIC metadata limits.
+- Next exact action: request a read-only final alpha completion review against docs and current code to identify any remaining required implementation blockers, then either fix them or record final alpha verification status.
+
+## 2026-06-22T23:02:54Z — final alpha completion review passed
+
+- Review result: `reviews/final-alpha-completion-review.md` found no alpha implementation blockers after `dacd69b`.
+- Evidence cited by reviewer:
+  - TUN/bwrap setup, DNS config, and setup proxy env support are present in `foxproxsetup`.
+  - Combined transparent runtime covers TCP/UDP/DNS with shared DNS cache/audit/policy, multi-port TCP, and HTTP/SOCKS proxy bridges.
+  - Explicit HTTP/CONNECT/SOCKS proxy support exists and uses shared policy-checked egress.
+  - Audit lifecycle/minimum event coverage aligns with alpha docs.
+- Reviewer verification passed:
+  - `cargo fmt --all -- --check`
+  - `cargo check --workspace`
+  - `cargo test --workspace`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`
+- Residual non-blocking follow-ups recorded: run a privileged/live bwrap smoke for combined `proof-transparent`; document writable `/etc/resolv.conf` or `--resolv-conf` expectations; document current QUIC limit as UDP/443 candidate classification plus DNS attribution rather than deeper QUIC TLS parsing; clean stale one-port proof comments.
+- Current conclusion: no remaining alpha implementation blockers are known.
