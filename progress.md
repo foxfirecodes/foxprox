@@ -926,3 +926,30 @@ The workspace now includes a `foxprox-stack` adapter crate that uses `smoltcp` b
 ### Remaining blind spots
 - This proves the smoltcp/IP-packet boundary and outbound packet emission, not full TCP host-socket bridging yet.
 - The adapter still uses an in-memory device; wiring `foxprox-device` TUN IO and host egress loops into the stack remains future runtime work.
+
+## 2026-06-21 — smoltcp-to-packet-device bridge cycle
+
+### Behavior under work
+Wire the smoltcp adapter proof to the core `PacketDevice` contract so a TUN-like packet source can feed smoltcp and smoltcp-emitted IP packets can be audited and written back through the same device abstraction.
+
+### Commands run
+- `cargo fmt` — applied formatting for the bridge additions.
+- `cargo test -p foxprox-stack --all-targets --all-features` — passed, 3 stack tests.
+- `cargo test --all-targets --all-features` — passed, 6 CLI tests, 101 core tests, 3 device tests, 3 egress tests, and 3 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_stack::tests::smoltcp_tun_bridge_audits_and_writes_stack_output ... ok`
+- `foxprox_stack::tests::smoltcp_stack_consumes_ip_packet_and_emits_icmp_reply ... ok`
+
+### Interpretation
+The stack proof now includes a bridge from the core `PacketDevice` trait into smoltcp and back out to the packet device. Both inbound and outbound stack packets are structured as `packet_observed` audit records with `stack=smoltcp`; outbound writes are gated by a `write_phase=attempt` audit before device write.
+
+### Changed files
+- `crates/foxprox-stack/src/lib.rs`
+- `progress.md`
+
+### Remaining blind spots
+- TCP accept/connect byte bridging through smoltcp sockets is still outstanding.
+- The bridge still uses in-memory packet devices in tests; real `/dev/net/tun` fd opening and bwrap handoff are not complete.

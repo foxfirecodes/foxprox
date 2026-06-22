@@ -7,6 +7,10 @@
 
 #![forbid(unsafe_code)]
 
+use foxprox_core::{
+    AuditKind, AuditRecord, BrokerCore, Decision, DenialReason, DeviceIoError, Frontend,
+    PacketDevice, ParsedIpPacket, PolicyDecision, PolicyRequest,
+};
 use smoltcp::iface::{Config, Interface, PollResult, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
@@ -178,6 +182,230 @@ impl SmoltcpIpStack {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SmoltcpTunBridgeResult {
+    pub inbound_observed: bool,
+    pub stack: StackPollEvidence,
+    pub packets_written: usize,
+    pub decision: Decision,
+    pub reason: Option<DenialReason>,
+}
+
+pub struct SmoltcpTunBridge<D> {
+    sandbox_id: String,
+    broker: BrokerCore,
+    stack: SmoltcpIpStack,
+    device: D,
+}
+
+impl<D: PacketDevice> SmoltcpTunBridge<D> {
+    pub fn new(
+        sandbox_id: impl Into<String>,
+        broker: BrokerCore,
+        stack: SmoltcpIpStack,
+        device: D,
+    ) -> Self {
+        Self {
+            sandbox_id: sandbox_id.into(),
+            broker,
+            stack,
+            device,
+        }
+    }
+
+    pub fn process_next_packet(
+        &mut self,
+        now_ms: i64,
+    ) -> Result<Option<SmoltcpTunBridgeResult>, DeviceIoError> {
+        let Some(packet) = self.device.read_packet()? else {
+            return Ok(None);
+        };
+        let parsed = match ParsedIpPacket::parse(&packet) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                let request = PolicyRequest::unsupported(
+                    self.sandbox_id.clone(),
+                    Frontend::Tun,
+                    error.denial_reason(),
+                );
+                let audit = error
+                    .audit_record(self.sandbox_id.clone())
+                    .with_timestamp_ms(now_ms as u128);
+                let decision = match self.broker.append_audit_for(&request, audit) {
+                    Ok(_) => PolicyDecision {
+                        decision: Decision::FailClosed,
+                        reason: Some(error.denial_reason()),
+                        rule_id: None,
+                        audit_kind: AuditKind::PacketMalformedDenied,
+                    },
+                    Err(decision) => decision,
+                };
+                return Ok(Some(bridge_result(
+                    false,
+                    StackPollEvidence::none(),
+                    0,
+                    decision,
+                )));
+            }
+        };
+        let request = request_for_packet(&self.sandbox_id, &parsed);
+        let inbound_audit = packet_audit(
+            &self.sandbox_id,
+            &parsed,
+            now_ms,
+            packet.len(),
+            "from_sandbox",
+        )
+        .with_detail("stack", "smoltcp");
+        if let Err(decision) = self.broker.append_audit_for(&request, inbound_audit) {
+            return Ok(Some(bridge_result(
+                false,
+                StackPollEvidence::none(),
+                0,
+                decision,
+            )));
+        }
+
+        self.stack.inject_packet(packet);
+        let stack_evidence = self.stack.poll(now_ms);
+        let outbound = self.stack.outbound_packets();
+        let mut written = 0usize;
+        for packet in outbound
+            .into_iter()
+            .rev()
+            .take(stack_evidence.packets_emitted)
+            .rev()
+        {
+            let parsed = match ParsedIpPacket::parse(&packet) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    let request = PolicyRequest::unsupported(
+                        self.sandbox_id.clone(),
+                        Frontend::Tun,
+                        error.denial_reason(),
+                    );
+                    let audit = error
+                        .audit_record(self.sandbox_id.clone())
+                        .with_timestamp_ms(now_ms as u128);
+                    let decision = match self.broker.append_audit_for(&request, audit) {
+                        Ok(_) => PolicyDecision {
+                            decision: Decision::FailClosed,
+                            reason: Some(error.denial_reason()),
+                            rule_id: None,
+                            audit_kind: AuditKind::PacketMalformedDenied,
+                        },
+                        Err(decision) => decision,
+                    };
+                    return Ok(Some(bridge_result(true, stack_evidence, written, decision)));
+                }
+            };
+            let request = request_for_packet(&self.sandbox_id, &parsed);
+            let outbound_audit = packet_audit(
+                &self.sandbox_id,
+                &parsed,
+                now_ms,
+                packet.len(),
+                "to_sandbox",
+            )
+            .with_detail("stack", "smoltcp")
+            .with_detail("write_phase", "attempt");
+            if let Err(decision) = self.broker.append_audit_for(&request, outbound_audit) {
+                return Ok(Some(bridge_result(true, stack_evidence, written, decision)));
+            }
+            if let Err(error) = self.device.write_packet(&packet) {
+                let error_audit = AuditRecord::new_at(
+                    AuditKind::BrokerError,
+                    self.sandbox_id.clone(),
+                    now_ms as u128,
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(parsed.protocol)
+                .with_source(parsed.source_endpoint())
+                .with_destination(parsed.destination_endpoint())
+                .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+                .with_detail("stack", "smoltcp")
+                .with_detail("direction", "to_sandbox")
+                .with_detail("device_io_error", "write_failed");
+                let _ = self.broker.append_audit_for(&request, error_audit);
+                return Err(error);
+            }
+            written += 1;
+        }
+
+        Ok(Some(SmoltcpTunBridgeResult {
+            inbound_observed: true,
+            stack: stack_evidence,
+            packets_written: written,
+            decision: Decision::Allow,
+            reason: None,
+        }))
+    }
+
+    pub fn broker(&self) -> &BrokerCore {
+        &self.broker
+    }
+
+    pub fn device(&self) -> &D {
+        &self.device
+    }
+}
+
+impl StackPollEvidence {
+    fn none() -> Self {
+        Self {
+            poll_result: "none",
+            packets_emitted: 0,
+            outbound_bytes: 0,
+        }
+    }
+}
+
+fn bridge_result(
+    inbound_observed: bool,
+    stack: StackPollEvidence,
+    packets_written: usize,
+    decision: PolicyDecision,
+) -> SmoltcpTunBridgeResult {
+    SmoltcpTunBridgeResult {
+        inbound_observed,
+        stack,
+        packets_written,
+        decision: decision.decision,
+        reason: decision.reason,
+    }
+}
+
+fn request_for_packet(sandbox_id: &str, parsed: &ParsedIpPacket) -> PolicyRequest {
+    let mut request = PolicyRequest::new(sandbox_id, Frontend::Tun, parsed.protocol)
+        .with_destination(parsed.destination_endpoint());
+    request.source = parsed.source_endpoint();
+    request.icmp_type = parsed.icmp_type;
+    request.icmp_code = parsed.icmp_code;
+    request
+}
+
+fn packet_audit(
+    sandbox_id: &str,
+    parsed: &ParsedIpPacket,
+    now_ms: i64,
+    packet_len: usize,
+    direction: &str,
+) -> AuditRecord {
+    AuditRecord::new_at(
+        AuditKind::PacketObserved,
+        sandbox_id.to_string(),
+        now_ms as u128,
+    )
+    .with_frontend(Frontend::Tun)
+    .with_protocol(parsed.protocol)
+    .with_source(parsed.source_endpoint())
+    .with_destination(parsed.destination_endpoint())
+    .with_detail("direction", direction)
+    .with_detail("ip_version", parsed.ip_version.to_string())
+    .with_detail("packet_len", packet_len.to_string())
+    .with_detail("payload_len", parsed.payload_len.to_string())
+}
+
 fn poll_result_name(result: PollResult) -> &'static str {
     match result {
         PollResult::None => "none",
@@ -188,7 +416,7 @@ fn poll_result_name(result: PollResult) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use foxprox_core::{checksum, ParsedIpPacket};
+    use foxprox_core::{checksum, InMemoryPacketDevice, PolicyConfig, PolicyEngine};
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -208,6 +436,30 @@ mod tests {
         assert_eq!(parsed.icmp_type, Some(0));
         assert_eq!(checksum(&outbound[0][..20]), 0);
         assert_eq!(checksum(&outbound[0][20..]), 0);
+    }
+
+    #[test]
+    fn smoltcp_tun_bridge_audits_and_writes_stack_output() {
+        let packet = ipv4_icmp_echo_request();
+        let device = InMemoryPacketDevice::with_inbound([packet]);
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 8);
+        let stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+
+        let result = bridge.process_next_packet(2_000).unwrap().unwrap();
+        assert!(result.inbound_observed);
+        assert_eq!(result.stack.packets_emitted, 1);
+        assert_eq!(result.packets_written, 1);
+        assert_eq!(result.decision, Decision::Allow);
+        let records: Vec<_> = bridge.broker().audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].details["direction"], "from_sandbox");
+        assert_eq!(records[0].details["stack"], "smoltcp");
+        assert_eq!(records[1].details["direction"], "to_sandbox");
+        assert_eq!(records[1].details["write_phase"], "attempt");
+        let reply = &bridge.device().outbound()[0];
+        let parsed = ParsedIpPacket::parse_ipv4(reply).unwrap();
+        assert_eq!(parsed.icmp_type, Some(0));
     }
 
     #[test]
