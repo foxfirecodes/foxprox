@@ -176,3 +176,7 @@ For namespace setup behavior, fake `ip` executables provide concrete process-bou
 ## 2026-06-21 — resolver setup should be deterministic and narrow
 
 Have setup write a minimal generated resolver file pointing at the broker nameserver and `ndots:0`; keep path selection separate so tests can verify file content without requiring a mount namespace or mutating host `/etc/resolv.conf`.
+
+## 2026-06-21 — setup fd handoff should be last after network config succeeds
+
+In the setup helper sequence, configure the interface and resolver before sending the fd to the broker. If setup fails first, the broker never receives a fd and cannot treat a partially configured sandbox network as ready.

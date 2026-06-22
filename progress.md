@@ -963,3 +963,25 @@
 - What failed or surprised the agent: no behavior failures; writing resolver state is best kept as a narrow file-boundary helper so actual mount namespace/resolv.conf path decisions can stay in setup integration code.
 - What remains unproven: binding this helper to the real sandbox `/etc/resolv.conf`, mount namespace writeability, cleanup/restoration behavior, live DNS queries through the configured resolver, and bwrap execution are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — setup sequence configure → resolver → fd handoff slice
+
+- Slice attempted: compose the setup-helper primitives into one ordered setup sequence that configures the TUN interface, writes broker DNS resolver config, and sends the setup fd to the broker.
+- Why next: TUN fd creation, interface commands, resolver writing, and fd passing are individually proven but not yet crossed in a single setup-to-broker sequence.
+- Verification plan: add a Unix setup sequence helper in `foxprox-integrations`, test with a fake `ip` executable, temp resolver file, temp fd, and Unix socket pair; verify commands/files and broker-side fd receipt; verify command failure prevents fd handoff; run formatting, clippy, focused integration tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — setup sequence configure → resolver → fd handoff
+
+- Slice attempted: compose setup-helper primitives into an ordered sequence that configures the TUN interface, writes broker DNS resolver config, and hands the setup fd to the broker.
+- Why next: individual setup boundaries existed, but alpha setup needs them to happen in one fail-closed sequence before target exec.
+- What changed: added Unix-only `SetupSequenceConfig`, `SetupSequenceResult`, `SetupSequenceError`, and `fd_handoff::run_setup_sequence`; the sequence runs interface commands, writes resolver config, then sends the fd over SCM_RIGHTS, stopping before resolver write and fd handoff if interface setup fails.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in the new setup sequence code/tests; `cargo fmt` was run.
+  - Focused checks passed: `cargo test -p foxprox-integrations setup_sequence -- --nocapture` verified fake `ip` command execution, resolver file content, broker-side fd receipt/readback, and fail-closed behavior that prevents resolver write/fd handoff when interface setup fails.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 10 `foxprox-integrations` tests and all existing workspace tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; ordering matters because sending the fd before route/DNS setup succeeds would let the broker proceed while the sandbox network is only partially configured.
+- What remains unproven: real TUN fd creation feeding this sequence, execution inside bwrap, capability drop, target exec, cleanup of partially applied real network state, and live sandbox packet logs are still absent.
+- Commit: this commit.

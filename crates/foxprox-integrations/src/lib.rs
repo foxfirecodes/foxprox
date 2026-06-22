@@ -387,6 +387,40 @@ pub mod fd_handoff {
 
     const HANDOFF_MARKER: &[u8] = b"foxprox-fd";
 
+    /// Setup sequence inputs after a TUN-like fd has been created.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct SetupSequenceConfig {
+        pub interface: super::TunInterfaceSetupConfig,
+        pub resolver: super::ResolverConfig,
+    }
+
+    /// Evidence returned after setup configuration and fd handoff complete.
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct SetupSequenceResult {
+        pub interface_name: String,
+        pub resolver_path: std::path::PathBuf,
+    }
+
+    /// Setup sequence errors.
+    #[derive(Debug)]
+    pub enum SetupSequenceError {
+        Interface(super::TunInterfaceSetupError),
+        Resolver(super::ResolverConfigError),
+        Handoff(FdHandoffError),
+    }
+
+    impl fmt::Display for SetupSequenceError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Interface(error) => write!(f, "setup-sequence-interface-error: {error}"),
+                Self::Resolver(error) => write!(f, "setup-sequence-resolver-error: {error}"),
+                Self::Handoff(error) => write!(f, "setup-sequence-handoff-error: {error}"),
+            }
+        }
+    }
+
+    impl std::error::Error for SetupSequenceError {}
+
     /// File descriptor received by the broker side of the setup handoff.
     #[derive(Debug)]
     pub struct ReceivedFd {
@@ -421,6 +455,22 @@ pub mod fd_handoff {
     }
 
     impl std::error::Error for FdHandoffError {}
+
+    /// Run the setup-helper sequence after a TUN-like fd has been created:
+    /// configure interface, write resolver config, then hand the fd to broker.
+    pub fn run_setup_sequence(
+        broker_socket: &UnixStream,
+        setup_fd: RawFd,
+        config: &SetupSequenceConfig,
+    ) -> Result<SetupSequenceResult, SetupSequenceError> {
+        super::configure_tun_interface(&config.interface).map_err(SetupSequenceError::Interface)?;
+        super::write_broker_resolv_conf(&config.resolver).map_err(SetupSequenceError::Resolver)?;
+        send_setup_fd(broker_socket, setup_fd).map_err(SetupSequenceError::Handoff)?;
+        Ok(SetupSequenceResult {
+            interface_name: config.interface.interface_name.clone(),
+            resolver_path: config.resolver.resolv_conf_path.clone(),
+        })
+    }
 
     /// Send one fd from setup-helper side to broker side over a Unix stream.
     pub fn send_setup_fd(socket: &UnixStream, fd: RawFd) -> Result<(), FdHandoffError> {
@@ -605,6 +655,124 @@ mod tests {
         let directory = ResolverConfig::new(directory_path, IpAddr::V6(Ipv6Addr::LOCALHOST));
         let error = write_broker_resolv_conf(&directory).unwrap_err();
         assert!(matches!(error, ResolverConfigError::Write { .. }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_sequence_configures_resolver_and_hands_fd_to_broker() {
+        use std::fs::{create_dir_all, read_to_string, remove_dir_all, OpenOptions};
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::net::{IpAddr, Ipv4Addr};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixStream;
+
+        let dir =
+            std::env::temp_dir().join(format!("foxprox-setup-sequence-{}-ok", std::process::id()));
+        create_dir_all(&dir).unwrap();
+        let script = dir.join("ip");
+        let ip_log = dir.join("ip.log");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n",
+                ip_log.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        let resolv_conf = dir.join("resolv.conf");
+        let fd_path = dir.join("tun-fd-standin");
+        let mut fd_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&fd_path)
+            .unwrap();
+        fd_file.write_all(b"setup-sequence-fd").unwrap();
+        fd_file.seek(SeekFrom::Start(0)).unwrap();
+        let (setup_socket, broker_socket) = UnixStream::pair().unwrap();
+        let config = fd_handoff::SetupSequenceConfig {
+            interface: TunInterfaceSetupConfig::new("fpx0", "10.0.0.2/24", 1500)
+                .with_ip_program(&script),
+            resolver: ResolverConfig::new(&resolv_conf, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+        };
+
+        let result = fd_handoff::run_setup_sequence(&setup_socket, fd_file.as_raw_fd(), &config)
+            .expect("setup sequence succeeds");
+        let received = fd_handoff::receive_setup_fd(&broker_socket).unwrap();
+        let mut received_file = std::fs::File::from(received.fd);
+        let mut fd_contents = String::new();
+        received_file.read_to_string(&mut fd_contents).unwrap();
+
+        assert_eq!(result.interface_name, "fpx0");
+        assert_eq!(result.resolver_path, resolv_conf);
+        assert_eq!(
+            read_to_string(&ip_log).unwrap(),
+            "link set dev fpx0 mtu 1500 up\naddr add 10.0.0.2/24 dev fpx0\nroute add default dev fpx0\n"
+        );
+        assert_eq!(
+            read_to_string(&resolv_conf).unwrap(),
+            "# generated by foxproxsetup\nnameserver 10.0.0.1\noptions ndots:0\n"
+        );
+        assert_eq!(fd_contents, "setup-sequence-fd");
+        remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_sequence_stops_before_resolver_and_handoff_on_interface_failure() {
+        use std::fs::{create_dir_all, remove_dir_all, OpenOptions};
+        use std::io::Write;
+        use std::net::{IpAddr, Ipv4Addr};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::net::UnixStream;
+        use std::time::Duration;
+
+        let dir = std::env::temp_dir().join(format!(
+            "foxprox-setup-sequence-{}-fail",
+            std::process::id()
+        ));
+        create_dir_all(&dir).unwrap();
+        let script = dir.join("ip");
+        std::fs::write(&script, "#!/bin/sh\necho setup failed >&2\nexit 9\n").unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        let resolv_conf = dir.join("resolv.conf");
+        let fd_path = dir.join("tun-fd-standin");
+        let mut fd_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&fd_path)
+            .unwrap();
+        fd_file.write_all(b"setup-sequence-fd").unwrap();
+        let (setup_socket, broker_socket) = UnixStream::pair().unwrap();
+        broker_socket
+            .set_read_timeout(Some(Duration::from_millis(10)))
+            .unwrap();
+        let config = fd_handoff::SetupSequenceConfig {
+            interface: TunInterfaceSetupConfig::new("fpx0", "10.0.0.2/24", 1500)
+                .with_ip_program(&script),
+            resolver: ResolverConfig::new(&resolv_conf, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))),
+        };
+
+        let error = fd_handoff::run_setup_sequence(&setup_socket, fd_file.as_raw_fd(), &config)
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            fd_handoff::SetupSequenceError::Interface(_)
+        ));
+        assert!(!resolv_conf.exists());
+        assert!(fd_handoff::receive_setup_fd(&broker_socket).is_err());
+        remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
