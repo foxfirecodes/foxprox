@@ -117,3 +117,7 @@ Direct-DNS bypass checks are only as safe as the broker DNS server list. Treatin
 ## 2026-06-21 - Audit drain batches need explicit bounds
 
 Bounded audit queues also need bounded drain APIs. Even if queue capacity is fixed, a sink path that serializes every queued event in one unbounded operation can create avoidable latency and allocation spikes under hostile traffic.
+
+## 2026-06-21 - Parser errors need audit mapping before runtime wiring
+
+Packet parser failures should have a single structured audit conversion path before adding TUN runtime loops. This avoids each caller inventing its own malformed-vs-unsupported mapping and preserves numeric unsupported protocol evidence consistently.

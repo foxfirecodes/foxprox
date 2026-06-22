@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use crate::attribution::Hostname;
 use crate::dns::{DnsAddressResponseMetadata, DnsQueryMetadata, DnsQueryType, DnsResponseCode};
 use crate::flow::{UdpFlowClass, UdpFlowEntry};
+use crate::packet::PacketParseError;
 use crate::policy::{Decision, DenialReason, DenyBehavior, PolicyRequest};
 use crate::types::{Endpoint, Frontend, HostnameConfidence, HostnameSource, Protocol, SandboxId};
 
@@ -181,6 +182,44 @@ impl AuditEvent {
         }
     }
 
+    pub fn from_packet_parse_error(
+        timestamp_millis: u64,
+        sandbox_id: SandboxId,
+        frontend: Frontend,
+        error: PacketParseError,
+    ) -> Self {
+        let protocol = match error {
+            PacketParseError::UnsupportedProtocol(number) => Some(Protocol::Unsupported(number)),
+            _ => None,
+        };
+        let reason = packet_parse_error_reason(error);
+
+        Self {
+            timestamp_millis,
+            sandbox_id,
+            kind: AuditEventKind::UnsupportedNetworkEvent,
+            frontend: Some(frontend),
+            protocol,
+            source: None,
+            destination: None,
+            requested_port: None,
+            hostname: None,
+            hostname_source: HostnameSource::None,
+            hostname_confidence: HostnameConfidence::None,
+            dns_query_type: None,
+            dns_response_code: None,
+            dns_answer_count: None,
+            dns_min_ttl_seconds: None,
+            decision: Some(AuditDecision::FailClosed),
+            rule_id: None,
+            reason: Some(reason),
+            http_method: None,
+            http_path_query: None,
+            byte_count: None,
+            flow_duration_millis: None,
+        }
+    }
+
     pub fn from_udp_flow_entry(
         timestamp_millis: u64,
         sandbox_id: SandboxId,
@@ -301,6 +340,24 @@ impl AuditEvent {
         );
         out.push('}');
         out
+    }
+}
+
+fn packet_parse_error_reason(error: PacketParseError) -> DenialReason {
+    match error {
+        PacketParseError::UnsupportedIpVersion(_)
+        | PacketParseError::UnsupportedIpv4Fragmentation
+        | PacketParseError::UnsupportedIpv6ExtensionHeader(_)
+        | PacketParseError::UnsupportedProtocol(_) => DenialReason::UnsupportedProtocol,
+        PacketParseError::Empty
+        | PacketParseError::TruncatedIpHeader
+        | PacketParseError::InvalidIpv4HeaderLength
+        | PacketParseError::InvalidIpv4TotalLength
+        | PacketParseError::InvalidIpv4HeaderChecksum
+        | PacketParseError::TruncatedTransportHeader
+        | PacketParseError::InvalidTcpHeaderLength
+        | PacketParseError::InvalidUdpLength
+        | PacketParseError::InvalidTransportChecksum => DenialReason::MalformedInput,
     }
 }
 
@@ -1030,6 +1087,34 @@ mod tests {
         assert!(event
             .to_json_line()
             .contains("\"protocol\":\"unsupported:99\""));
+    }
+
+    #[test]
+    fn packet_parse_errors_build_fail_closed_audit_events() {
+        let malformed = AuditEvent::from_packet_parse_error(
+            500,
+            SandboxId::new("sandbox-packet"),
+            Frontend::Tun,
+            PacketParseError::InvalidTransportChecksum,
+        );
+        assert_eq!(malformed.kind, AuditEventKind::UnsupportedNetworkEvent);
+        assert_eq!(malformed.decision, Some(AuditDecision::FailClosed));
+        assert_eq!(malformed.reason, Some(DenialReason::MalformedInput));
+        assert_eq!(malformed.protocol, None);
+
+        let unsupported = AuditEvent::from_packet_parse_error(
+            501,
+            SandboxId::new("sandbox-packet"),
+            Frontend::Tun,
+            PacketParseError::UnsupportedProtocol(99),
+        );
+        assert_eq!(unsupported.reason, Some(DenialReason::UnsupportedProtocol));
+        assert_eq!(unsupported.protocol, Some(Protocol::Unsupported(99)));
+        let line = unsupported.to_json_line();
+        assert!(line.contains("\"kind\":\"unsupported_network_event\""));
+        assert!(line.contains("\"decision\":\"fail_closed\""));
+        assert!(line.contains("\"protocol\":\"unsupported:99\""));
+        assert!(line.contains("\"reason\":\"unsupported_protocol\""));
     }
 
     #[test]

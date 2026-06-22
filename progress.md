@@ -676,3 +676,22 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: unit tests assert serialized JSON line ordering and bounded batch accounting.
 * Residual risk: no OS file/stdout sink, async runtime integration, or durable write error policy exists yet; this commit only adds the bounded core drain primitive.
 * Commit hash: cabc9ff add bounded audit json drain batches.
+
+## 2026-06-21 - Packet parser fail-closed audit event builder
+
+* Invariant under work: parser-level fail-closed packet decisions must have a structured audit event path that preserves malformed-vs-unsupported reasons and unsupported protocol numbers without re-parsing packet bytes.
+* Threat or failure mode addressed: runtime code could drop malformed/unsupported packet errors silently or collapse all parser failures into generic text, hiding checksum failures, unsupported protocol numbers, fragmentation denial, or extension-header denial from audit review.
+* Planned verification: add an audit event builder for `PacketParseError`, map malformed errors to `MalformedInput`, map unsupported protocol families to `UnsupportedProtocol`, preserve numeric unsupported protocol values in JSON, and run full tests/clippy.
+
+## 2026-06-21 - Packet parser fail-closed audit event builder results
+
+* Tests added/updated:
+  * invalid transport checksum parse errors produce `UnsupportedNetworkEvent` audit records with `FailClosed` and `MalformedInput` reason.
+  * unsupported packet protocol numbers produce `FailClosed` audit records with `UnsupportedProtocol` reason and serialized `unsupported:<number>` protocol evidence.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 99 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * packet parser failures now have a deterministic core audit conversion path.
+  * malformed checksum/length/header errors remain distinct from unsupported protocol/version/fragmentation/extension errors in audit reasons.
+* Audit evidence: unit tests assert audit kind, fail-closed decision, reason, unsupported protocol preservation, and JSON fragments.
+* Residual risk: actual TUN/runtime packet loop still needs to call this builder and push/drain audit records; no forwarding integration exists yet.
