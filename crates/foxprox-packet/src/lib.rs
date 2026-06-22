@@ -21,6 +21,16 @@ pub struct PacketContext {
     pub frontend: FrontendKind,
 }
 
+/// Parsed IPv4 UDP datagram suitable for forwarding proofs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Ipv4UdpDatagram {
+    pub source: Ipv4Addr,
+    pub destination: Ipv4Addr,
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub payload: Vec<u8>,
+}
+
 impl PacketContext {
     pub const fn new(sandbox_id: SandboxId, frontend: FrontendKind) -> Self {
         Self {
@@ -63,6 +73,9 @@ pub enum PacketParseError {
     },
     UnsupportedIpv6ExtensionHeader {
         next_header: u8,
+    },
+    NotUdp {
+        protocol: u8,
     },
     TcpHeaderTooShort {
         actual: usize,
@@ -124,6 +137,7 @@ impl PacketParseError {
             Self::UnsupportedIpv6ExtensionHeader { next_header } => {
                 format!("unsupported-ipv6-extension-header: next_header={next_header}")
             }
+            Self::NotUdp { protocol } => format!("not-udp: protocol={protocol}"),
             Self::TcpHeaderTooShort { actual } => {
                 format!("tcp-header-too-short: actual={actual}")
             }
@@ -748,6 +762,34 @@ pub fn synthesize_icmp_echo_reply(request_packet: &[u8]) -> Result<Vec<u8>, Pack
     Ok(reply)
 }
 
+/// Parse one IPv4 UDP packet into a transport datagram.
+pub fn parse_ipv4_udp_datagram(packet: &[u8]) -> Result<Ipv4UdpDatagram, PacketParseError> {
+    let header = Ipv4Header::parse(packet)?;
+    if header.protocol != 17 {
+        return Err(PacketParseError::NotUdp {
+            protocol: header.protocol,
+        });
+    }
+    let udp = &packet[header.header_length..header.total_length];
+    if udp.len() < 8 {
+        return Err(PacketParseError::UdpHeaderTooShort { actual: udp.len() });
+    }
+    let udp_length = u16::from_be_bytes([udp[4], udp[5]]) as usize;
+    if udp_length < 8 || udp_length > udp.len() {
+        return Err(PacketParseError::InvalidUdpLength {
+            udp_length,
+            actual: udp.len(),
+        });
+    }
+    Ok(Ipv4UdpDatagram {
+        source: header.source,
+        destination: header.destination,
+        source_port: u16::from_be_bytes([udp[0], udp[1]]),
+        destination_port: u16::from_be_bytes([udp[2], udp[3]]),
+        payload: udp[8..udp_length].to_vec(),
+    })
+}
+
 /// Synthesize one IPv4 UDP response packet for a received IPv4 UDP datagram.
 ///
 /// This is the minimal transparent UDP write-back primitive. It reverses IPv4
@@ -1137,6 +1179,25 @@ mod tests {
                     .to_owned()
             }
         );
+    }
+
+    #[test]
+    fn parses_ipv4_udp_datagram_for_forwarding() {
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&49152_u16.to_be_bytes());
+        udp.extend_from_slice(&5353_u16.to_be_bytes());
+        udp.extend_from_slice(&13_u16.to_be_bytes());
+        udp.extend_from_slice(&0_u16.to_be_bytes());
+        udp.extend_from_slice(b"hello");
+        let packet = ipv4_packet(17, [10, 0, 0, 2], [10, 0, 0, 1], &udp);
+
+        let datagram = parse_ipv4_udp_datagram(&packet).unwrap();
+
+        assert_eq!(datagram.source, Ipv4Addr::new(10, 0, 0, 2));
+        assert_eq!(datagram.destination, Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(datagram.source_port, 49152);
+        assert_eq!(datagram.destination_port, 5353);
+        assert_eq!(datagram.payload, b"hello");
     }
 
     #[test]

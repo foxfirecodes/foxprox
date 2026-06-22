@@ -240,3 +240,7 @@ For live TUN write-back smoke tests, a broker can parse the target's IPv4 UDP pa
 ## 2026-06-22 — move live-smoke packet builders into packet primitives
 
 If an ignored live smoke test needs to synthesize a valid packet, promote that code into `foxprox-packet` with focused unit tests. Live tests should exercise production packet builders rather than carrying their own unchecked protocol helpers.
+
+## 2026-06-22 — unfiltered UDP forwarding composes from packet parse, egress, and response synthesis
+
+A narrow transparent UDP forwarding proof only needs to parse the TUN IPv4 UDP datagram, send its payload through `UdpEgress`, receive one host datagram, and synthesize an IPv4 UDP response using the original sandbox IP/port tuple.

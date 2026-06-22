@@ -60,6 +60,7 @@ dependencies = [
  "foxprox-config",
  "foxprox-core",
  "foxprox-device",
+ "foxprox-egress",
  "foxprox-integrations",
  "foxprox-packet",
  "serde_json",

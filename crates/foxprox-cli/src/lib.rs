@@ -27,7 +27,8 @@ use foxprox_broker::IpPacketBroker;
 use foxprox_config::{policy_config_from_toml, ConfigError};
 use foxprox_core::{FrontendKind, PolicyEngine, SandboxId};
 use foxprox_device::{TunIoError, TunPacketIo};
-use foxprox_packet::PacketContext;
+use foxprox_egress::{EgressError, UdpEgress, UdpTarget};
+use foxprox_packet::{parse_ipv4_udp_datagram, synthesize_ipv4_udp_response, PacketContext};
 
 #[cfg(target_os = "linux")]
 use foxprox_integrations::{drop_net_admin_capability, CapabilityDropError};
@@ -48,6 +49,7 @@ pub enum CliError {
     Config(ConfigError),
     Core(String),
     Audit(AuditSinkError),
+    Egress(EgressError),
     Reply(String),
     TunIo(TunIoError),
     #[cfg(unix)]
@@ -64,6 +66,7 @@ impl fmt::Display for CliError {
             Self::Config(error) => write!(f, "{error}"),
             Self::Core(error) => write!(f, "{error}"),
             Self::Audit(error) => write!(f, "{error}"),
+            Self::Egress(error) => write!(f, "{error}"),
             Self::Reply(error) => write!(f, "packet-reply-error: {error}"),
             Self::TunIo(error) => write!(f, "{error}"),
             #[cfg(unix)]
@@ -80,6 +83,7 @@ impl std::error::Error for CliError {
             Self::Io { error, .. } => Some(error),
             Self::Config(error) => Some(error),
             Self::Audit(error) => Some(error),
+            Self::Egress(error) => Some(error),
             Self::TunIo(error) => Some(error),
             #[cfg(unix)]
             Self::SetupSequence(error) => Some(error),
@@ -99,6 +103,12 @@ impl From<ConfigError> for CliError {
 impl From<AuditSinkError> for CliError {
     fn from(value: AuditSinkError) -> Self {
         Self::Audit(value)
+    }
+}
+
+impl From<EgressError> for CliError {
+    fn from(value: EgressError) -> Self {
+        Self::Egress(value)
     }
 }
 
@@ -239,6 +249,36 @@ pub fn process_tun_io_packets(
         summaries.push(summary);
     }
     Ok(summaries)
+}
+
+/// Forward one IPv4 UDP packet payload through host UDP egress and synthesize a
+/// response packet suitable for writing back to TUN.
+pub fn forward_ipv4_udp_packet_once<E: UdpEgress>(
+    packet: &[u8],
+    egress: &E,
+    target: &UdpTarget,
+    response_buffer_len: usize,
+) -> Result<Vec<u8>, CliError> {
+    if response_buffer_len == 0 {
+        return Err(CliError::Usage(
+            "udp-forward-response-buffer-len must be > 0".to_owned(),
+        ));
+    }
+    let datagram =
+        parse_ipv4_udp_datagram(packet).map_err(|error| CliError::Core(error.to_string()))?;
+    let session = egress.connect(target)?;
+    session
+        .socket()
+        .send(&datagram.payload)
+        .map_err(EgressError::from)?;
+    let mut response_payload = vec![0_u8; response_buffer_len];
+    let length = session
+        .socket()
+        .recv(&mut response_payload)
+        .map_err(EgressError::from)?;
+    response_payload.truncate(length);
+    synthesize_ipv4_udp_response(packet, &response_payload)
+        .map_err(|error| CliError::Core(error.to_string()))
 }
 
 /// Run setup command work with an already-created TUN-like fd.
@@ -537,6 +577,48 @@ mod tests {
             .copy_from_slice(&std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).octets());
         packet[40..].copy_from_slice(&payload);
         packet
+    }
+
+    fn udp_packet(source_port: u16, destination_port: u16, payload: &[u8]) -> Vec<u8> {
+        let udp_length = 8 + payload.len();
+        let mut udp = Vec::with_capacity(udp_length);
+        udp.extend_from_slice(&source_port.to_be_bytes());
+        udp.extend_from_slice(&destination_port.to_be_bytes());
+        udp.extend_from_slice(&(udp_length as u16).to_be_bytes());
+        udp.extend_from_slice(&0_u16.to_be_bytes());
+        udp.extend_from_slice(payload);
+        ipv4_packet(17, [10, 0, 0, 2], [10, 0, 0, 1], &udp)
+    }
+
+    #[test]
+    fn udp_packet_once_forwards_payload_through_host_egress_and_builds_tun_response() {
+        use foxprox_egress::HostUdpEgress;
+        use std::net::{Ipv4Addr, UdpSocket};
+        use std::time::Duration;
+
+        let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        upstream
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut buffer = [0_u8; 64];
+            let (length, peer) = upstream.recv_from(&mut buffer).unwrap();
+            assert_eq!(&buffer[..length], b"hello");
+            upstream.send_to(b"world", peer).unwrap();
+        });
+        let packet = udp_packet(49152, 5353, b"hello");
+        let egress = HostUdpEgress::new(Duration::from_secs(1)).unwrap();
+        let target = UdpTarget::new_ip(upstream_addr.ip(), upstream_addr.port()).unwrap();
+
+        let response = forward_ipv4_udp_packet_once(&packet, &egress, &target, 64).unwrap();
+        server.join().unwrap();
+
+        assert_eq!(&response[12..16], &[10, 0, 0, 1]);
+        assert_eq!(&response[16..20], &[10, 0, 0, 2]);
+        assert_eq!(u16::from_be_bytes([response[20], response[21]]), 5353);
+        assert_eq!(u16::from_be_bytes([response[22], response[23]]), 49152);
+        assert_eq!(&response[28..], b"world");
     }
 
     #[test]

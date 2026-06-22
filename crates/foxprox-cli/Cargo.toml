@@ -12,6 +12,7 @@ foxprox-broker = { path = "../foxprox-broker" }
 foxprox-config = { path = "../foxprox-config" }
 foxprox-core = { path = "../foxprox-core" }
 foxprox-device = { path = "../foxprox-device" }
+foxprox-egress = { path = "../foxprox-egress" }
 foxprox-packet = { path = "../foxprox-packet" }
 
 [target.'cfg(unix)'.dependencies]

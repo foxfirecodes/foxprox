@@ -1301,3 +1301,25 @@
 - What failed or surprised the agent: no behavior failures; moving the helper clarified that IPv4 UDP write-back is a packet primitive, not just live-test glue.
 - What remains unproven: forwarding a TUN UDP payload through a host UDP egress socket and writing the host response back through TUN.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — TUN UDP datagram → host UDP egress response slice
+
+- Slice attempted: forward one parsed TUN IPv4 UDP datagram through the host UDP egress backend and synthesize the host response back into an IPv4 UDP packet for TUN write-back.
+- Why next: live TUN ingress/write-back and reusable UDP response synthesis are proven; Milestone 4 still needs an unfiltered UDP forwarding proof through host sockets.
+- Verification plan: expose a packet-level IPv4 UDP datagram parser, add a runtime helper that sends the UDP payload through `UdpEgress`, receives one response, and builds a TUN response packet; prove it against a loopback UDP server, then run focused tests plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — TUN UDP datagram → host UDP egress response
+
+- Slice attempted: forward one parsed TUN IPv4 UDP datagram through the host UDP egress backend and synthesize the host response back into an IPv4 UDP packet for TUN write-back.
+- Why next: live TUN ingress/write-back and reusable UDP response synthesis were proven; Milestone 4 still needed an unfiltered UDP forwarding proof through host sockets.
+- What changed: `foxprox-packet` now exposes `Ipv4UdpDatagram` and `parse_ipv4_udp_datagram`. `foxprox-cli` now has `forward_ipv4_udp_packet_once`, which parses an IPv4 UDP packet, sends the payload through `UdpEgress`, receives one host response, and uses `synthesize_ipv4_udp_response` to build the TUN response packet.
+- Verification:
+  - Focused packet checks passed: `cargo test -p foxprox-packet ipv4_udp -- --nocapture`.
+  - Focused forwarding check passed: `cargo test -p foxprox-cli udp_packet_once -- --nocapture`, proving payload `hello` reached a loopback UDP server and response `world` became a reversed IPv4 UDP packet for the sandbox.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 18 `foxprox-packet` tests and 9 `foxprox-cli` tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; the existing `HostUdpEgress` backend was enough once packet parsing/response building were available as primitives.
+- What remains unproven: wiring this forwarding helper to `TunPacketIo` and proving it live through the bwrap-created TUN fd.
+- Commit: this commit.
