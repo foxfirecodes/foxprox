@@ -12,7 +12,7 @@ use std::os::unix::net::UnixListener;
 use foxprox_device::fd as fd_handoff;
 
 use foxprox_core::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
-use foxprox_core::egress::{EgressBackend, EgressOutcome, EgressRequest};
+use foxprox_core::egress::{EgressBackend, EgressRequest};
 use foxprox_core::origin::parse_socks5_connect_request;
 use foxprox_core::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule, RuleAction};
 use foxprox_core::runtime::{
@@ -21,6 +21,7 @@ use foxprox_core::runtime::{
 };
 use foxprox_core::scenario::{run_scenario, ScenarioName};
 use foxprox_core::smoltcp_gate::feed_tcp_syn_to_smoltcp_listener;
+use foxprox_egress::{LocalTcpConnectEgress, LocalTcpStreamEgress, LocalUdpEgress};
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -1468,7 +1469,7 @@ fn run_tcp_syn_smoke() -> Result<AuditRecord, String> {
     fd_handoff::close_fd(fd);
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir(&socket_dir);
-    let egress_calls = runtime.egress.calls;
+    let egress_calls = runtime.egress.calls();
     let fixture_result = if egress_calls > 0 {
         Some(
             tcp_fixture_thread
@@ -1999,7 +2000,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
     .with_metadata("bridged_bytes", bridged_bytes.to_string())
     .with_metadata("response_written", response_written.to_string())
     .with_metadata("policy_allowed", policy_allowed.to_string())
-    .with_metadata("egress_calls", bridge_egress.calls.to_string())
+    .with_metadata("egress_calls", bridge_egress.calls().to_string())
     .with_metadata("egress_fixture", echo_addr.to_string());
     if let Some(audit) = runtime_audit {
         record = record
@@ -2371,7 +2372,7 @@ fn run_udp_deny_smoke() -> Result<AuditRecord, String> {
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir(&socket_dir);
     let runtime_audit = runtime.audit.last().cloned();
-    let egress_calls = runtime.egress.calls;
+    let egress_calls = runtime.egress.calls();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let success = output.status.success() && egress_calls == 0;
@@ -3095,128 +3096,6 @@ fn parse_connect_request_target(headers: &str) -> Result<String, String> {
         return Err("CONNECT HTTP version missing".to_string());
     }
     Ok(target.to_string())
-}
-
-#[cfg(unix)]
-struct LocalTcpStreamEgress {
-    fixture: std::net::SocketAddr,
-    calls: usize,
-}
-
-#[cfg(unix)]
-impl LocalTcpStreamEgress {
-    fn new(fixture: std::net::SocketAddr) -> Self {
-        Self { fixture, calls: 0 }
-    }
-}
-
-#[cfg(unix)]
-impl EgressBackend for LocalTcpStreamEgress {
-    fn execute(&mut self, request: &EgressRequest) -> Result<EgressOutcome, String> {
-        let EgressRequest::TcpStreamData { bytes, .. } = request else {
-            return Err("local TCP stream egress only supports TCP stream data".to_string());
-        };
-        self.calls += 1;
-        let mut stream = TcpStream::connect_timeout(&self.fixture, Duration::from_secs(2))
-            .map_err(|err| format!("TCP stream host egress connect failed: {err}"))?;
-        stream
-            .write_all(bytes)
-            .map_err(|err| format!("TCP stream host egress write failed: {err}"))?;
-        stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .map_err(|err| format!("TCP stream host egress timeout setup failed: {err}"))?;
-        let mut reply = [0_u8; 1024];
-        let reply_len = stream
-            .read(&mut reply)
-            .map_err(|err| format!("TCP stream host egress read failed: {err}"))?;
-        Ok(EgressOutcome {
-            connected: true,
-            bytes_sent: bytes.len() as u64,
-            bytes_received: reply_len as u64,
-            message: "local TCP stream fixture egress".to_string(),
-            response_payload: reply[..reply_len].to_vec(),
-        })
-    }
-}
-
-#[cfg(unix)]
-struct LocalTcpConnectEgress {
-    fixture: std::net::SocketAddr,
-    calls: usize,
-}
-
-#[cfg(unix)]
-impl LocalTcpConnectEgress {
-    fn new(fixture: std::net::SocketAddr) -> Self {
-        Self { fixture, calls: 0 }
-    }
-}
-
-#[cfg(unix)]
-impl EgressBackend for LocalTcpConnectEgress {
-    fn execute(&mut self, request: &EgressRequest) -> Result<EgressOutcome, String> {
-        let EgressRequest::TcpConnect { destination } = request else {
-            return Err("local TCP egress only supports TCP connects".to_string());
-        };
-        self.calls += 1;
-        let _stream = TcpStream::connect_timeout(&self.fixture, Duration::from_secs(2))
-            .map_err(|err| format!("host TCP egress connect failed: {err}"))?;
-        Ok(EgressOutcome {
-            connected: true,
-            bytes_sent: 0,
-            bytes_received: 0,
-            message: format!("local TCP fixture egress for {destination}"),
-            response_payload: Vec::new(),
-        })
-    }
-}
-
-#[cfg(unix)]
-struct LocalUdpEgress {
-    socket: UdpSocket,
-    fixture: std::net::SocketAddr,
-    calls: usize,
-}
-
-#[cfg(unix)]
-impl LocalUdpEgress {
-    fn new(fixture: std::net::SocketAddr) -> Result<Self, String> {
-        let socket = UdpSocket::bind("127.0.0.1:0")
-            .map_err(|err| format!("failed to bind host UDP egress socket: {err}"))?;
-        socket
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .map_err(|err| format!("failed to set host UDP egress timeout: {err}"))?;
-        Ok(Self {
-            socket,
-            fixture,
-            calls: 0,
-        })
-    }
-}
-
-#[cfg(unix)]
-impl EgressBackend for LocalUdpEgress {
-    fn execute(&mut self, request: &EgressRequest) -> Result<EgressOutcome, String> {
-        let EgressRequest::UdpDatagram { bytes, .. } = request else {
-            return Err("local UDP egress only supports UDP datagrams".to_string());
-        };
-        self.calls += 1;
-        self.socket
-            .send_to(bytes, self.fixture)
-            .map_err(|err| format!("host UDP egress send failed: {err}"))?;
-        let mut reply_payload = [0_u8; 2048];
-        let (reply_len, _) = self
-            .socket
-            .recv_from(&mut reply_payload)
-            .map_err(|err| format!("host UDP egress receive failed: {err}"))?;
-        Ok(EgressOutcome {
-            connected: true,
-            bytes_sent: bytes.len() as u64,
-            bytes_received: reply_len as u64,
-            message: "local UDP fixture egress".to_string(),
-            response_payload: reply_payload[..reply_len].to_vec(),
-        })
-    }
 }
 
 #[cfg(unix)]

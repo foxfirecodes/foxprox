@@ -887,3 +887,15 @@
 - Interpretation: both host-side fd receive and setup-side fd send now share the device crate boundary, further aligning the implementation with the documented broker-device split.
 - Next verification gap: commit device send extraction; remaining work is production async/device integration or broader crate decomposition.
 - Commit hash after commit: pending.
+
+## 2026-06-22T07:05:00Z — Host egress adapter crate extraction
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run udp-forward-smoke && target/debug/foxprox-lab run tcp-syn-smoke && target/debug/foxprox-lab run tcp-bridge-smoke`
+- Environment assumptions: local UDP/TCP fixtures are available; bwrap/TUN fd handoff works locally; new `foxprox-egress` crate uses synchronous std sockets as harness/future broker adapters.
+- Expected result: move local TCP connect, TCP stream data, and UDP datagram host egress adapters out of `foxprox-lab` into a reusable egress crate without regressing UDP/TCP smokes.
+- Observed result: pass. Workspace tests now include `foxprox-egress` (1 test), plus `foxprox-core` 58 tests, `foxprox-device` 2 tests, `foxprox-cli` 2 tests, and `foxproxsetup` 6 tests. `udp-forward-smoke`, `tcp-syn-smoke`, and `tcp-bridge-smoke` all emitted `decision":"allow"`.
+- Relevant output excerpt: `foxprox_egress::tests::tcp_stream_egress_round_trips_fixture_bytes ... ok`; UDP forward `"forwarded":"true"`; TCP SYN `"egress_calls":"1"`; TCP bridge `"egress_calls":"1"`.
+- Changed files: `Cargo.lock`, `Cargo.toml`, `crates/foxprox-egress/{Cargo.toml,src/lib.rs}`, `crates/foxprox-cli/{Cargo.toml,src/main.rs}`, `progress.md`.
+- Interpretation: host egress mechanics now have a crate boundary matching the documented architecture, and the CLI harness is further reduced to orchestration and fixture setup.
+- Next verification gap: commit egress crate extraction; remaining work is production async integration or more crate decomposition for proxy frontends.
+- Commit hash after commit: pending.
