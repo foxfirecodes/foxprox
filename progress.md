@@ -483,3 +483,25 @@
 - What failed or surprised the agent: no behavioral failures; keeping IPv4 reply synthesis behind an address-family/type guard prevents accidental ICMPv6 echo handling by the IPv4 packet builder.
 - What remains unproven: real TUN reads/writes, ICMPv6 echo reply synthesis, IPv6 extension header traversal, TCP/UDP forwarding, and long-running runtime audit flushing are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — HTTPS CONNECT frontend preflight → policy/audit/response slice
+
+- Slice attempted: turn parsed HTTPS CONNECT metadata into a proxy-frontend preflight handler that evaluates shared policy, emits audit evidence, and produces deterministic client response bytes for allowed, denied, and malformed requests.
+- Why next: CONNECT parsing and policy rules are proven, but explicit proxy support still lacks a frontend boundary that converts request bytes into policy/audit plus externally observable proxy behavior.
+- Verification plan: add a `foxprox-proxy` crate with an HTTP CONNECT preflight handler, map parse failures to fail-closed unsupported audit, return `200 Connection Established` only for allowed decisions and `403 Forbidden` for denied/fail-closed decisions, serialize audit output in tests, then run formatting, clippy, focused proxy tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — HTTPS CONNECT frontend preflight → policy/audit/response
+
+- Slice attempted: explicit HTTP proxy CONNECT preflight from request bytes to policy/audit and client-visible response bytes.
+- Why next: CONNECT parser and policy support existed, but there was no frontend boundary proving proxy request bytes produce shared policy/audit output and deterministic allow/deny behavior.
+- What changed: added `crates/foxprox-proxy` with `HttpProxyPreflight`, `HttpConnectPreflight`, and `HttpProxyResponse`; CONNECT requests are parsed as `FrontendKind::HttpProxy`, allowed decisions return `HTTP/1.1 200 Connection Established`, denied decisions return `HTTP/1.1 403 Forbidden`, and malformed CONNECT requests become fail-closed unsupported audit events with a 403 response.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting; `cargo fmt` was run.
+  - `cargo test -p foxprox-proxy` passed 3 focused tests covering allowed CONNECT audit/200 response, denied CONNECT 403 response, and malformed request fail-closed/403 behavior.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 5 `foxprox-flow` tests, 18 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 3 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed after formatting.
+- What failed or surprised the agent: the policy helper names are `HostnamePattern::new(".example.com")` and `with_minimum_hostname_confidence`; the initial test used non-existent shortcut names and failed to compile.
+- What remains unproven: CONNECT tunnel establishment, host TCP egress, plaintext HTTP proxy absolute-form handling, SOCKS5 frontend response negotiation, proxy listener sockets, and backpressure in a live proxy runtime are still absent.
+- Commit: this commit.

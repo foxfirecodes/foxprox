@@ -1,0 +1,18 @@
+[package]
+name = "foxprox-proxy"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+foxprox-core = { path = "../foxprox-core" }
+foxprox-inspect = { path = "../foxprox-inspect" }
+
+[dev-dependencies]
+foxprox-audit = { path = "../foxprox-audit" }
+serde_json = { workspace = true }

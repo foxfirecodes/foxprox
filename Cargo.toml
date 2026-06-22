@@ -8,6 +8,7 @@ members = [
     "crates/foxprox-cli",
     "crates/foxprox-inspect",
     "crates/foxprox-flow",
+    "crates/foxprox-proxy",
 ]
 resolver = "2"
 

@@ -88,3 +88,7 @@ The normalized `IcmpMessage` type can still distinguish ICMPv4 from ICMPv6 by en
 ## 2026-06-21 — dispatch IP version before fail-closed parsing
 
 The broker-facing packet boundary should inspect only the first version nibble, then hand raw bytes to the appropriate packet parser. Unknown or empty input becomes an unsupported normalized event, while IPv4-only packet synthesis must remain guarded by IPv4 endpoints and ICMPv4 type numbers.
+
+## 2026-06-21 — proxy frontend preflight should fail closed before egress
+
+Explicit proxy handlers can safely prove request parsing, policy, audit, and response generation before TCP tunneling exists. Malformed proxy requests should be converted to unsupported normalized events so they produce fail-closed audit records and denial responses instead of parser-only errors.
