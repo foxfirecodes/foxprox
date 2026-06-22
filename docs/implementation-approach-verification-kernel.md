@@ -41,7 +41,7 @@ Use this verification ladder, choosing the strongest applicable level:
 * property tests for deterministic policy decisions and boundary normalization
 * fuzz targets for packet-facing, proxy-facing, DNS, TLS ClientHello, and QUIC metadata parsers when those surfaces exist
 * integration tests for Linux/TUN/network-namespace behavior when code touches those paths
-* runtime smoke commands for sandbox-visible network behavior when relevant
+* smoke commands for sandbox-visible network behavior when relevant
 
 If a stronger verification layer is not possible yet, record why in `progress.md` and add the closest executable check.
 
@@ -124,4 +124,3 @@ Stop only when one of these is true:
 * the next step requires a scope-changing, security-sensitive, hard-to-reverse, or outside-docs decision;
 * verification is impossible after reducing the issue to a minimal repro;
 * two consecutive work cycles produce no meaningful product or verification progress;
-* an explicit runtime or turn budget is reached.
