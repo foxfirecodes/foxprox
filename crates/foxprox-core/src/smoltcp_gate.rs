@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::net::Ipv4Addr;
 use std::rc::Rc;
 
-use smoltcp::iface::{Config, Interface, SocketSet};
+use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
@@ -75,10 +75,116 @@ pub fn feed_tcp_syn_to_smoltcp_listener(
     })
 }
 
+/// Stateful smoltcp TCP listener harness for environment smokes.
+///
+/// The harness keeps the smoltcp interface and TCP socket alive across multiple TUN packets, so a
+/// caller can complete a handshake, receive sandbox bytes, send response bytes, and drain outbound
+/// IP packets to write back to TUN.
+pub struct SmoltcpTcpServerHarness {
+    device: MemoryIpDevice,
+    iface: Interface,
+    sockets: SocketSet<'static>,
+    handle: SocketHandle,
+    now_millis: i64,
+}
+
+impl SmoltcpTcpServerHarness {
+    pub fn listen(listen_ip: Ipv4Addr, listen_port: u16) -> Result<Self, String> {
+        let transmitted = Rc::new(RefCell::new(Vec::new()));
+        let mut device = MemoryIpDevice {
+            rx: VecDeque::new(),
+            tx: transmitted,
+        };
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = 0x5eed_5678;
+        let timestamp = Instant::from_millis(0);
+        let mut iface = Interface::new(config, &mut device, timestamp);
+        iface.update_ip_addrs(|ip_addrs| {
+            ip_addrs
+                .push(IpCidr::new(
+                    IpAddress::v4(
+                        listen_ip.octets()[0],
+                        listen_ip.octets()[1],
+                        listen_ip.octets()[2],
+                        listen_ip.octets()[3],
+                    ),
+                    32,
+                ))
+                .expect("smoltcp IP address storage should have room for one IPv4 address");
+        });
+
+        let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 8192]);
+        let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 8192]);
+        let mut socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
+        socket
+            .listen(listen_port)
+            .map_err(|err| format!("smoltcp TCP listen failed: {err:?}"))?;
+        let mut sockets = SocketSet::new(vec![]);
+        let handle = sockets.add(socket);
+
+        Ok(Self {
+            device,
+            iface,
+            sockets,
+            handle,
+            now_millis: 0,
+        })
+    }
+
+    pub fn receive_packet(&mut self, packet: Vec<u8>) -> Result<(), String> {
+        self.device.rx.push_back(packet);
+        self.poll()
+    }
+
+    pub fn poll(&mut self) -> Result<(), String> {
+        let timestamp = Instant::from_millis(self.now_millis);
+        self.iface
+            .poll(timestamp, &mut self.device, &mut self.sockets);
+        self.now_millis += 1;
+        Ok(())
+    }
+
+    pub fn drain_emitted_packets(&mut self) -> Vec<Vec<u8>> {
+        self.device.drain_tx()
+    }
+
+    pub fn recv_available(&mut self) -> Result<Option<Vec<u8>>, String> {
+        let socket = self.sockets.get_mut::<tcp::Socket>(self.handle);
+        if !socket.can_recv() {
+            return Ok(None);
+        }
+        socket
+            .recv(|buffer| (buffer.len(), buffer.to_vec()))
+            .map(Some)
+            .map_err(|err| format!("smoltcp TCP recv failed: {err:?}"))
+    }
+
+    pub fn send_slice(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let socket = self.sockets.get_mut::<tcp::Socket>(self.handle);
+        if !socket.can_send() {
+            return Err("smoltcp TCP socket cannot send yet".to_string());
+        }
+        socket
+            .send_slice(bytes)
+            .map_err(|err| format!("smoltcp TCP send failed: {err:?}"))?;
+        self.poll()
+    }
+
+    pub fn socket_active(&mut self) -> bool {
+        self.sockets.get::<tcp::Socket>(self.handle).is_active()
+    }
+}
+
 #[derive(Debug)]
 struct MemoryIpDevice {
     rx: VecDeque<Vec<u8>>,
     tx: Rc<RefCell<Vec<Vec<u8>>>>,
+}
+
+impl MemoryIpDevice {
+    fn drain_tx(&self) -> Vec<Vec<u8>> {
+        self.tx.borrow_mut().drain(..).collect()
+    }
 }
 
 impl Device for MemoryIpDevice {

@@ -395,3 +395,27 @@
 - Interpretation: the smoltcp gate is now proven against a real sandbox SYN and real TUN write-back, closing part of the gap between deterministic stack proof and environment integration. It is still not full TCP forwarding because smoltcp state is one-shot and there is no host stream byte bridge.
 - Next verification gap: maintain smoltcp interface/socket state across ACK and data packets and bridge received sandbox bytes to a local host TCP fixture.
 - Commit hash after commit: pending.
+
+## 2026-06-22T00:50:00Z — SYN-ACK smoke commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs progress.md && git commit -m "Add smoltcp SYN-ACK TUN smoke"`
+- Environment assumptions: TCP SYN-ACK smoke and deterministic tests above were verified before commit.
+- Expected result: commit captures environment smoke that feeds a real sandbox SYN into smoltcp and writes the emitted SYN-ACK back to TUN.
+- Observed result: commit `8101a9e` created with 3 files changed.
+- Relevant output excerpt: `[harness-lab 8101a9e] Add smoltcp SYN-ACK TUN smoke`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: smoltcp handshake write-back checkpoint is preserved.
+- Next verification gap: stateful smoltcp byte bridging to a host TCP fixture.
+- Commit hash after commit: 8101a9e.
+
+## 2026-06-22T01:15:00Z — Stateful smoltcp TCP bridge smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run tcp-bridge-smoke`
+- Environment assumptions: bwrap, `/dev/net/tun`, Python, and Unix fd handoff are available; a local host TCP fixture is used instead of external network. The smoke bridges one request/response and is not yet a production multi-flow TCP runtime.
+- Expected result: tests remain green; sandbox connects to a routed TCP destination, smoltcp completes the handshake, smoltcp receives sandbox payload bytes, host egress fixture receives those bytes, fixture response is sent back through smoltcp, and sandbox validates the response.
+- Observed result: pass. `foxprox-core` ran 40 tests, `foxprox-cli` ran 2 tests, `foxproxsetup` ran 7 tests, and `tcp-bridge-smoke` emitted `decision":"allow"`, `bridged_bytes":"5"`, `response_written":"true"`, and `status":"exit status: 0"`.
+- Relevant output excerpt: `"reason":"sandbox TCP bytes were bridged through smoltcp to a host TCP fixture and back"`; `"emitted_packets":"2"`; `"packets_read":"5"`.
+- Changed files: `crates/foxprox-core/src/smoltcp_gate.rs`, `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: this is the first local Milestone 2 TCP forwarding proof over the bwrap-created, handed-off TUN fd: bytes from an unmodified sandbox TCP socket are mediated by smoltcp and bridged through a host-owned TCP socket. Remaining work is to turn the smoke path into reusable broker runtime code with policy/audit integration and multi-flow lifecycle handling.
+- Next verification gap: integrate policy/audit decisions into the smoltcp TCP bridge smoke and fail closed before host egress on a denied TCP bridge attempt.
+- Commit hash after commit: pending.

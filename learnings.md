@@ -42,3 +42,8 @@
 
 - `smoltcp` 0.13 can be driven deterministically with a custom `Device` whose capabilities use `Medium::Ip` and `HardwareAddress::Ip`. This matches TUN-shaped IP packets and avoids Ethernet/TAP assumptions in the TCP stack gate.
 - smoltcp validates TCP checksums for inbound SYN packets, so synthetic TCP fixtures need a correct IPv4 pseudo-header checksum; the earlier parser-only TCP fixtures with zero TCP checksums are not sufficient for stack-level tests.
+
+## 2026-06-22 — smoltcp bridge smoke pattern
+
+- A stateful smoltcp IP-medium interface can complete a sandbox TCP handshake from packets read on the handed-off TUN fd. After writing the SYN-ACK back, subsequent sandbox ACK/data packets can be fed into the same interface and `tcp::Socket::recv` exposes application bytes for host egress bridging.
+- For a minimal TCP forwarding proof, a local `TcpListener` fixture avoids external network dependency while still proving that broker-owned host sockets, not sandbox sockets, perform egress.

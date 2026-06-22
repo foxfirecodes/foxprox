@@ -1,4 +1,5 @@
 use std::env;
+use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
@@ -13,7 +14,7 @@ use foxprox_core::egress::{EgressBackend, EgressOutcome, EgressRequest};
 use foxprox_core::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule, RuleAction};
 use foxprox_core::runtime::{TransparentTcpRuntime, TransparentUdpRuntime};
 use foxprox_core::scenario::{run_scenario, ScenarioName};
-use foxprox_core::smoltcp_gate::feed_tcp_syn_to_smoltcp_listener;
+use foxprox_core::smoltcp_gate::{feed_tcp_syn_to_smoltcp_listener, SmoltcpTcpServerHarness};
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -51,6 +52,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("dns-attribution-smoke");
             println!("tcp-syn-smoke");
             println!("tcp-synack-smoke");
+            println!("tcp-bridge-smoke");
             Ok(())
         }
         [cmd, scenario] if cmd == "run" => run_named_scenario(scenario),
@@ -84,6 +86,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         tcp_syn_smoke_records()
     } else if scenario == "tcp-synack-smoke" {
         tcp_synack_smoke_records()
+    } else if scenario == "tcp-bridge-smoke" {
+        tcp_bridge_smoke_records()
     } else {
         run_scenario(ScenarioName::parse(scenario)?)
     };
@@ -95,7 +99,7 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke>",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke|tcp-bridge-smoke>",
         ScenarioName::list().join("|")
     );
 }
@@ -1713,6 +1717,255 @@ fn run_tcp_synack_smoke() -> Result<AuditRecord, String> {
     .with_metadata("packets_read", packets_read.to_string())
     .with_metadata("emitted_packets", emitted_packets.to_string())
     .with_metadata("syn_ack_written", syn_ack_written.to_string());
+    if !stdout.is_empty() {
+        record = record.with_metadata("stdout", stdout);
+    }
+    if !stderr.is_empty() {
+        record = record.with_metadata("stderr", stderr);
+    }
+    Ok(record)
+}
+
+#[cfg(unix)]
+fn tcp_bridge_smoke_records() -> Vec<AuditRecord> {
+    match run_tcp_bridge_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::TcpFlowClosed,
+            "tcp-bridge-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::Harness)
+        .with_protocol(Protocol::Tcp)],
+    }
+}
+
+#[cfg(not(unix))]
+fn tcp_bridge_smoke_records() -> Vec<AuditRecord> {
+    vec![AuditRecord::new(
+        EventKind::TcpFlowClosed,
+        "tcp-bridge-smoke",
+        Decision::FailClosed,
+        "TCP bridge smoke is only supported on Unix",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Tcp)]
+}
+
+#[cfg(unix)]
+fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
+    let echo = TcpListener::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind TCP bridge echo fixture: {err}"))?;
+    let echo_addr = echo
+        .local_addr()
+        .map_err(|err| format!("failed to inspect TCP bridge echo fixture: {err}"))?;
+    echo.set_nonblocking(true)
+        .map_err(|err| format!("failed to make TCP bridge fixture nonblocking: {err}"))?;
+    let echo_thread = std::thread::spawn(move || -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match echo.accept() {
+                Ok((mut stream, _peer)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .map_err(|err| format!("failed to set TCP fixture read timeout: {err}"))?;
+                    let mut buf = [0_u8; 1024];
+                    let n = stream.read(&mut buf).map_err(|err| {
+                        format!("TCP fixture failed to read bridged bytes: {err}")
+                    })?;
+                    if n == 0 {
+                        return Err("TCP fixture received empty stream".to_string());
+                    }
+                    let mut reply = b"egress:".to_vec();
+                    reply.extend_from_slice(&buf[..n]);
+                    stream
+                        .write_all(&reply)
+                        .map_err(|err| format!("TCP fixture failed to write reply: {err}"))?;
+                    return Ok(());
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(err) => return Err(format!("TCP bridge fixture accept failed: {err}")),
+            }
+            if Instant::now() >= deadline {
+                return Err(
+                    "TCP bridge fixture did not receive a host egress connection".to_string(),
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+
+    let helper = setup_helper_path()?;
+    let target_dir = helper
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| {
+            format!(
+                "could not derive target directory from {}",
+                helper.display()
+            )
+        })?
+        .to_path_buf();
+    let socket_dir = target_dir.join(format!("fxbrg-{}", std::process::id()));
+    let socket_path = socket_dir.join("s");
+    let _ = std::fs::remove_file(&socket_path);
+    std::fs::create_dir_all(&socket_dir)
+        .map_err(|err| format!("failed to create TCP bridge smoke socket dir: {err}"))?;
+    let handoff_listener = UnixListener::bind(&socket_path)
+        .map_err(|err| format!("failed to bind TCP bridge smoke handoff socket: {err}"))?;
+    handoff_listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make TCP bridge handoff listener nonblocking: {err}"))?;
+
+    let mut child = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--ro-bind",
+        ])
+        .arg(&target_dir)
+        .arg(&target_dir)
+        .args(["--bind"])
+        .arg(&socket_dir)
+        .arg(&socket_dir)
+        .args(["--proc", "/proc", "--"])
+        .env("FOXPROX_SETUP_SOCKET", &socket_path)
+        .arg(&helper)
+        .args([
+            "--",
+            "/usr/bin/python3",
+            "-c",
+            "import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.settimeout(5); s.connect(('203.0.113.22',8082)); s.sendall(b'probe'); data=s.recv(64); s.close(); sys.exit(0 if data==b'egress:probe' else 4)",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn bwrap TCP bridge smoke: {err}"))?;
+
+    let fd = accept_handoff_fd(&handoff_listener, &mut child, Duration::from_secs(10))?;
+    fd_handoff::set_nonblocking(fd)?;
+    let mut stack = SmoltcpTcpServerHarness::listen("203.0.113.22".parse().unwrap(), 8082)?;
+    let mut buf = [0_u8; 4096];
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut packets_read = 0_u64;
+    let mut emitted_packets = 0_u64;
+    let mut bridged_bytes = 0_usize;
+    let mut response_written = false;
+    while Instant::now() < deadline {
+        match fd_handoff::read_fd(fd, &mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                packets_read += 1;
+                stack.receive_packet(buf[..n].to_vec())?;
+                for emitted in stack.drain_emitted_packets() {
+                    emitted_packets += 1;
+                    fd_handoff::write_all_fd(fd, &emitted)?;
+                }
+                if let Some(data) = stack.recv_available()? {
+                    if !data.is_empty() && !response_written {
+                        bridged_bytes = data.len();
+                        let mut stream =
+                            TcpStream::connect_timeout(&echo_addr, Duration::from_secs(2))
+                                .map_err(|err| {
+                                    format!("TCP bridge host egress connect failed: {err}")
+                                })?;
+                        stream
+                            .write_all(&data)
+                            .map_err(|err| format!("TCP bridge host egress write failed: {err}"))?;
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(2)))
+                            .map_err(|err| {
+                                format!("TCP bridge host egress timeout setup failed: {err}")
+                            })?;
+                        let mut reply = [0_u8; 1024];
+                        let reply_len = stream
+                            .read(&mut reply)
+                            .map_err(|err| format!("TCP bridge host egress read failed: {err}"))?;
+                        stack.send_slice(&reply[..reply_len])?;
+                        for emitted in stack.drain_emitted_packets() {
+                            emitted_packets += 1;
+                            fd_handoff::write_all_fd(fd, &emitted)?;
+                        }
+                        response_written = true;
+                    }
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to read TUN fd during TCP bridge smoke: {err}"
+                ))
+            }
+        }
+        stack.poll()?;
+        for emitted in stack.drain_emitted_packets() {
+            emitted_packets += 1;
+            fd_handoff::write_all_fd(fd, &emitted)?;
+        }
+        if child
+            .try_wait()
+            .map_err(|err| format!("failed to poll bwrap TCP bridge smoke: {err}"))?
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for bwrap TCP bridge smoke: {err}"))?;
+    fd_handoff::close_fd(fd);
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir(&socket_dir);
+    let echo_result = echo_thread
+        .join()
+        .map_err(|_| "TCP bridge echo fixture thread panicked".to_string())?;
+    echo_result?;
+    let success = output.status.success() && response_written && bridged_bytes == b"probe".len();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut record = AuditRecord::new(
+        EventKind::TcpFlowClosed,
+        "tcp-bridge-smoke",
+        if success {
+            Decision::Allow
+        } else {
+            Decision::FailClosed
+        },
+        if success {
+            "sandbox TCP bytes were bridged through smoltcp to a host TCP fixture and back"
+        } else {
+            "TCP bridge smoke failed before sandbox received the host fixture response"
+        },
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Tcp)
+    .with_metadata("status", output.status.to_string())
+    .with_metadata("packets_read", packets_read.to_string())
+    .with_metadata("emitted_packets", emitted_packets.to_string())
+    .with_metadata("bridged_bytes", bridged_bytes.to_string())
+    .with_metadata("response_written", response_written.to_string())
+    .with_metadata("egress_fixture", echo_addr.to_string());
     if !stdout.is_empty() {
         record = record.with_metadata("stdout", stdout);
     }
