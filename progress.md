@@ -979,3 +979,27 @@
   - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated in adapter crate.
 - Commit hash after commit: bfa7515.
 - Remaining boundary risks: host-to-sandbox packet injection, partial-write/backpressure semantics, async stream readiness, and bridge cleanup on real close remain.
+
+## 2026-06-22 — Boundary objective: host-to-sandbox TCP write-back contract
+
+- Boundary under work: runtime path for reading host egress TCP bytes and injecting them back into the stack adapter as opaque outbound packets for the device.
+- Allowed dependency direction: runtime reads only `HostTcpStream` handles from its bridge table and calls a stack-neutral adapter write method; smoltcp packetization remains inside `foxprox-smoltcp`; policy/audit remain normalized-event only.
+- Dependency-risk assessment: sandbox-to-host writes are now proven, but alpha TCP forwarding also needs return bytes. The fragile boundary is preventing runtime from learning smoltcp socket APIs or raw TCP packet synthesis; adapter-owned `StackTcpWrite` should express only normalized flow key plus payload bytes.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/net/smoltcp/audit.
+- Observed results: added `StackTcpWrite` and a default stack-adapter TCP write-back method, implemented runtime `flush_tcp_bridge_reads_to_stack_device` to read bridged `HostTcpStream` bytes, enqueue them into the adapter, and write resulting opaque packets to the device. Implemented smoltcp write-back by sending bytes through private TCP sockets and polling outbound packets. Added runtime and smoltcp tests proving host bytes become adapter writes and smoltcp emits an opaque packet containing return payload. All verification passed.
+- Changed files:
+  - `crates/foxprox-net/src/lib.rs`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `crates/foxprox-smoltcp/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 97 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime depends on contracts, not smoltcp.
+  - `cargo tree -p foxprox-net` — stack write-back contract stays normalized.
+  - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated in adapter crate.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: partial-write/backpressure policy, async readiness, FIN/RST lifecycle, and real continuous loop scheduling remain.

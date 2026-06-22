@@ -228,3 +228,8 @@
 
 - Retain host TCP streams only in runtime bridge state keyed by normalized sandbox/frontend/source/destination data; do not let smoltcp socket handles or `std::net::TcpStream` details enter policy/audit contracts.
 - Exposing the egress outcome from normalized-event handling avoids re-running policy or opening a second host socket just to keep the stream handle for later payload writes.
+
+## 2026-06-22 — host-to-sandbox TCP write-back
+
+- Return traffic should cross runtime as host-stream bytes plus a normalized stack write request; only the stack adapter should turn those bytes into TCP/IP packets.
+- A separate bridge flush step avoids making the packet-ingest path perform potentially blocking stream reads while still proving the host-to-sandbox forwarding boundary.

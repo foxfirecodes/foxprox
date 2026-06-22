@@ -26,6 +26,14 @@ use foxprox_policy::PolicyEngine;
 /// stack, but must emit only normalized events and opaque outbound packets.
 pub trait StackAdapter {
     fn ingest_ip_packet(&mut self, packet: &[u8]) -> Result<Vec<StackEvent>, StackError>;
+
+    fn send_tcp_data_to_sandbox(&mut self, data: &StackTcpWrite) -> Result<usize, StackError> {
+        let _ = data;
+        Err(StackError::Adapter(
+            "stack adapter does not support TCP write-back".into(),
+        ))
+    }
+
     fn poll_outbound_packets(&mut self) -> Result<Vec<OutboundIpPacket>, StackError>;
 }
 
@@ -42,6 +50,18 @@ pub enum StackEvent {
 /// inside the adapter.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StackTcpData {
+    pub sandbox_id: SandboxId,
+    pub frontend: FrontendKind,
+    pub source: SocketAddr,
+    pub destination: SocketAddr,
+    pub bytes: Vec<u8>,
+}
+
+/// Normalized TCP stream bytes to inject into an adapter-managed sandbox flow.
+/// The source/destination identify the original sandbox flow key; TCP packet
+/// synthesis and socket buffering remain stack-adapter private.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StackTcpWrite {
     pub sandbox_id: SandboxId,
     pub frontend: FrontendKind,
     pub source: SocketAddr,

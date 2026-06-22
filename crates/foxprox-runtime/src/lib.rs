@@ -14,7 +14,7 @@ use foxprox_egress::{EgressError, EgressOutcome, HostEgress, HostTcpStream};
 use foxprox_net::{
     handle_ipv4_packet, handle_normalized_event_with_egress, BrokerError, BrokerEventOutcome,
     FlowProtocol, InboundIpv4Packet, OutboundIpPacket, PacketBrokerOutcome, StackAdapter,
-    StackEvent, StackTcpData,
+    StackEvent, StackTcpData, StackTcpWrite,
 };
 use foxprox_policy::PolicyEngine;
 
@@ -156,6 +156,69 @@ where
         };
         stream.write_from_sandbox(&event.bytes).map(Some)
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StackBridgeReadOutcome {
+    pub tcp_streams_read: usize,
+    pub tcp_bytes_read_from_egress: usize,
+    pub tcp_bytes_enqueued_to_stack: usize,
+    pub outbound_packets_written: usize,
+}
+
+/// Read pending host-side bytes from bridged TCP streams, enqueue them into the
+/// stack adapter, and write adapter-produced opaque packets to the device.
+pub fn flush_tcp_bridge_reads_to_stack_device<D, S, T>(
+    device: &mut D,
+    adapter: &mut S,
+    bridges: &mut StackTcpBridgeTable<T>,
+    max_bytes_per_stream: usize,
+) -> Result<StackBridgeReadOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    S: StackAdapter,
+    T: HostTcpStream,
+{
+    let mut reads = Vec::new();
+    for (key, stream) in &mut bridges.streams {
+        let bytes = stream
+            .read_to_sandbox(max_bytes_per_stream)
+            .map_err(BrokerError::Egress)
+            .map_err(RuntimeError::Broker)?;
+        if !bytes.is_empty() {
+            reads.push((key.clone(), bytes));
+        }
+    }
+
+    let tcp_streams_read = reads.len();
+    let mut tcp_bytes_read_from_egress = 0;
+    let mut tcp_bytes_enqueued_to_stack = 0;
+    for (key, bytes) in reads {
+        tcp_bytes_read_from_egress += bytes.len();
+        let write = StackTcpWrite {
+            sandbox_id: key.sandbox_id,
+            frontend: key.frontend,
+            source: key.source,
+            destination: key.destination,
+            bytes,
+        };
+        tcp_bytes_enqueued_to_stack += adapter
+            .send_tcp_data_to_sandbox(&write)
+            .map_err(RuntimeError::Stack)?;
+    }
+
+    let outbound_packets = adapter
+        .poll_outbound_packets()
+        .map_err(RuntimeError::Stack)?;
+    let outbound_packets_written = outbound_packets.len();
+    write_outbound_packets(device, &outbound_packets)?;
+
+    Ok(StackBridgeReadOutcome {
+        tcp_streams_read,
+        tcp_bytes_read_from_egress,
+        tcp_bytes_enqueued_to_stack,
+        outbound_packets_written,
+    })
 }
 
 /// Context for processing one packet through a stack adapter.
@@ -539,6 +602,41 @@ mod tests {
         assert_eq!(audit.records().len(), 1);
     }
 
+    #[test]
+    fn bridge_reads_host_bytes_into_stack_adapter_and_writes_device_packets() {
+        let cursor = Cursor::new(Vec::new());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let key = StackTcpFlowKey::new(
+            SandboxId::new("s1").unwrap(),
+            FrontendKind::Tun,
+            "10.0.0.2:49152".parse().unwrap(),
+            "203.0.113.10:80".parse().unwrap(),
+        );
+        let mut bridges = StackTcpBridgeTable::default();
+        bridges.insert(
+            key.clone(),
+            ReadableTcpStream::new(vec![b"world".to_vec()].into()),
+        );
+        let mut adapter = ReadBackStackAdapter {
+            writes: Vec::new(),
+            outbound: vec![OutboundIpPacket::new(vec![0x45, 0, 0, 20]).unwrap()],
+        };
+
+        let outcome =
+            flush_tcp_bridge_reads_to_stack_device(&mut device, &mut adapter, &mut bridges, 1024)
+                .unwrap();
+
+        assert_eq!(outcome.tcp_streams_read, 1);
+        assert_eq!(outcome.tcp_bytes_read_from_egress, 5);
+        assert_eq!(outcome.tcp_bytes_enqueued_to_stack, 5);
+        assert_eq!(outcome.outbound_packets_written, 1);
+        assert_eq!(adapter.writes.len(), 1);
+        assert_eq!(adapter.writes[0].source, key.source);
+        assert_eq!(adapter.writes[0].destination, key.destination);
+        assert_eq!(adapter.writes[0].bytes, b"world");
+        assert_eq!(device.into_inner().into_inner(), vec![0x45, 0, 0, 20]);
+    }
+
     struct FlowClosedStackAdapter;
 
     impl StackAdapter for FlowClosedStackAdapter {
@@ -682,6 +780,50 @@ mod tests {
 
         fn read_to_sandbox(&mut self, _max_bytes: usize) -> Result<Vec<u8>, EgressError> {
             Ok(Vec::new())
+        }
+    }
+
+    struct ReadableTcpStream {
+        reads: std::collections::VecDeque<Vec<u8>>,
+    }
+
+    impl ReadableTcpStream {
+        fn new(reads: std::collections::VecDeque<Vec<u8>>) -> Self {
+            Self { reads }
+        }
+    }
+
+    impl HostTcpStream for ReadableTcpStream {
+        fn write_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
+            Ok(bytes.len())
+        }
+
+        fn read_to_sandbox(&mut self, max_bytes: usize) -> Result<Vec<u8>, EgressError> {
+            let Some(mut bytes) = self.reads.pop_front() else {
+                return Ok(Vec::new());
+            };
+            bytes.truncate(max_bytes);
+            Ok(bytes)
+        }
+    }
+
+    struct ReadBackStackAdapter {
+        writes: Vec<StackTcpWrite>,
+        outbound: Vec<OutboundIpPacket>,
+    }
+
+    impl StackAdapter for ReadBackStackAdapter {
+        fn ingest_ip_packet(&mut self, _packet: &[u8]) -> Result<Vec<StackEvent>, StackError> {
+            Ok(Vec::new())
+        }
+
+        fn send_tcp_data_to_sandbox(&mut self, data: &StackTcpWrite) -> Result<usize, StackError> {
+            self.writes.push(data.clone());
+            Ok(data.bytes.len())
+        }
+
+        fn poll_outbound_packets(&mut self) -> Result<Vec<OutboundIpPacket>, StackError> {
+            Ok(std::mem::take(&mut self.outbound))
         }
     }
 
