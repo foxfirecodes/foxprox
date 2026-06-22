@@ -12,13 +12,15 @@ use std::{
 };
 
 use foxprox_audit::{AuditRecord, AuditSink, FlowClosedAudit};
-use foxprox_core::{FrontendKind, NormalizedEvent, Protocol, SandboxId, TcpConnectAttempt};
+use foxprox_core::{
+    FrontendKind, NormalizedEvent, Protocol, SandboxId, TcpConnectAttempt, UdpFlowAttempt,
+};
 use foxprox_device::{DeviceError, DevicePacket, PacketDevice};
-use foxprox_egress::{EgressError, EgressOutcome, HostEgress, HostTcpStream};
+use foxprox_egress::{EgressError, EgressOutcome, HostEgress, HostTcpStream, HostUdpFlow};
 use foxprox_net::{
-    handle_ipv4_packet, handle_normalized_event_with_egress, BrokerError, BrokerEventOutcome,
-    FlowProtocol, InboundIpv4Packet, OutboundIpPacket, PacketBrokerOutcome, StackAdapter,
-    StackEvent, StackTcpData, StackTcpWrite,
+    handle_ipv4_packet, handle_ipv4_packet_with_egress, handle_normalized_event_with_egress,
+    BrokerError, BrokerEventOutcome, FlowProtocol, InboundIpv4Packet, OutboundIpPacket,
+    PacketBrokerOutcome, StackAdapter, StackEvent, StackTcpData, StackTcpWrite,
 };
 use foxprox_policy::PolicyEngine;
 
@@ -64,6 +66,116 @@ where
     write_outbound_packets(device, &outcome.outbound_packets)?;
 
     Ok(outcome)
+}
+
+/// Normalized key for a UDP pseudo-flow bridged to a host egress UDP handle.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct UdpFlowKey {
+    pub sandbox_id: SandboxId,
+    pub frontend: FrontendKind,
+    pub source: SocketAddr,
+    pub destination: SocketAddr,
+}
+
+impl UdpFlowKey {
+    pub fn from_attempt(event: &UdpFlowAttempt) -> Self {
+        Self {
+            sandbox_id: event.sandbox_id.clone(),
+            frontend: event.frontend,
+            source: event.source,
+            destination: event.destination,
+        }
+    }
+}
+
+/// Runtime-owned UDP flow table. It stores only egress-owned UDP handles behind
+/// the shared `HostUdpFlow` contract.
+pub struct UdpBridgeTable<U> {
+    flows: HashMap<UdpFlowKey, U>,
+}
+
+impl<U> Default for UdpBridgeTable<U> {
+    fn default() -> Self {
+        Self {
+            flows: HashMap::new(),
+        }
+    }
+}
+
+impl<U> UdpBridgeTable<U> {
+    pub fn len(&self) -> usize {
+        self.flows.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.flows.is_empty()
+    }
+
+    pub fn contains_key(&self, key: &UdpFlowKey) -> bool {
+        self.flows.contains_key(key)
+    }
+
+    pub fn insert(&mut self, key: UdpFlowKey, flow: U) -> Option<U> {
+        self.flows.insert(key, flow)
+    }
+
+    pub fn remove(&mut self, key: &UdpFlowKey) -> Option<U> {
+        self.flows.remove(key)
+    }
+}
+
+/// Context for processing one IPv4 packet while retaining UDP egress handles.
+pub struct DevicePacketStepWithUdp<'a, E, A>
+where
+    E: HostEgress,
+{
+    pub sandbox_id: &'a SandboxId,
+    pub frontend: FrontendKind,
+    pub policy: &'a PolicyEngine,
+    pub egress: &'a mut E,
+    pub audit: &'a mut A,
+    pub udp_bridges: &'a mut UdpBridgeTable<E::UdpHandle>,
+    pub sequence: u64,
+    pub timestamp_millis: u64,
+}
+
+/// Process one IPv4 packet and retain any opened UDP flow handle for later
+/// response routing.
+pub fn process_one_ipv4_device_packet_with_udp_bridges<D, E, A>(
+    device: &mut D,
+    ctx: DevicePacketStepWithUdp<'_, E, A>,
+) -> Result<PacketBrokerOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    E: HostEgress,
+    E::UdpHandle: HostUdpFlow,
+    A: AuditSink,
+{
+    let packet = device.read_packet().map_err(RuntimeError::Device)?;
+    let mut result = handle_ipv4_packet_with_egress(
+        InboundIpv4Packet {
+            sandbox_id: ctx.sandbox_id,
+            frontend: ctx.frontend,
+            bytes: packet.bytes(),
+        },
+        ctx.policy,
+        ctx.egress,
+        ctx.audit,
+        ctx.sequence,
+        ctx.timestamp_millis,
+    )
+    .map_err(RuntimeError::Broker)?;
+
+    if let (NormalizedEvent::UdpFlowAttempt(event), Some(EgressOutcome::UdpOpened(flow))) =
+        (&result.event, result.egress_outcome.take())
+    {
+        ctx.udp_bridges
+            .insert(UdpFlowKey::from_attempt(event), flow);
+    }
+
+    write_outbound_packets(device, &result.outbound_packets)?;
+
+    Ok(result.into_outcome())
 }
 
 /// Normalized key for a stack TCP flow bridged to a host egress stream.
@@ -576,6 +688,46 @@ mod tests {
     }
 
     #[test]
+    fn one_step_ipv4_runtime_retains_allowed_udp_bridge() {
+        let inbound = udp_packet(53000, 12345, b"ping");
+        let cursor = Cursor::new(inbound);
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
+        let writes = Rc::new(RefCell::new(Vec::new()));
+        let mut egress = RecordingUdpEgress::new(Rc::clone(&writes));
+        let mut audit = BoundedAuditSink::new(4);
+        let mut udp_bridges = UdpBridgeTable::default();
+        let sandbox_id = SandboxId::new("s1").unwrap();
+
+        let outcome = process_one_ipv4_device_packet_with_udp_bridges(
+            &mut device,
+            DevicePacketStepWithUdp {
+                sandbox_id: &sandbox_id,
+                frontend: FrontendKind::Tun,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                udp_bridges: &mut udp_bridges,
+                sequence: 2,
+                timestamp_millis: 2000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.outcome, BrokerEventOutcome::Forwarded);
+        assert_eq!(outcome.udp_bytes_sent, 4);
+        assert_eq!(udp_bridges.len(), 1);
+        assert!(udp_bridges.contains_key(&UdpFlowKey {
+            sandbox_id,
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:53000".parse().unwrap(),
+            destination: "10.0.0.1:12345".parse().unwrap(),
+        }));
+        assert_eq!(writes.borrow().as_slice(), &[b"ping".to_vec()]);
+        assert_eq!(audit.records().len(), 1);
+    }
+
+    #[test]
     fn one_step_runtime_records_stack_flow_close_audit() {
         let inbound = vec![0x45, 0, 0, 20];
         let cursor = Cursor::new(inbound);
@@ -952,6 +1104,72 @@ mod tests {
         }
     }
 
+    struct RecordingUdpEgress {
+        writes: Rc<RefCell<Vec<Vec<u8>>>>,
+    }
+
+    impl RecordingUdpEgress {
+        fn new(writes: Rc<RefCell<Vec<Vec<u8>>>>) -> Self {
+            Self { writes }
+        }
+    }
+
+    impl HostEgress for RecordingUdpEgress {
+        type TcpStream = MockTcpStream;
+        type UdpHandle = RecordingUdpFlow;
+        type HttpResponse = MockHttpResponse;
+
+        fn connect_tcp(
+            &mut self,
+            _event: &TcpConnectAttempt,
+        ) -> Result<Self::TcpStream, EgressError> {
+            Err(EgressError::UnsupportedAllowedEvent)
+        }
+
+        fn open_udp_flow(
+            &mut self,
+            _event: &UdpFlowAttempt,
+        ) -> Result<Self::UdpHandle, EgressError> {
+            Ok(RecordingUdpFlow {
+                writes: Rc::clone(&self.writes),
+            })
+        }
+
+        fn proxy_http_request(
+            &mut self,
+            _event: &HttpRequest,
+        ) -> Result<Self::HttpResponse, EgressError> {
+            Err(EgressError::UnsupportedAllowedEvent)
+        }
+
+        fn proxy_connect(&mut self, _event: &HttpsConnect) -> Result<Self::TcpStream, EgressError> {
+            Err(EgressError::UnsupportedAllowedEvent)
+        }
+
+        fn socks_connect(&mut self, _event: &SocksConnect) -> Result<Self::TcpStream, EgressError> {
+            Err(EgressError::UnsupportedAllowedEvent)
+        }
+
+        fn resolve_dns(&mut self, _event: &DnsQuery) -> Result<Vec<SocketAddr>, EgressError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct RecordingUdpFlow {
+        writes: Rc<RefCell<Vec<Vec<u8>>>>,
+    }
+
+    impl HostUdpFlow for RecordingUdpFlow {
+        fn send_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
+            self.writes.borrow_mut().push(bytes.to_vec());
+            Ok(bytes.len())
+        }
+
+        fn recv_to_sandbox(&mut self, _max_bytes: usize) -> Result<Vec<u8>, EgressError> {
+            Ok(Vec::new())
+        }
+    }
+
     struct RecordingEgress {
         tcp_connects: Vec<TcpConnectAttempt>,
         writes: Rc<RefCell<Vec<Vec<u8>>>>,
@@ -1092,6 +1310,25 @@ mod tests {
             destination: "203.0.113.10:80".parse().unwrap(),
             hostname: None,
         }
+    }
+
+    fn udp_packet(source_port: u16, destination_port: u16, payload: &[u8]) -> Vec<u8> {
+        let total_len = 28 + payload.len();
+        let udp_len = 8 + payload.len();
+        let mut packet = vec![0_u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[10, 0, 0, 2]);
+        packet[16..20].copy_from_slice(&[10, 0, 0, 1]);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[28..].copy_from_slice(payload);
+        let ip_checksum = foxprox_packet::internet_checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+        packet
     }
 
     fn echo_request_packet() -> Vec<u8> {

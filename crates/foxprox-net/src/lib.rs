@@ -394,6 +394,29 @@ pub struct PacketBrokerOutcome {
     pub outbound_packets: Vec<OutboundIpPacket>,
 }
 
+/// Packet handling result that also preserves any egress handle opened while
+/// processing the normalized event, for runtime flow bridge retention.
+pub struct PacketBrokerResult<E: HostEgress> {
+    pub event: NormalizedEvent,
+    pub decision: PolicyDecision,
+    pub outcome: BrokerEventOutcome,
+    pub udp_bytes_sent: usize,
+    pub outbound_packets: Vec<OutboundIpPacket>,
+    pub egress_outcome: Option<DispatchOutcome<E>>,
+}
+
+impl<E: HostEgress> PacketBrokerResult<E> {
+    pub fn into_outcome(self) -> PacketBrokerOutcome {
+        PacketBrokerOutcome {
+            event: self.event,
+            decision: self.decision,
+            outcome: self.outcome,
+            udp_bytes_sent: self.udp_bytes_sent,
+            outbound_packets: self.outbound_packets,
+        }
+    }
+}
+
 /// Normalize one inbound IPv4 packet, run policy/audit/egress, and return any
 /// opaque packets that should be written back to the device frontend.
 ///
@@ -412,8 +435,26 @@ where
     E: HostEgress,
     A: AuditSink,
 {
+    handle_ipv4_packet_with_egress(packet, policy, egress, audit, sequence, timestamp_millis)
+        .map(PacketBrokerResult::into_outcome)
+}
+
+/// Normalize one inbound IPv4 packet, run policy/audit/egress, and preserve any
+/// egress handle opened for runtime bridge retention.
+pub fn handle_ipv4_packet_with_egress<E, A>(
+    packet: InboundIpv4Packet<'_>,
+    policy: &PolicyEngine,
+    egress: &mut E,
+    audit: &mut A,
+    sequence: u64,
+    timestamp_millis: u64,
+) -> Result<PacketBrokerResult<E>, BrokerError>
+where
+    E: HostEgress,
+    A: AuditSink,
+{
     let inspection = inspect_ipv4_packet(packet.sandbox_id.clone(), packet.frontend, packet.bytes);
-    let evaluated = handle_normalized_event_with_decision(
+    let mut evaluated = handle_normalized_event_with_decision(
         &inspection.event,
         policy,
         egress,
@@ -425,12 +466,14 @@ where
     let mut udp_bytes_sent = 0;
 
     if evaluated.decision.is_allowed() {
-        if let (Some(payload), Some(EgressOutcome::UdpOpened(mut udp))) =
-            (&inspection.udp_payload, evaluated.egress_outcome)
+        if let (Some(payload), Some(EgressOutcome::UdpOpened(udp))) =
+            (&inspection.udp_payload, evaluated.egress_outcome.take())
         {
+            let mut udp = udp;
             udp_bytes_sent = udp
                 .send_from_sandbox(payload)
                 .map_err(BrokerError::Egress)?;
+            evaluated.egress_outcome = Some(EgressOutcome::UdpOpened(udp));
         }
         if let Some(reply) = inspection.synthetic_reply {
             outbound_packets
@@ -443,12 +486,13 @@ where
             .push(OutboundIpPacket::new(reply.bytes().to_vec()).map_err(BrokerError::Stack)?);
     }
 
-    Ok(PacketBrokerOutcome {
+    Ok(PacketBrokerResult {
         event: inspection.event,
         decision: evaluated.decision,
         outcome: evaluated.outcome,
         udp_bytes_sent,
         outbound_packets,
+        egress_outcome: evaluated.egress_outcome,
     })
 }
 

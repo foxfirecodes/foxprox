@@ -1130,3 +1130,26 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 0f23f9b.
 - Remaining boundary risks: UDP response packet synthesis, UDP flow table handle retention, ICMP errors, and backpressure/rate limits remain.
+
+## 2026-06-22 — Boundary objective: runtime UDP flow bridge retention
+
+- Boundary under work: retain shared egress UDP flow handles after allowed packet forwarding so later host replies can be routed back to the sandbox.
+- Allowed dependency direction: net orchestration may return an egress-owned UDP handle to runtime; runtime stores it by normalized sandbox/frontend/source/destination key; policy/audit continue to consume only `UdpFlowAttempt`; packet payload bytes stay opaque to policy/audit.
+- Dependency-risk assessment: minimal UDP send forwarding currently opens a host UDP handle and drops it, preventing response routing and idle lifecycle management. The smallest next contract is returning the opened handle after payload send without exposing socket types outside egress/runtime generics.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for net/runtime/egress/audit.
+- Observed results: added `PacketBrokerResult` and `handle_ipv4_packet_with_egress` so net orchestration can preserve opened egress handles after packet policy handling. Runtime now has normalized `UdpFlowKey`, `UdpBridgeTable`, and `process_one_ipv4_device_packet_with_udp_bridges` that sends the initial allowed UDP payload through shared egress and retains the resulting `HostUdpFlow` handle. Added a runtime test proving an allowed UDP packet writes `ping` and stores one normalized UDP bridge. All verification passed.
+- Changed files:
+  - `crates/foxprox-net/src/lib.rs`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 103 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-net` — packet-to-egress handle preservation stays in orchestration.
+  - `cargo tree -p foxprox-runtime` — UDP bridge retention is runtime-owned.
+  - `cargo tree -p foxprox-egress` — UDP socket IO remains behind egress.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: UDP response packet synthesis, idle expiry, per-flow limits, ICMP errors, and rate limiting remain.

@@ -263,3 +263,8 @@
 
 - UDP payload bytes can cross from packet parsing to net orchestration as opaque forwarding data while policy/audit still receive only normalized `UdpFlowAttempt` metadata.
 - Host UDP socket behavior should mirror TCP stream readiness: egress owns nonblocking sockets and normalizes `WouldBlock` to zero progress behind `HostUdpFlow`.
+
+## 2026-06-22 — UDP bridge retention
+
+- UDP response routing needs runtime to retain the exact `HostUdpFlow` handle opened by shared egress after the initial allowed payload send; dropping it prevents later sandbox reply synthesis.
+- Preserve packet-policy boundaries by returning the egress handle from net orchestration while policy/audit continue seeing only normalized `UdpFlowAttempt` data.
