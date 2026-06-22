@@ -108,3 +108,7 @@ Host egress can be verified without external network dependencies by binding a l
 ## 2026-06-21 — keep CONNECT target available outside audit records
 
 Audit records are not a replacement for frontend control state. HTTP CONNECT egress establishment needs the parsed host/port target alongside the policy evaluation because host-only CONNECT events do not produce an IP endpoint in audit output.
+
+## 2026-06-21 — SOCKS IP-form requests make deterministic egress tests
+
+When testing SOCKS5-to-egress integration, use IPv4 address-form CONNECT requests to loopback. The parsed event yields a direct IP target and avoids DNS resolution variability while still exercising the shared egress boundary.

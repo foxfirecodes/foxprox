@@ -592,3 +592,24 @@
 - What failed or surprised the agent: no failures; the preflight had to retain the parsed CONNECT target separately because audit records intentionally do not include host-only destination ports as endpoints.
 - What remains unproven: full bidirectional tunnel pumping after sending the 200 response, plaintext HTTP proxy forwarding, SOCKS5 egress integration, TCP flow close/byte-count audit, async resource limits, and TUN TCP forwarding are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — SOCKS5 CONNECT preflight → host TCP egress slice
+
+- Slice attempted: connect an allowed SOCKS5 CONNECT preflight to the shared host TCP egress backend.
+- Why next: HTTPS CONNECT now reaches shared egress, but SOCKS5 TCP CONNECT still stops at policy/response preflight; alpha requires SOCKS TCP destinations to use the same host egress layer.
+- Verification plan: add SOCKS5 tunnel establishment that opens egress only after allow decisions, returns ruleset-denied without egress on policy denial, returns general failure on egress errors, verify loopback byte exchange through the returned connection, then run focused proxy tests plus formatting, clippy, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — SOCKS5 CONNECT preflight → host TCP egress
+
+- Slice attempted: establish host TCP egress after an allowed SOCKS5 CONNECT preflight.
+- Why next: HTTPS CONNECT used shared egress, but SOCKS5 CONNECT still stopped before opening host sockets.
+- What changed: added `Socks5ConnectTunnel` and `Socks5Preflight::establish_connect_tunnel`; allowed SOCKS5 CONNECT requests open host TCP egress, policy denials do not call egress and retain ruleset-denied response code, and egress failures return SOCKS5 general failure with retained diagnostics. Shared target extraction now supports HTTPS CONNECT and SOCKS domain/IP forms.
+- Verification:
+  - Focused checks passed: `cargo test -p foxprox-proxy socks5_tunnel` ran 3 tests proving allowed SOCKS5 CONNECT opens loopback egress and exchanges bytes, denied SOCKS5 does not call egress, and allowed preflight plus failed egress returns general failure.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 3 `foxprox-egress` tests, 5 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 15 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed.
+- What failed or surprised the agent: no failures; SOCKS IP-form requests are useful for deterministic loopback egress tests because the parsed event can produce an IP target without DNS resolution.
+- What remains unproven: SOCKS5 greeting negotiation, full bidirectional stream pumping, plaintext HTTP proxy forwarding, UDP egress/DNS upstream forwarding, TCP close/byte-count audit, and TUN TCP forwarding are still absent.
+- Commit: this commit.

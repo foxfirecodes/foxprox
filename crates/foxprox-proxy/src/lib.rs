@@ -70,6 +70,14 @@ pub struct Socks5ConnectPreflight {
     pub response: Socks5Response,
 }
 
+/// Result of attempting to establish an allowed SOCKS5 CONNECT via host egress.
+#[derive(Debug)]
+pub struct Socks5ConnectTunnel {
+    pub preflight: Socks5ConnectPreflight,
+    pub connection: Option<TcpEgressConnection>,
+    pub egress_error: Option<EgressError>,
+}
+
 /// Client-visible SOCKS5 response bytes for the preflight decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Socks5Response {
@@ -248,8 +256,64 @@ impl Socks5Preflight {
         sandbox_id: SandboxId,
         request: &[u8],
     ) -> Socks5ConnectPreflight {
-        let event = parse_socks5_connect_request(sandbox_id.clone(), FrontendKind::Socks5, request)
-            .unwrap_or_else(|error| malformed_socks5_event(sandbox_id, error.to_string()));
+        let (preflight, _) = self.evaluate_connect_request(sandbox_id, request);
+        preflight
+    }
+
+    /// Parse, authorize, and open host TCP egress for one SOCKS5 CONNECT request.
+    pub fn establish_connect_tunnel<E: TcpEgress>(
+        &self,
+        sandbox_id: SandboxId,
+        request: &[u8],
+        egress: &E,
+    ) -> Socks5ConnectTunnel {
+        let (mut preflight, target) = self.evaluate_connect_request(sandbox_id, request);
+        if preflight.evaluation.audit.decision != AuditDecision::Allowed {
+            return Socks5ConnectTunnel {
+                preflight,
+                connection: None,
+                egress_error: None,
+            };
+        }
+
+        let Some(target) = target else {
+            preflight.response = Socks5Response::GeneralFailure;
+            return Socks5ConnectTunnel {
+                preflight,
+                connection: None,
+                egress_error: Some(EgressError::InvalidTarget(
+                    "missing SOCKS5 target after allow".to_owned(),
+                )),
+            };
+        };
+
+        match egress.connect(&target) {
+            Ok(connection) => Socks5ConnectTunnel {
+                preflight,
+                connection: Some(connection),
+                egress_error: None,
+            },
+            Err(error) => {
+                preflight.response = Socks5Response::GeneralFailure;
+                Socks5ConnectTunnel {
+                    preflight,
+                    connection: None,
+                    egress_error: Some(error),
+                }
+            }
+        }
+    }
+
+    fn evaluate_connect_request(
+        &self,
+        sandbox_id: SandboxId,
+        request: &[u8],
+    ) -> (Socks5ConnectPreflight, Option<TcpTarget>) {
+        let parsed =
+            parse_socks5_connect_request(sandbox_id.clone(), FrontendKind::Socks5, request);
+        let target = parsed.as_ref().ok().and_then(connect_target_from_event);
+        let event =
+            parsed.unwrap_or_else(|error| malformed_socks5_event(sandbox_id, error.to_string()));
         let evaluation = self.policy.evaluate(&event);
         let response = match evaluation.audit.decision {
             AuditDecision::Allowed => Socks5Response::Succeeded,
@@ -257,10 +321,13 @@ impl Socks5Preflight {
             AuditDecision::FailClosed | AuditDecision::Observed => Socks5Response::GeneralFailure,
         };
 
-        Socks5ConnectPreflight {
-            evaluation,
-            response,
-        }
+        (
+            Socks5ConnectPreflight {
+                evaluation,
+                response,
+            },
+            target,
+        )
     }
 }
 
@@ -269,6 +336,10 @@ fn connect_target_from_event(event: &NormalizedEvent) -> Option<TcpTarget> {
         NormalizedEvent::HttpsConnect(connect) => {
             TcpTarget::new_host(&connect.host, connect.port).ok()
         }
+        NormalizedEvent::SocksConnect(connect) => match connect.destination_ip {
+            Some(ip) => TcpTarget::new_ip(ip, connect.port).ok(),
+            None => TcpTarget::new_host(&connect.host, connect.port).ok(),
+        },
         _ => None,
     }
 }
@@ -385,6 +456,13 @@ mod tests {
     fn socks5_udp_associate() -> Vec<u8> {
         let mut request = socks5_domain_connect("api.example.com", 443);
         request[1] = 3;
+        request
+    }
+
+    fn socks5_ipv4_connect(ip: Ipv4Addr, port: u16) -> Vec<u8> {
+        let mut request = vec![5, 1, 0, 1];
+        request.extend_from_slice(&ip.octets());
+        request.extend_from_slice(&port.to_be_bytes());
         request
     }
 
@@ -714,5 +792,91 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("malformed-socks5-connect"));
+    }
+
+    #[test]
+    fn allowed_socks5_tunnel_opens_host_egress_and_bridges_bytes() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request).unwrap();
+            stream.write_all(b"pong").unwrap();
+            request
+        });
+        let handler = Socks5Preflight::new(PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        }));
+        let egress = HostTcpEgress::new(Duration::from_secs(1)).unwrap();
+
+        let mut tunnel = handler.establish_connect_tunnel(
+            sandbox_id(),
+            &socks5_ipv4_connect(Ipv4Addr::LOCALHOST, addr.port()),
+            &egress,
+        );
+
+        assert_eq!(tunnel.preflight.response, Socks5Response::Succeeded);
+        assert_eq!(tunnel.egress_error, None);
+        let connection = tunnel
+            .connection
+            .as_mut()
+            .expect("egress connection exists");
+        connection.stream_mut().write_all(b"ping").unwrap();
+        let mut response = [0_u8; 4];
+        connection.stream_mut().read_exact(&mut response).unwrap();
+        let server_request = server.join().unwrap();
+        assert_eq!(&server_request, b"ping");
+        assert_eq!(&response, b"pong");
+    }
+
+    #[test]
+    fn denied_socks5_tunnel_does_not_call_egress() {
+        struct PanicEgress;
+        impl TcpEgress for PanicEgress {
+            fn connect(&self, _target: &TcpTarget) -> Result<TcpEgressConnection, EgressError> {
+                panic!("egress must not be called for denied SOCKS5 preflight")
+            }
+        }
+
+        let handler = Socks5Preflight::new(allow_example_socks_policy());
+        let tunnel = handler.establish_connect_tunnel(
+            sandbox_id(),
+            &socks5_domain_connect("blocked.invalid", 443),
+            &PanicEgress,
+        );
+
+        assert_eq!(
+            tunnel.preflight.response,
+            Socks5Response::ConnectionNotAllowedByRuleset
+        );
+        assert!(tunnel.connection.is_none());
+        assert_eq!(tunnel.egress_error, None);
+    }
+
+    #[test]
+    fn allowed_socks5_tunnel_returns_general_failure_when_egress_connect_fails() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let handler = Socks5Preflight::new(PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        }));
+        let egress = HostTcpEgress::new(Duration::from_millis(100)).unwrap();
+
+        let tunnel = handler.establish_connect_tunnel(
+            sandbox_id(),
+            &socks5_ipv4_connect(Ipv4Addr::LOCALHOST, addr.port()),
+            &egress,
+        );
+
+        assert_eq!(tunnel.preflight.response, Socks5Response::GeneralFailure);
+        assert!(tunnel.connection.is_none());
+        assert!(matches!(
+            tunnel.egress_error,
+            Some(EgressError::Connect { .. })
+        ));
     }
 }
