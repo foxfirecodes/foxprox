@@ -266,6 +266,16 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
             )));
         }
 
+        let policy_decision = self.broker.evaluate(&request);
+        if policy_decision.decision.is_deny() {
+            return Ok(Some(bridge_result(
+                true,
+                StackPollEvidence::none(),
+                0,
+                policy_decision,
+            )));
+        }
+
         self.stack.inject_packet(packet);
         let stack_evidence = self.stack.poll(now_ms);
         let outbound = self.stack.outbound_packets();
@@ -336,8 +346,8 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
             inbound_observed: true,
             stack: stack_evidence,
             packets_written: written,
-            decision: Decision::Allow,
-            reason: None,
+            decision: policy_decision.decision,
+            reason: policy_decision.reason,
         }))
     }
 
@@ -442,7 +452,12 @@ mod tests {
     fn smoltcp_tun_bridge_audits_and_writes_stack_output() {
         let packet = ipv4_icmp_echo_request();
         let device = InMemoryPacketDevice::with_inbound([packet]);
-        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 8);
+        let config = PolicyConfig {
+            allow_ping: true,
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
         let stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
         let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
 
@@ -452,14 +467,40 @@ mod tests {
         assert_eq!(result.packets_written, 1);
         assert_eq!(result.decision, Decision::Allow);
         let records: Vec<_> = bridge.broker().audit().records().collect();
-        assert_eq!(records.len(), 2);
+        assert_eq!(records.len(), 3);
         assert_eq!(records[0].details["direction"], "from_sandbox");
         assert_eq!(records[0].details["stack"], "smoltcp");
-        assert_eq!(records[1].details["direction"], "to_sandbox");
-        assert_eq!(records[1].details["write_phase"], "attempt");
+        assert_eq!(records[1].kind, AuditKind::IcmpDecision);
+        assert_eq!(records[1].decision, Some(Decision::Allow));
+        assert_eq!(records[2].details["direction"], "to_sandbox");
+        assert_eq!(records[2].details["write_phase"], "attempt");
         let reply = &bridge.device().outbound()[0];
         let parsed = ParsedIpPacket::parse_ipv4(reply).unwrap();
         assert_eq!(parsed.icmp_type, Some(0));
+    }
+
+    #[test]
+    fn smoltcp_tun_bridge_default_denies_before_stack_poll_or_write() {
+        let packet = ipv4_icmp_echo_request();
+        let device = InMemoryPacketDevice::with_inbound([packet]);
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 8);
+        let stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+
+        let result = bridge.process_next_packet(2_500).unwrap().unwrap();
+        assert!(result.inbound_observed);
+        assert_eq!(result.stack.packets_emitted, 0);
+        assert_eq!(result.packets_written, 0);
+        assert_eq!(result.decision, Decision::DenyDrop);
+        assert_eq!(result.reason, Some(DenialReason::IcmpUnsupported));
+        assert!(bridge.device().outbound().is_empty());
+        let records: Vec<_> = bridge.broker().audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::PacketObserved);
+        assert_eq!(records[0].details["stack"], "smoltcp");
+        assert_eq!(records[1].kind, AuditKind::IcmpDecision);
+        assert_eq!(records[1].decision, Some(Decision::DenyDrop));
+        assert_eq!(records[1].reason, Some(DenialReason::IcmpUnsupported));
     }
 
     #[test]

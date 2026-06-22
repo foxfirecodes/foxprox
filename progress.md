@@ -953,3 +953,32 @@ The stack proof now includes a bridge from the core `PacketDevice` trait into sm
 ### Remaining blind spots
 - TCP accept/connect byte bridging through smoltcp sockets is still outstanding.
 - The bridge still uses in-memory packet devices in tests; real `/dev/net/tun` fd opening and bwrap handoff are not complete.
+
+## 2026-06-21 — Round-7 smoltcp bridge policy gate cycle
+
+### Behavior under work
+Fix the reviewer blocker in `SmoltcpTunBridge`: TUN packets must be observed and then evaluated by the broker before smoltcp receives them, so default-denied ICMP/TCP/UDP traffic cannot cause stack output or device writes.
+
+### Expected evidence
+- Default-denied ICMP echo traffic through the smoltcp bridge emits a policy decision, does not poll/inject smoltcp, and writes no reply.
+- Explicitly ping-allowed ICMP echo traffic still reaches smoltcp, emits a reply, records inbound policy decision evidence, and gates outbound write with structured write-attempt audit.
+
+### Commands run
+- `cargo fmt` — applied formatting for smoltcp bridge policy gate changes.
+- `cargo test --all-targets --all-features` — passed, 6 CLI tests, 101 core tests, 3 device tests, 3 egress tests, and 4 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_stack::tests::smoltcp_tun_bridge_default_denies_before_stack_poll_or_write ... ok`
+- `foxprox_stack::tests::smoltcp_tun_bridge_audits_and_writes_stack_output ... ok`
+
+### Interpretation
+The round-7 blocker is fixed. `SmoltcpTunBridge` now appends inbound packet observation, then calls the shared broker policy evaluator before injecting any packet into smoltcp. Default-denied ICMP traffic emits an `icmp_decision` denial, performs no stack poll output, and writes no packet. Explicitly ping-allowed traffic still reaches smoltcp and writes the audited echo reply.
+
+### Changed files
+- `crates/foxprox-stack/src/lib.rs`
+- `progress.md`
+
+### Remaining blind spots
+- The bridge now preserves the existing TUN policy gate, but full smoltcp TCP socket accept/connect and host TCP byte bridging are still outstanding.
