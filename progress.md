@@ -683,3 +683,27 @@
 - Interpretation: ICMP basics now have a reusable core runtime boundary for ping allow/deny and packet write-back, while the environment limitation for invoking system ping remains recorded in `learnings.md`.
 - Next verification gap: final alpha coverage review; remaining gaps are productionization/refactoring rather than additional small harness proofs.
 - Commit hash after commit: pending.
+
+## 2026-06-22T02:48:00Z — ICMP runtime commit recorded
+
+- Command executed: `git add crates/foxprox-core/src/policy.rs crates/foxprox-core/src/runtime.rs progress.md && git commit -m "Add ICMP policy runtime"`
+- Environment assumptions: deterministic ICMP runtime tests above were verified before commit.
+- Expected result: commit captures policy-gated ICMP echo reply/deny runtime and prior QUIC runtime ledger note.
+- Observed result: commit `34d5edf` created with 3 files changed.
+- Relevant output excerpt: `[harness-lab 34d5edf] Add ICMP policy runtime`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: ICMP runtime checkpoint is preserved.
+- Next verification gap: final alpha coverage review; remaining gaps are productionization/refactoring rather than additional small harness proofs.
+- Commit hash after commit: 34d5edf.
+
+## 2026-06-22T03:05:00Z — Final alpha harness verification sweep
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run all >/tmp/foxprox-all.jsonl && cargo run -p foxprox-cli --bin foxprox-lab -- run inspect >/tmp/foxprox-inspect.jsonl && cargo run -p foxprox-cli --bin foxprox-lab -- run robustness >/tmp/foxprox-robustness.jsonl && cargo run -p foxprox-cli --bin foxprox-lab -- run http-proxy-smoke >/tmp/foxprox-http-proxy.jsonl && cargo run -p foxprox-cli --bin foxprox-lab -- run https-connect-smoke >/tmp/foxprox-connect.jsonl && cargo run -p foxprox-cli --bin foxprox-lab -- run socks5-smoke >/tmp/foxprox-socks.jsonl && cargo run -p foxprox-cli --bin foxprox-lab -- run proxy-deny-smoke >/tmp/foxprox-proxy-deny.jsonl && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run dns-attribution-smoke >/tmp/foxprox-dns-attr.jsonl && target/debug/foxprox-lab run tcp-bridge-smoke >/tmp/foxprox-tcp-bridge.jsonl && target/debug/foxprox-lab run tcp-bridge-deny-smoke >/tmp/foxprox-tcp-deny.jsonl`
+- Environment assumptions: local Linux supports bwrap, `/dev/net/tun`, Unix fd handoff, and sandbox Python; all network-dependent smokes use local fixtures, not external services.
+- Expected result: deterministic unit/scenario coverage, explicit proxy smokes, DNS attribution, TCP bridge allow with transparent HTTP inspection, and TCP bridge deny/reset all pass.
+- Observed result: pass. `foxprox-core` ran 48 tests; `foxprox-cli` ran 2 tests; `foxproxsetup` ran 7 tests. All listed deterministic and environment-dependent commands completed successfully.
+- Relevant output excerpt: `OK`; tcp bridge smoke `"decision":"allow"`, `"inspection_decision":"allow"`, `"inspection_rule_id":"allow-transparent-http-bridge"`, `"status":"exit status: 0"`; deny smoke `"decision":"deny_reset"`, `"rst_written":"true"`, `"egress_calls":"0"`.
+- Changed files: `progress.md`.
+- Interpretation: the harness now covers the documented alpha behavior with local evidence: setup/fd handoff, packet write-back, TCP bridge through smoltcp, UDP/DNS/attribution, transparent HTTP/TLS/QUIC decisions, explicit HTTP/CONNECT/SOCKS proxy allow and deny, ICMP policy/write-back, fail-closed malformed/unsupported paths, and audit backpressure modeling.
+- Next verification gap: outside this harness-lab alpha, production hardening remains: factor CLI smoke orchestration into long-lived broker runtime crates, wire bounded audit buffers into all forwarding paths, support real upstream DNS forwarding, and define a safe ping capability strategy if real system `ping` smoke is required.
+- Commit hash after commit: pending.
