@@ -1930,3 +1930,29 @@ Addressed round-29/round-30 high findings. Blocking runtime `exit` now archives 
 
 ### Remaining blind spots
 - The blocking harness now retires owned listener handles, but final runtime still needs real async task cancellation/joining, OS fd/socket cleanup, global audit backpressure, TUN/smoltcp task cleanup, and child-process supervision.
+
+## 2026-06-22 — Child process exit ledger evidence
+
+### Commands run
+- `cargo fmt` — applied formatting for child exit lifecycle evidence.
+- `cargo test -p foxprox-core runtime::tests --all-targets --all-features` — passed, 11 runtime lifecycle tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 124 core tests, 3 device tests, 28 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_lifecycle_records_clean_child_exit ... ok`
+- `runtime::tests::runtime_lifecycle_child_failure_is_fail_closed ... ok`
+- `runtime::tests::runtime_lifecycle_exit_is_terminal ... ok`
+
+### Interpretation
+Added `RuntimeChildExit` and `RuntimeLifecycleHarness::exit_with_cleanup_and_child` so `network_session_exit` can include supervised child status fields (`child_status`, `child_process_id`, `child_exit_code`, `child_signal`). Clean child exits preserve an allow session exit when cleanup succeeds; signaled/non-zero child termination is fail-closed with `RuntimeState` while preserving terminal lifecycle semantics.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Child process status is still injected into a platform-independent lifecycle harness. Final runtime must wire this to a real spawned child, task joins, and OS process status collection.

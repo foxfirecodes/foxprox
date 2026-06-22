@@ -156,3 +156,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Cleanup evidence must retire callable resources
 
 - A runtime harness must not claim listener cleanup complete while still owning active listener objects. On exit, archive component audit evidence, drop/retire listener handles, and ensure post-exit listener operations fail instead of accepting more work. Aggregate audit views should place session exit after component activity.
+
+## 2026-06-22 — Child exit status is part of session outcome
+
+- Runtime lifecycle exit should not only record broker status and cleanup. The supervised child process status (PID, exit code, signal) belongs in `network_session_exit`, and abnormal child termination should turn an otherwise clean runtime exit into fail-closed evidence.

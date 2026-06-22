@@ -104,6 +104,47 @@ impl RuntimeCleanupReport {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeChildExit {
+    pub process_id: Option<u32>,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+}
+
+impl RuntimeChildExit {
+    pub fn exited(process_id: u32, exit_code: i32) -> Self {
+        Self {
+            process_id: Some(process_id),
+            exit_code: Some(exit_code),
+            signal: None,
+        }
+    }
+
+    pub fn signaled(process_id: u32, signal: i32) -> Self {
+        Self {
+            process_id: Some(process_id),
+            exit_code: None,
+            signal: Some(signal),
+        }
+    }
+
+    fn status_detail(&self) -> &'static str {
+        if self.signal.is_some() {
+            "signaled"
+        } else if self.exit_code == Some(0) {
+            "clean"
+        } else if self.exit_code.is_some() {
+            "failed"
+        } else {
+            "unknown"
+        }
+    }
+
+    fn is_failed(&self) -> bool {
+        self.signal.is_some() || self.exit_code.is_some_and(|code| code != 0)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeExitStatus {
@@ -260,6 +301,16 @@ impl RuntimeLifecycleHarness {
         cleanup: RuntimeCleanupReport,
         now_ms: u64,
     ) -> Result<(), RuntimeLifecycleError> {
+        self.exit_with_cleanup_and_child(status, cleanup, None, now_ms)
+    }
+
+    pub fn exit_with_cleanup_and_child(
+        &mut self,
+        status: RuntimeExitStatus,
+        cleanup: RuntimeCleanupReport,
+        child_exit: Option<RuntimeChildExit>,
+        now_ms: u64,
+    ) -> Result<(), RuntimeLifecycleError> {
         let started_at_ms = match self.state {
             RuntimeLifecycleState::Running { started_at_ms } => started_at_ms,
             RuntimeLifecycleState::NotStarted => {
@@ -279,6 +330,8 @@ impl RuntimeLifecycleHarness {
         };
         let (decision, reason) = if !cleanup.failed.is_empty() {
             (Decision::FailClosed, Some(DenialReason::SetupFailed))
+        } else if child_exit.as_ref().is_some_and(RuntimeChildExit::is_failed) {
+            (Decision::FailClosed, Some(DenialReason::RuntimeState))
         } else {
             match status {
                 RuntimeExitStatus::Clean => (Decision::Allow, None),
@@ -287,7 +340,7 @@ impl RuntimeLifecycleHarness {
                 }
             }
         };
-        let audit = AuditRecord::new_at(
+        let mut audit = AuditRecord::new_at(
             AuditKind::NetworkSessionExit,
             self.sandbox_id.clone(),
             now_ms as u128,
@@ -306,6 +359,18 @@ impl RuntimeLifecycleHarness {
             cleanup_action_list(&cleanup.failed),
         )
         .with_detail("failed_cleanup_count", cleanup.failed.len().to_string());
+        if let Some(child_exit) = child_exit {
+            audit = audit.with_detail("child_status", child_exit.status_detail());
+            if let Some(process_id) = child_exit.process_id {
+                audit = audit.with_detail("child_process_id", process_id.to_string());
+            }
+            if let Some(exit_code) = child_exit.exit_code {
+                audit = audit.with_detail("child_exit_code", exit_code.to_string());
+            }
+            if let Some(signal) = child_exit.signal {
+                audit = audit.with_detail("child_signal", signal.to_string());
+            }
+        }
         self.append_required(audit)?;
         self.state = RuntimeLifecycleState::Exited {
             started_at_ms,
@@ -615,6 +680,57 @@ mod tests {
         assert_eq!(records[1].details["cleanup_count"], "2");
         assert_eq!(records[1].details["failed_cleanup_actions"], "");
         assert_eq!(records[1].details["failed_cleanup_count"], "0");
+    }
+
+    #[test]
+    fn runtime_lifecycle_records_clean_child_exit() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start(vec![RuntimeComponent::HttpProxyListener], 1_000)
+            .unwrap();
+        runtime
+            .exit_with_cleanup_and_child(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::HttpProxyListener]),
+                Some(RuntimeChildExit::exited(42, 0)),
+                1_250,
+            )
+            .unwrap();
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::Allow));
+        assert_eq!(records[1].details["child_status"], "clean");
+        assert_eq!(records[1].details["child_process_id"], "42");
+        assert_eq!(records[1].details["child_exit_code"], "0");
+        assert!(!records[1].details.contains_key("child_signal"));
+    }
+
+    #[test]
+    fn runtime_lifecycle_child_failure_is_fail_closed() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start(vec![RuntimeComponent::Socks5Listener], 1_000)
+            .unwrap();
+        runtime
+            .exit_with_cleanup_and_child(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::Socks5Listener]),
+                Some(RuntimeChildExit::signaled(43, 15)),
+                1_250,
+            )
+            .unwrap();
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["runtime_status"], "clean");
+        assert_eq!(records[1].details["child_status"], "signaled");
+        assert_eq!(records[1].details["child_process_id"], "43");
+        assert_eq!(records[1].details["child_signal"], "15");
     }
 
     #[test]
