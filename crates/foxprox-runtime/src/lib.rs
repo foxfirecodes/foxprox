@@ -339,6 +339,62 @@ pub trait TcpStreamBridge {
     fn write_to_sandbox(&mut self, flow: &FlowKey, bytes: &[u8]) -> Result<(), TcpBridgeError>;
 }
 
+#[derive(Debug)]
+pub struct StdTcpStreamBridge<W> {
+    flow: FlowKey,
+    host_stream: TcpStream,
+    sandbox_writer: W,
+}
+
+impl<W> StdTcpStreamBridge<W> {
+    pub fn new(
+        flow: FlowKey,
+        host_stream: TcpStream,
+        sandbox_writer: W,
+    ) -> Result<Self, TcpBridgeError> {
+        if flow.protocol != Protocol::Tcp {
+            return Err(TcpBridgeError::UnsupportedProtocol);
+        }
+        Ok(Self {
+            flow,
+            host_stream,
+            sandbox_writer,
+        })
+    }
+
+    pub fn sandbox_writer(&self) -> &W {
+        &self.sandbox_writer
+    }
+
+    pub fn into_parts(self) -> (TcpStream, W) {
+        (self.host_stream, self.sandbox_writer)
+    }
+
+    fn ensure_flow(&self, flow: &FlowKey) -> Result<(), TcpBridgeError> {
+        if &self.flow == flow {
+            Ok(())
+        } else {
+            Err(TcpBridgeError::FlowNotOpen)
+        }
+    }
+}
+
+impl<W: Write> TcpStreamBridge for StdTcpStreamBridge<W> {
+    fn write_to_host(&mut self, flow: &FlowKey, bytes: &[u8]) -> Result<(), TcpBridgeError> {
+        self.ensure_flow(flow)?;
+        self.host_stream
+            .write_all(bytes)
+            .map_err(|_| TcpBridgeError::IoFailed)
+    }
+
+    fn write_to_sandbox(&mut self, flow: &FlowKey, bytes: &[u8]) -> Result<(), TcpBridgeError> {
+        self.ensure_flow(flow)?;
+        self.sandbox_writer
+            .write_all(bytes)
+            .map_err(|_| TcpBridgeError::IoFailed)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OpenTcpFlow {
     pub key: FlowKey,
@@ -1836,7 +1892,7 @@ mod tests {
         PolicyRule, RuleSet, SniStatus, UdpClass, UdpTimeouts, VecAuditSink,
     };
     use std::collections::VecDeque;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, TcpListener};
 
     #[derive(Default)]
     struct FakeEgress {
@@ -2150,6 +2206,40 @@ mod tests {
         let closed = bridge.mark_closed(&flow).unwrap();
         assert_eq!(closed.bytes_from_sandbox, 7);
         assert!(bridge.open_flows().is_empty());
+    }
+
+    #[test]
+    fn std_tcp_stream_bridge_writes_to_loopback_host_after_flow_open() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = vec![0; b"client-data".len()];
+            stream.read_exact(&mut received).unwrap();
+            received
+        });
+        let flow = FlowKey::new(
+            Protocol::Tcp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            Endpoint::new(listen_addr.ip(), listen_addr.port()),
+        );
+        let host_stream = TcpStream::connect(listen_addr).unwrap();
+        let bridge = StdTcpStreamBridge::new(flow.clone(), host_stream, Vec::new()).unwrap();
+        let mut runtime = TcpStreamBridgeRuntime::new(bridge);
+        runtime.mark_opened(flow.clone()).unwrap();
+
+        runtime
+            .send_sandbox_bytes_to_host(&flow, b"client-data")
+            .unwrap();
+        runtime
+            .send_host_bytes_to_sandbox(&flow, b"host-data")
+            .unwrap();
+
+        assert_eq!(server.join().unwrap(), b"client-data".to_vec());
+        assert_eq!(runtime.bridge().sandbox_writer(), &b"host-data".to_vec());
+        let open = runtime.open_flows().get(&flow).unwrap();
+        assert_eq!(open.bytes_from_sandbox, 11);
+        assert_eq!(open.bytes_from_host, 9);
     }
 
     #[test]

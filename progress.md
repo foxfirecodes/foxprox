@@ -926,3 +926,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: close accounting is still driven by fake bridge state; live smoltcp streams and host TCP socket half-close/error handling are not implemented.
 - Exact next step: commit TCP bridge close accounting, then add real host TCP stream bridge boundary tests using loopback sockets and in-memory sandbox-side IO.
+
+## 2026-06-22T21:31:06Z
+- Current objective: continue after TCP bridge close-accounting commit toward a real host TCP bridge boundary.
+- Git status summary: clean worktree after commit `12ce595`.
+- Intended slice: add a standard-library TCP stream bridge implementation that writes sandbox bytes to a loopback `TcpStream` and writes host bytes into sandbox-side IO, behind the existing opened-flow bridge gate.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`; keep network verification loopback-only and deterministic.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`, and `learnings.md` if socket behavior requires a new invariant.
+- Remaining risks: this still will not integrate smoltcp or continuously poll sockets; it only proves the concrete stream bridge boundary can move bytes after verification gates open the flow.
+- Exact next step: implement `StdTcpStreamBridge` and a loopback test through `TcpStreamBridgeRuntime`.
+
+## 2026-06-22T21:32:23Z
+- Current objective: add a concrete standard-library TCP stream bridge behind the opened-flow gate.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 73 runtime tests, and 7 setup tests passed. New loopback test proves `StdTcpStreamBridge` writes sandbox bytes to a real localhost `TcpStream` and writes host bytes to sandbox-side in-memory IO only after the bridge runtime marks the TCP flow open.
+- Commit hash when committed: pending.
+- Remaining risks: the concrete bridge still performs explicit writes only; no host socket read polling, smoltcp stream integration, backpressure, or half-close behavior exists.
+- Exact next step: commit the standard TCP stream bridge, then add a bounded host-read helper that reads from a real TCP stream and writes the bytes through the sandbox side with EOF/error outcomes.
