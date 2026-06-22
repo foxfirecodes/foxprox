@@ -400,5 +400,5 @@
   - `cargo test --workspace` — passed, 58 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-packet` — packet crate depends only on `foxprox-core`.
-- Commit hash after commit: pending.
+- Commit hash after commit: 7affa80.
 - Remaining boundary risks: IPv6 TCP/UDP normalization, production stack-adapter TCP segment handling, real TUN fd IO, UDP forwarding sockets, and policy-driven ICMP-unreachable write-back integration remain.
