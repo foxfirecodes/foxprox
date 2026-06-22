@@ -1178,3 +1178,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: this is only an adapter construction proof; it does not feed TUN packets into smoltcp sockets, detect TCP connect attempts, or bridge streams.
 - Exact next step: commit the smoltcp adapter boundary, then add a smoltcp TCP socket proof that a socket can be allocated/listened without unsafe code and with explicit buffer sizing.
+
+## 2026-06-22T21:52:14Z
+- Current objective: continue after smoltcp adapter boundary toward the TCP socket proof for the forwarding gate.
+- Git status summary: clean worktree after commit `5db2c41`.
+- Intended slice: add a smoltcp TCP listener socket allocation proof with explicit RX/TX buffer sizes and no unsafe code.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: listening socket proof still does not accept a TUN-origin connection or bridge bytes.
+- Exact next step: implement `listen_tcp` on the smoltcp loopback adapter and deterministic validation tests.
+
+## 2026-06-22T21:53:06Z
+- Current objective: add smoltcp TCP listener socket proof.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 4 smoltcp adapter tests passed. New adapter method allocates a smoltcp TCP listener with explicit RX/TX buffers, rejects port 0 and zero-sized buffers, and polls the loopback stack without unsafe code.
+- Commit hash when committed: pending.
+- Remaining risks: the listener is not yet connected to a peer or surfaced as a normalized `TcpConnectAttempt`.
+- Exact next step: commit smoltcp TCP listener proof, then add a loopback client-to-listener connection proof that can detect the listener socket becoming active.

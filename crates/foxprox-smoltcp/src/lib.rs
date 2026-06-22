@@ -9,6 +9,7 @@ use std::net::Ipv4Addr;
 
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Loopback, Medium};
+use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 
@@ -22,6 +23,9 @@ pub struct SmoltcpIpConfig {
 pub enum SmoltcpAdapterError {
     InvalidPrefixLen,
     AddressRejected,
+    InvalidTcpPort,
+    InvalidTcpBufferSize,
+    TcpListenRejected,
 }
 
 pub struct SmoltcpIpLoopback {
@@ -59,6 +63,28 @@ impl SmoltcpIpLoopback {
         &self.config
     }
 
+    pub fn listen_tcp(
+        &mut self,
+        port: u16,
+        rx_bytes: usize,
+        tx_bytes: usize,
+    ) -> Result<(), SmoltcpAdapterError> {
+        if port == 0 {
+            return Err(SmoltcpAdapterError::InvalidTcpPort);
+        }
+        if rx_bytes == 0 || tx_bytes == 0 {
+            return Err(SmoltcpAdapterError::InvalidTcpBufferSize);
+        }
+        let rx_buffer = tcp::SocketBuffer::new(vec![0; rx_bytes]);
+        let tx_buffer = tcp::SocketBuffer::new(vec![0; tx_bytes]);
+        let socket = tcp::Socket::new(rx_buffer, tx_buffer);
+        let handle = self.sockets.add(socket);
+        self.sockets
+            .get_mut::<tcp::Socket>(handle)
+            .listen(port)
+            .map_err(|_| SmoltcpAdapterError::TcpListenRejected)
+    }
+
     pub fn poll_once(&mut self, now_millis: i64) {
         let _ = self.iface.poll(
             Instant::from_millis(now_millis),
@@ -92,6 +118,46 @@ mod tests {
 
         assert_eq!(adapter.config().address, Ipv4Addr::new(10, 66, 0, 1));
         assert_eq!(adapter.config().prefix_len, 24);
+    }
+
+    #[test]
+    fn tcp_listener_socket_is_allocated_with_explicit_buffers() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        adapter.poll_once(1);
+    }
+
+    #[test]
+    fn tcp_listener_rejects_invalid_port_and_buffers() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            adapter.listen_tcp(0, 1024, 1024),
+            Err(SmoltcpAdapterError::InvalidTcpPort)
+        ));
+        assert!(matches!(
+            adapter.listen_tcp(8080, 0, 1024),
+            Err(SmoltcpAdapterError::InvalidTcpBufferSize)
+        ));
+        assert!(matches!(
+            adapter.listen_tcp(8080, 1024, 0),
+            Err(SmoltcpAdapterError::InvalidTcpBufferSize)
+        ));
     }
 
     #[test]
