@@ -41,8 +41,10 @@ pub struct CombinedTransparentProofConfig {
     pub prefix_len: u8,
     /// TUN MTU.
     pub mtu: usize,
-    /// Destination TCP port to listen for transparently.
+    /// Primary destination TCP port to listen for transparently.
     pub tcp_port: u16,
+    /// Additional destination TCP ports to listen for transparently.
+    pub additional_tcp_ports: Vec<u16>,
     /// Host TCP connect timeout.
     pub connect_timeout: Duration,
     /// Maximum buffered bytes in either TCP bridge direction.
@@ -88,6 +90,7 @@ impl CombinedTransparentProofConfig {
             prefix_len: tcp.prefix_len,
             mtu: tcp.mtu,
             tcp_port: tcp.tcp_port,
+            additional_tcp_ports: Vec::new(),
             connect_timeout: tcp.connect_timeout,
             pending_buffer_limit: tcp.pending_buffer_limit,
             idle_timeout: tcp.idle_timeout,
@@ -107,13 +110,28 @@ impl CombinedTransparentProofConfig {
         }
     }
 
+    fn tcp_ports(&self) -> Vec<u16> {
+        let mut ports = Vec::with_capacity(1 + self.additional_tcp_ports.len());
+        ports.push(self.tcp_port);
+        for port in &self.additional_tcp_ports {
+            if !ports.contains(port) {
+                ports.push(*port);
+            }
+        }
+        ports
+    }
+
     fn tcp_config(&self) -> TcpProofConfig {
+        self.tcp_config_for_port(self.tcp_port)
+    }
+
+    fn tcp_config_for_port(&self, tcp_port: u16) -> TcpProofConfig {
         TcpProofConfig {
             sandbox_id: self.sandbox_id.clone(),
             broker_ip: self.broker_ip,
             prefix_len: self.prefix_len,
             mtu: self.mtu,
-            tcp_port: self.tcp_port,
+            tcp_port,
             connect_timeout: self.connect_timeout,
             pending_buffer_limit: self.pending_buffer_limit,
             idle_timeout: self.idle_timeout,
@@ -193,9 +211,7 @@ where
         .add_default_ipv4_route(smoltcp_ipv4(config.broker_ip))
         .map_err(|error| io::Error::other(format!("failed to add smoltcp route: {error}")))?;
 
-    let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 65_535]);
-    let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 65_535]);
-    let tcp_socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
+    let tcp_ports = config.tcp_ports();
     let proxy_tcp_socket = config.http_proxy_bridge.map(|_| {
         let rx = tcp::SocketBuffer::new(vec![0; 65_535]);
         let tx = tcp::SocketBuffer::new(vec![0; 65_535]);
@@ -212,7 +228,10 @@ where
         .map_err(|error| io::Error::other(format!("udp dns bind failed: {error}")))?;
 
     let mut sockets = SocketSet::new(vec![]);
-    let tcp_handle = sockets.add(tcp_socket);
+    let tcp_handles: Vec<_> = tcp_ports
+        .iter()
+        .map(|_| sockets.add(tcp_socket()))
+        .collect();
     let proxy_tcp_handle = proxy_tcp_socket.map(|socket| sockets.add(socket));
     let socks_tcp_handle = socks_tcp_socket.map(|socket| sockets.add(socket));
     let dns_handle = sockets.add(dns_socket);
@@ -232,7 +251,9 @@ where
         });
     }
 
-    install_tcp_listener(sockets.get_mut::<tcp::Socket>(tcp_handle), config.tcp_port)?;
+    for (port, handle) in tcp_ports.iter().copied().zip(tcp_handles.iter().copied()) {
+        install_tcp_listener(sockets.get_mut::<tcp::Socket>(handle), port)?;
+    }
     if let (Some(bridge), Some(handle)) = (config.http_proxy_bridge, proxy_tcp_handle) {
         install_tcp_listener(sockets.get_mut::<tcp::Socket>(handle), bridge.sandbox_port)?;
     }
@@ -240,8 +261,8 @@ where
         install_tcp_listener(sockets.get_mut::<tcp::Socket>(handle), bridge.sandbox_port)?;
     }
     eprintln!(
-        "foxprox-net: combined transparent proof listening tcp_port={} dns={}:{} upstream={} udp_forward_ports={:?} http_proxy_bridge={:?} socks5_proxy_bridge={:?}",
-        config.tcp_port,
+        "foxprox-net: combined transparent proof listening tcp_ports={:?} dns={}:{} upstream={} udp_forward_ports={:?} http_proxy_bridge={:?} socks5_proxy_bridge={:?}",
+        tcp_ports,
         config.broker_ip,
         config.dns_port,
         config.upstream_dns,
@@ -251,7 +272,10 @@ where
     );
     ready()?;
 
-    let tcp_config = config.tcp_config();
+    let tcp_configs: Vec<_> = tcp_ports
+        .iter()
+        .map(|port| config.tcp_config_for_port(*port))
+        .collect();
     let proxy_tcp_config = config
         .http_proxy_bridge
         .map(|bridge| config.proxy_bridge_tcp_config(bridge));
@@ -259,7 +283,10 @@ where
         .socks5_proxy_bridge
         .map(|bridge| config.proxy_bridge_tcp_config(bridge));
     let (worker_tx, worker_rx) = mpsc::channel();
-    let mut tcp_state = TransparentTcpState::new();
+    let mut tcp_states: Vec<_> = tcp_ports
+        .iter()
+        .map(|_| TransparentTcpState::new())
+        .collect();
     let mut proxy_tcp_state = config.http_proxy_bridge.map(|_| TransparentTcpState::new());
     let mut socks_tcp_state = config
         .socks5_proxy_bridge
@@ -278,9 +305,13 @@ where
             &worker_rx,
         );
 
+        for ((state, handle), tcp_config) in tcp_states
+            .iter_mut()
+            .zip(tcp_handles.iter().copied())
+            .zip(tcp_configs.iter())
         {
-            let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
-            tcp_state.poll(socket, &tcp_config, &mut audit, Some(&cache))?;
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            state.poll(socket, tcp_config, &mut audit, Some(&cache))?;
         }
         if let (Some(state), Some(handle), Some(proxy_config)) = (
             proxy_tcp_state.as_mut(),
@@ -382,6 +413,12 @@ where
     }
 }
 
+fn tcp_socket() -> tcp::Socket<'static> {
+    let rx = tcp::SocketBuffer::new(vec![0; 65_535]);
+    let tx = tcp::SocketBuffer::new(vec![0; 65_535]);
+    tcp::Socket::new(rx, tx)
+}
+
 fn install_tcp_listener(socket: &mut tcp::Socket<'_>, tcp_port: u16) -> io::Result<()> {
     socket
         .listen(tcp_port)
@@ -391,6 +428,15 @@ fn install_tcp_listener(socket: &mut tcp::Socket<'_>, tcp_port: u16) -> io::Resu
 pub(crate) fn validate_http_proxy_bridge(
     config: &CombinedTransparentProofConfig,
 ) -> io::Result<()> {
+    let tcp_ports = config.tcp_ports();
+    for port in &tcp_ports {
+        if *port == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "transparent TCP ports must be non-zero",
+            ));
+        }
+    }
     let bridges = [config.http_proxy_bridge, config.socks5_proxy_bridge];
     if let (Some(http), Some(socks)) = (config.http_proxy_bridge, config.socks5_proxy_bridge) {
         if http.sandbox_port == socks.sandbox_port {
@@ -401,13 +447,13 @@ pub(crate) fn validate_http_proxy_bridge(
         }
     }
     for bridge in bridges.into_iter().flatten() {
-        validate_one_proxy_bridge(config, bridge)?;
+        validate_one_proxy_bridge(&tcp_ports, bridge)?;
     }
     Ok(())
 }
 
 fn validate_one_proxy_bridge(
-    config: &CombinedTransparentProofConfig,
+    transparent_tcp_ports: &[u16],
     bridge: ExplicitProxyBridgeConfig,
 ) -> io::Result<()> {
     if bridge.sandbox_port == 0 {
@@ -416,10 +462,10 @@ fn validate_one_proxy_bridge(
             "HTTP proxy bridge port must be non-zero",
         ));
     }
-    if bridge.sandbox_port == config.tcp_port {
+    if transparent_tcp_ports.contains(&bridge.sandbox_port) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "HTTP proxy bridge port must differ from transparent TCP port",
+            "explicit proxy bridge port must differ from transparent TCP ports",
         ));
     }
     if bridge.backend_addr.port() == 0 {
@@ -446,6 +492,8 @@ mod tests {
         let config = CombinedTransparentProofConfig::new(SandboxId::new("test").unwrap());
 
         assert_eq!(config.tcp_port, 80);
+        assert!(config.additional_tcp_ports.is_empty());
+        assert_eq!(config.tcp_ports(), vec![80]);
         assert_eq!(config.dns_port, 53);
         assert_eq!(config.broker_ip, Ipv4Addr::new(10, 255, 0, 1));
         assert!(config.connect_timeout <= Duration::from_secs(5));
@@ -490,6 +538,13 @@ mod tests {
     }
 
     #[test]
+    fn combined_deduplicates_additional_transparent_tcp_ports() {
+        let mut config = CombinedTransparentProofConfig::new(SandboxId::new("test").unwrap());
+        config.additional_tcp_ports = vec![443, 80, 8080, 443];
+        assert_eq!(config.tcp_ports(), vec![80, 443, 8080]);
+    }
+
+    #[test]
     fn combined_rejects_invalid_http_proxy_bridge_config() {
         let mut config = CombinedTransparentProofConfig::new(SandboxId::new("test").unwrap());
         config.http_proxy_bridge = Some(ExplicitHttpProxyBridgeConfig {
@@ -509,6 +564,17 @@ mod tests {
             validate_http_proxy_bridge(&config).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
+
+        config.additional_tcp_ports = vec![8080];
+        config.http_proxy_bridge = Some(ExplicitHttpProxyBridgeConfig {
+            sandbox_port: 8080,
+            backend_addr: SocketAddr::from(([127, 0, 0, 1], 18080)),
+        });
+        assert_eq!(
+            validate_http_proxy_bridge(&config).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        config.additional_tcp_ports.clear();
 
         config.http_proxy_bridge = Some(ExplicitHttpProxyBridgeConfig {
             sandbox_port: 8080,

@@ -1831,3 +1831,39 @@
   - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
   - Dependency checks passed: `cargo tree -p foxprox-core`, `cargo tree -p foxprox-net`, `cargo tree -p foxprox-proxy`, `cargo tree -p foxprox-cli`.
 - Next action: remove transient review artifact and commit `bridge socks5 proxy over tun`.
+
+## 2026-06-22T22:34:02Z — committed SOCKS5 TUN bridge
+
+- Commit created: `677d540` (`bridge socks5 proxy over tun`).
+- Commit contents: SOCKS5 ready callback, combined-runtime SOCKS5 proxy bridge, CLI `proof-transparent` SOCKS5 bridge flags, validation/tests, and verification ledger.
+- Current git status after commit: clean.
+- Remaining alpha comparison: combined transparent runtime still accepts only one ordinary transparent TCP destination port (`tcp_port`), so a single combined proof cannot simultaneously cover direct HTTP/80 and direct HTTPS/443 while also running DNS/UDP/proxy bridges. Next smallest coherent slice: support multiple transparent TCP proof ports in the combined runtime and CLI while preserving existing single `tcp_port` API compatibility.
+
+## 2026-06-22T22:38:21Z — multi-port combined TCP WIP awaiting review
+
+- Current objective: allow the combined transparent runtime to listen on multiple ordinary transparent TCP destination ports in one TUN/smoltcp proof, so direct HTTP/80 and HTTPS/443 can be covered together alongside DNS/UDP and explicit proxy bridges.
+- Implemented WIP:
+  - Added `additional_tcp_ports` to `CombinedTransparentProofConfig`, with `tcp_ports()` preserving the primary `tcp_port` API and deduplicating additional ports.
+  - Refactored combined runtime to create/install/poll one `TransparentTcpState` and smoltcp TCP socket per transparent TCP port, while keeping separate HTTP/SOCKS proxy bridge states.
+  - Extended bridge validation to reject zero transparent TCP ports and conflicts between any transparent TCP port and explicit proxy bridge ports.
+  - Added CLI `proof-transparent --tcp-forward-port PORT` for repeatable additional transparent TCP ports and installs matching TCP/HTTP/TLS proof allow rules for each transparent port.
+  - Added tests for default/deduplicated port lists and additional-port bridge conflict validation.
+- Focused verification passed: `cargo test -p foxprox-net -p foxprox-cli` (46 net tests, 10 CLI tests).
+- Next exact action: request/read blocker review for multi-port listener/state correctness, validation, and CLI policy rules before full verification and commit.
+
+## 2026-06-22T22:38:06Z — multi-port combined TCP final review and verification
+
+- Review result: `reviews/multi-port-combined-tcp-final.md` reported no blockers.
+  - Confirmed independent smoltcp TCP socket/config/state per transparent port.
+  - Confirmed listeners install before `ready()`.
+  - Confirmed zero/conflict validation happens before smoltcp TUN setup.
+  - Confirmed CLI deduplicates ports and adds TCP/HTTP/TLS allow rules for 80/443.
+  - Confirmed explicit proxy bridge conflicts are checked against all transparent TCP ports before accepting the TUN fd.
+- Final verification already run after WIP implementation:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 10 CLI tests, 53 core tests, 9 device tests, 7 egress tests, 46 net tests, 28 proxy tests, 2 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - Dependency checks passed: `cargo tree -p foxprox-core`, `cargo tree -p foxprox-net`, `cargo tree -p foxprox-cli`.
+- Next action: remove transient review artifact and commit `support multi-port combined tcp`.

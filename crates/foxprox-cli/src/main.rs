@@ -51,7 +51,7 @@ fn run() -> io::Result<()> {
 }
 
 fn usage() -> &'static str {
-    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1] [--audit-queue-capacity N]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--audit-queue-capacity N]\n       foxprox proof-udp-dns --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N] [--max-udp-flows N]\n       foxprox proof-transparent --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N] [--max-udp-flows N] [--http-proxy-port PORT] [--http-proxy-allow-port PORT]... [--http-proxy-backend-listen 127.0.0.1:0] [--socks5-proxy-port PORT] [--socks5-proxy-allow-port PORT]... [--socks5-proxy-backend-listen 127.0.0.1:0]\n       foxprox proof-http-proxy [--listen 10.255.0.1:8080] [--allow-port PORT]... [--request-head-limit BYTES] [--request-head-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]\n       foxprox proof-socks5-proxy [--listen 10.255.0.1:1080] [--allow-port PORT]... [--request-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]"
+    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1] [--audit-queue-capacity N]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--audit-queue-capacity N]\n       foxprox proof-udp-dns --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N] [--max-udp-flows N]\n       foxprox proof-transparent --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--tcp-forward-port PORT]... [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N] [--max-udp-flows N] [--http-proxy-port PORT] [--http-proxy-allow-port PORT]... [--http-proxy-backend-listen 127.0.0.1:0] [--socks5-proxy-port PORT] [--socks5-proxy-allow-port PORT]... [--socks5-proxy-backend-listen 127.0.0.1:0]\n       foxprox proof-http-proxy [--listen 10.255.0.1:8080] [--allow-port PORT]... [--request-head-limit BYTES] [--request-head-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]\n       foxprox proof-socks5-proxy [--listen 10.255.0.1:1080] [--allow-port PORT]... [--request-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]"
 }
 
 fn proof_icmp<I>(mut args: I) -> io::Result<()>
@@ -346,6 +346,14 @@ where
             "--tcp-port" => {
                 config.tcp_port = parse_value(&required_value(&mut args, "--tcp-port")?)?
             }
+            "--tcp-forward-port" => {
+                config
+                    .additional_tcp_ports
+                    .push(parse_nonzero_u16(&required_value(
+                        &mut args,
+                        "--tcp-forward-port",
+                    )?)?);
+            }
             "--upstream-dns" => {
                 config.upstream_dns =
                     parse_socket_addr(&required_value(&mut args, "--upstream-dns")?)?
@@ -415,21 +423,8 @@ where
         }
     }
 
-    config
-        .policy
-        .rules
-        .push(allow_tcp_forward_rule(config.tcp_port));
-    if config.tcp_port == 80 {
-        config
-            .policy
-            .rules
-            .push(allow_http_forward_rule(config.tcp_port));
-    }
-    if config.tcp_port == 443 {
-        config
-            .policy
-            .rules
-            .push(allow_tls_forward_rule(config.tcp_port));
+    for port in combined_transparent_tcp_ports(&config) {
+        add_transparent_tcp_allow_rules(&mut config.policy.rules, port);
     }
 
     let setup_socket = setup_socket.ok_or_else(|| {
@@ -443,8 +438,9 @@ where
     })?;
 
     let listener = BoundSetupListener::bind(&setup_socket)?;
+    let transparent_tcp_ports = combined_transparent_tcp_ports(&config);
     validate_transparent_proxy_bridge_inputs(
-        config.tcp_port,
+        &transparent_tcp_ports,
         http_proxy_port,
         http_proxy_config.listen_addr,
         socks5_proxy_port,
@@ -508,14 +504,14 @@ where
 }
 
 fn validate_transparent_proxy_bridge_inputs(
-    transparent_tcp_port: u16,
+    transparent_tcp_ports: &[u16],
     http_proxy_port: Option<u16>,
     http_backend_listen: SocketAddr,
     socks5_proxy_port: Option<u16>,
     socks_backend_listen: SocketAddr,
 ) -> io::Result<()> {
     if let Some(port) = http_proxy_port {
-        if port == transparent_tcp_port {
+        if transparent_tcp_ports.contains(&port) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "HTTP proxy port must differ from transparent TCP port",
@@ -524,7 +520,7 @@ fn validate_transparent_proxy_bridge_inputs(
         validate_http_proxy_backend_loopback(http_backend_listen)?;
     }
     if let Some(port) = socks5_proxy_port {
-        if port == transparent_tcp_port || Some(port) == http_proxy_port {
+        if transparent_tcp_ports.contains(&port) || Some(port) == http_proxy_port {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "SOCKS5 proxy port must differ from transparent TCP and HTTP proxy ports",
@@ -721,6 +717,27 @@ where
         config.listen_addr
     );
     run_socks5_proxy_proof(config)
+}
+
+fn combined_transparent_tcp_ports(config: &CombinedTransparentProofConfig) -> Vec<u16> {
+    let mut ports = Vec::with_capacity(1 + config.additional_tcp_ports.len());
+    ports.push(config.tcp_port);
+    for port in &config.additional_tcp_ports {
+        if !ports.contains(port) {
+            ports.push(*port);
+        }
+    }
+    ports
+}
+
+fn add_transparent_tcp_allow_rules(rules: &mut Vec<PolicyRule>, port: u16) {
+    rules.push(allow_tcp_forward_rule(port));
+    if port == 80 {
+        rules.push(allow_http_forward_rule(port));
+    }
+    if port == 443 {
+        rules.push(allow_tls_forward_rule(port));
+    }
 }
 
 fn allow_tcp_forward_rule(port: u16) -> PolicyRule {
@@ -1060,6 +1077,7 @@ mod tests {
         assert!(usage().contains("proof-transparent"));
         assert!(usage().contains("--max-workers"));
         assert!(usage().contains("--udp-forward-port"));
+        assert!(usage().contains("--tcp-forward-port"));
         assert!(usage().contains("--http-proxy-port"));
         assert!(usage().contains("--socks5-proxy-port"));
     }
@@ -1078,7 +1096,7 @@ mod tests {
     #[test]
     fn transparent_proxy_bridge_input_validation_rejects_conflicts_before_backend_start() {
         let error = validate_transparent_proxy_bridge_inputs(
-            80,
+            &[80],
             Some(8080),
             SocketAddr::from(([127, 0, 0, 1], 0)),
             Some(8080),
@@ -1088,7 +1106,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
 
         let error = validate_transparent_proxy_bridge_inputs(
-            80,
+            &[80],
             None,
             SocketAddr::from(([127, 0, 0, 1], 0)),
             Some(1080),
