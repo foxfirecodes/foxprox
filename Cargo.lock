@@ -96,6 +96,7 @@ dependencies = [
  "foxprox-core",
  "foxprox-egress",
  "foxprox-inspect",
+ "foxprox-packet",
 ]
 
 [[package]]

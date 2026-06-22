@@ -1366,3 +1366,24 @@
 - What this proves: a target inside a real bwrap network namespace can send UDP through TUN, the broker can forward the payload to a host UDP socket, and the target can receive the host response through TUN.
 - What remains unproven: long-running UDP flow table integration/live multi-flow behavior, DNS policy integration over live TUN, and TCP forwarding via a userspace stack.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — TUN DNS packet → broker DNS handler slice
+
+- Slice attempted: connect IPv4 UDP packets from TUN to the existing DNS broker handler and synthesize DNS responses back into IPv4 UDP packets.
+- Why next: generic UDP forwarding works live, but DNS has policy/audit/cache semantics that should not be bypassed by raw UDP forwarding.
+- Verification plan: add a DNS crate helper that parses a TUN IPv4 UDP packet, calls `DnsBrokerDatagramHandler`, records DNS answers, and wraps the DNS response in an IPv4 UDP response packet. Prove allowed forwarding/cache and denied REFUSED response paths, then run focused DNS tests plus workspace checks.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — TUN DNS packet → broker DNS handler
+
+- Slice attempted: connect IPv4 UDP packets from TUN to the existing DNS broker handler and synthesize DNS responses back into IPv4 UDP packets.
+- Why next: generic UDP forwarding works live, but DNS has policy/audit/cache semantics that should not be bypassed by raw UDP forwarding.
+- What changed: `foxprox-dns` now depends on `foxprox-packet` and exposes `handle_tun_dns_packet`. It parses an IPv4 UDP packet from TUN, derives the sandbox UDP source endpoint, calls `DnsBrokerDatagramHandler`, records DNS answers through the existing cache path, and wraps allowed/denied DNS responses in synthesized IPv4 UDP response packets for TUN write-back.
+- Verification:
+  - Focused checks passed: `cargo test -p foxprox-dns tun_dns_packet -- --nocapture`, proving both allowed upstream forwarding/cache recording and denied REFUSED response wrapping without egress.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 8 `foxprox-dns` tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: the DNS cache constructor takes no TTL argument; TTL handling is internal to recorded DNS answers.
+- What remains unproven: live bwrap DNS query through the TUN DNS handler and integration of DNS attribution with later live TCP/UDP flows.
+- Commit: this commit.

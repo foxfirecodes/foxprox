@@ -252,3 +252,7 @@ Before moving UDP forwarding into a live namespace smoke test, prove the runtime
 ## 2026-06-22 — live UDP forwarding smoke can use host loopback upstream
 
 To prove transparent UDP forwarding through a live bwrap-created TUN fd, run a host loopback UDP server, have the sandbox target send to the broker-side TUN IP, and let the broker forward only the payload to loopback egress before synthesizing a response back to the sandbox tuple.
+
+## 2026-06-22 — TUN DNS should reuse DNS broker policy/cache semantics
+
+Transparent DNS packets from TUN should be parsed only enough to recover the UDP tuple and payload, then routed through `DnsBrokerDatagramHandler`. This preserves existing DNS allow/deny audit behavior, REFUSED/FORMERR synthesis, upstream forwarding, and attribution-cache recording.

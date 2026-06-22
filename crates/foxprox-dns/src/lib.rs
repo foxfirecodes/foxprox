@@ -16,6 +16,9 @@ use foxprox_core::{
 };
 use foxprox_egress::{EgressError, UdpEgress, UdpTarget};
 use foxprox_inspect::{DnsAttributionCache, DnsResponseError};
+use foxprox_packet::{
+    parse_ipv4_udp_datagram, synthesize_ipv4_udp_response, PacketBuildError, PacketParseError,
+};
 
 /// Result of handling one DNS datagram received by the broker resolver.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,6 +37,44 @@ pub struct DnsServeOneResult {
     pub received_bytes: usize,
     pub sent_bytes: Option<usize>,
     pub datagram: DnsDatagramResult,
+}
+
+/// Result of handling one DNS query carried inside an IPv4 UDP packet from TUN.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TunDnsPacketResult {
+    pub source: Endpoint,
+    pub datagram: DnsDatagramResult,
+    pub response_packet: Option<Vec<u8>>,
+}
+
+/// TUN DNS packet handling errors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TunDnsPacketError {
+    Parse(PacketParseError),
+    Build(PacketBuildError),
+}
+
+impl fmt::Display for TunDnsPacketError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parse(error) => write!(f, "tun-dns-parse-error: {error}"),
+            Self::Build(error) => write!(f, "tun-dns-build-error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for TunDnsPacketError {}
+
+impl From<PacketParseError> for TunDnsPacketError {
+    fn from(value: PacketParseError) -> Self {
+        Self::Parse(value)
+    }
+}
+
+impl From<PacketBuildError> for TunDnsPacketError {
+    fn from(value: PacketBuildError) -> Self {
+        Self::Build(value)
+    }
 }
 
 /// DNS UDP listener/runtime errors.
@@ -182,6 +223,37 @@ pub fn serve_one_udp_query<E: UdpEgress>(
         received_bytes,
         sent_bytes,
         datagram,
+    })
+}
+
+/// Handle one DNS query carried by an IPv4 UDP packet from TUN.
+pub fn handle_tun_dns_packet<E: UdpEgress>(
+    packet: &[u8],
+    handler: &DnsBrokerDatagramHandler,
+    egress: &E,
+    sandbox_id: SandboxId,
+    cache: &mut DnsAttributionCache,
+    observed_at: SystemTime,
+) -> Result<TunDnsPacketResult, TunDnsPacketError> {
+    let datagram = parse_ipv4_udp_datagram(packet)?;
+    let source = Endpoint::udp(datagram.source.into(), datagram.source_port);
+    let result = handler.handle_query(
+        egress,
+        sandbox_id,
+        source,
+        &datagram.payload,
+        cache,
+        observed_at,
+    );
+    let response_packet = result
+        .response
+        .as_ref()
+        .map(|response| synthesize_ipv4_udp_response(packet, response))
+        .transpose()?;
+    Ok(TunDnsPacketResult {
+        source,
+        datagram: result,
+        response_packet,
     })
 }
 
@@ -539,6 +611,23 @@ mod tests {
         Endpoint::udp(Ipv4Addr::new(10, 0, 0, 1).into(), 53)
     }
 
+    fn ipv4_udp_packet(source_port: u16, destination_port: u16, payload: &[u8]) -> Vec<u8> {
+        let udp_length = 8 + payload.len();
+        let total_length = 20 + udp_length;
+        let mut packet = vec![0_u8; total_length];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_length as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[10, 0, 0, 2]);
+        packet[16..20].copy_from_slice(&[10, 0, 0, 1]);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        packet[24..26].copy_from_slice(&(udp_length as u16).to_be_bytes());
+        packet[28..].copy_from_slice(payload);
+        packet
+    }
+
     fn allow_example_dns_policy() -> PolicyEngine {
         allow_example_dns_policy_for(broker_resolver())
     }
@@ -681,6 +770,98 @@ mod tests {
             cache.enrich_event(flow, now).hostname(),
             Some("dns.example.com")
         );
+    }
+
+    #[test]
+    fn tun_dns_packet_allows_forwards_records_and_wraps_response_packet() {
+        let query = dns_a_query("dns.example.com");
+        let response = dns_a_response(&query, [93, 184, 216, 34], 60);
+        let server_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let server_addr = server_socket.local_addr().unwrap();
+        let expected_query = query.clone();
+        let server_response = response.clone();
+        let server = thread::spawn(move || {
+            let mut received = vec![0_u8; 512];
+            let (length, peer) = server_socket.recv_from(&mut received).unwrap();
+            received.truncate(length);
+            assert_eq!(received, expected_query);
+            server_socket.send_to(&server_response, peer).unwrap();
+        });
+        let egress = HostUdpEgress::new(Duration::from_secs(1)).unwrap();
+        let forwarder =
+            UdpDnsForwarder::new(UdpTarget::new_ip(server_addr.ip(), server_addr.port()).unwrap());
+        let handler =
+            DnsBrokerDatagramHandler::new(allow_example_dns_policy(), forwarder, broker_resolver());
+        let mut cache = DnsAttributionCache::new();
+        let packet = ipv4_udp_packet(53000, 53, &query);
+
+        let result = handle_tun_dns_packet(
+            &packet,
+            &handler,
+            &egress,
+            sandbox_id(),
+            &mut cache,
+            SystemTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        server.join().unwrap();
+        let response_packet = result.response_packet.unwrap();
+
+        assert!(result.datagram.forwarded);
+        assert_eq!(result.datagram.recorded_answers, 1);
+        assert_eq!(result.source, sandbox_source());
+        assert_eq!(&response_packet[12..16], &[10, 0, 0, 1]);
+        assert_eq!(&response_packet[16..20], &[10, 0, 0, 2]);
+        assert_eq!(
+            u16::from_be_bytes([response_packet[20], response_packet[21]]),
+            53
+        );
+        assert_eq!(
+            u16::from_be_bytes([response_packet[22], response_packet[23]]),
+            53000
+        );
+        assert_eq!(&response_packet[28..], response.as_slice());
+    }
+
+    #[test]
+    fn tun_dns_packet_denial_wraps_refused_response_without_egress() {
+        struct PanicUdpEgress;
+        impl UdpEgress for PanicUdpEgress {
+            fn connect(
+                &self,
+                _target: &UdpTarget,
+            ) -> Result<foxprox_egress::UdpEgressSession, foxprox_egress::EgressError> {
+                panic!("denied TUN DNS query must not use egress")
+            }
+        }
+        let query = dns_a_query("blocked.example.com");
+        let handler = DnsBrokerDatagramHandler::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            UdpDnsForwarder::new(UdpTarget::new_host("127.0.0.1", 53).unwrap()),
+            broker_resolver(),
+        );
+        let mut cache = DnsAttributionCache::new();
+        let packet = ipv4_udp_packet(53000, 53, &query);
+
+        let result = handle_tun_dns_packet(
+            &packet,
+            &handler,
+            &PanicUdpEgress,
+            sandbox_id(),
+            &mut cache,
+            SystemTime::UNIX_EPOCH,
+        )
+        .unwrap();
+        let response_packet = result.response_packet.unwrap();
+
+        assert_eq!(
+            result.datagram.evaluation.audit.decision,
+            AuditDecision::Denied
+        );
+        assert!(!result.datagram.forwarded);
+        assert_eq!(response_packet[28], query[0]);
+        assert_eq!(response_packet[29], query[1]);
+        assert_eq!(response_packet[31] & 0x0f, 5);
     }
 
     #[test]
