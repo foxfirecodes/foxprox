@@ -977,5 +977,5 @@
   - `cargo tree -p foxprox-egress` — egress depends only on `foxprox-core`.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
   - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated in adapter crate.
-- Commit hash after commit: pending.
+- Commit hash after commit: bfa7515.
 - Remaining boundary risks: host-to-sandbox packet injection, partial-write/backpressure semantics, async stream readiness, and bridge cleanup on real close remain.
