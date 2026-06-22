@@ -120,3 +120,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Shared DNS cache runtime boundary
 
 - Live DNS-to-proxy attribution can be modeled with `SharedDnsCache`: DNS handlers commit/rollback delivered observations into the shared cache, while explicit proxy frontends resolve per request from that same cache and append resolution audit evidence before policy/egress.
+
+## 2026-06-22 — Runtime lifecycle ledger boundary
+
+- Runtime lifecycle supervision should emit `network_session_start` before components run and `network_session_exit` on clean or failed shutdown. If exit evidence is backpressured, preserve `audit_backpressure` and treat the lifecycle result as fail-closed.

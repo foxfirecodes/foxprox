@@ -19,6 +19,7 @@ pub mod packet;
 pub mod policy;
 pub mod proxy;
 pub mod proxy_frontend;
+pub mod runtime;
 pub mod setup;
 pub mod tcp;
 pub mod tun;
@@ -52,6 +53,9 @@ pub use proxy::{
 pub use proxy_frontend::{
     ExplicitProxyEgress, ExplicitProxyFrontend, ExplicitProxyResult, InMemoryExplicitProxyEgress,
     ProxyEgressError,
+};
+pub use runtime::{
+    RuntimeComponent, RuntimeExitStatus, RuntimeLifecycleError, RuntimeLifecycleHarness,
 };
 pub use setup::{
     BwrapSetupPlan, NetworkSetupConfig, ProxyEnvironment, SetupExecutionReport, SetupHelperPlan,

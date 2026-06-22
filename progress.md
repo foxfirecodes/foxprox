@@ -1691,3 +1691,29 @@ The DNS/proxy cache wiring blind spot is reduced from snapshot-only injection to
 
 ### Remaining blind spots
 - This is still a synchronous shared-cache proof, not full async runtime supervision. The runtime must wire DNS listener delivery rollback and proxy accept loops to the same shared cache under real task scheduling.
+
+## 2026-06-22 — Runtime lifecycle ledger harness
+
+### Commands run
+- `cargo fmt` — applied formatting for runtime lifecycle harness.
+- `cargo test -p foxprox-core --all-targets --all-features` — passed, 116 core tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 116 core tests, 3 device tests, 25 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_core::runtime::tests::runtime_lifecycle_records_start_and_clean_exit ... ok`
+- `foxprox_core::runtime::tests::runtime_lifecycle_exit_backpressure_fails_closed ... ok`
+- `foxprox_core::runtime::tests::runtime_lifecycle_exit_before_start_is_rejected_without_audit ... ok`
+
+### Interpretation
+The core now has a platform-independent runtime lifecycle ledger harness. Runtime components such as TUN, smoltcp stack, DNS listener, and explicit proxy listeners can be represented in `network_session_start` evidence with component counts/names, and shutdown emits `network_session_exit` with duration and status. Exit audit backpressure is fail-closed and leaves `audit_backpressure` evidence instead of silently dropping lifecycle state.
+
+### Changed files
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-core/src/runtime.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This is a lifecycle ledger harness, not an async process/task supervisor. Final runtime must attach real listener tasks, TUN fd loops, child process exit status, and cleanup actions to this lifecycle boundary.
