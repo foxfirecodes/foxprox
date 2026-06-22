@@ -515,3 +515,15 @@
 - Interpretation: explicit HTTP proxy networking now has a local forwarding proof, not just parser fixtures. Remaining explicit proxy gaps are denied HTTP proxy behavior, HTTPS CONNECT tunneling, and SOCKS5 TCP CONNECT forwarding.
 - Next verification gap: add an explicit HTTP proxy deny smoke or HTTPS CONNECT/SOCKS TCP CONNECT forwarding smoke.
 - Commit hash after commit: pending.
+
+## 2026-06-22T02:45:00Z — HTTP proxy smoke commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs progress.md && git commit -m "Add explicit HTTP proxy smoke"`
+- Environment assumptions: local HTTP proxy smoke and workspace tests above were verified before commit.
+- Expected result: commit captures explicit HTTP proxy forwarding smoke and ledger updates.
+- Observed result: commit `a1401ce` created with 3 files changed.
+- Relevant output excerpt: `[harness-lab a1401ce] Add explicit HTTP proxy smoke`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: explicit HTTP proxy allow checkpoint is preserved.
+- Next verification gap: denied HTTP proxy behavior, HTTPS CONNECT forwarding, or SOCKS TCP CONNECT forwarding.
+- Commit hash after commit: a1401ce.
