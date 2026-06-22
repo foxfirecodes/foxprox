@@ -438,5 +438,5 @@
   - `cargo check --workspace` — passed.
   - `cargo test --workspace` — passed, 61 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
-- Commit hash after commit: pending.
+- Commit hash after commit: e73124b.
 - Remaining boundary risks: per-backend socket/file-descriptor limits, per-sandbox byte/flow-rate accounting, production timer cleanup, and memory budgeting for stream buffers remain.
