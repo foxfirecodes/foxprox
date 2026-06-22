@@ -128,3 +128,8 @@
 - I incorrectly escalated the next runtime implementation path to the user even though the implementation approach explicitly says autonomy means proceed by default and choose the safest documented option for ordinary implementation choices.
 - The better path was to select the documented default (`Tokio` unless strong reason otherwise, prove `smoltcp` behind the adapter, and evaluate TUN crates locally) and record assumptions in `progress.md`, only pausing for a truly scope-changing or security-sensitive decision.
 - Future autonomous cycles should not ask for permission to pick among documented implementation paths; choose the best path forward, verify, record risks/learnings, and continue until a real stop condition is met.
+
+## 2026-06-21 — IPv4 packet orchestration boundary
+
+- Packet write-back should be gated by policy in `foxprox-net`: the packet crate may discover a possible echo reply, but the orchestrator only returns it after the normalized ICMP event is allowed.
+- Policy-driven ICMP unreachable synthesis can use the original packet bytes locally in the net/packet boundary while audit and policy continue to see only normalized events and denial actions.

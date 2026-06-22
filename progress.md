@@ -549,3 +549,26 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: f5e11b6.
 - Remaining boundary risks: async egress, stream backpressure, HTTP response parsing/streaming, connection timeouts, DNS upstream selection, and integration with TUN/proxy listener event loops remain.
+
+## 2026-06-21 — Boundary objective: IPv4 packet policy orchestration
+
+- Boundary under work: TUN-facing IPv4 packet orchestration that connects packet normalization, policy/audit, shared egress, and policy-driven packet write-back.
+- Allowed dependency direction: `foxprox-net` may orchestrate `foxprox-packet`, policy, audit, and egress; `foxprox-policy` and `foxprox-audit` must still consume only normalized events and must not import packet/raw-buffer types.
+- Dependency-risk assessment: packet write-back can leak raw packet details upward if policy or audit learn packet headers. The orchestrator should keep original bytes local, ask policy only about normalized events, and return opaque outbound packets.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency checks for `foxprox-policy`, `foxprox-audit`, and `foxprox-net`.
+- Observed results: initial `cargo clippy --all-targets --all-features -- -D warnings` found an 8-argument packet handler API; factoring the packet/session labels into `InboundIpv4Packet` kept the public boundary narrower and clippy-clean. All verification passed afterward.
+- Changed files:
+  - `Cargo.lock`
+  - `crates/foxprox-net/Cargo.toml`
+  - `crates/foxprox-net/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 69 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed after the API narrowing noted above.
+  - `cargo tree -p foxprox-policy` — policy depends only on `foxprox-core`.
+  - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
+  - `cargo tree -p foxprox-net` — net orchestrates core/audit/dns/egress/packet/policy; packet remains behind the net orchestration boundary.
+- Commit hash after commit: pending.
+- Remaining boundary risks: real TUN fd IO, userspace stack handoff for non-proof TCP segments, TCP reset denial synthesis, and production device event loops remain.

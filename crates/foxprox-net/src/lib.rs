@@ -18,6 +18,7 @@ use foxprox_core::{
     UdpTimeouts,
 };
 use foxprox_egress::{dispatch_allowed_event, EgressError, HostEgress};
+use foxprox_packet::{inspect_ipv4_packet, synthesize_ipv4_denial_response};
 use foxprox_policy::PolicyEngine;
 
 /// Network-stack adapter boundary. Implementations may use smoltcp or another
@@ -264,21 +265,110 @@ where
     E: HostEgress,
     A: AuditSink,
 {
+    handle_normalized_event_with_decision(event, policy, egress, audit, sequence, timestamp_millis)
+        .map(|evaluated| evaluated.outcome)
+}
+
+fn handle_normalized_event_with_decision<E, A>(
+    event: &NormalizedEvent,
+    policy: &PolicyEngine,
+    egress: &mut E,
+    audit: &mut A,
+    sequence: u64,
+    timestamp_millis: u64,
+) -> Result<EvaluatedEventOutcome, BrokerError>
+where
+    E: HostEgress,
+    A: AuditSink,
+{
     let decision = policy.decide(event);
     let record = AuditRecord::from_event(sequence, timestamp_millis, event, &decision);
     audit.record(record).map_err(BrokerError::Audit)?;
 
-    if decision.is_allowed() {
+    let outcome = if decision.is_allowed() {
         match dispatch_allowed_event(egress, event) {
-            Ok(_) => Ok(BrokerEventOutcome::Forwarded),
-            Err(EgressError::UnsupportedAllowedEvent) => Ok(BrokerEventOutcome::NoEgressRequired),
-            Err(error) => Err(BrokerError::Egress(error)),
+            Ok(_) => BrokerEventOutcome::Forwarded,
+            Err(EgressError::UnsupportedAllowedEvent) => BrokerEventOutcome::NoEgressRequired,
+            Err(error) => return Err(BrokerError::Egress(error)),
         }
     } else {
-        Ok(BrokerEventOutcome::Denied(decision_denial_action(
-            &decision,
-        )))
+        BrokerEventOutcome::Denied(decision_denial_action(&decision))
+    };
+
+    Ok(EvaluatedEventOutcome { decision, outcome })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct EvaluatedEventOutcome {
+    decision: PolicyDecision,
+    outcome: BrokerEventOutcome,
+}
+
+/// One inbound IPv4 packet plus the normalized session/frontend labels needed
+/// to keep raw device bytes out of policy and audit APIs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InboundIpv4Packet<'a> {
+    pub sandbox_id: &'a SandboxId,
+    pub frontend: FrontendKind,
+    pub bytes: &'a [u8],
+}
+
+/// Result of handling one inbound IPv4 packet at the packet-policy boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PacketBrokerOutcome {
+    pub event: NormalizedEvent,
+    pub decision: PolicyDecision,
+    pub outcome: BrokerEventOutcome,
+    pub outbound_packets: Vec<OutboundIpPacket>,
+}
+
+/// Normalize one inbound IPv4 packet, run policy/audit/egress, and return any
+/// opaque packets that should be written back to the device frontend.
+///
+/// Raw packet bytes stay inside this orchestration boundary. Policy and audit
+/// see only the normalized event; synthetic replies and denial packets are
+/// returned as opaque `OutboundIpPacket` values for a TUN loop to write back.
+pub fn handle_ipv4_packet<E, A>(
+    packet: InboundIpv4Packet<'_>,
+    policy: &PolicyEngine,
+    egress: &mut E,
+    audit: &mut A,
+    sequence: u64,
+    timestamp_millis: u64,
+) -> Result<PacketBrokerOutcome, BrokerError>
+where
+    E: HostEgress,
+    A: AuditSink,
+{
+    let inspection = inspect_ipv4_packet(packet.sandbox_id.clone(), packet.frontend, packet.bytes);
+    let evaluated = handle_normalized_event_with_decision(
+        &inspection.event,
+        policy,
+        egress,
+        audit,
+        sequence,
+        timestamp_millis,
+    )?;
+    let mut outbound_packets = Vec::new();
+
+    if evaluated.decision.is_allowed() {
+        if let Some(reply) = inspection.synthetic_reply {
+            outbound_packets
+                .push(OutboundIpPacket::new(reply.bytes().to_vec()).map_err(BrokerError::Stack)?);
+        }
+    } else if let Some(reply) = synthesize_ipv4_denial_response(packet.bytes, &evaluated.decision)
+        .map_err(BrokerError::Packet)?
+    {
+        outbound_packets
+            .push(OutboundIpPacket::new(reply.bytes().to_vec()).map_err(BrokerError::Stack)?);
     }
+
+    Ok(PacketBrokerOutcome {
+        event: inspection.event,
+        decision: evaluated.decision,
+        outcome: evaluated.outcome,
+        outbound_packets,
+    })
 }
 
 /// Record a flow lifecycle close/expiry without exposing adapter-specific flow
@@ -332,6 +422,8 @@ pub enum BrokerEventOutcome {
 pub enum BrokerError {
     Audit(foxprox_audit::AuditError),
     Egress(EgressError),
+    Packet(foxprox_packet::PacketError),
+    Stack(StackError),
 }
 
 impl fmt::Display for BrokerError {
@@ -339,6 +431,8 @@ impl fmt::Display for BrokerError {
         match self {
             Self::Audit(error) => write!(f, "audit error: {error}"),
             Self::Egress(error) => write!(f, "egress error: {error}"),
+            Self::Packet(error) => write!(f, "packet error: {error}"),
+            Self::Stack(error) => write!(f, "stack error: {error}"),
         }
     }
 }
@@ -627,5 +721,120 @@ mod tests {
         );
         assert!(egress.udp_flows.is_empty());
         assert_eq!(audit.records().len(), 1);
+    }
+
+    #[test]
+    fn allowed_icmp_echo_packet_returns_synthetic_reply_after_policy() {
+        let mut config = RuntimeConfig::deny_by_default();
+        config.allow_ping = true;
+        let policy = PolicyEngine::new(config);
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(8);
+        let packet = echo_request_packet();
+
+        let sandbox_id = SandboxId::new("s1").unwrap();
+        let outcome = handle_ipv4_packet(
+            InboundIpv4Packet {
+                sandbox_id: &sandbox_id,
+                frontend: FrontendKind::Tun,
+                bytes: &packet,
+            },
+            &policy,
+            &mut egress,
+            &mut audit,
+            1,
+            1000,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.outcome, BrokerEventOutcome::NoEgressRequired);
+        assert!(outcome.decision.is_allowed());
+        assert_eq!(outcome.outbound_packets.len(), 1);
+        assert_eq!(outcome.outbound_packets[0].bytes()[20], 0);
+        assert_eq!(audit.records().len(), 1);
+        assert!(egress.tcp_connects.is_empty());
+        assert!(egress.udp_flows.is_empty());
+    }
+
+    #[test]
+    fn denied_udp_packet_can_synthesize_policy_icmp_unreachable() {
+        let mut config = RuntimeConfig::allow_by_default();
+        let mut rule = PolicyRule::deny(
+            RuleId::new("udp-admin-deny").unwrap(),
+            DenialAction::IcmpUnreachable,
+        );
+        rule.protocol = ProtocolMatcher::Exact(Protocol::Udp);
+        rule.port = PortMatcher::Exact(12345);
+        config.rules.push(rule);
+        let policy = PolicyEngine::new(config);
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(8);
+        let packet = udp_packet(53000, 12345, &[1, 2, 3, 4]);
+
+        let sandbox_id = SandboxId::new("s1").unwrap();
+        let outcome = handle_ipv4_packet(
+            InboundIpv4Packet {
+                sandbox_id: &sandbox_id,
+                frontend: FrontendKind::Tun,
+                bytes: &packet,
+            },
+            &policy,
+            &mut egress,
+            &mut audit,
+            2,
+            2000,
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.outcome,
+            BrokerEventOutcome::Denied(Some(DenialAction::IcmpUnreachable))
+        );
+        assert_eq!(outcome.outbound_packets.len(), 1);
+        assert_eq!(outcome.outbound_packets[0].bytes()[20], 3);
+        assert_eq!(outcome.outbound_packets[0].bytes()[21], 13);
+        assert!(egress.udp_flows.is_empty());
+        assert_eq!(audit.records().len(), 1);
+    }
+
+    fn echo_request_packet() -> Vec<u8> {
+        let mut packet = vec![0_u8; 28];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&28_u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 1;
+        packet[12..16].copy_from_slice(&[10, 0, 0, 2]);
+        packet[16..20].copy_from_slice(&[10, 0, 0, 1]);
+        packet[20] = 8;
+        packet[24..26].copy_from_slice(&0x1234_u16.to_be_bytes());
+        packet[26..28].copy_from_slice(&1_u16.to_be_bytes());
+        finish_ipv4_packet(packet)
+    }
+
+    fn udp_packet(source_port: u16, destination_port: u16, payload: &[u8]) -> Vec<u8> {
+        let udp_len = 8 + payload.len();
+        let total_len = 20 + udp_len;
+        let mut packet = vec![0_u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&[10, 0, 0, 2]);
+        packet[16..20].copy_from_slice(&[203, 0, 113, 10]);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[28..].copy_from_slice(payload);
+        finish_ipv4_packet(packet)
+    }
+
+    fn finish_ipv4_packet(mut packet: Vec<u8>) -> Vec<u8> {
+        let ip_checksum = foxprox_packet::internet_checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+        if packet[9] == 1 {
+            let icmp_checksum = foxprox_packet::internet_checksum(&packet[20..]);
+            packet[22..24].copy_from_slice(&icmp_checksum.to_be_bytes());
+        }
+        packet
     }
 }

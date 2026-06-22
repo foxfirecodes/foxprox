@@ -14,4 +14,5 @@ foxprox-audit = { path = "../foxprox-audit" }
 foxprox-core = { path = "../foxprox-core" }
 foxprox-dns = { path = "../foxprox-dns" }
 foxprox-egress = { path = "../foxprox-egress" }
+foxprox-packet = { path = "../foxprox-packet" }
 foxprox-policy = { path = "../foxprox-policy" }

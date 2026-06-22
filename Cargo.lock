@@ -63,6 +63,7 @@ dependencies = [
  "foxprox-core",
  "foxprox-dns",
  "foxprox-egress",
+ "foxprox-packet",
  "foxprox-policy",
 ]
 
