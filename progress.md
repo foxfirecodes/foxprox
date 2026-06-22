@@ -820,3 +820,27 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * denied, malformed, replayed, or response-synthesis-failed outcomes still do not expose forwardable wire bytes.
 * Audit evidence: handler tests assert forwarded wire bytes match inputs while existing audit assertions preserve DNS query/response decision metadata.
 * Residual risk: actual UDP socket IO and audit-buffer integration still need implementation; this commit only prevents future runtime code from needing to reconstruct accepted DNS wire messages.
+
+## 2026-06-21 - Explicit HTTP proxy request decision helper
+
+* Invariant under work: explicit HTTP proxy plaintext requests and HTTPS CONNECT authorities must use strict parser metadata, shared policy decisions, structured audit events, and bounded denial/error response synthesis through one helper.
+* Threat or failure mode addressed: future proxy accept loops could parse HTTP/CONNECT requests ad hoc, omit requested-port or path metadata, allow malformed proxy requests, or deny without auditable frontend/source attribution.
+* Planned verification: add pure proxy handler tests for allowed HTTP request forwarding, denied HTTP response/audit, allowed CONNECT tunnel metadata, malformed CONNECT fail-closed response/audit, bounded response synthesis failure drop, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Explicit HTTP proxy request decision helper results
+
+* Tests added/updated:
+  * allowed explicit HTTP proxy requests forward the original bounded wire bytes after strict Host/path parsing, shared policy allow, and audit preservation of method/path/requested-port/rule metadata.
+  * denied HTTP proxy requests synthesize bounded `403 Forbidden` responses with structured deny audit including hostname attribution and requested port.
+  * allowed HTTPS CONNECT requests produce explicit tunnel outcomes with high-confidence explicit-proxy attribution and authority port audit metadata.
+  * malformed CONNECT and unsupported proxy request shapes fail closed with bounded `400 Bad Request` responses and malformed-input audit.
+  * too-small proxy response bounds produce a drop outcome instead of unbounded allocation while preserving the audited deny decision.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` passed tests but clippy failed on an unused non-test import.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 119 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * explicit HTTP and CONNECT proxy requests now share the core policy/audit path before any future egress forwarding.
+  * malformed proxy request heads cannot reach policy as permissive metadata and receive fail-closed audit.
+  * denied requests receive bounded local proxy responses; if response bounds are too small, the helper drops rather than allocating beyond the configured limit.
+* Audit evidence: proxy handler tests assert audit kind, frontend, allow/deny/fail-closed decisions, denial reasons, rule IDs, hostname attribution, requested ports, and HTTP method/path fields.
+* Residual risk: no async listener, host TCP egress, CONNECT tunnel byte bridging, or response write-loop backpressure exists yet; this is the pure core decision/response boundary for future proxy frontend wiring.

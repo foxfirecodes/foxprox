@@ -149,3 +149,7 @@ The safe DNS response path is strict parse, pending transaction validation, then
 ## 2026-06-21 - DNS forwarding should use audited wire bytes
 
 DNS handler forward outcomes should carry the exact bounded wire bytes that were parsed and audited. Reconstructing wire messages from metadata in the runtime could diverge from the security decision or accidentally mutate transaction IDs, flags, or answer sections.
+
+## 2026-06-21 - Proxy frontends need a pure decision boundary before IO
+
+Explicit HTTP and CONNECT handlers should parse bounded headers, normalize into shared policy requests, build audit records, and synthesize bounded local denial/error responses before any runtime socket forwarding. This keeps malformed requests and policy denials out of egress code and avoids per-listener ad hoc parsing.

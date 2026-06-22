@@ -14,6 +14,7 @@ pub mod flow;
 pub mod http;
 pub mod packet;
 pub mod policy;
+pub mod proxy_handler;
 pub mod quic;
 pub mod socks;
 pub mod tls;
@@ -47,6 +48,10 @@ pub use http::{
 };
 pub use packet::{parse_ip_packet, PacketParseError, PacketSummary};
 pub use policy::{Decision, DenialReason, DenyBehavior, PolicyEngine, PolicyRequest};
+pub use proxy_handler::{
+    handle_http_proxy_request, HttpProxyRequestContext, HttpProxyRequestOutcome,
+    HttpProxyResponseError,
+};
 pub use quic::{
     parse_quic_candidate, QuicHeaderForm, QuicLongPacketType, QuicPacketMetadata, QuicParseError,
 };
