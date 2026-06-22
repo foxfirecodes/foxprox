@@ -775,5 +775,5 @@
   - `cargo test --workspace` — passed, 82 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-dns` — DNS depends only on `foxprox-core`.
-- Commit hash after commit: pending.
+- Commit hash after commit: 6beadd8.
 - Remaining boundary risks: UDP socket serving, upstream DNS wire forwarding, TCP DNS, negative caching, and DNSSEC/authority metadata remain.
