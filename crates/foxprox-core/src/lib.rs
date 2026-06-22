@@ -10,6 +10,7 @@ pub mod audit;
 pub mod config;
 pub mod dns;
 pub mod dns_handler;
+pub mod egress;
 pub mod flow;
 pub mod http;
 pub mod icmp;
@@ -41,6 +42,7 @@ pub use dns_handler::{
     BrokerDnsQueryContext, BrokerDnsQueryOutcome, BrokerDnsResponseContext,
     BrokerDnsResponseOutcome,
 };
+pub use egress::{EgressDestination, EgressPermit, EgressPermitError};
 pub use flow::{
     TcpFlowEntry, TcpFlowKey, TcpFlowObserveOutcome, TcpFlowObserveStatus, TcpFlowTable,
     UdpFlowClass, UdpFlowEntry, UdpFlowKey, UdpFlowObserveOutcome, UdpFlowObserveStatus,

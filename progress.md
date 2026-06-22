@@ -990,3 +990,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * denied ping traffic cannot trigger synthetic replies.
 * Audit evidence: packet handler tests assert ICMP allow and deny audit decisions around write-back behavior.
 * Residual risk: no live TUN fd writer exists yet; write-back is limited to IPv4 echo replies and does not cover IPv6 echo or ICMP unreachable synthesis.
+
+## 2026-06-21 - Shared egress permit boundary
+
+* Invariant under work: host egress intent must be constructed only from shared policy allow decisions and normalized destination metadata, so frontends cannot bypass broker policy by opening host sockets directly.
+* Threat or failure mode addressed: future TUN/proxy runtimes could pass parsed destinations to host sockets without verifying they came from an allow decision, or could lose whether egress is IP-based vs explicit host/authority-based.
+* Planned verification: add egress permit tests for allowed IP TCP, allowed CONNECT hostname authority, denied decision rejection, missing destination rejection, and unsupported protocol rejection; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Shared egress permit boundary results
+
+* Tests added/updated:
+  * allowed IP policy decisions create egress permits with frontend, protocol, destination endpoint, sandbox ID, and rule provenance.
+  * allowed explicit host/authority decisions such as HTTPS CONNECT create hostname/port egress permits without requiring premature IP resolution.
+  * denied and fail-closed decisions cannot create egress permits.
+  * missing destination/port metadata and unsupported protocol requests are rejected before any host egress intent exists.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 143 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * future frontends have a shared core permit type that can only be built from allow decisions and normalized destinations.
+  * denied/fail-closed requests and unsupported protocols cannot be converted into host socket intents.
+* Audit evidence: egress permits carry policy rule provenance for later correlation with allow audit records; no new audit event was added in this cycle.
+* Residual risk: actual host TCP/UDP socket code is still absent; runtime code must require `EgressPermit` rather than raw endpoints to preserve this no-bypass boundary.

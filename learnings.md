@@ -181,3 +181,7 @@ TCP close/expiration audit records should be built from the `TcpFlowEntry` retur
 ## 2026-06-21 - ICMP write-back must be policy-gated
 
 Synthetic ping replies should be produced only after the TUN packet handler has both parsed the packet and received an allow decision, such as `allow_ping`. Default-denied echo requests should drop with ICMP denial audit and must not reach synthesis.
+
+## 2026-06-21 - Host egress should require an allow-derived permit
+
+Future host socket code should accept an `EgressPermit` built from a shared policy allow decision, not raw parser metadata. This keeps TUN, HTTP, CONNECT, and SOCKS frontends from accidentally bypassing the policy/audit boundary.
