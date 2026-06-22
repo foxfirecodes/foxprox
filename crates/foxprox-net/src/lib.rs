@@ -19,8 +19,8 @@ pub use udp::{run_udp_dns_proof, run_udp_dns_proof_with_ready, UdpDnsProofConfig
 use foxprox_core::{
     parse_http_request_head, parse_tls_client_hello, Attribution, AttributionConfidence,
     AttributionSource, AuditBackpressure, AuditBuffer, AuditEvent, AuditEventKind, Decision,
-    DnsCache, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, SandboxId, TransportEndpoint,
-    UnsupportedReason,
+    DnsCache, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, Protocol, SandboxId,
+    TransportEndpoint, UnsupportedReason,
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, TunTapInterface};
@@ -179,6 +179,28 @@ fn emit_tcp_unsupported_audit(
     };
     let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
     emit_tcp_audit(audit, &event, decision)
+}
+
+fn emit_tcp_flow_closed_audit(
+    audit: &mut AuditBuffer,
+    sandbox_id: &SandboxId,
+    active: &ActiveFlow,
+) -> io::Result<()> {
+    let mut event = AuditEvent::new(Frontend::Tun, AuditEventKind::TcpFlowClosed)
+        .with_sandbox_id(sandbox_id.clone())
+        .with_endpoints(
+            Some(active.source),
+            Some(TransportEndpoint::from(active.destination)),
+        );
+    event.protocol = Some(Protocol::Tcp);
+    event.bytes_from_sandbox = active.bytes_to_host;
+    event.bytes_to_sandbox = active.bytes_to_sandbox;
+    event.flow_duration = Some(active.started_at.elapsed());
+    audit
+        .try_push(event.clone())
+        .map_err(audit_backpressure_error)?;
+    eprintln!("foxprox-net: audit event={event:?}");
+    Ok(())
 }
 
 fn transparent_tcp_audit_event(event: &NetworkEvent, decision: Decision) -> AuditEvent {
@@ -414,6 +436,7 @@ impl TransparentTcpState {
                         && active.pending_to_host.is_empty()
                         && active.pending_to_sandbox.is_empty()
                     {
+                        emit_tcp_flow_closed_audit(audit, &config.sandbox_id, active)?;
                         eprintln!(
                             "foxprox-net: tcp flow closed sandbox_to_host={} host_to_sandbox={}",
                             active.bytes_to_host, active.bytes_to_sandbox
@@ -664,6 +687,8 @@ impl ConnectingFlow {
                     self.source.ip, self.source.port, self.destination
                 );
                 Ok(Some(ActiveFlow::new(
+                    self.source,
+                    self.destination,
                     stream,
                     std::mem::take(&mut self.pending_to_host),
                 )))
@@ -680,6 +705,8 @@ impl ConnectingFlow {
 }
 
 struct ActiveFlow {
+    source: TransportEndpoint,
+    destination: SocketAddr,
     host: TcpStream,
     pending_to_host: Vec<u8>,
     pending_to_sandbox: Vec<u8>,
@@ -687,12 +714,21 @@ struct ActiveFlow {
     host_write_shutdown: bool,
     bytes_to_host: u64,
     bytes_to_sandbox: u64,
+    started_at: StdInstant,
     last_activity: StdInstant,
 }
 
 impl ActiveFlow {
-    fn new(host: TcpStream, pending_to_host: Vec<u8>) -> Self {
+    fn new(
+        source: TransportEndpoint,
+        destination: SocketAddr,
+        host: TcpStream,
+        pending_to_host: Vec<u8>,
+    ) -> Self {
+        let now = StdInstant::now();
         Self {
+            source,
+            destination,
             host,
             pending_to_host,
             pending_to_sandbox: Vec::new(),
@@ -700,7 +736,8 @@ impl ActiveFlow {
             host_write_shutdown: false,
             bytes_to_host: 0,
             bytes_to_sandbox: 0,
-            last_activity: StdInstant::now(),
+            started_at: now,
+            last_activity: now,
         }
     }
 
@@ -875,6 +912,7 @@ mod tests {
         DecisionAction, DnsCacheEntry, DnsObservation, DnsQueryType, Hostname, HttpMethod, Origin,
         Protocol,
     };
+    use std::net::TcpListener;
 
     #[test]
     fn default_config_is_bounded() {
@@ -1210,6 +1248,40 @@ mod tests {
         };
 
         assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn tcp_flow_closed_audit_records_bytes_duration_and_endpoints() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).unwrap();
+        let (server, _) = listener.accept().unwrap();
+        drop(server);
+        let active = ActiveFlow {
+            source: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)), 44_444),
+            destination: SocketAddr::from(([93, 184, 216, 34], 80)),
+            host: client,
+            pending_to_host: Vec::new(),
+            pending_to_sandbox: Vec::new(),
+            host_eof: true,
+            host_write_shutdown: true,
+            bytes_to_host: 123,
+            bytes_to_sandbox: 456,
+            started_at: StdInstant::now() - Duration::from_millis(5),
+            last_activity: StdInstant::now(),
+        };
+        let mut audit = audit_buffer(8).unwrap();
+
+        emit_tcp_flow_closed_audit(&mut audit, &SandboxId::new("test").unwrap(), &active).unwrap();
+        let event = audit.pop_front().unwrap();
+
+        assert_eq!(event.kind, AuditEventKind::TcpFlowClosed);
+        assert_eq!(event.protocol, Some(Protocol::Tcp));
+        assert_eq!(event.source.unwrap().port, 44_444);
+        assert_eq!(event.destination.unwrap().port, 80);
+        assert_eq!(event.bytes_from_sandbox, 123);
+        assert_eq!(event.bytes_to_sandbox, 456);
+        assert!(event.flow_duration.is_some());
     }
 
     #[test]

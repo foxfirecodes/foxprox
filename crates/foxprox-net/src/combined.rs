@@ -1,8 +1,8 @@
 //! Combined transparent TCP, UDP, and broker-DNS proof runtime.
 
 use crate::udp::{
-    handle_dns_datagram, handle_udp_forward_datagram, handle_worker_results, udp_socket,
-    UdpForwardDatagram, UdpForwardSocket, WorkerLimiter,
+    expire_udp_flows_with_audit, handle_dns_datagram, handle_udp_forward_datagram,
+    handle_worker_results, udp_socket, UdpForwardDatagram, UdpForwardSocket, WorkerLimiter,
 };
 use crate::{audit_buffer, set_nonblocking, smoltcp_ipv4, TcpProofConfig, TransparentTcpState};
 use foxprox_core::{DnsCache, PolicyRuleSet, SandboxId, UdpFlowTable};
@@ -291,14 +291,10 @@ where
         if expired_cache_entries > 0 {
             eprintln!("foxprox-net: expired {expired_cache_entries} DNS cache entries");
         }
-        for expired in udp_flows.expire(now) {
-            eprintln!(
-                "foxprox-net: udp flow expired destination={}:{} sandbox_to_host={} host_to_sandbox={}",
-                expired.key.destination_ip,
-                expired.key.destination_port,
-                expired.bytes_from_sandbox,
-                expired.bytes_to_sandbox
-            );
+        if let Err(error) =
+            expire_udp_flows_with_audit(&mut audit, &config.sandbox_id, &mut udp_flows, now)
+        {
+            eprintln!("foxprox-net: combined udp expiry audit failed: {error}");
         }
 
         std::thread::sleep(Duration::from_millis(2));

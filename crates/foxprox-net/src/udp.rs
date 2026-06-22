@@ -8,7 +8,7 @@ use foxprox_core::{
     classify_udp_candidate, parse_dns_query, parse_dns_response, Attribution, AuditBackpressure,
     AuditBuffer, AuditEvent, AuditEventKind, Decision, DnsCache, DnsCacheEntry, FlowKey,
     FlowTimeoutClass, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, Protocol, SandboxId,
-    TransportEndpoint, UdpFlowTable, UnsupportedReason,
+    TransportEndpoint, UdpFlowRecord, UdpFlowTable, UnsupportedReason,
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, PacketMeta, TunTapInterface};
@@ -313,14 +313,10 @@ where
         if expired_cache_entries > 0 {
             eprintln!("foxprox-net: expired {expired_cache_entries} DNS cache entries");
         }
-        for expired in udp_flows.expire(now) {
-            eprintln!(
-                "foxprox-net: udp flow expired destination={}:{} sandbox_to_host={} host_to_sandbox={}",
-                expired.key.destination_ip,
-                expired.key.destination_port,
-                expired.bytes_from_sandbox,
-                expired.bytes_to_sandbox
-            );
+        if let Err(error) =
+            expire_udp_flows_with_audit(&mut audit, &config.sandbox_id, &mut udp_flows, now)
+        {
+            eprintln!("foxprox-net: udp expiry audit failed: {error}");
         }
 
         std::thread::sleep(Duration::from_millis(2));
@@ -631,6 +627,57 @@ fn audit_backpressure_error(error: AuditBackpressure) -> io::Error {
         io::ErrorKind::WouldBlock,
         format!("audit queue backpressure: {error:?}"),
     )
+}
+
+pub(crate) fn expire_udp_flows_with_audit(
+    audit: &mut AuditBuffer,
+    sandbox_id: &SandboxId,
+    flows: &mut UdpFlowTable,
+    now: SystemTime,
+) -> io::Result<()> {
+    for expired in flows.expired(now) {
+        emit_udp_flow_expired_audit(audit, sandbox_id, &expired)?;
+        let _ = flows.remove(&expired.key);
+        eprintln!(
+            "foxprox-net: udp flow expired destination={}:{} sandbox_to_host={} host_to_sandbox={}",
+            expired.key.destination_ip,
+            expired.key.destination_port,
+            expired.bytes_from_sandbox,
+            expired.bytes_to_sandbox
+        );
+    }
+    Ok(())
+}
+
+pub(crate) fn emit_udp_flow_expired_audit(
+    audit: &mut AuditBuffer,
+    sandbox_id: &SandboxId,
+    flow: &UdpFlowRecord,
+) -> io::Result<()> {
+    let mut event = AuditEvent::new(Frontend::Tun, AuditEventKind::UdpFlowExpired)
+        .with_sandbox_id(sandbox_id.clone())
+        .with_endpoints(
+            Some(TransportEndpoint::new(
+                flow.key.source_ip,
+                flow.key.source_port,
+            )),
+            Some(TransportEndpoint::new(
+                flow.key.destination_ip,
+                flow.key.destination_port,
+            )),
+        );
+    event.protocol = Some(Protocol::Udp);
+    event.destination_port = Some(flow.key.destination_port);
+    event.attribution = Some(flow.attribution.clone());
+    event.hostname = flow.attribution.hostname.clone();
+    event.bytes_from_sandbox = flow.bytes_from_sandbox;
+    event.bytes_to_sandbox = flow.bytes_to_sandbox;
+    event.flow_duration = flow.last_activity.duration_since(flow.created_at).ok();
+    audit
+        .try_push(event.clone())
+        .map_err(audit_backpressure_error)?;
+    eprintln!("foxprox-net: udp audit event={event:?}");
+    Ok(())
 }
 
 fn emit_udp_unsupported_audit(
@@ -1022,6 +1069,73 @@ mod tests {
         assert_eq!(audit.hostname.unwrap().as_str(), "example.com");
         assert_eq!(audit.dns_query_type.as_deref(), Some("A"));
         assert!(audit.decision.unwrap().is_allowed());
+    }
+
+    #[test]
+    fn udp_flow_expired_audit_records_bytes_duration_and_endpoints() {
+        let sandbox_id = SandboxId::new("test").unwrap();
+        let now = SystemTime::now();
+        let key = FlowKey::udp(
+            IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)),
+            44_444,
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            443,
+        );
+        let mut flow = UdpFlowRecord::new(key, FlowTimeoutClass::Quic, Attribution::ip_only(), now);
+        flow.record_sandbox_bytes(123, now);
+        flow.record_host_bytes(456, now + Duration::from_millis(5));
+        let mut audit = audit_buffer(8).unwrap();
+
+        emit_udp_flow_expired_audit(&mut audit, &sandbox_id, &flow).unwrap();
+        let event = audit.pop_front().unwrap();
+
+        assert_eq!(event.kind, AuditEventKind::UdpFlowExpired);
+        assert_eq!(event.protocol, Some(Protocol::Udp));
+        assert_eq!(event.source.unwrap().port, 44_444);
+        assert_eq!(event.destination.unwrap().port, 443);
+        assert_eq!(event.destination_port, Some(443));
+        assert_eq!(event.bytes_from_sandbox, 123);
+        assert_eq!(event.bytes_to_sandbox, 456);
+        assert!(event.flow_duration.is_some());
+    }
+
+    #[test]
+    fn udp_flow_expiry_backpressure_keeps_record_for_retry() {
+        let sandbox_id = SandboxId::new("test").unwrap();
+        let now = SystemTime::now();
+        let key = FlowKey::udp(
+            IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)),
+            44_444,
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            443,
+        );
+        let mut flows = UdpFlowTable::default();
+        flows.record_sandbox_datagram(
+            key,
+            FlowTimeoutClass::Quic,
+            Attribution::ip_only(),
+            123,
+            now,
+        );
+        let mut audit = audit_buffer(1).unwrap();
+        let filler = NetworkEvent::DnsQuery {
+            sandbox_id: sandbox_id.clone(),
+            hostname: Hostname::parse("example.com").unwrap(),
+            query_type: "A".to_string(),
+            frontend: Frontend::Tun,
+        };
+        emit_udp_audit(&mut audit, &filler, Decision::allow("broker-dns")).unwrap();
+
+        let error = expire_udp_flows_with_audit(
+            &mut audit,
+            &sandbox_id,
+            &mut flows,
+            now + FlowTimeoutClass::Quic.default_duration(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(flows.get(&key).is_some());
     }
 
     #[test]

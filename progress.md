@@ -1433,6 +1433,70 @@
 - Current git status summary: setup/progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit setup DNS configuration, then reassess remaining P1/P2 alpha gaps.
 
+## 2026-06-22T01:08:18Z — setup DNS configuration committed; next objective selected
+
+- Commit created: `d77158b` (`configure sandbox dns in setup`).
+- Current objective: add structured lifecycle audit for transparent TCP flow close and UDP flow expiry.
+- Rationale: alpha gap reassessment noted P2 audit gaps for lifecycle events that are currently `eprintln!` only. The smallest coherent slice is emitting existing `AuditEventKind::TcpFlowClosed` and `AuditEventKind::UdpFlowExpired` through the bounded audit buffer without changing policy or egress behavior.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: implement structured lifecycle audit in `crates/foxprox-net/src/lib.rs` and `crates/foxprox-net/src/udp.rs`.
+
+## 2026-06-22T01:10:56Z — transparent lifecycle audit pending review
+
+- Current objective: commit structured lifecycle audit for TCP close and UDP expiry.
+- Changes implemented:
+  - `ActiveFlow` now carries source, destination, and start time in addition to byte counters.
+  - TCP close path emits bounded structured `AuditEventKind::TcpFlowClosed` with sandbox id, endpoints, protocol, byte counters, and duration before clearing the flow.
+  - UDP expiry path emits bounded structured `AuditEventKind::UdpFlowExpired` with sandbox id, endpoints, destination port, attribution, byte counters, and duration in both standalone UDP/DNS and combined transparent runtimes.
+  - Added tests for TCP flow close audit metadata and UDP flow expiry audit metadata.
+- Subagents/reviews requested: `lifecycle-audit-final` is running.
+- Verification commands and outcomes:
+  - `cargo test -p foxprox-net -- --nocapture` passed: 36 net tests.
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 8 CLI tests, 51 core tests, 9 device tests, 36 net tests, 28 proxy tests, 2 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-net/src/lib.rs`, `crates/foxprox-net/src/udp.rs`, `crates/foxprox-net/src/combined.rs`, `progress.md`.
+- Current git status summary: net/UDP/combined/progress modified; review artifact pending.
+- Next exact action: read lifecycle audit review, fix blockers if any, then commit.
+
+## 2026-06-22T01:15:07Z — lifecycle audit blocker fixed; rereview pending
+
+- Current objective: commit structured lifecycle audit for TCP close and UDP expiry.
+- Review result: `lifecycle-audit-final` found one blocker: UDP expiry audits were lossy under audit backpressure because `UdpFlowTable::expire` removed records before audit enqueue; standalone and combined loops logged and continued on enqueue failure, permanently losing `UdpFlowExpired` events.
+- Fix implemented:
+  - Added `UdpFlowTable::expired(now)` for non-removing expired-record snapshots and `UdpFlowTable::remove(key)` for explicit removal after audit success.
+  - Added `expire_udp_flows_with_audit`, which enqueues `UdpFlowExpired` first and removes/logs the flow only after successful audit enqueue.
+  - Standalone UDP/DNS and combined transparent runtimes now use `expire_udp_flows_with_audit`; on audit backpressure the flow remains for retry.
+  - Added `udp_flow_expiry_backpressure_keeps_record_for_retry` regression test.
+- Subagents/reviews requested: `lifecycle-audit-rereview` is running.
+- Verification commands and outcomes after fix:
+  - `cargo test -p foxprox-core -p foxprox-net -- --nocapture` passed: 51 core tests, 37 net tests.
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 8 CLI tests, 51 core tests, 9 device tests, 37 net tests, 28 proxy tests, 2 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-core/src/flow.rs`, `crates/foxprox-net/src/lib.rs`, `crates/foxprox-net/src/udp.rs`, `crates/foxprox-net/src/combined.rs`, `progress.md`.
+- Current git status summary: core flow/net/UDP/combined/progress modified; review artifacts pending.
+- Next exact action: read lifecycle audit rereview, fix blockers if any, then commit.
+
+## 2026-06-22T01:17:10Z — lifecycle audit rereview passed
+
+- Current objective: commit structured lifecycle audit for TCP close and UDP expiry.
+- Rereview result: `lifecycle-audit-rereview` found no blockers after the UDP expiry backpressure fix.
+- Confirmed behavior:
+  - UDP expiry audits no longer remove/lose flow records on audit backpressure.
+  - Successful UDP expiry audit removes/logs expired flows in both standalone and combined transparent runtimes.
+  - TCP flow close audit remains sane.
+  - Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed; dependency tree showed no creep.
+- Files changed: `crates/foxprox-core/src/flow.rs`, `crates/foxprox-net/src/lib.rs`, `crates/foxprox-net/src/udp.rs`, `crates/foxprox-net/src/combined.rs`, `progress.md`.
+- Current git status summary: core flow/net/UDP/combined/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit lifecycle audit, then reassess remaining alpha gaps.
+
 ## 2026-06-22T00:12:18Z — ICMP audit/cleanup rereview passed
 
 - Current objective: commit cleanup-safe setup socket binding plus ICMP proof audit coverage.

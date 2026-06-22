@@ -190,18 +190,25 @@ impl UdpFlowTable {
         self.flows.get(key)
     }
 
+    /// Returns expired pseudo-flow records without removing them.
+    pub fn expired(&self, now: SystemTime) -> Vec<UdpFlowRecord> {
+        self.flows
+            .values()
+            .filter(|record| record.is_expired(now))
+            .cloned()
+            .collect()
+    }
+
+    /// Removes one pseudo-flow by key.
+    pub fn remove(&mut self, key: &FlowKey) -> Option<UdpFlowRecord> {
+        self.flows.remove(key)
+    }
+
     /// Removes expired pseudo-flows and returns the expired records.
     pub fn expire(&mut self, now: SystemTime) -> Vec<UdpFlowRecord> {
-        let expired_keys: Vec<_> = self
-            .flows
-            .iter()
-            .filter_map(|(key, record)| record.is_expired(now).then_some(*key))
-            .collect();
-        let mut expired = Vec::with_capacity(expired_keys.len());
-        for key in expired_keys {
-            if let Some(record) = self.flows.remove(&key) {
-                expired.push(record);
-            }
+        let expired = self.expired(now);
+        for record in &expired {
+            self.flows.remove(&record.key);
         }
         expired
     }
