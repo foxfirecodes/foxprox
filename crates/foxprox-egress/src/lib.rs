@@ -13,8 +13,8 @@ use foxprox_core::{
     ExplicitProxyFrontend, Frontend, HttpProxyRequestMetadata, NetworkEndpoint, PolicyRequest,
     Protocol, ProxyEgressError, ProxyParseError, RuntimeChildExit, RuntimeCleanupAction,
     RuntimeCleanupReport, RuntimeComponent, RuntimeExitStatus, RuntimeLifecycleError,
-    RuntimeLifecycleHarness, RuntimeListenerConfig, RuntimeTaskJoinReport, SharedDnsCache,
-    SocksConnectMetadata, TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
+    RuntimeLifecycleHarness, RuntimeListenerConfig, RuntimeTaskExpectation, RuntimeTaskJoinReport,
+    SharedDnsCache, SocksConnectMetadata, TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
 };
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -958,10 +958,17 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
         let mut lifecycle =
             RuntimeLifecycleHarness::new(sandbox_id.clone(), lifecycle_audit_capacity);
         lifecycle
-            .start(
+            .start_with_task_expectations(
                 vec![
                     RuntimeComponent::DnsListener,
                     RuntimeComponent::HttpProxyListener,
+                ],
+                vec![
+                    RuntimeTaskExpectation::new(RuntimeComponent::DnsListener, "dns_accept_loop"),
+                    RuntimeTaskExpectation::new(
+                        RuntimeComponent::HttpProxyListener,
+                        "http_proxy_accept_loop",
+                    ),
                 ],
                 now_ms,
             )
@@ -1224,11 +1231,22 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
         let mut lifecycle =
             RuntimeLifecycleHarness::new(sandbox_id.clone(), lifecycle_audit_capacity);
         lifecycle
-            .start(
+            .start_with_task_expectations(
                 vec![
                     RuntimeComponent::DnsListener,
                     RuntimeComponent::HttpProxyListener,
                     RuntimeComponent::Socks5Listener,
+                ],
+                vec![
+                    RuntimeTaskExpectation::new(RuntimeComponent::DnsListener, "dns_accept_loop"),
+                    RuntimeTaskExpectation::new(
+                        RuntimeComponent::HttpProxyListener,
+                        "http_proxy_accept_loop",
+                    ),
+                    RuntimeTaskExpectation::new(
+                        RuntimeComponent::Socks5Listener,
+                        "socks5_accept_loop",
+                    ),
                 ],
                 now_ms,
             )
@@ -3664,7 +3682,7 @@ mod tests {
         assert_eq!(exit.details["task_join_status"], "incomplete");
         assert_eq!(
             exit.details["missing_runtime_tasks"],
-            "http_proxy_listener,socks5_listener"
+            "http_proxy_listener:http_proxy_accept_loop,socks5_listener:socks5_accept_loop"
         );
         assert_eq!(exit.details["missing_runtime_task_count"], "2");
     }

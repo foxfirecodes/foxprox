@@ -209,3 +209,8 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Packet loops should return task outcomes
 
 - Single-step packet processing is not enough for runtime supervision. A bounded TUN packet loop should report processed count, terminal device error, and a `RuntimeTaskOutcome` so lifecycle exit can include concrete task join evidence.
+
+## 2026-06-22 — Task expectations need names, and loop branches need direct proof
+
+- Component-level task coverage can still hide missing spawned handles when one component owns multiple tasks. Runtime lifecycle start should be able to record expected task names, and exit should compare task outcomes against those names when provided.
+- Progress claims for packet-loop terminal states should have direct tests for each branch: idle completion, bounded cancellation, read failure, and write failure.

@@ -454,6 +454,53 @@ mod tests {
     }
 
     #[test]
+    fn tun_packet_loop_reports_budget_cancellation() {
+        let packet = ipv4_packet(17, 0, &[0x12, 0x34, 0x30, 0x39, 0, 8, 0, 0]);
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let device = InMemoryPacketDevice::with_inbound([packet.clone(), packet]);
+        let mut harness = TunPacketHarness::new("s1", broker, device);
+
+        let report = harness.process_packet_loop(1_000, 1);
+
+        assert_eq!(report.processed_packets, 1);
+        assert_eq!(report.error, None);
+        assert_eq!(report.task_outcome.component, RuntimeComponent::TunDevice);
+        assert_eq!(report.task_outcome.task_name, "tun_packet_loop");
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Cancelled);
+    }
+
+    #[test]
+    fn tun_packet_loop_reports_write_failure_task_outcome() {
+        let mut icmp = vec![8, 0, 0, 0, 0x12, 0x34, 0, 1];
+        let icmp_checksum = checksum(&icmp);
+        icmp[2..4].copy_from_slice(&icmp_checksum.to_be_bytes());
+        let packet = ipv4_packet(1, 0, &icmp);
+        let config = PolicyConfig {
+            allow_ping: true,
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let device = FailingWritePacketDevice::with_inbound([packet]);
+        let mut harness = TunPacketHarness::new("s1", broker, device);
+
+        let report = harness.process_packet_loop(3_250, 8);
+
+        assert_eq!(report.processed_packets, 0);
+        assert_eq!(report.error, Some(DeviceIoError::WriteFailed));
+        assert_eq!(report.task_outcome.component, RuntimeComponent::TunDevice);
+        assert_eq!(report.task_outcome.task_name, "tun_packet_loop");
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Failed);
+        let records: Vec<_> = harness.broker().audit().records().collect();
+        assert_eq!(records[3].kind, AuditKind::BrokerError);
+        assert_eq!(records[3].details["device_io_error"], "write_failed");
+    }
+
+    #[test]
     fn malformed_packet_fails_closed_without_write() {
         let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 4);
         let device = InMemoryPacketDevice::with_inbound([vec![0; 11]]);

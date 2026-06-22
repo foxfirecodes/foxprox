@@ -132,6 +132,25 @@ impl RuntimeTaskStatus {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeTaskExpectation {
+    pub component: RuntimeComponent,
+    pub task_name: String,
+}
+
+impl RuntimeTaskExpectation {
+    pub fn new(component: RuntimeComponent, task_name: impl Into<String>) -> Self {
+        Self {
+            component,
+            task_name: task_name.into(),
+        }
+    }
+
+    fn as_detail(&self) -> String {
+        format!("{}:{}", self.component.as_detail(), self.task_name)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeTaskOutcome {
     pub component: RuntimeComponent,
     pub task_name: String,
@@ -171,7 +190,11 @@ impl RuntimeTaskJoinReport {
         Self { outcomes }
     }
 
-    fn status_detail(&self, expected_components: &[RuntimeComponent]) -> &'static str {
+    fn status_detail(
+        &self,
+        expected_components: &[RuntimeComponent],
+        expected_tasks: &[RuntimeTaskExpectation],
+    ) -> &'static str {
         if self
             .outcomes
             .iter()
@@ -180,24 +203,46 @@ impl RuntimeTaskJoinReport {
             "failed"
         } else if self.outcomes.is_empty() {
             "not_recorded"
-        } else if !self.missing_components(expected_components).is_empty() {
+        } else if !self
+            .missing_task_details(expected_components, expected_tasks)
+            .is_empty()
+        {
             "incomplete"
         } else {
             "complete"
         }
     }
 
-    fn has_failures_or_missing(&self, expected_components: &[RuntimeComponent]) -> bool {
+    fn has_failures_or_missing(
+        &self,
+        expected_components: &[RuntimeComponent],
+        expected_tasks: &[RuntimeTaskExpectation],
+    ) -> bool {
         self.outcomes
             .iter()
             .any(|outcome| outcome.status.is_failed())
-            || !self.missing_components(expected_components).is_empty()
+            || !self
+                .missing_task_details(expected_components, expected_tasks)
+                .is_empty()
     }
 
-    fn missing_components(
+    fn missing_task_details(
         &self,
         expected_components: &[RuntimeComponent],
-    ) -> Vec<RuntimeComponent> {
+        expected_tasks: &[RuntimeTaskExpectation],
+    ) -> Vec<String> {
+        if !expected_tasks.is_empty() {
+            return expected_tasks
+                .iter()
+                .filter(|expected| {
+                    !self.outcomes.iter().any(|outcome| {
+                        outcome.component == expected.component
+                            && outcome.task_name == expected.task_name
+                    })
+                })
+                .map(RuntimeTaskExpectation::as_detail)
+                .collect();
+        }
         expected_components
             .iter()
             .copied()
@@ -207,6 +252,7 @@ impl RuntimeTaskJoinReport {
                     .iter()
                     .any(|outcome| outcome.component == *component)
             })
+            .map(|component| component.as_detail().to_string())
             .collect()
     }
 }
@@ -394,6 +440,7 @@ pub struct RuntimeLifecycleHarness {
     sandbox_id: String,
     audit: BoundedAuditLedger,
     components: Vec<RuntimeComponent>,
+    expected_tasks: Vec<RuntimeTaskExpectation>,
     state: RuntimeLifecycleState,
 }
 
@@ -403,6 +450,7 @@ impl RuntimeLifecycleHarness {
             sandbox_id: sandbox_id.into(),
             audit: BoundedAuditLedger::new(audit_capacity),
             components: Vec::new(),
+            expected_tasks: Vec::new(),
             state: RuntimeLifecycleState::NotStarted,
         }
     }
@@ -410,6 +458,15 @@ impl RuntimeLifecycleHarness {
     pub fn start(
         &mut self,
         components: Vec<RuntimeComponent>,
+        now_ms: u64,
+    ) -> Result<(), RuntimeLifecycleError> {
+        self.start_with_task_expectations(components, Vec::new(), now_ms)
+    }
+
+    pub fn start_with_task_expectations(
+        &mut self,
+        components: Vec<RuntimeComponent>,
+        expected_tasks: Vec<RuntimeTaskExpectation>,
         now_ms: u64,
     ) -> Result<(), RuntimeLifecycleError> {
         match self.state {
@@ -437,9 +494,18 @@ impl RuntimeLifecycleHarness {
         .with_frontend(Frontend::Core)
         .with_decision(Decision::Allow, None)
         .with_detail("runtime_components", component_list(&components))
-        .with_detail("component_count", components.len().to_string());
+        .with_detail("component_count", components.len().to_string())
+        .with_detail(
+            "expected_runtime_tasks",
+            task_expectation_list(&expected_tasks),
+        )
+        .with_detail(
+            "expected_runtime_task_count",
+            expected_tasks.len().to_string(),
+        );
         self.append_required(audit)?;
         self.components = components;
+        self.expected_tasks = expected_tasks;
         self.state = RuntimeLifecycleState::Running {
             started_at_ms: now_ms,
         };
@@ -580,9 +646,9 @@ impl RuntimeLifecycleHarness {
             (Decision::FailClosed, Some(DenialReason::SetupFailed))
         } else if missing_child_status
             || child_exit.as_ref().is_some_and(RuntimeChildExit::is_failed)
-            || task_report
-                .as_ref()
-                .is_some_and(|report| report.has_failures_or_missing(&self.components))
+            || task_report.as_ref().is_some_and(|report| {
+                report.has_failures_or_missing(&self.components, &self.expected_tasks)
+            })
         {
             (Decision::FailClosed, Some(DenialReason::RuntimeState))
         } else {
@@ -613,11 +679,12 @@ impl RuntimeLifecycleHarness {
         )
         .with_detail("failed_cleanup_count", cleanup.failed.len().to_string());
         if let Some(task_report) = task_report {
-            let missing_components = task_report.missing_components(&self.components);
+            let missing_tasks =
+                task_report.missing_task_details(&self.components, &self.expected_tasks);
             audit = audit
                 .with_detail(
                     "task_join_status",
-                    task_report.status_detail(&self.components),
+                    task_report.status_detail(&self.components, &self.expected_tasks),
                 )
                 .with_detail("runtime_tasks", task_outcome_list(&task_report.outcomes))
                 .with_detail("runtime_task_count", task_report.outcomes.len().to_string())
@@ -630,10 +697,10 @@ impl RuntimeLifecycleHarness {
                         .count()
                         .to_string(),
                 )
-                .with_detail("missing_runtime_tasks", component_list(&missing_components))
+                .with_detail("missing_runtime_tasks", string_list(&missing_tasks))
                 .with_detail(
                     "missing_runtime_task_count",
-                    missing_components.len().to_string(),
+                    missing_tasks.len().to_string(),
                 );
         }
         if missing_child_status {
@@ -766,12 +833,24 @@ fn component_list(components: &[RuntimeComponent]) -> String {
         .join(",")
 }
 
+fn task_expectation_list(expectations: &[RuntimeTaskExpectation]) -> String {
+    expectations
+        .iter()
+        .map(RuntimeTaskExpectation::as_detail)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn task_outcome_list(outcomes: &[RuntimeTaskOutcome]) -> String {
     outcomes
         .iter()
         .map(RuntimeTaskOutcome::as_detail)
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn string_list(values: &[String]) -> String {
+    values.join(",")
 }
 
 #[cfg(test)]
@@ -1135,6 +1214,47 @@ mod tests {
         assert_eq!(
             records[1].details["missing_runtime_tasks"],
             "http_proxy_listener"
+        );
+        assert_eq!(records[1].details["missing_runtime_task_count"], "1");
+    }
+
+    #[test]
+    fn runtime_lifecycle_missing_expected_task_name_is_fail_closed() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start_with_task_expectations(
+                vec![RuntimeComponent::DnsListener],
+                vec![
+                    RuntimeTaskExpectation::new(RuntimeComponent::DnsListener, "dns_accept_loop"),
+                    RuntimeTaskExpectation::new(RuntimeComponent::DnsListener, "dns_upstream_loop"),
+                ],
+                1_000,
+            )
+            .unwrap();
+        runtime
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::DnsListener]),
+                None,
+                Some(RuntimeTaskJoinReport::new(vec![RuntimeTaskOutcome::new(
+                    RuntimeComponent::DnsListener,
+                    "dns_accept_loop",
+                    RuntimeTaskStatus::Completed,
+                )])),
+                1_100,
+            )
+            .unwrap();
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].details["expected_runtime_task_count"], "2");
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["task_join_status"], "incomplete");
+        assert_eq!(
+            records[1].details["missing_runtime_tasks"],
+            "dns_listener:dns_upstream_loop"
         );
         assert_eq!(records[1].details["missing_runtime_task_count"], "1");
     }

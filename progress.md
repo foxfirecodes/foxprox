@@ -2285,3 +2285,35 @@ Added `TunPacketLoopReport` and `TunPacketHarness::process_packet_loop(...)` as 
 
 ### Remaining blind spots
 - The loop is still synchronous and caller-driven. Final runtime must attach it to real async TUN fd readiness, smoltcp polling, global audit fan-in, and lifecycle cleanup.
+
+## 2026-06-22 — Prove all TUN loop outcomes and named task expectations
+
+### Commands run
+- `cargo fmt` — applied formatting for named task expectations and additional TUN loop tests.
+- `cargo test -p foxprox-core runtime::tests::runtime_lifecycle_missing_expected_task_name_is_fail_closed --all-targets --all-features` — passed.
+- `cargo test -p foxprox-core tun::tests::tun_packet_loop --all-targets --all-features` — passed, 4 TUN packet-loop tests.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_exit --all-targets --all-features` — passed, 2 blocking proxy runtime exit tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 140 core tests, 3 device tests, 38 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_lifecycle_missing_expected_task_name_is_fail_closed ... ok`
+- `tun::tests::tun_packet_loop_reports_budget_cancellation ... ok`
+- `tun::tests::tun_packet_loop_reports_write_failure_task_outcome ... ok`
+- `tun::tests::tun_packet_loop_reports_read_failure_task_outcome ... ok`
+- `tun::tests::tun_packet_loop_reports_idle_completion ... ok`
+
+### Interpretation
+Addressed round-43 validation highs by directly testing every `TunPacketHarness::process_packet_loop` terminal branch: idle completion, budget cancellation, read failure, and write failure. Also strengthened runtime task coverage by adding `RuntimeTaskExpectation` and `RuntimeLifecycleHarness::start_with_task_expectations(...)`; when expectations are provided, exit compares reported outcomes by component and task name, records named `missing_runtime_tasks`, and fail-closes incomplete task reports. Blocking DNS/HTTP/SOCKS runtimes now record named listener task expectations at lifecycle start.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-core/src/tun.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Named expectations are still declared by harness code. A final async runtime must derive them from actual spawned task handles and feed real join/cancel results into lifecycle exit and audit fan-in.
