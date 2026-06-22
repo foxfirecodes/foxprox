@@ -1202,3 +1202,36 @@ Round-11 high finding is fixed. `BlockingDnsUpstream` now verifies the UDP respo
 
 ### Remaining blind spots
 - Source validation is implemented in the blocking UDP proof; final async resolver runtime still needs equivalent peer validation and retry/lifecycle behavior.
+
+## 2026-06-22 — DNS upstream socket config cycle
+
+### Behavior under work
+Make the concrete DNS upstream egress configurable from runtime config by carrying a full upstream socket address, not just an IP address, while keeping validation/audit schema observable.
+
+### Expected evidence
+- Runtime config default serializes `dns_upstream` as `1.1.1.1:53` and validation audit records the same socket address.
+- Invalid zero DNS upstream port fails config validation with structured `dns_upstream_port_zero` evidence.
+- `BlockingDnsUpstream` can be constructed from `BrokerRuntimeConfig`, preserving peer-source validation against the configured socket address.
+
+### Commands run
+- `cargo fmt` — applied formatting for DNS upstream socket config.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 103 core tests, 3 device tests, 6 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `config::tests::runtime_config_serializes_stable_alpha_fields_and_audit ... ok`
+- `config::tests::runtime_config_validation_reports_setup_policy_and_limit_errors ... ok`
+- `foxprox_egress::tests::blocking_dns_upstream_exchanges_query_through_dns_handler ... ok`
+
+### Interpretation
+Runtime config now carries `dns_upstream` as a full socket address (`1.1.1.1:53` by default), validates non-zero upstream ports with structured `dns_upstream_port_zero` evidence, and records the socket address in validation audit. `BlockingDnsUpstream::from_runtime_config` uses that exact socket address, aligning config, source validation, and concrete UDP egress behavior.
+
+### Changed files
+- `crates/foxprox-core/src/config.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Config now carries the resolver socket identity, but there is still no long-running async DNS listener wiring runtime config into a process lifecycle.

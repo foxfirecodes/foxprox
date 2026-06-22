@@ -8,8 +8,8 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    DnsQueryMetadata, DnsUpstream, DnsUpstreamError, NetworkEndpoint, TcpEgress, TcpEgressError,
-    UdpEgress, UdpEgressError,
+    BrokerRuntimeConfig, DnsQueryMetadata, DnsUpstream, DnsUpstreamError, NetworkEndpoint,
+    TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
 };
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
@@ -88,6 +88,15 @@ impl BlockingDnsUpstream {
             timeout,
             max_response_bytes,
         }
+    }
+
+    pub fn from_runtime_config(
+        config: &BrokerRuntimeConfig,
+        bind_addr: SocketAddr,
+        timeout: Duration,
+        max_response_bytes: usize,
+    ) -> Self {
+        Self::new(config.dns_upstream, bind_addr, timeout, max_response_bytes)
     }
 }
 
@@ -257,8 +266,10 @@ mod tests {
                 .hostname("example.com"),
         );
         let broker = BrokerCore::new(PolicyEngine::new(config), 4);
-        let upstream = BlockingDnsUpstream::new(
-            resolver_addr,
+        let mut runtime_config = BrokerRuntimeConfig::alpha_default("s1");
+        runtime_config.dns_upstream = resolver_addr;
+        let upstream = BlockingDnsUpstream::from_runtime_config(
+            &runtime_config,
             "127.0.0.1:0".parse().unwrap(),
             Duration::from_secs(1),
             512,

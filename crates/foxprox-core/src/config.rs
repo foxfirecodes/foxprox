@@ -3,14 +3,14 @@ use crate::policy::{PolicyConfig, PolicyConfigError};
 use crate::setup::NetworkSetupConfig;
 use crate::types::{AuditKind, Decision, DenialReason, Frontend};
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BrokerRuntimeConfig {
     pub setup: NetworkSetupConfig,
     pub policy: PolicyConfig,
     pub audit_capacity: usize,
-    pub dns_upstream: IpAddr,
+    pub dns_upstream: SocketAddr,
     pub proxy_listeners: ProxyListenerConfig,
     pub resource_limits: ResourceLimitConfig,
 }
@@ -21,7 +21,7 @@ impl BrokerRuntimeConfig {
             setup: NetworkSetupConfig::alpha_default(sandbox_id),
             policy: PolicyConfig::default(),
             audit_capacity: 1024,
-            dns_upstream: IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)),
+            dns_upstream: SocketAddr::new(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), 53),
             proxy_listeners: ProxyListenerConfig::default(),
             resource_limits: ResourceLimitConfig::default(),
         }
@@ -76,6 +76,13 @@ impl BrokerRuntimeConfig {
                 "audit_capacity_zero",
                 "audit_capacity",
                 "audit capacity must be greater than zero",
+            ));
+        }
+        if self.dns_upstream.port() == 0 {
+            errors.push(RuntimeConfigError::new(
+                "dns_upstream_port_zero",
+                "dns_upstream",
+                "DNS upstream socket address must include a non-zero port",
             ));
         }
         if self.proxy_listeners.http_enabled
@@ -209,7 +216,7 @@ mod tests {
         let value = serde_json::to_value(&config).unwrap();
         assert_eq!(value["setup"]["sandbox_id"], "s1");
         assert_eq!(value["audit_capacity"], 1024);
-        assert_eq!(value["dns_upstream"], "1.1.1.1");
+        assert_eq!(value["dns_upstream"], "1.1.1.1:53");
         assert_eq!(value["proxy_listeners"]["http_enabled"], true);
         assert_eq!(value["resource_limits"]["udp_max_active_flows"], 1024);
 
@@ -217,7 +224,7 @@ mod tests {
         assert_eq!(audit.kind, AuditKind::BrokerStarted);
         assert_eq!(audit.decision, Some(Decision::Allow));
         assert_eq!(audit.details["audit_capacity"], "1024");
-        assert_eq!(audit.details["dns_upstream"], "1.1.1.1");
+        assert_eq!(audit.details["dns_upstream"], "1.1.1.1:53");
         assert_eq!(audit.details["udp_max_active_flows"], "1024");
     }
 
@@ -231,6 +238,7 @@ mod tests {
         config.setup.socks_proxy_port = 1080;
         config.setup.setup_control_fd = Some(-1);
         config.audit_capacity = 0;
+        config.dns_upstream = "1.1.1.1:0".parse().unwrap();
         config.resource_limits.udp_max_active_flows = Some(0);
         config.policy.broker_dns.clear();
 
@@ -242,6 +250,7 @@ mod tests {
         assert!(codes.contains(&"proxy_port_conflict"));
         assert!(codes.contains(&"setup_control_fd_negative"));
         assert!(codes.contains(&"audit_capacity_zero"));
+        assert!(codes.contains(&"dns_upstream_port_zero"));
         assert!(codes.contains(&"udp_flow_limit_zero"));
         assert!(codes.contains(&"policy_broker_dns_empty"));
 

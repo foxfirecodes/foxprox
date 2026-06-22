@@ -75,3 +75,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-21 — Concrete DNS upstream boundary
 
 - DNS upstream socket code can live in `foxprox-egress` by implementing the core `DnsUpstream` trait. Tests should run a local UDP resolver and assert that `DnsBrokerHandler` still owns response validation, audit, and cache commit behavior, while socket timeout/IO errors map to `DnsUpstreamError::Unavailable`.
+
+## 2026-06-22 — DNS upstream config needs a socket identity
+
+- Treat DNS upstream identity as a full `SocketAddr`, not just an IP. The port is part of both runtime configuration and source-validation evidence for UDP DNS replies; zero ports should fail config validation before runtime.
