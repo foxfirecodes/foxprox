@@ -802,3 +802,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: TLS metadata conversion still requires complete ClientHello bytes from future stream buffering; no smoltcp byte bridge feeds this helper yet.
 - Exact next step: commit TLS DNS-cache precedence, then add minimal HTTP/TLS stream metadata buffering state that waits for complete headers/ClientHello instead of evaluating partial TCP payloads.
+
+## 2026-06-22T02:24:50Z
+- Current objective: continue after TLS/DNS precedence toward bounded TCP metadata buffering for future stream forwarding.
+- Git status summary: clean worktree after commit `241a3f6`.
+- Intended slice: add a small bounded TCP metadata buffer that accumulates payload bytes until plaintext HTTP headers or TLS ClientHello SNI are complete, returning `NeedMoreData` instead of guessing on partial input.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this buffer is not yet wired to smoltcp streams or backpressure; it is a deterministic metadata boundary only.
+- Exact next step: implement bounded HTTP/TLS metadata buffering helpers and split-payload tests.
+
+## 2026-06-22T02:33:15Z
+- Current objective: add bounded TCP metadata buffering for complete HTTP headers and TLS ClientHello SNI extraction.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings` (initially failed on a large `Result` error variant in the private buffer extender; fixed by returning `Option<TcpMetadataBufferOutcome>`)
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 54 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 63 runtime tests, and 7 setup tests passed. New tests prove split HTTP headers and split TLS ClientHello payloads return `NeedMoreData` until complete metadata is available, and the buffer enforces a configured size limit before parsing.
+- Commit hash when committed: pending.
+- Remaining risks: buffering is not yet attached to a real smoltcp stream adapter, has no per-flow lifecycle, and does not bridge bytes.
+- Exact next step: commit TCP metadata buffering, then add per-flow TCP metadata buffer management keyed by flow so future stream adapters can feed ordered bytes safely.

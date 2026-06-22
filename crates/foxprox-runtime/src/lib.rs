@@ -1362,6 +1362,115 @@ pub fn tcpv4_http_request_to_event(
     })
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TcpMetadataBuffer {
+    bytes: Vec<u8>,
+    max_len: usize,
+}
+
+impl TcpMetadataBuffer {
+    pub fn new(max_len: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max_len,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    pub fn push_http(
+        &mut self,
+        sandbox_id: SandboxId,
+        segment: &Tcpv4Segment<'_>,
+    ) -> TcpMetadataBufferOutcome {
+        if let Some(outcome) = self.extend(segment.payload) {
+            return outcome;
+        }
+        match parse_http_request(&self.bytes) {
+            Ok(metadata) => TcpMetadataBufferOutcome::Event(NormalizedEvent::HttpRequest {
+                sandbox_id,
+                frontend: FrontendKind::Tun,
+                source: Some(Endpoint::new(
+                    IpAddr::V4(segment.source),
+                    segment.source_port,
+                )),
+                destination: Some(Endpoint::new(
+                    IpAddr::V4(segment.destination),
+                    segment.destination_port,
+                )),
+                metadata,
+            }),
+            Err(InspectError::NeedMoreData) => TcpMetadataBufferOutcome::NeedMoreData,
+            Err(error) => TcpMetadataBufferOutcome::NoMetadata(error),
+        }
+    }
+
+    pub fn push_tls_client_hello(
+        &mut self,
+        sandbox_id: SandboxId,
+        segment: &Tcpv4Segment<'_>,
+        cache: &DnsCache,
+        now_millis: u128,
+    ) -> TcpMetadataBufferOutcome {
+        if let Some(outcome) = self.extend(segment.payload) {
+            return outcome;
+        }
+        match parse_tls_client_hello_sni(&self.bytes) {
+            Ok(hello) => {
+                let dns_attribution = cache.lookup_ip(IpAddr::V4(segment.destination), now_millis);
+                let sni_dns_mismatch = dns_attribution
+                    .as_ref()
+                    .is_some_and(|dns| dns.hostname != hello.sni);
+                TcpMetadataBufferOutcome::Event(NormalizedEvent::TcpConnectAttempt {
+                    sandbox_id,
+                    frontend: FrontendKind::Tun,
+                    source: Some(Endpoint::new(
+                        IpAddr::V4(segment.source),
+                        segment.source_port,
+                    )),
+                    destination: Endpoint::new(
+                        IpAddr::V4(segment.destination),
+                        segment.destination_port,
+                    ),
+                    hostname: Some(HostnameAttribution::new(
+                        hello.sni,
+                        AttributionSource::TlsSni,
+                        AttributionConfidence::High,
+                    )),
+                    sni_status: SniStatus::Present,
+                    sni_dns_mismatch,
+                })
+            }
+            Err(InspectError::NeedMoreData) => TcpMetadataBufferOutcome::NeedMoreData,
+            Err(error) => TcpMetadataBufferOutcome::NoMetadata(error),
+        }
+    }
+
+    fn extend(&mut self, payload: &[u8]) -> Option<TcpMetadataBufferOutcome> {
+        if self.bytes.len().saturating_add(payload.len()) > self.max_len {
+            return Some(TcpMetadataBufferOutcome::LimitExceeded {
+                limit: self.max_len,
+            });
+        }
+        self.bytes.extend_from_slice(payload);
+        None
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TcpMetadataBufferOutcome {
+    NeedMoreData,
+    Event(NormalizedEvent),
+    NoMetadata(InspectError),
+    LimitExceeded { limit: usize },
+}
+
 pub fn udpv4_packet_to_event(sandbox_id: SandboxId, packet: &Udpv4Packet<'_>) -> NormalizedEvent {
     udpv4_packet_to_event_with_broker_dns(sandbox_id, packet, &[])
 }
@@ -2738,6 +2847,91 @@ mod tests {
             tcpv4_http_request_to_event(SandboxId::new("http-tun").unwrap(), &tcp),
             Err(InspectError::NeedMoreData)
         );
+    }
+
+    #[test]
+    fn tcp_metadata_buffer_waits_for_complete_http_headers() {
+        let first = build_tcp_ipv4_packet(53000, 80, 0x18, b"GET /allowed HTTP/1.1\r\n");
+        let second = build_tcp_ipv4_packet(53000, 80, 0x18, b"Host: Example.com\r\n\r\n");
+        let ParsedIpPacket::Tcpv4Segment(first_tcp) = parse_ip_packet(&first).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        let ParsedIpPacket::Tcpv4Segment(second_tcp) = parse_ip_packet(&second).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        let mut buffer = TcpMetadataBuffer::new(1024);
+
+        assert_eq!(
+            buffer.push_http(SandboxId::new("buffer-http").unwrap(), &first_tcp),
+            TcpMetadataBufferOutcome::NeedMoreData
+        );
+        let outcome = buffer.push_http(SandboxId::new("buffer-http").unwrap(), &second_tcp);
+
+        let TcpMetadataBufferOutcome::Event(NormalizedEvent::HttpRequest { metadata, .. }) =
+            outcome
+        else {
+            panic!("expected buffered HTTP event");
+        };
+        assert_eq!(metadata.host.as_str(), "example.com");
+        assert_eq!(metadata.path_query, "/allowed");
+    }
+
+    #[test]
+    fn tcp_metadata_buffer_waits_for_complete_tls_client_hello() {
+        let hello = build_tls_client_hello("api.example.com");
+        let split = 7;
+        let first = build_tcp_ipv4_packet(53000, 443, 0x18, &hello[..split]);
+        let second = build_tcp_ipv4_packet(53000, 443, 0x18, &hello[split..]);
+        let ParsedIpPacket::Tcpv4Segment(first_tcp) = parse_ip_packet(&first).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        let ParsedIpPacket::Tcpv4Segment(second_tcp) = parse_ip_packet(&second).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        let cache = DnsCache::new();
+        let mut buffer = TcpMetadataBuffer::new(1024);
+
+        assert_eq!(
+            buffer.push_tls_client_hello(
+                SandboxId::new("buffer-tls").unwrap(),
+                &first_tcp,
+                &cache,
+                100,
+            ),
+            TcpMetadataBufferOutcome::NeedMoreData
+        );
+        let outcome = buffer.push_tls_client_hello(
+            SandboxId::new("buffer-tls").unwrap(),
+            &second_tcp,
+            &cache,
+            100,
+        );
+
+        let TcpMetadataBufferOutcome::Event(NormalizedEvent::TcpConnectAttempt {
+            hostname,
+            sni_status,
+            ..
+        }) = outcome
+        else {
+            panic!("expected buffered TLS event");
+        };
+        assert_eq!(hostname.unwrap().hostname.as_str(), "api.example.com");
+        assert_eq!(sni_status, SniStatus::Present);
+    }
+
+    #[test]
+    fn tcp_metadata_buffer_enforces_size_limit_before_parsing() {
+        let packet = build_tcp_ipv4_packet(53000, 80, 0x18, b"GET / HTTP/1.1\r\n");
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        let mut buffer = TcpMetadataBuffer::new(4);
+
+        assert_eq!(
+            buffer.push_http(SandboxId::new("buffer-limit").unwrap(), &tcp),
+            TcpMetadataBufferOutcome::LimitExceeded { limit: 4 }
+        );
+        assert!(buffer.is_empty());
     }
 
     #[test]
