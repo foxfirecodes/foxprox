@@ -218,3 +218,8 @@
 
 - TCP byte extraction can stay stack-neutral as `StackTcpData`: sandbox/session/frontend/source/destination plus payload bytes, with smoltcp receive buffers and socket state contained in the adapter crate.
 - A minimal SYN → SYN-ACK → ACK+payload fixture is enough to prove smoltcp data extraction before designing host egress stream backpressure.
+
+## 2026-06-22 — host TCP stream IO boundary
+
+- Keep host socket byte IO in `foxprox-egress` via a `HostTcpStream` trait so future transparent and explicit proxy bridges share stream handling instead of embedding `std::net::TcpStream` in runtime or frontend code.
+- The first stream contract should be intentionally narrow (`write_from_sandbox`, `read_to_sandbox`) until bridge state and backpressure semantics are designed.

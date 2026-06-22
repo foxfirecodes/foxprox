@@ -6,7 +6,7 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 
 use foxprox_core::{
@@ -17,7 +17,7 @@ use foxprox_core::{
 /// Shared host-side egress backend used by all frontends after policy allows an
 /// event. Production implementations open host sockets; tests can use mocks.
 pub trait HostEgress {
-    type TcpStream;
+    type TcpStream: HostTcpStream;
     type UdpHandle;
     type HttpResponse;
 
@@ -35,6 +35,28 @@ pub trait HostEgress {
     fn socks_connect(&mut self, event: &SocksConnect) -> Result<Self::TcpStream, EgressError>;
 
     fn resolve_dns(&mut self, event: &DnsQuery) -> Result<Vec<SocketAddr>, EgressError>;
+}
+
+/// Shared host TCP stream contract used by transparent and proxy bridge code.
+pub trait HostTcpStream {
+    fn write_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError>;
+    fn read_to_sandbox(&mut self, max_bytes: usize) -> Result<Vec<u8>, EgressError>;
+}
+
+impl HostTcpStream for TcpStream {
+    fn write_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
+        self.write(bytes)
+            .map_err(|error| EgressError::StreamIo(error.to_string()))
+    }
+
+    fn read_to_sandbox(&mut self, max_bytes: usize) -> Result<Vec<u8>, EgressError> {
+        let mut buffer = vec![0_u8; max_bytes];
+        let len = self
+            .read(&mut buffer)
+            .map_err(|error| EgressError::StreamIo(error.to_string()))?;
+        buffer.truncate(len);
+        Ok(buffer)
+    }
 }
 
 /// Records allowed events and returns inert handles. Useful for contract tests.
@@ -90,6 +112,16 @@ impl HostEgress for MockEgress {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MockTcpStream;
+
+impl HostTcpStream for MockTcpStream {
+    fn write_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
+        Ok(bytes.len())
+    }
+
+    fn read_to_sandbox(&mut self, _max_bytes: usize) -> Result<Vec<u8>, EgressError> {
+        Ok(Vec::new())
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MockUdpHandle;
@@ -214,6 +246,7 @@ fn format_http_host_header(host: &DestinationHost, port: u16) -> String {
 pub enum EgressError {
     ConnectFailed(String),
     DnsFailed(String),
+    StreamIo(String),
     UnsupportedAllowedEvent,
 }
 
@@ -222,6 +255,7 @@ impl fmt::Display for EgressError {
         match self {
             Self::ConnectFailed(reason) => write!(f, "host connect failed: {reason}"),
             Self::DnsFailed(reason) => write!(f, "DNS failed: {reason}"),
+            Self::StreamIo(reason) => write!(f, "host stream IO failed: {reason}"),
             Self::UnsupportedAllowedEvent => f.write_str("allowed event has no egress operation"),
         }
     }
@@ -328,6 +362,13 @@ mod tests {
             DestinationHost::Hostname(foxprox_core::Hostname::new("Example.COM").unwrap());
         assert_eq!(destination_host_to_string(&hostname), "example.com");
         assert_eq!(http_method_as_str(&foxprox_core::HttpMethod::Post), "POST");
+    }
+
+    #[test]
+    fn tcp_stream_contract_is_shared_for_bridge_code() {
+        let mut stream = MockTcpStream;
+        assert_eq!(stream.write_from_sandbox(b"hello").unwrap(), 5);
+        assert_eq!(stream.read_to_sandbox(1024).unwrap(), Vec::<u8>::new());
     }
 
     #[test]

@@ -934,3 +934,24 @@
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
 - Commit hash after commit: 33a5dee.
 - Remaining boundary risks: egress stream writes, backpressure, server-to-sandbox data, close lifecycle from real sockets, and continuous polling remain.
+
+## 2026-06-22 — Boundary objective: host TCP stream IO contract
+
+- Boundary under work: shared host TCP stream read/write contract for future transparent and proxy byte bridging.
+- Allowed dependency direction: `foxprox-egress` owns host stream IO traits/implementations; frontends and stack adapters must not write host sockets directly, and policy/audit must not depend on stream types.
+- Dependency-risk assessment: smoltcp can now emit TCP payload bytes, but without a shared egress stream contract runtime code would be tempted to downcast or handle std sockets directly. Define the narrow stream IO API before wiring bridge state.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: added `HostTcpStream` as the shared egress-owned stream IO trait, bounded `HostEgress::TcpStream` by it, implemented the trait for `std::net::TcpStream` and `MockTcpStream`, and added a contract test proving bridge code can write/read through the normalized egress handle without frontend or stack socket types. All verification passed.
+- Changed files:
+  - `crates/foxprox-egress/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 93 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-egress` — egress depends only on `foxprox-core`.
+  - `cargo tree -p foxprox-runtime` — runtime reaches stream handles through shared egress trait.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: runtime connection-handle storage, backpressure, server-to-sandbox packet injection, and async stream IO remain.
