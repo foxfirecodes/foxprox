@@ -112,7 +112,7 @@ mod tests {
     use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 
     #[test]
-    fn smoltcp_socket_receives_payload_after_handshake() {
+    fn smoltcp_socket_receives_and_sends_payload_after_handshake() {
         let mut device = InMemoryIpDevice::new(1500);
         device.push_rx(ipv4_tcp_syn_packet());
         let mut config = Config::new(HardwareAddress::Ip);
@@ -141,11 +141,31 @@ mod tests {
         device.push_rx(ipv4_tcp_packet(2, server_seq + 1, 0x18, b"hello"));
 
         iface.poll(Instant::from_millis(1), &mut device, &mut sockets);
-        let socket = sockets.get_mut::<tcp::Socket>(handle);
-        let mut received = [0_u8; 16];
-        let length = socket.recv_slice(&mut received).unwrap();
+        {
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            let mut received = [0_u8; 16];
+            let length = socket.recv_slice(&mut received).unwrap();
+            assert_eq!(&received[..length], b"hello");
+        }
+        let _ack_only = device.take_tx();
+        sockets
+            .get_mut::<tcp::Socket>(handle)
+            .send_slice(b"world")
+            .unwrap();
 
-        assert_eq!(&received[..length], b"hello");
+        iface.poll(Instant::from_millis(2), &mut device, &mut sockets);
+        let outbound = device.take_tx();
+        let data_packet = outbound
+            .iter()
+            .find(|packet| packet.ends_with(b"world"))
+            .expect("smoltcp emits TCP payload packet");
+        assert_eq!(&data_packet[12..16], &[10, 0, 0, 1]);
+        assert_eq!(&data_packet[16..20], &[10, 0, 0, 2]);
+        assert_eq!(u16::from_be_bytes([data_packet[20], data_packet[21]]), 8080);
+        assert_eq!(
+            u16::from_be_bytes([data_packet[22], data_packet[23]]),
+            49152
+        );
     }
 
     #[test]

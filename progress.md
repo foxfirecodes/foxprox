@@ -1451,3 +1451,24 @@
 - What failed or surprised the agent: no behavior failures; smoltcp accepted a minimal ACK+PSH packet once the test echoed back the server sequence from SYN-ACK.
 - What remains unproven: sending data from smoltcp back to the sandbox after host egress response, and bridging accepted socket payloads to real host TCP streams.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — smoltcp socket send emits outbound payload slice
+
+- Slice attempted: prove data written into an established smoltcp socket becomes outbound raw IP packet bytes for TUN write-back.
+- Why next: smoltcp can now receive stream payload from raw packets; TCP forwarding also needs host response bytes to be sent back toward the sandbox.
+- Verification plan: after the existing handshake/payload receive proof, write `world` to the smoltcp socket, poll, capture TX packets, and assert an outbound TCP packet carries `world` back to the client tuple. Run focused tcp tests plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — smoltcp socket send emits outbound payload
+
+- Slice attempted: prove data written into an established smoltcp socket becomes outbound raw IP packet bytes for TUN write-back.
+- Why next: smoltcp could receive stream payload from raw packets; TCP forwarding also needs host response bytes to be sent back toward the sandbox.
+- What changed: extended the smoltcp handshake test to write `world` into the established socket after reading client payload `hello`, poll smoltcp, and assert the captured outbound raw IP packet carries `world` back to the client tuple.
+- Verification:
+  - Focused check passed: `cargo test -p foxprox-tcp -- --nocapture`, with the renamed `smoltcp_socket_receives_and_sends_payload_after_handshake` proving both receive and send directions.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 2 `foxprox-tcp` tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; clearing ACK-only TX packets before writing response bytes made the payload-carrying packet assertion deterministic.
+- What remains unproven: host TCP socket bridging and live TUN fd integration for smoltcp.
+- Commit: this commit.

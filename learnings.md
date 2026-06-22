@@ -268,3 +268,7 @@ For TUN-shaped smoltcp tests, implement a `Device` with `Medium::Ip`, feed raw I
 ## 2026-06-22 — smoltcp handshake tests need the server sequence from SYN-ACK
 
 To drive smoltcp from raw packets in tests, feed a SYN, poll, read the server sequence from the emitted SYN-ACK, then feed ACK+payload with `ack = server_seq + 1` and `seq = client_syn_seq + 1`. The listening socket can then receive payload bytes.
+
+## 2026-06-22 — clear ACK-only smoltcp TX before asserting payload packets
+
+When testing smoltcp stream send after receiving client payload, poll may emit ACK-only packets first. Drain captured TX packets before calling `send_slice`, then poll and assert on the payload-carrying packet for deterministic evidence.
