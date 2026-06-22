@@ -787,3 +787,25 @@
 - What failed or surprised the agent: no behavior failures; binding the broker socket on an ephemeral port required policy rules to match the actual resolver endpoint rather than assuming port 53 in tests.
 - What remains unproven: long-running DNS runtime loop, sandbox-reachable resolver address from TUN/netns setup, concurrent queries, transaction matching beyond one datagram, cache limits, and UDP response packet routing through TUN are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — HTTP proxy TCP listener one-request runtime slice
+
+- Slice attempted: serve one explicit HTTP proxy TCP connection through a real listener socket, policy preflight, shared egress, upstream response read, and client response write-back.
+- Why next: HTTP proxy forwarding works as a helper, but alpha explicit proxy support needs a listener-facing runtime boundary; a one-request loopback server is the smallest live proof before full concurrent proxy loops.
+- Verification plan: add `serve_one_http_proxy_connection` to `foxprox-proxy`, verify a loopback client sends an absolute-form HTTP request to the proxy listener, the proxy forwards origin-form to a loopback upstream and returns the upstream response, then run formatting, clippy, focused proxy tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — HTTP proxy TCP listener one-request runtime
+
+- Slice attempted: serve one explicit HTTP proxy request through a real TCP listener socket, policy preflight, shared egress, upstream response read, and client write-back.
+- Why next: HTTP proxy forwarding existed as a helper but not as a listener-facing runtime boundary; alpha explicit proxy support needs observable client-to-proxy-to-upstream behavior.
+- What changed: added `HttpProxyServeOneResult`, `HttpProxyServeOutcome`, `HttpProxyServeError`, request-head reading with a size limit, and `serve_one_http_proxy_connection`; the helper accepts one TCP client, reads one HTTP proxy request head, invokes the existing policy/egress path, writes upstream responses back to the client, or emits deterministic 403/502 responses.
+- Verification:
+  - `cargo fmt --check` passed.
+  - Focused check passed: `cargo test -p foxprox-proxy http_proxy_listener -- --nocapture` verified a loopback client sent an absolute-form HTTP request to the proxy listener, the upstream loopback server received an origin-form request, and the client received the upstream `pong` response.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 6 `foxprox-dns` tests, 5 `foxprox-egress` tests, 6 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 21 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; a one-request listener can reuse the existing forwarding helper and remain intentionally limited to header-only plaintext HTTP until body streaming/backpressure is added.
+- What remains unproven: long-running/concurrent HTTP proxy listener loop, request body streaming, CONNECT/SOCKS listener runtimes, tunnel close-audit integration, resource limits beyond request-head size, and TUN forwarding are still absent.
+- Commit: this commit.

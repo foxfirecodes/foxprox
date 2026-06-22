@@ -7,7 +7,8 @@
 
 #![forbid(unsafe_code)]
 
-use std::io::Write;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpListener};
 
 use foxprox_core::{
     AuditDecision, Endpoint, FrontendKind, NormalizedEvent, PolicyEngine, PolicyEvaluation,
@@ -31,6 +32,48 @@ pub struct HttpRequestForward {
     pub preflight: HttpRequestPreflight,
     pub connection: Option<TcpEgressConnection>,
     pub egress_error: Option<EgressError>,
+}
+
+/// Result of serving one accepted HTTP proxy TCP connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HttpProxyServeOneResult {
+    pub peer: SocketAddr,
+    pub preflight: HttpRequestPreflight,
+    pub outcome: HttpProxyServeOutcome,
+    pub upstream_error: Option<EgressError>,
+}
+
+/// Runtime outcome for one HTTP proxy connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HttpProxyServeOutcome {
+    ForwardedHttp { response_bytes: u64 },
+    Responded(HttpProxyResponse),
+}
+
+/// HTTP proxy one-connection runtime errors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HttpProxyServeError {
+    RequestHeadTooLarge { limit: usize },
+    Io(String),
+}
+
+impl std::fmt::Display for HttpProxyServeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequestHeadTooLarge { limit } => {
+                write!(f, "http-proxy-request-head-too-large: limit={limit}")
+            }
+            Self::Io(error) => write!(f, "http-proxy-io-error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for HttpProxyServeError {}
+
+impl From<std::io::Error> for HttpProxyServeError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value.to_string())
+    }
 }
 
 /// Result of one HTTP CONNECT preflight evaluation.
@@ -349,6 +392,67 @@ impl HttpProxyPreflight {
     }
 }
 
+/// Accept and serve one plaintext HTTP proxy connection from a TCP listener.
+///
+/// This one-request runtime proof reads a request head, applies the HTTP proxy
+/// preflight/egress path, forwards an allowed upstream response back to the
+/// client, or writes the deterministic denial/error response.
+pub fn serve_one_http_proxy_connection<E: TcpEgress>(
+    listener: &TcpListener,
+    handler: &HttpProxyPreflight,
+    egress: &E,
+    sandbox_id: SandboxId,
+) -> Result<HttpProxyServeOneResult, HttpProxyServeError> {
+    let (mut client, peer) = listener.accept().map_err(HttpProxyServeError::from)?;
+    let request_head = read_http_request_head(&mut client, 16 * 1024)?;
+    let source = Endpoint::tcp(peer.ip(), peer.port());
+    let mut forwarded =
+        handler.forward_http_request(sandbox_id, Some(source), &request_head, egress);
+
+    match forwarded.preflight.action {
+        HttpProxyAction::Forward => {
+            let Some(connection) = forwarded.connection.take() else {
+                client
+                    .write_all(HttpProxyResponse::BadGateway.as_bytes())
+                    .map_err(HttpProxyServeError::from)?;
+                return Ok(HttpProxyServeOneResult {
+                    peer,
+                    preflight: forwarded.preflight,
+                    outcome: HttpProxyServeOutcome::Responded(HttpProxyResponse::BadGateway),
+                    upstream_error: forwarded.egress_error,
+                });
+            };
+            let mut upstream = connection.into_inner();
+            let mut response = Vec::new();
+            upstream
+                .read_to_end(&mut response)
+                .map_err(HttpProxyServeError::from)?;
+            client
+                .write_all(&response)
+                .map_err(HttpProxyServeError::from)?;
+            Ok(HttpProxyServeOneResult {
+                peer,
+                preflight: forwarded.preflight,
+                outcome: HttpProxyServeOutcome::ForwardedHttp {
+                    response_bytes: response.len() as u64,
+                },
+                upstream_error: None,
+            })
+        }
+        HttpProxyAction::Respond(response) => {
+            client
+                .write_all(response.as_bytes())
+                .map_err(HttpProxyServeError::from)?;
+            Ok(HttpProxyServeOneResult {
+                peer,
+                preflight: forwarded.preflight,
+                outcome: HttpProxyServeOutcome::Responded(response),
+                upstream_error: forwarded.egress_error,
+            })
+        }
+    }
+}
+
 /// Minimal SOCKS5 frontend preflight handler for CONNECT requests after method
 /// negotiation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -459,6 +563,25 @@ impl Socks5Preflight {
             target,
         )
     }
+}
+
+fn read_http_request_head(
+    stream: &mut std::net::TcpStream,
+    limit: usize,
+) -> Result<Vec<u8>, HttpProxyServeError> {
+    let mut request = Vec::new();
+    let mut byte = [0_u8; 1];
+    while !request.ends_with(b"\r\n\r\n") {
+        if request.len() >= limit {
+            return Err(HttpProxyServeError::RequestHeadTooLarge { limit });
+        }
+        let read = stream.read(&mut byte).map_err(HttpProxyServeError::from)?;
+        if read == 0 {
+            break;
+        }
+        request.push(byte[0]);
+    }
+    Ok(request)
 }
 
 fn connect_target_from_event(event: &NormalizedEvent) -> Option<TcpTarget> {
@@ -572,7 +695,7 @@ mod tests {
     use foxprox_egress::HostTcpEgress;
     use serde_json::Value;
     use std::io::{Read, Write};
-    use std::net::{Ipv4Addr, TcpListener};
+    use std::net::Ipv4Addr;
     use std::thread;
     use std::time::Duration;
 
@@ -738,6 +861,60 @@ mod tests {
         let upstream_request = String::from_utf8(upstream_request).unwrap();
         assert!(upstream_request.starts_with("GET /public/index.html?x=1 HTTP/1.1\r\n"));
         assert!(!upstream_request.contains("GET http://127.0.0.1"));
+        assert!(String::from_utf8(response).unwrap().contains("pong"));
+    }
+
+    #[test]
+    fn http_proxy_listener_serves_one_request_through_upstream_egress() {
+        let upstream_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream = thread::spawn(move || {
+            let (mut stream, _) = upstream_listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong")
+                .unwrap();
+            request
+        });
+        let proxy_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let handler = HttpProxyPreflight::new(PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        }));
+        let egress = HostTcpEgress::new(Duration::from_secs(1)).unwrap();
+        let server = thread::spawn(move || {
+            serve_one_http_proxy_connection(&proxy_listener, &handler, &egress, sandbox_id())
+                .unwrap()
+        });
+
+        let mut client = std::net::TcpStream::connect(proxy_addr).unwrap();
+        let request = format!(
+            "GET http://127.0.0.1:{}/public HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+            upstream_addr.port(),
+            upstream_addr.port()
+        );
+        client.write_all(request.as_bytes()).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        let response_len = response.len() as u64;
+        let served = server.join().unwrap();
+        let upstream_request = String::from_utf8(upstream.join().unwrap()).unwrap();
+
+        assert_eq!(
+            served.outcome,
+            HttpProxyServeOutcome::ForwardedHttp {
+                response_bytes: response_len
+            }
+        );
+        assert_eq!(served.upstream_error, None);
+        assert_eq!(served.preflight.action, HttpProxyAction::Forward);
+        assert!(upstream_request.starts_with("GET /public HTTP/1.1\r\n"));
         assert!(String::from_utf8(response).unwrap().contains("pong"));
     }
 

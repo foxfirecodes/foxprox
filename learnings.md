@@ -144,3 +144,7 @@ TCP bridge statistics are directional, but many audit records only have a total 
 ## 2026-06-21 — live DNS listener tests should bind policy to the actual socket
 
 When testing a broker DNS socket on loopback with an ephemeral port, construct the policy broker-resolver endpoint from `socket.local_addr()` instead of assuming UDP/53. This keeps direct-DNS policy and listener validation aligned with the live socket under test.
+
+## 2026-06-21 — one-request proxy listeners prove socket boundaries without async runtime
+
+A blocking one-request TCP listener is enough to prove explicit proxy reachability and egress integration with deterministic loopback tests. Keep it narrow: read a bounded request head, reuse preflight/egress helpers, and defer concurrency, body streaming, and backpressure to later runtime slices.
