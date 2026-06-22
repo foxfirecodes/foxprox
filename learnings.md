@@ -63,3 +63,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-21 — Audited smoltcp TCP egress bridge
 
 - For smoltcp TCP egress proofs, split the stack operation into draining received stream bytes and sending response bytes back through the socket. This lets the bridge evaluate/audit host egress before opening the egress path, then append a structured `tcp_flow_closed` record with byte counts after stack response emission.
+
+## 2026-06-21 — foxproxsetup contract as plan-first helper
+
+- The setup helper can be made testable before privileged execution by parsing the exact bwrap-emitted `foxproxsetup` flag shape into a structured `SetupHelperPlan`. Tests should assert helper steps and audit fields rather than executing `ip` or requiring `CAP_NET_ADMIN`.

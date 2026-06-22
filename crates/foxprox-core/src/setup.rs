@@ -1,6 +1,7 @@
 use crate::audit::AuditRecord;
 use crate::types::{AuditKind, Decision, Frontend, NetworkEndpoint};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -59,6 +60,150 @@ pub struct BwrapSetupPlan {
     pub proxy_environment: ProxyEnvironment,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupHelperPlan {
+    pub config: NetworkSetupConfig,
+    pub steps: Vec<SetupHelperStep>,
+    pub proxy_environment: ProxyEnvironment,
+    pub target_command: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupHelperStep {
+    pub name: String,
+    pub command: Vec<String>,
+    pub evidence: BTreeMap<String, String>,
+}
+
+impl SetupHelperStep {
+    fn new(name: impl Into<String>, command: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            command,
+            evidence: BTreeMap::new(),
+        }
+    }
+
+    fn with_evidence(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.evidence.insert(key.into(), value.into());
+        self
+    }
+}
+
+impl SetupHelperPlan {
+    pub fn new(config: NetworkSetupConfig, target_command: &[String]) -> Self {
+        let prefix_len = 24u8;
+        let mut steps = vec![
+            SetupHelperStep::new(
+                "create_tun",
+                vec![
+                    "ip".to_string(),
+                    "tuntap".to_string(),
+                    "add".to_string(),
+                    "dev".to_string(),
+                    config.tun_name.clone(),
+                    "mode".to_string(),
+                    "tun".to_string(),
+                ],
+            )
+            .with_evidence("requires_capability", "CAP_NET_ADMIN"),
+            SetupHelperStep::new(
+                "assign_tun_address",
+                vec![
+                    "ip".to_string(),
+                    "addr".to_string(),
+                    "add".to_string(),
+                    format!("{}/{}", config.sandbox_ip, prefix_len),
+                    "dev".to_string(),
+                    config.tun_name.clone(),
+                ],
+            ),
+            SetupHelperStep::new(
+                "set_tun_mtu_up",
+                vec![
+                    "ip".to_string(),
+                    "link".to_string(),
+                    "set".to_string(),
+                    "dev".to_string(),
+                    config.tun_name.clone(),
+                    "mtu".to_string(),
+                    config.mtu.to_string(),
+                    "up".to_string(),
+                ],
+            ),
+            SetupHelperStep::new(
+                "configure_default_route",
+                vec![
+                    "ip".to_string(),
+                    "route".to_string(),
+                    "add".to_string(),
+                    "default".to_string(),
+                    "via".to_string(),
+                    config.gateway_ip.to_string(),
+                    "dev".to_string(),
+                    config.tun_name.clone(),
+                ],
+            ),
+            SetupHelperStep::new(
+                "configure_dns",
+                vec![
+                    "write-resolv-conf".to_string(),
+                    format!("nameserver {}", config.broker_dns_ip),
+                ],
+            )
+            .with_evidence("dns_mode", "broker_dns"),
+            SetupHelperStep::new(
+                "configure_proxy_reachability",
+                vec![
+                    "export-proxy-env".to_string(),
+                    config.proxy_environment().http_proxy,
+                    config.proxy_environment().all_proxy,
+                ],
+            ),
+        ];
+        if let Some(fd) = config.setup_control_fd {
+            steps.push(
+                SetupHelperStep::new(
+                    "handoff_tun_fd",
+                    vec![
+                        "send-fd".to_string(),
+                        fd.to_string(),
+                        config.tun_name.clone(),
+                    ],
+                )
+                .with_evidence("setup_control_fd", fd.to_string()),
+            );
+        }
+        steps.extend([
+            SetupHelperStep::new(
+                "drop_setup_capability",
+                vec!["capsh".to_string(), "--drop=cap_net_admin".to_string()],
+            )
+            .with_evidence("dropped_capability", "CAP_NET_ADMIN"),
+            SetupHelperStep::new("exec_target", target_command.to_vec())
+                .with_evidence("target_argc", target_command.len().to_string()),
+        ]);
+        Self {
+            proxy_environment: config.proxy_environment(),
+            config,
+            steps,
+            target_command: target_command.to_vec(),
+        }
+    }
+
+    pub fn audit_record(&self) -> AuditRecord {
+        AuditRecord::new(AuditKind::TunConfigured, self.config.sandbox_id.clone())
+            .with_frontend(Frontend::Setup)
+            .with_destination(NetworkEndpoint::ip(self.config.gateway_ip))
+            .with_decision(Decision::Allow, None)
+            .with_detail("setup_helper", "foxproxsetup")
+            .with_detail("tun_name", self.config.tun_name.clone())
+            .with_detail("mtu", self.config.mtu.to_string())
+            .with_detail("steps", self.steps.len().to_string())
+            .with_detail("drops_capability", "CAP_NET_ADMIN")
+    }
+}
+
 impl BwrapSetupPlan {
     pub fn new(config: NetworkSetupConfig, target_command: &[String]) -> Self {
         let mut bwrap_args = vec![
@@ -76,6 +221,8 @@ impl BwrapSetupPlan {
 
         let mut setup_command = vec![
             "foxproxsetup".to_string(),
+            "--sandbox-id".to_string(),
+            config.sandbox_id.clone(),
             "--tun-name".to_string(),
             config.tun_name.clone(),
             "--sandbox-ip".to_string(),
@@ -152,6 +299,56 @@ mod tests {
             .windows(2)
             .any(|w| w == ["--drop-cap", "CAP_NET_ADMIN"]));
         assert!(full.ends_with(&target));
+    }
+
+    #[test]
+    fn setup_helper_plan_contains_network_setup_and_exec_contract() {
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.setup_control_fd = Some(9);
+        let plan = SetupHelperPlan::new(
+            config,
+            &["curl".to_string(), "http://example.com".to_string()],
+        );
+        let step_names: Vec<_> = plan.steps.iter().map(|step| step.name.as_str()).collect();
+        assert_eq!(
+            step_names,
+            vec![
+                "create_tun",
+                "assign_tun_address",
+                "set_tun_mtu_up",
+                "configure_default_route",
+                "configure_dns",
+                "configure_proxy_reachability",
+                "handoff_tun_fd",
+                "drop_setup_capability",
+                "exec_target",
+            ]
+        );
+        assert!(plan.steps[0]
+            .command
+            .windows(3)
+            .any(|w| w == ["dev", "foxprox0", "mode"]));
+        assert_eq!(plan.steps[4].evidence["dns_mode"], "broker_dns");
+        assert_eq!(plan.steps[6].evidence["setup_control_fd"], "9");
+        assert_eq!(
+            plan.steps[7].evidence["dropped_capability"],
+            "CAP_NET_ADMIN"
+        );
+        assert_eq!(plan.steps[8].evidence["target_argc"], "2");
+    }
+
+    #[test]
+    fn setup_helper_plan_audit_is_structured() {
+        let plan = SetupHelperPlan::new(
+            NetworkSetupConfig::alpha_default("s1"),
+            &["true".to_string()],
+        );
+        let audit = plan.audit_record();
+        assert_eq!(audit.kind, AuditKind::TunConfigured);
+        assert_eq!(audit.frontend, Some(Frontend::Setup));
+        assert_eq!(audit.details["setup_helper"], "foxproxsetup");
+        assert_eq!(audit.details["drops_capability"], "CAP_NET_ADMIN");
+        assert_eq!(audit.details["steps"], "8");
     }
 
     #[test]

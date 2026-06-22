@@ -19,3 +19,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "foxprox"
 path = "src/main.rs"
+
+[[bin]]
+name = "foxproxsetup"
+path = "src/setup_main.rs"

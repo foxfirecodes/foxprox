@@ -1037,3 +1037,39 @@ The smoltcp TCP path now proves a bounded host-egress bridge shape: bytes draine
 
 ### Remaining blind spots
 - The bridge proof still uses in-memory TCP packets and mock egress in tests; real `/dev/net/tun`, async host sockets, and continuous bidirectional stream scheduling remain runtime integration work.
+
+## 2026-06-21 — foxproxsetup helper plan cycle
+
+### Behavior under work
+Make the bwrap `foxproxsetup` helper contract observable as its own structured setup plan, including TUN creation/configuration, route/DNS/proxy setup, fd handoff intent, capability drop, and target exec steps.
+
+### Expected evidence
+- Core setup tests assert structured helper steps for `ip tuntap`, address/MTU/link up, default route, DNS, proxy reachability, fd handoff, capability drop, and exec.
+- A `foxproxsetup` CLI binary can parse the same flag shape emitted by `BwrapSetupPlan` and output helper plan JSON plus structured setup audit.
+
+### Commands run
+- `cargo fmt` — applied formatting for setup helper plan and `foxproxsetup` CLI binary.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 103 core tests, 3 device tests, 3 egress tests, and 7 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `setup::tests::setup_helper_plan_contains_network_setup_and_exec_contract ... ok`
+- `setup::tests::setup_helper_plan_audit_is_structured ... ok`
+- `foxprox_cli::tests::foxproxsetup_plan_parses_bwrap_helper_flags ... ok`
+- `foxprox_cli::tests::foxproxsetup_missing_target_prints_fail_closed_audit ... ok`
+
+### Interpretation
+The bwrap setup helper is now represented by a structured `SetupHelperPlan`, and the workspace builds a `foxproxsetup` binary that parses the same flag shape emitted by `BwrapSetupPlan`. The helper plan captures TUN creation/configuration, route, DNS, proxy reachability, fd handoff intent, setup capability drop, and target exec as observable steps with structured audit.
+
+### Changed files
+- `crates/foxprox-core/src/setup.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-cli/Cargo.toml`
+- `crates/foxprox-cli/src/lib.rs`
+- `crates/foxprox-cli/src/setup_main.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- `foxproxsetup` is still plan-first and does not execute privileged `ip` commands, send a real TUN fd, or exec the target. Real privileged setup execution remains runtime integration work.

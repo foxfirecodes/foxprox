@@ -50,7 +50,9 @@ pub use proxy_frontend::{
     ExplicitProxyEgress, ExplicitProxyFrontend, ExplicitProxyResult, InMemoryExplicitProxyEgress,
     ProxyEgressError,
 };
-pub use setup::{BwrapSetupPlan, NetworkSetupConfig, ProxyEnvironment};
+pub use setup::{
+    BwrapSetupPlan, NetworkSetupConfig, ProxyEnvironment, SetupHelperPlan, SetupHelperStep,
+};
 pub use tcp::{InMemoryTcpEgress, TcpEgress, TcpEgressError, TcpForwardResult, TcpForwarder};
 pub use tun::{DeviceIoError, InMemoryPacketDevice, PacketDevice, TunPacketHarness};
 pub use types::*;

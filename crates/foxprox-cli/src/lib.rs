@@ -1,5 +1,6 @@
 use foxprox_core::{
     AuditKind, AuditRecord, BrokerRuntimeConfig, BwrapSetupPlan, Decision, DenialReason, Frontend,
+    NetworkSetupConfig, SetupHelperPlan,
 };
 use serde_json::json;
 use std::fs;
@@ -21,6 +22,94 @@ pub fn run_args(args: &[String]) -> CliOutput {
         [command, sandbox_id] if command == "default-config" => default_config(sandbox_id),
         _ => usage_output(),
     }
+}
+
+pub fn run_foxproxsetup_args(args: &[String]) -> CliOutput {
+    let Some(separator) = args.iter().position(|arg| arg == "--") else {
+        return error_output(
+            "setup_missing_separator",
+            "expected foxproxsetup <setup flags> -- <target...>".to_string(),
+        );
+    };
+    if args.len() <= separator + 1 {
+        return error_output(
+            "setup_missing_target",
+            "expected non-empty target command after --".to_string(),
+        );
+    }
+    let target = &args[separator + 1..];
+    let config = match parse_setup_config(&args[..separator]) {
+        Ok(config) => config,
+        Err(error) => return error_output("setup_parse_error", error),
+    };
+    let plan = SetupHelperPlan::new(config, target);
+    let output = json!({
+        "plan": plan,
+        "audit": plan.audit_record(),
+    });
+    match serde_json::to_string(&output) {
+        Ok(json) => CliOutput {
+            exit_code: 0,
+            stdout: format!("{json}\n"),
+            stderr: String::new(),
+        },
+        Err(error) => error_output("setup_serialize_error", error.to_string()),
+    }
+}
+
+fn parse_setup_config(args: &[String]) -> Result<NetworkSetupConfig, String> {
+    let mut sandbox_id: Option<String> = None;
+    let mut tun_name: Option<String> = None;
+    let mut sandbox_ip = None;
+    let mut gateway_ip = None;
+    let mut mtu = None;
+    let mut broker_dns_ip = None;
+    let mut http_proxy_port = None;
+    let mut socks_proxy_port = None;
+    let mut setup_control_fd = None;
+    let mut index = 0usize;
+    while index < args.len() {
+        let flag = args[index].as_str();
+        let value = args
+            .get(index + 1)
+            .ok_or_else(|| format!("missing value for {flag}"))?;
+        match flag {
+            "--sandbox-id" => sandbox_id = Some(value.clone()),
+            "--tun-name" => tun_name = Some(value.clone()),
+            "--sandbox-ip" => sandbox_ip = Some(value.parse().map_err(|_| "invalid sandbox ip")?),
+            "--gateway-ip" => gateway_ip = Some(value.parse().map_err(|_| "invalid gateway ip")?),
+            "--mtu" => mtu = Some(value.parse().map_err(|_| "invalid mtu")?),
+            "--dns" => broker_dns_ip = Some(value.parse().map_err(|_| "invalid dns ip")?),
+            "--http-proxy" => http_proxy_port = Some(parse_proxy_port(value)?),
+            "--socks-proxy" => socks_proxy_port = Some(parse_proxy_port(value)?),
+            "--setup-control-fd" => {
+                setup_control_fd = Some(value.parse().map_err(|_| "invalid setup control fd")?)
+            }
+            "--drop-cap" if value == "CAP_NET_ADMIN" => {}
+            other => return Err(format!("unsupported setup flag {other}")),
+        }
+        index += 2;
+    }
+    Ok(NetworkSetupConfig {
+        sandbox_id: sandbox_id.ok_or("missing --sandbox-id")?,
+        tun_name: tun_name.ok_or("missing --tun-name")?,
+        sandbox_ip: sandbox_ip.ok_or("missing --sandbox-ip")?,
+        gateway_ip: gateway_ip.ok_or("missing --gateway-ip")?,
+        mtu: mtu.ok_or("missing --mtu")?,
+        broker_dns_ip: broker_dns_ip.ok_or("missing --dns")?,
+        http_proxy_port: http_proxy_port.ok_or("missing --http-proxy")?,
+        socks_proxy_port: socks_proxy_port.ok_or("missing --socks-proxy")?,
+        setup_control_fd,
+    })
+}
+
+fn parse_proxy_port(value: &str) -> Result<u16, String> {
+    value
+        .rsplit_once(':')
+        .ok_or_else(|| "proxy endpoint must include port".to_string())?
+        .1
+        .parse()
+        .map_err(|_| "invalid proxy port".to_string())
 }
 
 pub fn validate_config_path(path: impl AsRef<Path>) -> CliOutput {
@@ -214,6 +303,54 @@ mod tests {
         let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
         assert_eq!(value["kind"], "broker_error");
         assert_eq!(value["details"]["error_codes"], "plan_bwrap_missing_target");
+    }
+
+    #[test]
+    fn foxproxsetup_plan_parses_bwrap_helper_flags() {
+        let output = run_foxproxsetup_args(&[
+            "--sandbox-id".to_string(),
+            "s1".to_string(),
+            "--tun-name".to_string(),
+            "foxprox0".to_string(),
+            "--sandbox-ip".to_string(),
+            "10.0.2.15".to_string(),
+            "--gateway-ip".to_string(),
+            "10.0.2.2".to_string(),
+            "--mtu".to_string(),
+            "1500".to_string(),
+            "--dns".to_string(),
+            "10.0.2.3".to_string(),
+            "--http-proxy".to_string(),
+            "10.0.2.2:3128".to_string(),
+            "--socks-proxy".to_string(),
+            "10.0.2.2:1080".to_string(),
+            "--setup-control-fd".to_string(),
+            "9".to_string(),
+            "--drop-cap".to_string(),
+            "CAP_NET_ADMIN".to_string(),
+            "--".to_string(),
+            "curl".to_string(),
+            "http://example.com".to_string(),
+        ]);
+        assert_eq!(output.exit_code, 0);
+        let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
+        assert_eq!(value["audit"]["kind"], "tun_configured");
+        assert_eq!(value["plan"]["steps"][0]["name"], "create_tun");
+        assert_eq!(value["plan"]["steps"][6]["name"], "handoff_tun_fd");
+        assert_eq!(value["plan"]["target_command"][0], "curl");
+    }
+
+    #[test]
+    fn foxproxsetup_missing_target_prints_fail_closed_audit() {
+        let output = run_foxproxsetup_args(&[
+            "--sandbox-id".to_string(),
+            "s1".to_string(),
+            "--".to_string(),
+        ]);
+        assert_eq!(output.exit_code, 1);
+        let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
+        assert_eq!(value["kind"], "broker_error");
+        assert_eq!(value["details"]["error_codes"], "setup_missing_target");
     }
 
     #[test]
