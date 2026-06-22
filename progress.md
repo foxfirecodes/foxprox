@@ -565,3 +565,5 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * flow memory remains bounded because expired entries are removed during collection.
 * Audit evidence: flow tests preserve the data required by `AuditEvent::from_udp_flow_entry` for expiration records.
 * Residual risk: UDP forwarding, response routing, and automatic runtime coupling between `expire_collect` and audit sinks remain future work.
+
+* Commit hash: be30b6b return auditable udp expirations.
