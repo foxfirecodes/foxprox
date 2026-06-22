@@ -1241,3 +1241,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: exported connect attempts are not yet consumed by `TcpStackRuntime`, and duplicate reporting suppression/reset semantics are not implemented.
 - Exact next step: commit smoltcp connect-attempt export, then implement `TcpStackAdapter` for the smoltcp adapter and verify policy-gated host egress with a fake egress.
+
+## 2026-06-22T21:59:33Z
+- Current objective: continue after smoltcp connect-attempt export toward runtime policy gating.
+- Git status summary: `Cargo.lock` still has the smoltcp crate's new `foxprox-core` dependency recorded after commit `6939ae9`; include it with this integration slice.
+- Intended slice: implement `TcpStackAdapter` for `SmoltcpIpLoopback` and verify `TcpStackRuntime` can policy-gate a smoltcp-observed connect attempt before fake host egress.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `Cargo.lock`, `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: adapter reset/open callbacks will be minimal state hooks, not full smoltcp socket reset/bridge behavior.
+- Exact next step: add the trait impl and a policy-gated fake-egress test.
+
+## 2026-06-22T22:01:12Z
+- Current objective: implement `TcpStackAdapter` for smoltcp loopback adapter.
+- Files changed: `Cargo.lock`, `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on a long import; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 8 smoltcp adapter tests passed. New test proves a smoltcp-observed connect attempt can be consumed by `TcpStackRuntime`, audited by the verification kernel, and reach fake host TCP egress only after an allow rule.
+- Commit hash when committed: pending.
+- Remaining risks: smoltcp adapter callbacks do not yet suppress duplicate connect reports or reset smoltcp sockets on denial.
+- Exact next step: commit smoltcp runtime gating, then add duplicate connect-attempt suppression after `mark_connect_opened` or `reset_connect` callbacks.

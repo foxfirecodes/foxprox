@@ -8,7 +8,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use foxprox_core::Endpoint;
-use foxprox_runtime::TcpStackConnectAttempt;
+use foxprox_runtime::{TcpStackAdapter, TcpStackConnectAttempt};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Loopback, Medium};
 use smoltcp::socket::tcp;
@@ -172,9 +172,65 @@ fn endpoint_to_foxprox(endpoint: smoltcp::wire::IpEndpoint) -> Option<Endpoint> 
     }
 }
 
+impl TcpStackAdapter for SmoltcpIpLoopback {
+    fn next_connect_attempt(&mut self) -> Option<TcpStackConnectAttempt> {
+        self.active_tcp_connect_attempts().into_iter().next()
+    }
+
+    fn reset_connect(&mut self, _attempt: &TcpStackConnectAttempt) {}
+
+    fn mark_connect_opened(&mut self, _attempt: &TcpStackConnectAttempt) {}
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use foxprox_core::{
+        DecisionAction, PolicyConfig, PolicyEngine, PolicyRule, Protocol, RuleSet, SandboxId,
+        VecAuditSink, VerificationKernel,
+    };
+    use foxprox_runtime::{
+        EgressError, HostEgress, TcpConnectRequest, TcpStackOutcome, TcpStackRuntime,
+        UdpDatagramRequest,
+    };
+
+    #[derive(Default)]
+    struct FakeEgress {
+        tcp_attempts: usize,
+    }
+
+    impl HostEgress for FakeEgress {
+        fn open_tcp(&mut self, _request: TcpConnectRequest) -> Result<(), EgressError> {
+            self.tcp_attempts += 1;
+            Ok(())
+        }
+
+        fn send_udp(&mut self, _request: UdpDatagramRequest) -> Result<(), EgressError> {
+            Err(EgressError::UnsupportedProtocol)
+        }
+    }
+
+    fn connected_adapter() -> SmoltcpIpLoopback {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        adapter
+            .connect_tcp(Ipv4Addr::new(10, 66, 0, 1), 8080, 50000, 1024, 1024)
+            .unwrap();
+        for millis in 1..20 {
+            adapter.poll_once(millis);
+            if !adapter.active_tcp_connect_attempts().is_empty() {
+                break;
+            }
+        }
+        adapter
+    }
 
     #[test]
     fn ip_loopback_interface_accepts_configured_ipv4_address() {
@@ -267,6 +323,43 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))
         );
         assert_eq!(attempts[0].destination.port, 8080);
+    }
+
+    #[test]
+    fn smoltcp_adapter_connect_attempt_is_policy_gated_by_runtime() {
+        let adapter = connected_adapter();
+        let mut rule = PolicyRule::allow("allow-smoltcp-tcp");
+        rule.protocol = Some(Protocol::Tcp);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = TcpStackRuntime::new(
+            adapter,
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("smoltcp-runtime").unwrap(),
+        );
+
+        let outcome = runtime.handle_next_connect(10).unwrap();
+        let (_adapter, egress, kernel) = runtime.into_parts();
+
+        assert!(matches!(outcome, TcpStackOutcome::HostConnectOpened { .. }));
+        assert_eq!(egress.tcp_attempts, 1);
+        assert_eq!(kernel.audit_sink().events().len(), 1);
+        assert_eq!(
+            kernel.audit_sink().events()[0]
+                .decision
+                .as_ref()
+                .unwrap()
+                .action,
+            DecisionAction::Allow
+        );
     }
 
     #[test]

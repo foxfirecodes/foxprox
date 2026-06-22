@@ -109,6 +109,7 @@ dependencies = [
 name = "foxprox-smoltcp"
 version = "0.1.0"
 dependencies = [
+ "foxprox-core",
  "foxprox-runtime",
  "smoltcp",
 ]
