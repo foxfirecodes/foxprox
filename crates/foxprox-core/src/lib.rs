@@ -941,7 +941,7 @@ impl PolicyEngine {
         if self.config.icmp.allow_essential_errors && is_essential_icmp_error(message) {
             return Some(PolicyDecision::Allow { rule_id: None });
         }
-        if self.config.icmp.allow_echo && message.icmp_type == 8 && message.icmp_code == 0 {
+        if self.config.icmp.allow_echo && is_icmp_echo_request(message) {
             return Some(PolicyDecision::Allow { rule_id: None });
         }
         Some(PolicyDecision::Deny {
@@ -953,7 +953,24 @@ impl PolicyEngine {
 }
 
 fn is_essential_icmp_error(message: &IcmpMessage) -> bool {
-    matches!(message.icmp_type, 3 | 11 | 12)
+    if is_ipv6_icmp(message) {
+        matches!(message.icmp_type, 1..=4)
+    } else {
+        matches!(message.icmp_type, 3 | 11 | 12)
+    }
+}
+
+fn is_icmp_echo_request(message: &IcmpMessage) -> bool {
+    message.icmp_code == 0
+        && if is_ipv6_icmp(message) {
+            message.icmp_type == 128
+        } else {
+            message.icmp_type == 8
+        }
+}
+
+fn is_ipv6_icmp(message: &IcmpMessage) -> bool {
+    message.source.ip.is_ipv6() || message.destination.ip.is_ipv6()
 }
 
 fn is_multicast_or_broadcast(ip: IpAddr) -> bool {
@@ -1331,6 +1348,87 @@ mod tests {
             source: Endpoint::new(Ipv4Addr::new(10, 0, 0, 2).into(), None),
             destination: Endpoint::new(Ipv4Addr::new(203, 0, 113, 10).into(), None),
             icmp_type: 8,
+            icmp_code: 0,
+        });
+
+        assert_eq!(
+            engine.evaluate(&echo).decision,
+            PolicyDecision::Allow { rule_id: None }
+        );
+    }
+
+    #[test]
+    fn icmpv6_defaults_allow_essential_errors_but_not_echo_or_neighbor_discovery() {
+        let engine = PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        });
+        let destination_unreachable = NormalizedEvent::IcmpMessage(IcmpMessage {
+            sandbox_id: sandbox_id(),
+            frontend: FrontendKind::Tun,
+            source: Endpoint::new(Ipv6Addr::LOCALHOST.into(), None),
+            destination: Endpoint::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).into(), None),
+            icmp_type: 1,
+            icmp_code: 0,
+        });
+        let packet_too_big = NormalizedEvent::IcmpMessage(IcmpMessage {
+            icmp_type: 2,
+            icmp_code: 0,
+            ..match destination_unreachable.clone() {
+                NormalizedEvent::IcmpMessage(event) => event,
+                _ => unreachable!(),
+            }
+        });
+        let echo = NormalizedEvent::IcmpMessage(IcmpMessage {
+            icmp_type: 128,
+            icmp_code: 0,
+            ..match destination_unreachable.clone() {
+                NormalizedEvent::IcmpMessage(event) => event,
+                _ => unreachable!(),
+            }
+        });
+        let neighbor_solicitation = NormalizedEvent::IcmpMessage(IcmpMessage {
+            icmp_type: 135,
+            icmp_code: 0,
+            ..match destination_unreachable.clone() {
+                NormalizedEvent::IcmpMessage(event) => event,
+                _ => unreachable!(),
+            }
+        });
+
+        for event in [destination_unreachable, packet_too_big] {
+            assert_eq!(
+                engine.evaluate(&event).decision,
+                PolicyDecision::Allow { rule_id: None }
+            );
+        }
+        for event in [echo, neighbor_solicitation] {
+            assert_eq!(
+                engine.evaluate(&event).decision,
+                PolicyDecision::Deny {
+                    behavior: DenialBehavior::Drop,
+                    reason: "icmp-default-deny".to_owned(),
+                    rule_id: None,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn configured_icmp_echo_allows_icmpv6_echo_request() {
+        let engine = PolicyEngine::new(PolicyConfig {
+            icmp: IcmpPolicy {
+                allow_echo: true,
+                allow_essential_errors: true,
+            },
+            ..PolicyConfig::default()
+        });
+        let echo = NormalizedEvent::IcmpMessage(IcmpMessage {
+            sandbox_id: sandbox_id(),
+            frontend: FrontendKind::Tun,
+            source: Endpoint::new(Ipv6Addr::LOCALHOST.into(), None),
+            destination: Endpoint::new(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).into(), None),
+            icmp_type: 128,
             icmp_code: 0,
         });
 

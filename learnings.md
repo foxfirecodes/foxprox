@@ -80,3 +80,7 @@ When a protocol has documented defaults, audit reasons should identify that laye
 ## 2026-06-21 — minimal IPv6 support should reject extension headers until handled deliberately
 
 Fixed-header IPv6 TCP/UDP/ICMPv6 parsing can reuse normalized core events, but extension headers include fragmentation and routing semantics that should fail closed until explicitly modeled.
+
+## 2026-06-21 — ICMP type semantics depend on IP family
+
+The normalized `IcmpMessage` type can still distinguish ICMPv4 from ICMPv6 by endpoint address family. Use IPv6 error types 1–4 and echo type 128 for ICMPv6; do not reuse IPv4 type 8/3/11/12 semantics blindly.

@@ -439,3 +439,24 @@
 - What failed or surprised the agent: the minimal IPv6 parser can share normalized events with IPv4 cleanly, but extension-header support should remain fail-closed until a deliberate parser slice handles hop-by-hop/routing/fragment semantics.
 - What remains unproven: IPv6 extension header traversal, IPv6 fragmentation policy beyond fail-closed extension rejection, ICMPv6 essential-error defaults, IPv6 checksums, and broker/TUN runtime dispatch between IPv4 and IPv6 are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — ICMPv6 default policy slice
+
+- Slice attempted: extend ICMP default policy to distinguish IPv4 and IPv6 ICMP semantics after IPv6 packet parsing.
+- Why next: IPv6 packet parsing now emits ICMPv6 messages, but core policy still only recognizes IPv4 essential errors and echo requests; alpha requires ICMP/ICMPv6 basics to fail closed except documented essentials.
+- Verification plan: update `PolicyEngine` ICMP defaults so IPv6 essential errors (types 1–4) are allowed when configured, IPv6 echo request (type 128/code 0) is controlled by `allow_echo`, and unusual ICMPv6 remains denied even under global default allow; run focused core/packet tests plus formatting, clippy, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — ICMPv6 default policy
+
+- Slice attempted: distinguish IPv4 and IPv6 ICMP default policy semantics.
+- Why next: IPv6 parser support produced ICMPv6 normalized events, but default policy still recognized only IPv4 error and echo type numbers.
+- What changed: core ICMP defaults now infer ICMPv6 from IPv6 endpoints, allow ICMPv6 essential errors types 1–4 when configured, allow ICMPv6 echo request type 128 only when `allow_echo` is enabled, and continue denying neighbor discovery/unusual ICMPv6 before global default allow.
+- Verification:
+  - `cargo fmt --check` passed.
+  - Focused checks passed: `cargo test -p foxprox-core icmpv6` ran 2 ICMPv6 policy tests successfully.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 4 `foxprox-broker` tests, 3 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 5 `foxprox-flow` tests, 18 `foxprox-inspect` tests, 15 `foxprox-packet` tests, and doc tests.
+- What failed or surprised the agent: no failures; the existing endpoint IP family was enough to avoid adding protocol-version fields to `IcmpMessage`.
+- What remains unproven: ICMPv6 echo reply synthesis, neighbor discovery handling, IPv6 extension-header traversal, IPv6 checksums, and broker/TUN runtime dispatch between IPv4 and IPv6 are still absent.
+- Commit: this commit.
