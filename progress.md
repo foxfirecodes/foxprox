@@ -941,3 +941,25 @@
 - What failed or surprised the agent: no behavior failures; fake executable tests provide command-boundary evidence without requiring root or mutating the host network namespace.
 - What remains unproven: running these commands inside bwrap, DNS resolver file configuration, actual route effects, cleanup on partial setup failure, capability drop after setup, and live sandbox packet logs are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — setup helper DNS resolver file slice
+
+- Slice attempted: write the sandbox resolver configuration that points DNS traffic at the broker-controlled resolver.
+- Why next: TUN interface commands are covered, but alpha setup also requires configuring DNS to the broker resolver so direct external DNS can be denied and broker DNS observations can feed attribution.
+- Verification plan: add a resolv.conf writer in `foxprox-integrations`, validate resolver IP input, write deterministic nameserver/options content to a temp file, verify overwrite behavior and invalid path diagnostics, then run formatting, clippy, focused integration tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — setup helper DNS resolver file
+
+- Slice attempted: write sandbox resolver configuration that points DNS at the broker-controlled resolver.
+- Why next: TUN link/address/route commands are covered, but alpha DNS attribution and direct-DNS denial require sandbox DNS to use the broker resolver.
+- What changed: `foxprox-integrations` now includes `ResolverConfig`, `ResolverConfigError`, and `write_broker_resolv_conf`; it writes deterministic `resolv.conf` content with broker `nameserver` and `options ndots:0`, overwriting stale resolvers and reporting path/write errors.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in the new resolver config code/tests; `cargo fmt` was run.
+  - Focused checks passed: `cargo test -p foxprox-integrations resolv_conf -- --nocapture` verified broker nameserver output, overwrite behavior, empty path rejection, and write failure diagnostics.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 8 `foxprox-integrations` tests and all existing workspace tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; writing resolver state is best kept as a narrow file-boundary helper so actual mount namespace/resolv.conf path decisions can stay in setup integration code.
+- What remains unproven: binding this helper to the real sandbox `/etc/resolv.conf`, mount namespace writeability, cleanup/restoration behavior, live DNS queries through the configured resolver, and bwrap execution are still absent.
+- Commit: this commit.

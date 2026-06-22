@@ -172,3 +172,7 @@ Opening `/dev/net/tun` may be possible without effective `CAP_NET_ADMIN`, while 
 ## 2026-06-21 — setup network command tests should use fake executables
 
 For namespace setup behavior, fake `ip` executables provide concrete process-boundary evidence of exact arguments and failure handling without mutating the host network namespace or requiring root. Reserve live privileged verification for a smaller end-to-end bwrap/TUN slice.
+
+## 2026-06-21 — resolver setup should be deterministic and narrow
+
+Have setup write a minimal generated resolver file pointing at the broker nameserver and `ndots:0`; keep path selection separate so tests can verify file content without requiring a mount namespace or mutating host `/etc/resolv.conf`.
