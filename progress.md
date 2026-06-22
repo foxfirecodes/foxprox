@@ -634,3 +634,24 @@
 - What failed or surprised the agent: no failures; UDP `connect` sets a default peer for send/recv but does not prove remote reachability until a datagram exchange test does so.
 - What remains unproven: UDP forwarding from normalized flow events, DNS upstream query/response handling, reply routing to sandbox, UDP resource limits, and live expiration scheduling are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — DNS UDP upstream → response cache slice
+
+- Slice attempted: forward a DNS query over the shared UDP egress backend, receive a DNS response, and record response answers into the attribution cache.
+- Why next: UDP egress and DNS response parsing/cache are proven separately; alpha DNS foundation requires broker-controlled DNS queries to go upstream and feed hostname attribution.
+- Verification plan: add a `foxprox-dns` crate with a UDP upstream forwarder using `UdpEgress`, test against a loopback UDP DNS fixture server that returns an A answer, verify response bytes and cache enrichment of a later TCP flow, then run focused DNS tests plus formatting, clippy, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — DNS UDP upstream → response cache
+
+- Slice attempted: forward DNS query bytes to an upstream server through shared UDP egress and record returned answers into the DNS attribution cache.
+- Why next: UDP egress and DNS response parsing existed independently, but broker DNS foundation needs upstream response bytes to feed hostname attribution for later transparent flows.
+- What changed: added `crates/foxprox-dns` with `UdpDnsForwarder`, `DnsForwardResult`, and `DnsForwardError`; the forwarder validates query length, uses `UdpEgress` to send/receive one DNS datagram, records A/AAAA answers through `DnsAttributionCache::record_response`, and exposes response bytes plus answer count.
+- Verification:
+  - `cargo test -p foxprox-dns` passed 2 focused tests: loopback UDP DNS fixture forwarding/answer caching/later TCP flow attribution, and short-query rejection before egress.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 2 `foxprox-dns` tests, 4 `foxprox-egress` tests, 5 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 15 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed.
+- What failed or surprised the agent: no failures; forwarding can record cache entries without parsing the original query because the DNS response answer parser already validates and extracts compressed answer names.
+- What remains unproven: DNS listener reachable from sandbox, DNS denial response synthesis, direct DNS bypass runtime interception, negative response handling, transaction matching, and UDP reply packet routing to TUN are still absent.
+- Commit: this commit.

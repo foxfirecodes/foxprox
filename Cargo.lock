@@ -56,6 +56,19 @@ name = "foxprox-core"
 version = "0.1.0"
 
 [[package]]
+name = "foxprox-dns"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+ "foxprox-egress",
+ "foxprox-inspect",
+]
+
+[[package]]
+name = "foxprox-egress"
+version = "0.1.0"
+
+[[package]]
 name = "foxprox-flow"
 version = "0.1.0"
 dependencies = [
@@ -78,6 +91,17 @@ name = "foxprox-packet"
 version = "0.1.0"
 dependencies = [
  "foxprox-core",
+]
+
+[[package]]
+name = "foxprox-proxy"
+version = "0.1.0"
+dependencies = [
+ "foxprox-audit",
+ "foxprox-core",
+ "foxprox-egress",
+ "foxprox-inspect",
+ "serde_json",
 ]
 
 [[package]]

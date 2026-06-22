@@ -116,3 +116,7 @@ When testing SOCKS5-to-egress integration, use IPv4 address-form CONNECT request
 ## 2026-06-21 — UDP egress connect needs datagram evidence
 
 A UDP socket can connect locally without proving a peer exists. Verify UDP egress with an actual send/receive exchange against a loopback UDP server rather than treating `UdpSocket::connect` alone as forwarding evidence.
+
+## 2026-06-21 — DNS forwarding can feed attribution from response answers
+
+The DNS forwarder does not need to trust or retain the original query name to populate attribution. It can parse answer owner names from the upstream response and record A/AAAA TTLs into the attribution cache, provided malformed responses fail closed.

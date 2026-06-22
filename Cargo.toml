@@ -10,6 +10,7 @@ members = [
     "crates/foxprox-flow",
     "crates/foxprox-proxy",
     "crates/foxprox-egress",
+    "crates/foxprox-dns",
 ]
 resolver = "2"
 
