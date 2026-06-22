@@ -767,3 +767,15 @@
 - Interpretation: TCP byte bridging now uses the shared host egress request model, reducing another piece of product behavior previously embedded only in CLI smoke code.
 - Next verification gap: broader production factoring into dedicated broker-device/broker-egress crates, or final review of remaining gaps before stopping.
 - Commit hash after commit: pending.
+
+## 2026-06-22T04:25:00Z — Reusable DNS runtime boundary
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run dns-smoke`; final warning cleanup check: `cargo fmt --all && cargo test --all`
+- Environment assumptions: deterministic DNS runtime tests are local-only; `dns-smoke` requires bwrap/TUN fd handoff and sandbox Python but answers DNS locally without external network.
+- Expected result: move DNS UDP/53 parse/answer/cache/audit behavior into a reusable core runtime and have `dns-smoke` use it.
+- Observed result: pass. `foxprox-core` increased to 54 tests; `foxprox-cli` ran 2 tests; `foxproxsetup` ran 7 tests. `dns-smoke` emitted `decision":"allow"`, `hostname":"lab.example"`, and `attribution_cached":"true"` through `TransparentDnsRuntime`.
+- Relevant output excerpt: `runtime::tests::dns_runtime_answers_and_caches_local_a_record ... ok`; `runtime::tests::dns_runtime_denies_unknown_local_name_without_reply ... ok`; `"event":"dns_query","frontend":"tun","hostname":"lab.example"`.
+- Changed files: `crates/foxprox-core/src/runtime.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: DNS broker-local behavior is now factored out of CLI smoke code into the reusable runtime layer, leaving fd IO and process lifecycle in the harness.
+- Next verification gap: migrate DNS attribution smoke to the DNS runtime or begin dedicated crate decomposition.
+- Commit hash after commit: pending.

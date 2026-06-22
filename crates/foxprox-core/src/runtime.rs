@@ -1,10 +1,11 @@
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::audit::{
     AttributionConfidence, AttributionSource, AuditRecord, BoundedAuditBuffer, Decision, EventKind,
     Frontend, Protocol,
 };
-use crate::dns::DnsCache;
+use crate::dns::{parse_dns_query, synthesize_a_response, DnsCache};
 use crate::egress::{EgressBackend, EgressRequest};
 use crate::origin::{parse_http_request, parse_tls_client_hello};
 use crate::packet::{
@@ -187,6 +188,147 @@ impl<B: EgressBackend> TransparentUdpRuntime<B> {
                 Ok(None)
             }
         }
+    }
+}
+
+/// Minimal broker-local DNS runtime for transparent UDP/53 packets.
+#[derive(Debug)]
+pub struct TransparentDnsRuntime {
+    answers: BTreeMap<String, Ipv4Addr>,
+    pub audit: Vec<AuditRecord>,
+    pub dns_cache: DnsCache,
+    pub now_tick: u64,
+    pub ttl_ticks: u64,
+}
+
+impl TransparentDnsRuntime {
+    pub fn new(answers: impl IntoIterator<Item = (String, Ipv4Addr)>) -> Self {
+        Self {
+            answers: answers.into_iter().collect(),
+            audit: Vec::new(),
+            dns_cache: DnsCache::new(),
+            now_tick: 1,
+            ttl_ticks: 60,
+        }
+    }
+
+    pub fn handle_ipv4_packet(
+        &mut self,
+        sandbox_id: impl Into<String>,
+        packet: &[u8],
+    ) -> Result<Option<Vec<u8>>, String> {
+        let sandbox_id = sandbox_id.into();
+        let parsed = match parse_ipv4(packet) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                self.audit.push(
+                    AuditRecord::new(
+                        EventKind::UnsupportedNetworkEvent,
+                        sandbox_id,
+                        Decision::FailClosed,
+                        format!("malformed IPv4 packet fails closed: {err}"),
+                    )
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(Protocol::Unsupported),
+                );
+                return Ok(None);
+            }
+        };
+        if parsed.protocol_number != 17 {
+            self.audit.push(
+                AuditRecord::new(
+                    EventKind::UnsupportedNetworkEvent,
+                    sandbox_id,
+                    Decision::FailClosed,
+                    "DNS runtime received non-UDP packet",
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(parsed.protocol()),
+            );
+            return Ok(None);
+        }
+        let udp =
+            parse_udp(parsed.payload).map_err(|err| format!("malformed UDP packet: {err}"))?;
+        let source = SocketAddr::new(IpAddr::V4(parsed.source), udp.source_port);
+        let destination = SocketAddr::new(IpAddr::V4(parsed.destination), udp.destination_port);
+        if udp.destination_port != 53 {
+            self.audit.push(
+                AuditRecord::new(
+                    EventKind::DnsQuery,
+                    sandbox_id,
+                    Decision::FailClosed,
+                    "DNS runtime received UDP packet not addressed to broker DNS port",
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(Protocol::Dns)
+                .with_addresses(Some(source), Some(destination)),
+            );
+            return Ok(None);
+        }
+        let query = match parse_dns_query(udp.payload) {
+            Ok(query) => query,
+            Err(err) => {
+                self.audit.push(
+                    AuditRecord::new(
+                        EventKind::DnsQuery,
+                        sandbox_id,
+                        Decision::FailClosed,
+                        format!("malformed DNS query fails closed: {err}"),
+                    )
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(Protocol::Dns)
+                    .with_addresses(Some(source), Some(destination)),
+                );
+                return Ok(None);
+            }
+        };
+        let Some(answer) = self.answers.get(&query.hostname).copied() else {
+            self.audit.push(
+                AuditRecord::new(
+                    EventKind::DnsQuery,
+                    sandbox_id,
+                    Decision::DenyDrop,
+                    "DNS hostname has no local alpha answer",
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(Protocol::Dns)
+                .with_addresses(Some(source), Some(destination))
+                .with_hostname(
+                    Some(query.hostname),
+                    AttributionSource::DnsCache,
+                    AttributionConfidence::Medium,
+                )
+                .with_metadata("query_type", query.query_type.as_str()),
+            );
+            return Ok(None);
+        };
+        let dns_response = synthesize_a_response(udp.payload, answer, self.ttl_ticks as u32)?;
+        let reply = synthesize_udp_reply(packet, &dns_response)?;
+        self.dns_cache.observe_response(
+            &query.hostname,
+            [IpAddr::V4(answer)],
+            self.now_tick,
+            self.ttl_ticks,
+        )?;
+        self.audit.push(
+            AuditRecord::new(
+                EventKind::DnsQuery,
+                sandbox_id,
+                Decision::Allow,
+                "broker DNS query answered locally",
+            )
+            .with_frontend(Frontend::Tun)
+            .with_protocol(Protocol::Dns)
+            .with_addresses(Some(source), Some(destination))
+            .with_hostname(
+                Some(query.hostname),
+                AttributionSource::DnsCache,
+                AttributionConfidence::Medium,
+            )
+            .with_metadata("query_type", query.query_type.as_str())
+            .with_metadata("answer", answer.to_string()),
+        );
+        Ok(Some(reply))
     }
 }
 
@@ -929,6 +1071,47 @@ mod tests {
     }
 
     #[test]
+    fn dns_runtime_answers_and_caches_local_a_record() {
+        let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), 53);
+        let mut runtime = TransparentDnsRuntime::new([(
+            "lab.example".to_string(),
+            Ipv4Addr::new(203, 0, 113, 77),
+        )]);
+        let packet = udp_probe_packet(
+            destination.ip(),
+            destination.port(),
+            &dns_a_query("lab.example"),
+        );
+        let reply = runtime.handle_ipv4_packet("lab", &packet).unwrap().unwrap();
+        assert!(reply.ends_with(&[203, 0, 113, 77]));
+        assert_eq!(runtime.audit[0].kind, EventKind::DnsQuery);
+        assert_eq!(runtime.audit[0].decision, Decision::Allow);
+        assert_eq!(runtime.audit[0].hostname.as_deref(), Some("lab.example"));
+        assert!(runtime
+            .dns_cache
+            .attribution_for(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 77)), 2)
+            .is_some());
+    }
+
+    #[test]
+    fn dns_runtime_denies_unknown_local_name_without_reply() {
+        let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), 53);
+        let mut runtime = TransparentDnsRuntime::new([]);
+        let packet = udp_probe_packet(
+            destination.ip(),
+            destination.port(),
+            &dns_a_query("blocked.example"),
+        );
+        let reply = runtime.handle_ipv4_packet("lab", &packet).unwrap();
+        assert!(reply.is_none());
+        assert_eq!(runtime.audit[0].decision, Decision::DenyDrop);
+        assert_eq!(
+            runtime.audit[0].hostname.as_deref(),
+            Some("blocked.example")
+        );
+    }
+
+    #[test]
     fn tcp_syn_connect_attempt_uses_policy_before_egress() {
         let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443);
         let policy = PolicyEngine::new(
@@ -1298,6 +1481,20 @@ mod tests {
         record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
         record.extend_from_slice(&handshake);
         record
+    }
+
+    fn dns_a_query(hostname: &str) -> Vec<u8> {
+        let mut wire = vec![
+            0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
+        for label in hostname.split('.') {
+            wire.push(label.len() as u8);
+            wire.extend_from_slice(label.as_bytes());
+        }
+        wire.push(0);
+        wire.extend_from_slice(&1_u16.to_be_bytes());
+        wire.extend_from_slice(&1_u16.to_be_bytes());
+        wire
     }
 
     fn udp_probe_packet(destination: IpAddr, destination_port: u16, payload: &[u8]) -> Vec<u8> {
