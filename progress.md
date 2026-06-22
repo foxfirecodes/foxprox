@@ -797,5 +797,5 @@
   - `cargo tree -p foxprox-net` — net orchestrates DNS/policy/audit/egress behind normalized boundaries.
   - `cargo tree -p foxprox-policy` — policy depends only on `foxprox-core`.
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
-- Commit hash after commit: pending.
+- Commit hash after commit: 651a917.
 - Remaining boundary risks: real UDP DNS socket loop, upstream wire forwarding, response caching integration, TCP DNS, and negative caching remain.
