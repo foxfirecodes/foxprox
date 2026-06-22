@@ -196,3 +196,7 @@ Resource limit primitives are not enough; runtime config should reject nonsensic
 ## 2026-06-21 — test temp paths need more than process id
 
 Rust tests in one process can run in parallel, so temp paths based only on process id can collide and cause odd executable-file races like `Text file busy`. Include a per-test unique suffix such as timestamp nanos for fake scripts and files.
+
+## 2026-06-21 — TUN fd consumption can be tested with fd stand-ins
+
+A broker-facing TUN IO wrapper only needs an owned fd with read/write behavior for boundary tests. Use a Unix stream pair as a deterministic fd stand-in, and keep real `/dev/net/tun` behavior in the create/ioctl tests.

@@ -9,7 +9,7 @@
 mod linux;
 
 #[cfg(target_os = "linux")]
-pub use linux::{create_tun, TunCreateConfig, TunCreateError, TunDevice};
+pub use linux::{create_tun, TunCreateConfig, TunCreateError, TunDevice, TunIoError, TunPacketIo};
 
 #[cfg(not(target_os = "linux"))]
 compile_error!("foxprox-device currently supports Linux only");

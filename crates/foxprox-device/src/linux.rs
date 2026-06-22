@@ -1,6 +1,7 @@
 use std::ffi::CStr;
 use std::fmt;
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
 use std::mem;
 use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
 use std::path::PathBuf;
@@ -45,6 +46,90 @@ pub struct TunDevice {
     pub name: String,
     pub fd: OwnedFd,
 }
+
+/// Packet IO wrapper around a TUN-like fd received by the broker.
+#[derive(Debug)]
+pub struct TunPacketIo {
+    fd: File,
+    max_packet_len: usize,
+}
+
+impl TunPacketIo {
+    pub fn from_owned_fd(fd: OwnedFd, max_packet_len: usize) -> Result<Self, TunIoError> {
+        if max_packet_len == 0 {
+            return Err(TunIoError::InvalidMaxPacketLen);
+        }
+        Ok(Self {
+            fd: File::from(fd),
+            max_packet_len,
+        })
+    }
+
+    pub fn read_packet(&mut self) -> Result<Vec<u8>, TunIoError> {
+        let mut packet = vec![0_u8; self.max_packet_len];
+        let length = self
+            .fd
+            .read(&mut packet)
+            .map_err(|error| TunIoError::Read {
+                error: error.to_string(),
+            })?;
+        packet.truncate(length);
+        Ok(packet)
+    }
+
+    pub fn write_packet(&mut self, packet: &[u8]) -> Result<(), TunIoError> {
+        if packet.len() > self.max_packet_len {
+            return Err(TunIoError::PacketTooLarge {
+                max_packet_len: self.max_packet_len,
+                actual: packet.len(),
+            });
+        }
+        self.fd
+            .write_all(packet)
+            .map_err(|error| TunIoError::Write {
+                error: error.to_string(),
+            })
+    }
+
+    pub fn into_inner(self) -> File {
+        self.fd
+    }
+}
+
+/// TUN packet IO errors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TunIoError {
+    InvalidMaxPacketLen,
+    PacketTooLarge {
+        max_packet_len: usize,
+        actual: usize,
+    },
+    Read {
+        error: String,
+    },
+    Write {
+        error: String,
+    },
+}
+
+impl fmt::Display for TunIoError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidMaxPacketLen => f.write_str("tun-io-invalid-max-packet-len"),
+            Self::PacketTooLarge {
+                max_packet_len,
+                actual,
+            } => write!(
+                f,
+                "tun-io-packet-too-large: max_packet_len={max_packet_len} actual={actual}"
+            ),
+            Self::Read { error } => write!(f, "tun-io-read-error: {error}"),
+            Self::Write { error } => write!(f, "tun-io-write-error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for TunIoError {}
 
 /// TUN setup errors.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -195,6 +280,33 @@ mod tests {
             create_tun(&TunCreateConfig::new("bad\0name")),
             Err(TunCreateError::InvalidName(_))
         ));
+    }
+
+    #[test]
+    fn tun_packet_io_reads_and_writes_over_owned_fd_boundary() {
+        use std::io::{Read, Write};
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+
+        let (mut peer, broker_side) = UnixStream::pair().unwrap();
+        let owned: OwnedFd = broker_side.into();
+        let mut io = TunPacketIo::from_owned_fd(owned, 64).unwrap();
+
+        peer.write_all(b"inbound-packet").unwrap();
+        let packet = io.read_packet().unwrap();
+        assert_eq!(&packet, b"inbound-packet");
+
+        io.write_packet(b"outbound-packet").unwrap();
+        let mut response = [0_u8; 15];
+        peer.read_exact(&mut response).unwrap();
+        assert_eq!(&response, b"outbound-packet");
+        assert_eq!(
+            io.write_packet(&[0_u8; 65]).unwrap_err(),
+            TunIoError::PacketTooLarge {
+                max_packet_len: 64,
+                actual: 65,
+            }
+        );
     }
 
     #[test]

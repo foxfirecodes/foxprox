@@ -1074,3 +1074,25 @@
 - What failed or surprised the agent: fake executable paths based only on process id can collide under parallel tests; include a time-based unique suffix for temp paths.
 - What remains unproven: runtime sink emission when a live UDP packet hits the limit, TCP/proxy connection limits, configurable audit/backpressure behavior under load, and live UDP forwarding are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — received fd → packet IO adapter slice
+
+- Slice attempted: wrap an owned setup-received fd in a broker-facing packet IO adapter that can read inbound packet bytes and write outbound packet bytes.
+- Why next: setup fd handoff is proven, but broker consumption of the received fd is still absent; a narrow fd-backed packet IO adapter connects setup handoff to the existing packet broker/write-back boundary.
+- Verification plan: add `TunPacketIo` to `foxprox-device`, test it over a Unix stream fd stand-in by reading inbound bytes and writing outbound bytes across the fd boundary, then run formatting, clippy, focused device tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — received fd → packet IO adapter
+
+- Slice attempted: wrap an owned setup-received fd in a broker-facing packet IO adapter for reading inbound packet bytes and writing outbound packet bytes.
+- Why next: setup fd handoff and packet broker/write-back were proven separately; broker runtime still needed a narrow fd-backed IO boundary for consuming the received TUN fd.
+- What changed: `foxprox-device` now exposes `TunPacketIo` and `TunIoError`; it accepts an `OwnedFd`, validates maximum packet length, reads one packet-sized byte buffer, writes outbound packet bytes, and rejects oversized writes before touching the fd.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in `foxprox-device`; `cargo fmt` was run.
+  - Focused check passed: `cargo test -p foxprox-device tun_packet_io -- --nocapture` verified inbound read and outbound write across a Unix stream fd stand-in plus oversized packet rejection.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 4 `foxprox-device` tests and all existing workspace tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; a Unix stream fd is enough for packet IO boundary evidence while real TUN fd behavior remains covered by the TUN create primitive.
+- What remains unproven: wiring `TunPacketIo` to the broker loop, continuous TUN read/write scheduling, received real TUN fd from bwrap setup, and live sandbox packet logs are still absent.
+- Commit: this commit.
