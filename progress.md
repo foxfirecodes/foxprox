@@ -418,5 +418,5 @@
   - `cargo check --workspace` — passed.
   - `cargo test --workspace` — passed, 60 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
-- Commit hash after commit: pending.
+- Commit hash after commit: 7de4f01.
 - Remaining boundary risks: DoH identification by hostname/IP intelligence, DNS-over-QUIC classification, and production TLS metadata wiring remain.
