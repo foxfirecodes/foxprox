@@ -258,3 +258,8 @@
 
 - Store normalized flow keys and byte counters alongside private smoltcp listener sockets so close events can be emitted after smoltcp resets endpoints/state.
 - Runtime bridge cleanup and audit can now be driven by real adapter lifecycle events without exposing smoltcp `State` or socket handles.
+
+## 2026-06-22 — minimal UDP forwarding
+
+- UDP payload bytes can cross from packet parsing to net orchestration as opaque forwarding data while policy/audit still receive only normalized `UdpFlowAttempt` metadata.
+- Host UDP socket behavior should mirror TCP stream readiness: egress owns nonblocking sockets and normalizes `WouldBlock` to zero progress behind `HostUdpFlow`.

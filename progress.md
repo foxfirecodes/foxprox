@@ -1106,3 +1106,27 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 47cc2db.
 - Remaining boundary risks: FIN half-close nuance, timeout-driven closes, and richer close reasons remain.
+
+## 2026-06-22 — Boundary objective: minimal UDP payload forwarding proof
+
+- Boundary under work: one-datagram UDP forwarding through the shared egress contract after normalized packet policy allows the flow.
+- Allowed dependency direction: packet parsing may expose opaque UDP payload bytes to net orchestration only; policy/audit continue to receive only `UdpFlowAttempt`; egress owns host UDP socket send/receive behavior behind a trait.
+- Dependency-risk assessment: UDP policy events already open host UDP flows, but payload bytes were not forwarded. A minimal send proof closes the alpha UDP gap while preserving the packet/policy boundary.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for packet/net/egress/audit.
+- Observed results: added opaque UDP payload extraction to `PacketInspection`, introduced `HostUdpFlow` for shared UDP send/receive behavior, implemented it for `UdpSocket` and mocks with nonblocking `WouldBlock` normalization, and taught `handle_ipv4_packet` to send allowed UDP payloads through the opened egress UDP handle. Added a net test proving an allowed UDP packet sends four payload bytes through shared egress while policy/audit see only the normalized event. All verification passed.
+- Changed files:
+  - `crates/foxprox-packet/src/lib.rs`
+  - `crates/foxprox-egress/src/lib.rs`
+  - `crates/foxprox-net/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 102 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-packet` — packet remains core-only.
+  - `cargo tree -p foxprox-net` — orchestration owns packet-to-egress forwarding.
+  - `cargo tree -p foxprox-egress` — UDP IO remains behind egress.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: UDP response packet synthesis, UDP flow table handle retention, ICMP errors, and backpressure/rate limits remain.

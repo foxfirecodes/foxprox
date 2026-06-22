@@ -18,7 +18,7 @@ use foxprox_core::{
 /// event. Production implementations open host sockets; tests can use mocks.
 pub trait HostEgress {
     type TcpStream: HostTcpStream;
-    type UdpHandle;
+    type UdpHandle: HostUdpFlow;
     type HttpResponse;
 
     fn connect_tcp(&mut self, event: &TcpConnectAttempt) -> Result<Self::TcpStream, EgressError>;
@@ -55,6 +55,33 @@ impl HostTcpStream for TcpStream {
     fn read_to_sandbox(&mut self, max_bytes: usize) -> Result<Vec<u8>, EgressError> {
         let mut buffer = vec![0_u8; max_bytes];
         let len = match self.read(&mut buffer) {
+            Ok(len) => len,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => 0,
+            Err(error) => return Err(EgressError::StreamIo(error.to_string())),
+        };
+        buffer.truncate(len);
+        Ok(buffer)
+    }
+}
+
+/// Shared host UDP flow contract used by packet forwarding code.
+pub trait HostUdpFlow {
+    fn send_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError>;
+    fn recv_to_sandbox(&mut self, max_bytes: usize) -> Result<Vec<u8>, EgressError>;
+}
+
+impl HostUdpFlow for UdpSocket {
+    fn send_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
+        match self.send(bytes) {
+            Ok(written) => Ok(written),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(0),
+            Err(error) => Err(EgressError::StreamIo(error.to_string())),
+        }
+    }
+
+    fn recv_to_sandbox(&mut self, max_bytes: usize) -> Result<Vec<u8>, EgressError> {
+        let mut buffer = vec![0_u8; max_bytes];
+        let len = match self.recv(&mut buffer) {
             Ok(len) => len,
             Err(error) if error.kind() == ErrorKind::WouldBlock => 0,
             Err(error) => return Err(EgressError::StreamIo(error.to_string())),
@@ -131,6 +158,16 @@ impl HostTcpStream for MockTcpStream {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MockUdpHandle;
 
+impl HostUdpFlow for MockUdpHandle {
+    fn send_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
+        Ok(bytes.len())
+    }
+
+    fn recv_to_sandbox(&mut self, _max_bytes: usize) -> Result<Vec<u8>, EgressError> {
+        Ok(Vec::new())
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MockHttpResponse;
 
@@ -162,6 +199,9 @@ impl HostEgress for StdHostEgress {
             .map_err(|error| EgressError::ConnectFailed(error.to_string()))?;
         socket
             .connect(event.destination)
+            .map_err(|error| EgressError::ConnectFailed(error.to_string()))?;
+        socket
+            .set_nonblocking(true)
             .map_err(|error| EgressError::ConnectFailed(error.to_string()))?;
         Ok(socket)
     }

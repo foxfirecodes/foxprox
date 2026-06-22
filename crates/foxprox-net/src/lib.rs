@@ -18,7 +18,9 @@ use foxprox_core::{
     UdpTimeouts,
 };
 use foxprox_dns::{build_address_response, build_refused_response, parse_dns_query_event};
-use foxprox_egress::{dispatch_allowed_event, DispatchOutcome, EgressError, HostEgress};
+use foxprox_egress::{
+    dispatch_allowed_event, DispatchOutcome, EgressError, EgressOutcome, HostEgress, HostUdpFlow,
+};
 use foxprox_packet::{inspect_ipv4_packet, synthesize_ipv4_denial_response};
 use foxprox_policy::PolicyEngine;
 
@@ -388,6 +390,7 @@ pub struct PacketBrokerOutcome {
     pub event: NormalizedEvent,
     pub decision: PolicyDecision,
     pub outcome: BrokerEventOutcome,
+    pub udp_bytes_sent: usize,
     pub outbound_packets: Vec<OutboundIpPacket>,
 }
 
@@ -419,8 +422,16 @@ where
         timestamp_millis,
     )?;
     let mut outbound_packets = Vec::new();
+    let mut udp_bytes_sent = 0;
 
     if evaluated.decision.is_allowed() {
+        if let (Some(payload), Some(EgressOutcome::UdpOpened(mut udp))) =
+            (&inspection.udp_payload, evaluated.egress_outcome)
+        {
+            udp_bytes_sent = udp
+                .send_from_sandbox(payload)
+                .map_err(BrokerError::Egress)?;
+        }
         if let Some(reply) = inspection.synthetic_reply {
             outbound_packets
                 .push(OutboundIpPacket::new(reply.bytes().to_vec()).map_err(BrokerError::Stack)?);
@@ -436,6 +447,7 @@ where
         event: inspection.event,
         decision: evaluated.decision,
         outcome: evaluated.outcome,
+        udp_bytes_sent,
         outbound_packets,
     })
 }
@@ -969,6 +981,34 @@ mod tests {
         assert_eq!(audit.records().len(), 1);
         assert!(egress.tcp_connects.is_empty());
         assert!(egress.udp_flows.is_empty());
+    }
+
+    #[test]
+    fn allowed_udp_packet_sends_payload_through_shared_egress() {
+        let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(8);
+        let sandbox_id = SandboxId::new("s1").unwrap();
+        let packet = udp_packet(53000, 12345, b"ping");
+
+        let outcome = handle_ipv4_packet(
+            InboundIpv4Packet {
+                sandbox_id: &sandbox_id,
+                frontend: FrontendKind::Tun,
+                bytes: &packet,
+            },
+            &policy,
+            &mut egress,
+            &mut audit,
+            5,
+            5000,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.outcome, BrokerEventOutcome::Forwarded);
+        assert_eq!(outcome.udp_bytes_sent, 4);
+        assert_eq!(egress.udp_flows.len(), 1);
+        assert_eq!(audit.records().len(), 1);
     }
 
     #[test]

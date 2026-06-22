@@ -19,6 +19,7 @@ use foxprox_core::{
 pub struct PacketInspection {
     pub event: NormalizedEvent,
     pub synthetic_reply: Option<SyntheticIpPacket>,
+    pub udp_payload: Option<Vec<u8>>,
 }
 
 /// Opaque synthetic IP packet to write back to the device frontend.
@@ -62,6 +63,7 @@ pub fn inspect_ipv4_packet(
                 safe_metadata: error.safe_metadata,
             }),
             synthetic_reply: None,
+            udp_payload: None,
         },
     }
 }
@@ -146,6 +148,7 @@ fn inspect_icmp_packet(
     Ok(PacketInspection {
         event,
         synthetic_reply,
+        udp_payload: None,
     })
 }
 
@@ -186,6 +189,7 @@ fn inspect_tcp_packet(
             hostname: None,
         }),
         synthetic_reply: None,
+        udp_payload: None,
     })
 }
 
@@ -217,6 +221,7 @@ fn inspect_udp_packet(
             classification: classify_udp_destination(destination),
         }),
         synthetic_reply: None,
+        udp_payload: Some(udp[8..udp_len].to_vec()),
     })
 }
 
