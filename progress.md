@@ -654,3 +654,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * invalid DNS exemption configuration fails closed before any allow-all rule can authorize the DNS packet.
 * Audit evidence: not applicable in this commit; invalid config surfaces as `Decision::FailClosed { reason: InvalidConfig }` for future audit emission.
 * Residual risk: config file deserialization/loading and interface-aware validation of broker resolver reachability remain future work.
+* Commit hash: 231b9cc fail closed invalid broker dns exemptions.
