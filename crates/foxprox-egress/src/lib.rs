@@ -108,9 +108,12 @@ impl DnsUpstream for BlockingDnsUpstream {
             .send_to(packet, self.upstream)
             .map_err(|_| DnsUpstreamError::Unavailable)?;
         let mut response = vec![0u8; self.max_response_bytes.max(1)];
-        let (len, _) = socket
+        let (len, peer) = socket
             .recv_from(&mut response)
             .map_err(|_| DnsUpstreamError::Unavailable)?;
+        if peer != self.upstream {
+            return Err(DnsUpstreamError::Unavailable);
+        }
         response.truncate(len);
         Ok(response)
     }
@@ -272,6 +275,52 @@ mod tests {
         let records: Vec<_> = handler.broker().audit().records().collect();
         assert_eq!(records.len(), 2);
         assert_eq!(records[1].details["returned_addresses"], "93.184.216.34");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn blocking_dns_upstream_rejects_wrong_source_response() {
+        let resolver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        resolver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let resolver_addr = resolver.local_addr().unwrap();
+        let wrong_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let query = dns_query(0x4545, "Example.COM", 1);
+        let response = dns_a_response(&query, [93, 184, 216, 34], 30);
+        let expected_query = query.clone();
+        let server = thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            let (len, peer) = resolver.recv_from(&mut buf).unwrap();
+            assert_eq!(&buf[..len], expected_query.as_slice());
+            wrong_sender.send_to(&response, peer).unwrap();
+        });
+
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-example-dns")
+                .protocol(Protocol::Dns)
+                .hostname("example.com"),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let upstream = BlockingDnsUpstream::new(
+            resolver_addr,
+            "127.0.0.1:0".parse().unwrap(),
+            Duration::from_secs(1),
+            512,
+        );
+        let mut handler = DnsBrokerHandler::new(broker, upstream, "10.0.2.3".parse().unwrap());
+
+        let result = handler.handle_query("s1", &query, 1_000);
+        assert_eq!(result.decision.decision, Decision::FailClosed);
+        assert_eq!(result.response.unwrap()[3] & 0x0f, 5);
+        assert!(result.observed_addresses.is_empty());
+        assert!(handler
+            .cache()
+            .attribution_for("93.184.216.34".parse().unwrap(), 2_000)
+            .is_none());
+        let records: Vec<_> = handler.broker().audit().records().collect();
+        assert_eq!(records[1].details["dns_upstream_error"], "unavailable");
         server.join().unwrap();
     }
 

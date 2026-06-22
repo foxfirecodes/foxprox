@@ -1169,3 +1169,36 @@ DNS upstream forwarding now has a concrete host UDP socket implementation behind
 
 ### Remaining blind spots
 - This is a blocking UDP upstream proof, not the final async DNS runtime listener. Real resolver configuration, retry policy, and socket lifecycle integration remain runtime work.
+
+## 2026-06-22 — Round-11 DNS upstream source validation cycle
+
+### Behavior under work
+Fix round-11 high finding: concrete UDP DNS upstream egress must reject responses whose source socket address does not match the configured upstream resolver before the DNS handler can validate and commit hostname attribution.
+
+### Expected evidence
+- A wrong-source but otherwise payload-valid DNS response maps to `DnsUpstreamError::Unavailable`, causing `DnsBrokerHandler` to fail closed with REFUSED and structured `dns_upstream_error=unavailable`.
+- Valid responses from the configured upstream still pass validation, audit returned addresses, and commit attribution.
+
+## 2026-06-22 — Round-11 DNS upstream source validation fix
+
+### Commands run
+- `cargo fmt` — applied formatting for DNS upstream source validation.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 6 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 103 core tests, 3 device tests, 6 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_dns_upstream_rejects_wrong_source_response ... ok`
+- `foxprox_egress::tests::blocking_dns_upstream_exchanges_query_through_dns_handler ... ok`
+- `foxprox_egress::tests::blocking_dns_upstream_unavailable_maps_to_handler_fail_closed ... ok`
+
+### Interpretation
+Round-11 high finding is fixed. `BlockingDnsUpstream` now verifies the UDP response peer equals the configured upstream resolver before releasing bytes to `DnsBrokerHandler`. Wrong-source but payload-valid DNS answers map to `DnsUpstreamError::Unavailable`; the handler fails closed with REFUSED, emits structured `dns_upstream_error=unavailable`, and leaves the DNS attribution cache empty. Valid configured-upstream responses still audit and cache normally.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `progress.md`
+
+### Remaining blind spots
+- Source validation is implemented in the blocking UDP proof; final async resolver runtime still needs equivalent peer validation and retry/lifecycle behavior.
