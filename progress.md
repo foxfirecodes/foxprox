@@ -947,3 +947,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: the concrete bridge still performs explicit writes only; no host socket read polling, smoltcp stream integration, backpressure, or half-close behavior exists.
 - Exact next step: commit the standard TCP stream bridge, then add a bounded host-read helper that reads from a real TCP stream and writes the bytes through the sandbox side with EOF/error outcomes.
+
+## 2026-06-22T21:32:59Z
+- Current objective: continue after standard TCP stream bridge commit toward host-to-sandbox read routing.
+- Git status summary: clean worktree after commit `535b004`.
+- Intended slice: add a bounded helper that reads bytes from a real host `TcpStream`, writes them to sandbox-side IO through the bridge, and reports EOF/error explicitly.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` using a loopback listener that writes and closes deterministically.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this still will not poll continuously or integrate with smoltcp; it proves one bounded read/write operation for the bridge boundary.
+- Exact next step: implement host-read outcome types and loopback tests for bytes and EOF.
+
+## 2026-06-22T21:33:52Z
+- Current objective: add bounded host-to-sandbox reads for the standard TCP stream bridge.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 75 runtime tests, and 7 setup tests passed. New loopback tests prove `StdTcpStreamBridge` can read bounded host bytes into sandbox-side IO and reports host EOF without writing bogus sandbox bytes.
+- Commit hash when committed: pending.
+- Remaining risks: reads are one-shot and blocking; there is no event loop, readiness polling, smoltcp stream source, or timeout configuration on the bridge runtime yet.
+- Exact next step: commit bounded TCP host-read support, then add a nonblocking/readiness-safe outcome so the future event loop can avoid blocking when no host bytes are available.

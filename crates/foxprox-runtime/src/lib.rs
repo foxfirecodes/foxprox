@@ -339,6 +339,12 @@ pub trait TcpStreamBridge {
     fn write_to_sandbox(&mut self, flow: &FlowKey, bytes: &[u8]) -> Result<(), TcpBridgeError>;
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TcpHostReadOutcome {
+    Bytes { count: usize },
+    Eof,
+}
+
 #[derive(Debug)]
 pub struct StdTcpStreamBridge<W> {
     flow: FlowKey,
@@ -364,6 +370,29 @@ impl<W> StdTcpStreamBridge<W> {
 
     pub fn sandbox_writer(&self) -> &W {
         &self.sandbox_writer
+    }
+
+    pub fn read_host_once_to_sandbox(
+        &mut self,
+        flow: &FlowKey,
+        max_bytes: usize,
+    ) -> Result<TcpHostReadOutcome, TcpBridgeError>
+    where
+        W: Write,
+    {
+        self.ensure_flow(flow)?;
+        let mut buffer = vec![0; max_bytes];
+        let count = self
+            .host_stream
+            .read(&mut buffer)
+            .map_err(|_| TcpBridgeError::IoFailed)?;
+        if count == 0 {
+            return Ok(TcpHostReadOutcome::Eof);
+        }
+        self.sandbox_writer
+            .write_all(&buffer[..count])
+            .map_err(|_| TcpBridgeError::IoFailed)?;
+        Ok(TcpHostReadOutcome::Bytes { count })
     }
 
     pub fn into_parts(self) -> (TcpStream, W) {
@@ -2240,6 +2269,51 @@ mod tests {
         let open = runtime.open_flows().get(&flow).unwrap();
         assert_eq!(open.bytes_from_sandbox, 11);
         assert_eq!(open.bytes_from_host, 9);
+    }
+
+    #[test]
+    fn std_tcp_stream_bridge_reads_host_bytes_to_sandbox_writer() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"from-host").unwrap();
+        });
+        let flow = FlowKey::new(
+            Protocol::Tcp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            Endpoint::new(listen_addr.ip(), listen_addr.port()),
+        );
+        let host_stream = TcpStream::connect(listen_addr).unwrap();
+        let mut bridge = StdTcpStreamBridge::new(flow.clone(), host_stream, Vec::new()).unwrap();
+
+        let outcome = bridge.read_host_once_to_sandbox(&flow, 32).unwrap();
+
+        server.join().unwrap();
+        assert_eq!(outcome, TcpHostReadOutcome::Bytes { count: 9 });
+        assert_eq!(bridge.sandbox_writer(), &b"from-host".to_vec());
+    }
+
+    #[test]
+    fn std_tcp_stream_bridge_reports_host_eof_without_writing_sandbox_bytes() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+        });
+        let flow = FlowKey::new(
+            Protocol::Tcp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            Endpoint::new(listen_addr.ip(), listen_addr.port()),
+        );
+        let host_stream = TcpStream::connect(listen_addr).unwrap();
+        let mut bridge = StdTcpStreamBridge::new(flow.clone(), host_stream, Vec::new()).unwrap();
+        server.join().unwrap();
+
+        let outcome = bridge.read_host_once_to_sandbox(&flow, 32).unwrap();
+
+        assert_eq!(outcome, TcpHostReadOutcome::Eof);
+        assert!(bridge.sandbox_writer().is_empty());
     }
 
     #[test]
