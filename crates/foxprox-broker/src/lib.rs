@@ -144,7 +144,7 @@ impl<U: EgressBackend, T: EgressBackend> TransparentBroker<U, T> {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    use foxprox_core::audit::Decision;
+    use foxprox_core::audit::{Decision, EventKind};
     use foxprox_core::egress::{EgressOutcome, MockEgressBackend};
     use foxprox_core::packet::{checksum, parse_ipv4, parse_udp};
     use foxprox_core::policy::{PolicyConfig, PolicyRule, RuleAction};
@@ -193,6 +193,27 @@ mod tests {
         let udp = parse_udp(parsed.payload).unwrap();
         assert_eq!(udp.payload, b"egress:probe");
         assert_eq!(broker.audit.last().unwrap().decision, Decision::Allow);
+    }
+
+    #[test]
+    fn broker_replies_to_allowed_icmp_echo() {
+        let mut broker = TransparentBroker::new(
+            "10.0.2.1:53".parse().unwrap(),
+            [],
+            PolicyEngine::new(PolicyConfig::deny_by_default()),
+            MockEgressBackend::new(),
+            PolicyEngine::new(PolicyConfig::deny_by_default()),
+            MockEgressBackend::new(),
+            PolicyEngine::new(PolicyConfig::deny_by_default().allow_ping(true)),
+        );
+
+        let step = broker
+            .handle_ipv4_packet("lab", &icmp_echo_packet(Ipv4Addr::new(10, 0, 2, 1)))
+            .unwrap();
+
+        assert_eq!(step.packets_to_device.len(), 1);
+        assert_eq!(broker.audit.last().unwrap().decision, Decision::Allow);
+        assert_eq!(broker.audit.last().unwrap().kind, EventKind::IcmpMessage);
     }
 
     #[test]
@@ -274,6 +295,30 @@ mod tests {
         packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
         packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
         packet[28..].copy_from_slice(payload);
+        packet
+    }
+
+    fn icmp_echo_packet(destination: Ipv4Addr) -> Vec<u8> {
+        let source = Ipv4Addr::new(10, 0, 2, 2);
+        let payload = b"ping";
+        let icmp_len = 8 + payload.len();
+        let total_len = 20 + icmp_len;
+        let mut packet = vec![0_u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 1;
+        packet[12..16].copy_from_slice(&source.octets());
+        packet[16..20].copy_from_slice(&destination.octets());
+        let ip_sum = checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+        packet[20] = 8;
+        packet[21] = 0;
+        packet[24..26].copy_from_slice(&0x1234_u16.to_be_bytes());
+        packet[26..28].copy_from_slice(&1_u16.to_be_bytes());
+        packet[28..].copy_from_slice(payload);
+        let icmp_sum = checksum(&packet[20..]);
+        packet[22..24].copy_from_slice(&icmp_sum.to_be_bytes());
         packet
     }
 

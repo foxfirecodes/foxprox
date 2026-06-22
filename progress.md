@@ -1106,3 +1106,16 @@
 - Recent broker migration commit hashes: UDP deny `cd43000`; UDP forward `90cd648`; DNS attribution `0a04eb2`; broker crate `f1acf95`.
 - Next verification gap: commit this sweep record. Remaining substantial production work is TCP bridge orchestration in `foxprox-broker` or true async long-lived broker lifecycle integration.
 - Commit hash after commit: pending.
+
+## 2026-06-22T12:00:00Z — Broker ICMP dispatch unit coverage
+
+- Command executed: `cargo fmt --all && cargo test --all`
+- Environment assumptions: deterministic packet fixtures only; real system `ping` remains outside this check because earlier capability-drop behavior blocks `CAP_NET_RAW` for sandbox ping.
+- Expected result: prove `foxprox-broker::TransparentBroker` dispatches ICMP echo packets into `TransparentIcmpRuntime` and writes back an allowed echo reply when ping policy is enabled.
+- Observed result: pass. `foxprox-broker` increased to 3 tests; workspace tests passed (`foxprox-core` 64, `foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4).
+- Relevant output excerpt: `broker_replies_to_allowed_icmp_echo ... ok`.
+- Changed files: `crates/foxprox-broker/src/lib.rs`, `progress.md`.
+- Interpretation: the broker orchestration crate now covers UDP allow/deny, broker DNS attribution, and ICMP dispatch in deterministic tests; Linux environment smokes already cover broker-backed UDP and DNS-attributed UDP.
+- Recent verification sweep commit hash: `0b619af`.
+- Next verification gap: commit ICMP broker coverage. Remaining large gap is TCP bridge orchestration in the broker crate or async long-lived broker lifecycle integration.
+- Commit hash after commit: pending.
