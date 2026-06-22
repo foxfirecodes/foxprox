@@ -791,3 +791,15 @@
 - Interpretation: both standalone DNS and DNS-attribution smokes now use the reusable DNS runtime boundary, further reducing CLI-only broker behavior.
 - Next verification gap: final review after runtime factoring; remaining work is likely crate decomposition and production async/resource hardening.
 - Commit hash after commit: pending.
+
+## 2026-06-22T04:43:00Z — DNS attribution runtime commit recorded
+
+- Command executed: `git add crates/foxprox-cli/src/main.rs progress.md && git commit -m "Use DNS runtime in attribution smoke"`
+- Environment assumptions: DNS attribution smoke and workspace tests above were verified before commit.
+- Expected result: commit captures DNS attribution smoke migration to the reusable DNS runtime plus prior TCP/egress/runtime commit ledger notes.
+- Observed result: commit `10d0d28` created with 2 files changed.
+- Relevant output excerpt: `[harness-lab 10d0d28] Use DNS runtime in attribution smoke`.
+- Changed files: `progress.md` appended with this commit record.
+- Interpretation: DNS runtime factoring checkpoint is preserved.
+- Next verification gap: final review after runtime factoring; remaining work is likely crate decomposition and production async/resource hardening.
+- Commit hash after commit: 10d0d28.
