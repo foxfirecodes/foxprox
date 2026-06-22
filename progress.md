@@ -1001,5 +1001,5 @@
   - `cargo tree -p foxprox-net` — stack write-back contract stays normalized.
   - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated in adapter crate.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: d101d39.
 - Remaining boundary risks: partial-write/backpressure policy, async readiness, FIN/RST lifecycle, and real continuous loop scheduling remain.
