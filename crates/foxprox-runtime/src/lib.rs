@@ -112,8 +112,24 @@ impl StackTcpFlowKey {
 /// Runtime-owned bridge table from normalized stack flows to egress-owned host
 /// TCP streams. The table deliberately stores only `HostTcpStream` handles; it
 /// never exposes smoltcp sockets or std socket details to policy or audit.
+pub const DEFAULT_MAX_PENDING_SANDBOX_BYTES: usize = 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StackTcpBridgeLimits {
+    pub max_pending_sandbox_bytes: usize,
+}
+
+impl Default for StackTcpBridgeLimits {
+    fn default() -> Self {
+        Self {
+            max_pending_sandbox_bytes: DEFAULT_MAX_PENDING_SANDBOX_BYTES,
+        }
+    }
+}
+
 pub struct StackTcpBridgeTable<T> {
     streams: HashMap<StackTcpFlowKey, StackTcpBridge<T>>,
+    limits: StackTcpBridgeLimits,
 }
 
 struct StackTcpBridge<T> {
@@ -141,11 +157,23 @@ impl<T> Default for StackTcpBridgeTable<T> {
     fn default() -> Self {
         Self {
             streams: HashMap::new(),
+            limits: StackTcpBridgeLimits::default(),
         }
     }
 }
 
 impl<T> StackTcpBridgeTable<T> {
+    pub fn with_limits(limits: StackTcpBridgeLimits) -> Self {
+        Self {
+            streams: HashMap::new(),
+            limits,
+        }
+    }
+
+    pub fn limits(&self) -> StackTcpBridgeLimits {
+        self.limits
+    }
+
     pub fn len(&self) -> usize {
         self.streams.len()
     }
@@ -187,17 +215,35 @@ impl<T> StackTcpBridge<T>
 where
     T: HostTcpStream,
 {
-    fn write_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
+    fn write_from_sandbox(
+        &mut self,
+        bytes: &[u8],
+        limits: StackTcpBridgeLimits,
+    ) -> Result<usize, EgressError> {
         if !self.pending_sandbox_to_host.is_empty() {
-            self.pending_sandbox_to_host.push_back(bytes.to_vec());
+            self.queue_pending_sandbox_bytes(bytes, limits)?;
             return Ok(0);
         }
         let written = self.stream.write_from_sandbox(bytes)?;
         if written < bytes.len() {
-            self.pending_sandbox_to_host
-                .push_back(bytes[written..].to_vec());
+            self.queue_pending_sandbox_bytes(&bytes[written..], limits)?;
         }
         Ok(written)
+    }
+
+    fn queue_pending_sandbox_bytes(
+        &mut self,
+        bytes: &[u8],
+        limits: StackTcpBridgeLimits,
+    ) -> Result<(), EgressError> {
+        let pending_after = self.pending_sandbox_bytes().saturating_add(bytes.len());
+        if pending_after > limits.max_pending_sandbox_bytes {
+            return Err(EgressError::StreamIo(
+                "TCP bridge pending sandbox buffer limit exceeded".into(),
+            ));
+        }
+        self.pending_sandbox_to_host.push_back(bytes.to_vec());
+        Ok(())
     }
 
     fn flush_pending_sandbox_writes(&mut self) -> Result<usize, EgressError> {
@@ -227,7 +273,9 @@ where
         let Some(bridge) = self.streams.get_mut(&key) else {
             return Ok(None);
         };
-        bridge.write_from_sandbox(&event.bytes).map(Some)
+        bridge
+            .write_from_sandbox(&event.bytes, self.limits)
+            .map(Some)
     }
 
     pub fn flush_pending_sandbox_writes(&mut self) -> Result<usize, EgressError> {
@@ -721,6 +769,48 @@ mod tests {
             writes.borrow().as_slice(),
             &[b"he".to_vec(), b"ll".to_vec(), b"o".to_vec()]
         );
+    }
+
+    #[test]
+    fn bridge_table_rejects_pending_sandbox_bytes_over_limit() {
+        let key = StackTcpFlowKey::new(
+            SandboxId::new("s1").unwrap(),
+            FrontendKind::Tun,
+            "10.0.0.2:49152".parse().unwrap(),
+            "203.0.113.10:80".parse().unwrap(),
+        );
+        let writes = Rc::new(RefCell::new(Vec::new()));
+        let mut bridges = StackTcpBridgeTable::with_limits(StackTcpBridgeLimits {
+            max_pending_sandbox_bytes: 3,
+        });
+        bridges.insert(
+            key.clone(),
+            PartialWriteTcpStream {
+                max_write: 1,
+                writes,
+            },
+        );
+        let first = foxprox_net::StackTcpData {
+            sandbox_id: key.sandbox_id.clone(),
+            frontend: key.frontend,
+            source: key.source,
+            destination: key.destination,
+            bytes: b"abc".to_vec(),
+        };
+        let second = foxprox_net::StackTcpData {
+            sandbox_id: key.sandbox_id.clone(),
+            frontend: key.frontend,
+            source: key.source,
+            destination: key.destination,
+            bytes: b"de".to_vec(),
+        };
+
+        assert_eq!(bridges.write_from_sandbox(&first).unwrap(), Some(1));
+        assert_eq!(bridges.pending_sandbox_bytes(&key), 2);
+        let error = bridges.write_from_sandbox(&second).unwrap_err();
+
+        assert!(error.to_string().contains("pending sandbox buffer limit"));
+        assert_eq!(bridges.pending_sandbox_bytes(&key), 2);
     }
 
     #[test]

@@ -238,3 +238,8 @@
 
 - Because `HostTcpStream::write_from_sandbox` returns a byte count, runtime must treat short writes as backpressure and retain the unwritten suffix rather than counting the event as fully forwarded.
 - Pending stream bytes belong in runtime bridge state, not egress or policy, because the queue is a forwarding concern tied to normalized flow keys and host stream handles.
+
+## 2026-06-22 — bounded bridge buffers
+
+- Partial-write buffering must have an explicit per-bridge pending byte cap before a continuous loop is safe; otherwise a slow host stream can become unbounded broker memory growth.
+- The pending limit belongs next to runtime bridge state because that is where normalized flow queues are retained and measured.

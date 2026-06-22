@@ -1024,3 +1024,23 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 7afc89c.
 - Remaining boundary risks: real async wakeups, maximum pending-buffer limits, connection teardown on repeated zero writes, and fair scheduling remain.
+
+## 2026-06-22 — Boundary objective: bounded TCP bridge buffering
+
+- Boundary under work: explicit resource limits for runtime TCP bridge pending buffers.
+- Allowed dependency direction: runtime owns bridge memory accounting and rejects excess normalized payload buffering; policy/audit remain independent of stream backpressure internals; egress streams only perform IO.
+- Dependency-risk assessment: retaining partial writes fixed data loss but introduced a possible unbounded memory queue. The bridge contract needs a bounded pending-byte limit before continuous forwarding loops are safe.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: added `StackTcpBridgeLimits` with a default 1 MiB pending sandbox-to-host cap, table construction with explicit limits, pending-byte inspection, and enforcement that rejects additional queued bytes before exceeding the cap. Added a test proving pending bytes remain unchanged and an egress stream error is returned when a second payload would exceed a three-byte cap. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 99 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — bounded bridge memory remains runtime-owned.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: per-sandbox/global limits, async wakeups, and teardown policy for exceeded limits remain.
