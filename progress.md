@@ -1194,5 +1194,5 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-runtime` — UDP expiry remains runtime-owned and typed.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 8a68a00.
 - Remaining boundary risks: per-sandbox/global UDP limits, ICMP error handling, IPv6, and rate limiting remain.
