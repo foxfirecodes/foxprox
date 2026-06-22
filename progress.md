@@ -2202,3 +2202,30 @@ Added structured task-join evidence to `network_session_exit` via `RuntimeTaskJo
 
 ### Remaining blind spots
 - The task report is still caller-provided; final async runtime must derive it from real task handles, child wait futures, TUN/smoltcp loops, and listener accept loops.
+
+## 2026-06-22 — Audit TUN read failures before packet loop exit
+
+### Commands run
+- `cargo fmt` — applied formatting for TUN read-failure audit changes.
+- `cargo test -p foxprox-core tun::tests::tun_read_failure_is_audited_fail_closed --all-targets --all-features` — passed.
+- `cargo test -p foxprox-core tun::tests --all-targets --all-features` — passed, 9 TUN tests.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 134 core tests, 3 device tests, 37 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed again after full tests.
+
+### Evidence excerpts
+- `tun::tests::tun_read_failure_is_audited_fail_closed ... ok`
+- `tun::tests::icmp_echo_write_failure_is_audited_without_success_claim ... ok`
+- `tun::tests::write_back_audit_backpressure_prevents_unobserved_reply ... ok`
+
+### Interpretation
+Closed a packet-loop observability gap: `TunPacketHarness::process_next_packet` now emits structured fail-closed `broker_error` evidence when the packet device read fails before returning `DeviceIoError::ReadFailed`. The record includes `frontend=tun`, `direction=from_sandbox`, `device_io_error=read_failed`, and `DenialReason::SetupFailed`, complementing the existing write-failure evidence.
+
+### Changed files
+- `crates/foxprox-core/src/tun.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- TUN processing is still a single-step harness. A concrete runtime loop still needs to convert read/write failures into task join outcomes, cleanup ordering, aggregate audit fan-in, and final `network_session_exit` evidence.

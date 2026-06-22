@@ -45,8 +45,13 @@ impl<D: PacketDevice> TunPacketHarness<D> {
         &mut self,
         now_ms: u64,
     ) -> Result<Option<TunPacketHarnessResult>, DeviceIoError> {
-        let Some(packet) = self.device.read_packet()? else {
-            return Ok(None);
+        let packet = match self.device.read_packet() {
+            Ok(Some(packet)) => packet,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                self.record_device_read_failure(now_ms);
+                return Err(error);
+            }
         };
         Ok(Some(self.process_packet(&packet, now_ms)?))
     }
@@ -161,6 +166,24 @@ impl<D: PacketDevice> TunPacketHarness<D> {
 
     pub fn into_parts(self) -> (BrokerCore, D) {
         (self.broker, self.device)
+    }
+
+    fn record_device_read_failure(&mut self, now_ms: u64) {
+        let request = PolicyRequest::unsupported(
+            self.sandbox_id.clone(),
+            Frontend::Tun,
+            DenialReason::SetupFailed,
+        );
+        let audit = AuditRecord::new_at(
+            AuditKind::BrokerError,
+            self.sandbox_id.clone(),
+            now_ms as u128,
+        )
+        .with_frontend(Frontend::Tun)
+        .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+        .with_detail("direction", "from_sandbox")
+        .with_detail("device_io_error", "read_failed");
+        let _ = self.broker.append_audit_for(&request, audit);
     }
 
     fn record_parse_failure(&mut self, error: IpParseError, now_ms: u64) -> TunPacketHarnessResult {
@@ -311,6 +334,42 @@ mod tests {
         assert_eq!(records[0].kind, AuditKind::PacketObserved);
         assert_eq!(records[1].kind, AuditKind::UdpPacketDecision);
         assert_eq!(records[1].reason, Some(DenialReason::DefaultDeny));
+    }
+
+    #[derive(Clone, Debug)]
+    struct FailingReadDevice;
+
+    impl PacketDevice for FailingReadDevice {
+        fn read_packet(&mut self) -> Result<Option<Vec<u8>>, DeviceIoError> {
+            Err(DeviceIoError::ReadFailed)
+        }
+
+        fn write_packet(&mut self, _packet: &[u8]) -> Result<(), DeviceIoError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn tun_read_failure_is_audited_fail_closed() {
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut harness = TunPacketHarness::new("s1", broker, FailingReadDevice);
+
+        assert_eq!(
+            harness.process_next_packet(1_000).unwrap_err(),
+            DeviceIoError::ReadFailed
+        );
+        let records: Vec<_> = harness.broker().audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::BrokerError);
+        assert_eq!(records[0].frontend, Some(Frontend::Tun));
+        assert_eq!(records[0].decision, Some(Decision::FailClosed));
+        assert_eq!(records[0].reason, Some(DenialReason::SetupFailed));
+        assert_eq!(records[0].details["direction"], "from_sandbox");
+        assert_eq!(records[0].details["device_io_error"], "read_failed");
     }
 
     #[test]

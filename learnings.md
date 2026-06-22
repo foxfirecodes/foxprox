@@ -197,3 +197,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Blocking runtimes should expose task join exit paths
 
 - Runtime task-join contracts are more useful when blocking runtime harnesses can pass them through their concrete exit methods. This keeps listener cleanup/retirement evidence and task join outcomes on the same `network_session_exit` record.
+
+## 2026-06-22 — TUN read failures must be ledger-visible
+
+- Packet loops can fail before a packet exists to parse or authorize. TUN/device read failures still need structured `broker_error` evidence (`device_io_error=read_failed`) so runtime shutdown can explain why packet processing stopped.
