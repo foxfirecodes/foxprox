@@ -1177,6 +1177,52 @@
 - Current git status summary: UDP net/CLI/progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit UDP/DNS worker limit, then address unsupported-path audit consistency.
 
+## 2026-06-22T00:23:29Z — UDP/DNS worker limit committed; next objective selected
+
+- Commit created: `119fa99` (`limit udp dns workers`).
+- Current objective: audit explicit proxy unsupported/malformed request paths.
+- Rationale: after policy, audit, parser fuzzing, and resource-limit slices, the remaining alpha audit gap is consistency on malformed/unsupported paths. The smallest coherent slice is explicit proxy malformed/unsupported HTTP and SOCKS request auditing because these paths already normalize valid requests and have bounded audit plumbing.
+- Expected commit boundary: `UnsupportedDenied` audit events for explicit proxy malformed/unsupported request reads/parses, tests for metadata/runtime behavior, no policy or dependency changes.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: implement explicit proxy unsupported-path audit consistency.
+
+## 2026-06-22T00:27:18Z — explicit proxy unsupported audit pending review
+
+- Current objective: commit explicit proxy unsupported/malformed audit coverage.
+- Changes implemented:
+  - Added unsupported proxy audit helper that emits `NetworkEvent::Unsupported` with `UnsupportedReason::Malformed`, evaluates it fail-closed, and records `AuditEventKind::UnsupportedDenied`.
+  - `proxy_audit_event` now preserves unsupported `frontend` and reason detail.
+  - HTTP proxy read/split/parse failures emit unsupported audit before returning fail-closed.
+  - SOCKS5 read/parse failures emit unsupported audit while preserving SOCKS failure replies for parse-level unsupported commands/address types.
+  - Added tests for unsupported audit metadata, malformed HTTP proxy runtime audit, and SOCKS UDP ASSOCIATE unsupported runtime audit.
+- Subagents/reviews requested: `proxy-unsupported-audit-final` is running.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-proxy -- --nocapture` passed: 28 proxy tests.
+  - `cargo test --workspace` passed: 51 core tests, 9 device tests, 20 net tests, 28 proxy tests, 7 CLI tests, setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-proxy` and `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-proxy/src/lib.rs`, `progress.md`.
+- Current git status summary: proxy/progress modified; review artifact pending.
+- Next exact action: read explicit proxy unsupported audit review, fix blockers if any, then commit.
+
+## 2026-06-22T00:28:34Z — explicit proxy unsupported audit review passed
+
+- Current objective: commit explicit proxy unsupported/malformed audit coverage.
+- Review result: `proxy-unsupported-audit-final` found no blockers.
+- Confirmed behavior:
+  - Unsupported audit metadata is wired via `NetworkEvent::Unsupported` to `AuditEventKind::UnsupportedDenied`, preserving frontend, protocol, fail-closed decision, and detail.
+  - HTTP read/split/parse failures emit unsupported audit before returning, with no resolve/connect path reached.
+  - SOCKS read/parse failures emit unsupported audit; parse failures still write SOCKS failure replies where applicable.
+  - Audit backpressure remains fail-closed because unsupported helper callers propagate enqueue failure before egress.
+  - No dependency diff.
+- Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed; reviewer also ran focused proxy tests successfully.
+- Files changed: `crates/foxprox-proxy/src/lib.rs`, `progress.md`.
+- Current git status summary: proxy/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit explicit proxy unsupported audit coverage, then continue remaining unsupported-path audit consistency for transparent UDP/DNS/TCP paths.
+
 ## 2026-06-22T00:12:18Z — ICMP audit/cleanup rereview passed
 
 - Current objective: commit cleanup-safe setup socket binding plus ICMP proof audit coverage.
