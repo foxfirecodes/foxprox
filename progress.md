@@ -1083,5 +1083,5 @@
   - `cargo tree -p foxprox-egress` — std socket behavior remains behind egress.
   - `cargo tree -p foxprox-runtime` — runtime still uses only `HostTcpStream`.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 79a4fb8.
 - Remaining boundary risks: async connect timeouts, readiness registration, write fairness, and handling repeated zero-progress streams remain.
