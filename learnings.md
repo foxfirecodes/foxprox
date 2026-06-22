@@ -125,3 +125,7 @@ Packet parser failures should have a single structured audit conversion path bef
 ## 2026-06-21 - Autonomy should follow documented scope without clarification
 
 I paused to ask which runtime implementation track to take even though the source docs already specify the alpha direction: Rust, TUN, smoltcp-based forwarding proof, broker-controlled DNS, shared policy/audit core, and bwrap-compatible setup boundaries. That was an over-application of the clarification gate. For this workflow, documented architecture choices should be treated as authorization to proceed autonomously; only conflicts, outside-docs choices, irreversible external changes, or security-model changes should stop for user input.
+
+## 2026-06-21 - DNS response synthesis should round trip through strict parsing
+
+DNS response builders should consume already-validated query metadata, preserve transaction IDs and normalized owner names, and produce responses that the strict DNS response parser accepts. Error responses should be empty-answer and bounded; address responses should reject unsupported query types and A/AAAA family mismatches rather than silently dropping or rewriting records.

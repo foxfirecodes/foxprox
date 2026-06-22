@@ -696,3 +696,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: unit tests assert audit kind, fail-closed decision, reason, unsupported protocol preservation, and JSON fragments.
 * Residual risk: actual TUN/runtime packet loop still needs to call this builder and push/drain audit records; no forwarding integration exists yet.
 * Commit hash: 978bbd6 audit packet parser fail closed errors.
+
+## 2026-06-21 - Bounded DNS response synthesis foundation
+
+* Invariant under work: broker-controlled DNS responses must be synthesized from validated query metadata with bounded output size, matching owner names, explicit response codes, and no unsupported answer semantics.
+* Threat or failure mode addressed: future DNS handler code could handcraft permissive or malformed DNS replies, emit answers for the wrong query type/owner, or allocate oversized responses when denying or answering broker DNS queries.
+* Planned verification: add DNS response builder tests for refused empty responses, A/AAAA answers with owner/type matching, unsupported type/family mismatch rejection, max-size enforcement, strict parser round trips, then run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Bounded DNS response synthesis foundation results
+
+* Tests added/updated:
+  * DNS error response builder synthesizes refused responses from validated query metadata, preserving transaction ID, normalized hostname, query type, and empty-answer semantics.
+  * DNS A response builder emits only matching owner/type records with explicit TTL and strict parser round-trip validation.
+  * builder rejects unsupported query types, address-family mismatches, excessive answer counts, invalid response-code values, and responses exceeding caller-supplied message-size bounds.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 102 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * DNS replies can now be generated without handcrafting ambiguous owner names or unsupported answer semantics.
+  * denied DNS decisions can receive bounded empty/error wire responses instead of requiring permissive forwarding.
+  * address answers are limited to A-for-A and AAAA-for-AAAA responses and are size/count bounded.
+* Audit evidence: response synthesis round trips through the strict DNS response parser, preserving response code, answer count, and TTL metadata used by existing DNS response audit builders.
+* Residual risk: no async DNS socket handler, upstream forwarding loop, retry policy, or automatic coupling between DNS policy decisions, synthesized responses, pending transactions, and audit sinks exists yet.

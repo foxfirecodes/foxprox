@@ -173,6 +173,19 @@ impl DnsResponseCode {
             other => Self::Other(other),
         }
     }
+
+    fn to_code(self) -> Option<u8> {
+        match self {
+            Self::NoError => Some(0),
+            Self::FormErr => Some(1),
+            Self::ServFail => Some(2),
+            Self::NxDomain => Some(3),
+            Self::NotImp => Some(4),
+            Self::Refused => Some(5),
+            Self::Other(code) if code <= 0x0f => Some(code),
+            Self::Other(_) => None,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -219,6 +232,15 @@ pub enum DnsParseError {
     OwnerNameMismatch,
     UnsupportedAnswerType,
     InvalidRecordLength,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DnsBuildError {
+    MessageTooLarge,
+    UnsupportedQueryType,
+    UnsupportedResponseCode,
+    AddressFamilyMismatch,
+    TooManyAnswers,
 }
 
 #[derive(Clone, Debug)]
@@ -433,6 +455,71 @@ pub fn parse_dns_query(
     })
 }
 
+pub fn build_dns_empty_response(
+    query: &DnsQueryMetadata,
+    response_code: DnsResponseCode,
+    max_message_bytes: usize,
+) -> Result<Vec<u8>, DnsBuildError> {
+    let response = build_dns_response_header_and_question(query, response_code, 0)?;
+    ensure_built_message_size(&response, max_message_bytes)?;
+    Ok(response)
+}
+
+pub fn build_dns_address_response<I>(
+    query: &DnsQueryMetadata,
+    addresses: I,
+    ttl_seconds: u32,
+    max_message_bytes: usize,
+    max_answers: usize,
+) -> Result<Vec<u8>, DnsBuildError>
+where
+    I: IntoIterator<Item = IpAddr>,
+{
+    let answer_type = match query.query_type {
+        DnsQueryType::A => 1_u16,
+        DnsQueryType::Aaaa => 28_u16,
+        _ => return Err(DnsBuildError::UnsupportedQueryType),
+    };
+
+    let mut accepted_addresses = Vec::new();
+    for address in addresses {
+        if accepted_addresses.len() >= max_answers
+            || accepted_addresses.len() >= usize::from(u16::MAX)
+        {
+            return Err(DnsBuildError::TooManyAnswers);
+        }
+        match (query.query_type, address) {
+            (DnsQueryType::A, IpAddr::V4(_)) | (DnsQueryType::Aaaa, IpAddr::V6(_)) => {
+                accepted_addresses.push(address);
+            }
+            _ => return Err(DnsBuildError::AddressFamilyMismatch),
+        }
+    }
+
+    let answer_count = accepted_addresses.len() as u16;
+    let mut response =
+        build_dns_response_header_and_question(query, DnsResponseCode::NoError, answer_count)?;
+    for address in accepted_addresses {
+        response.extend_from_slice(&[0xc0, 0x0c]);
+        response.extend_from_slice(&answer_type.to_be_bytes());
+        response.extend_from_slice(&1_u16.to_be_bytes());
+        response.extend_from_slice(&ttl_seconds.to_be_bytes());
+        match address {
+            IpAddr::V4(address) => {
+                response.extend_from_slice(&4_u16.to_be_bytes());
+                response.extend_from_slice(&address.octets());
+            }
+            IpAddr::V6(address) => {
+                response.extend_from_slice(&16_u16.to_be_bytes());
+                response.extend_from_slice(&address.octets());
+            }
+        }
+    }
+
+    ensure_built_message_size(&response, max_message_bytes)?;
+    Ok(response)
+}
+
 pub fn parse_dns_address_response(
     bytes: &[u8],
     max_message_bytes: usize,
@@ -513,6 +600,60 @@ pub fn parse_dns_address_response(
         addresses,
         min_ttl_seconds,
     })
+}
+
+fn build_dns_response_header_and_question(
+    query: &DnsQueryMetadata,
+    response_code: DnsResponseCode,
+    answer_count: u16,
+) -> Result<Vec<u8>, DnsBuildError> {
+    let response_code = response_code
+        .to_code()
+        .ok_or(DnsBuildError::UnsupportedResponseCode)?;
+    let mut response = Vec::new();
+    response.extend_from_slice(&query.transaction_id.to_be_bytes());
+    let flags =
+        0x8000_u16 | if query.recursion_desired { 0x0100 } else { 0 } | u16::from(response_code);
+    response.extend_from_slice(&flags.to_be_bytes());
+    response.extend_from_slice(&1_u16.to_be_bytes());
+    response.extend_from_slice(&answer_count.to_be_bytes());
+    response.extend_from_slice(&0_u16.to_be_bytes());
+    response.extend_from_slice(&0_u16.to_be_bytes());
+    encode_qname(query.hostname.as_str(), &mut response);
+    response.extend_from_slice(&dns_query_type_code(query.query_type).to_be_bytes());
+    response.extend_from_slice(&1_u16.to_be_bytes());
+    Ok(response)
+}
+
+fn encode_qname(hostname: &str, output: &mut Vec<u8>) {
+    for label in hostname.split('.') {
+        output.push(label.len() as u8);
+        output.extend_from_slice(label.as_bytes());
+    }
+    output.push(0);
+}
+
+fn dns_query_type_code(query_type: DnsQueryType) -> u16 {
+    match query_type {
+        DnsQueryType::A => 1,
+        DnsQueryType::Aaaa => 28,
+        DnsQueryType::Cname => 5,
+        DnsQueryType::Mx => 15,
+        DnsQueryType::Txt => 16,
+        DnsQueryType::Srv => 33,
+        DnsQueryType::Ptr => 12,
+        DnsQueryType::Other(code) => code,
+    }
+}
+
+fn ensure_built_message_size(
+    response: &[u8],
+    max_message_bytes: usize,
+) -> Result<(), DnsBuildError> {
+    if response.len() > max_message_bytes {
+        return Err(DnsBuildError::MessageTooLarge);
+    }
+    Ok(())
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -974,6 +1115,97 @@ mod tests {
         assert_eq!(parsed.response_code, DnsResponseCode::NxDomain);
         assert!(parsed.addresses.is_empty());
         assert_eq!(parsed.min_ttl_seconds, None);
+    }
+
+    #[test]
+    fn builds_bounded_dns_error_responses_from_validated_queries() {
+        let query = parse_dns_query(&dns_query("Blocked.Example", 1), 512).unwrap();
+        let response = build_dns_empty_response(&query, DnsResponseCode::Refused, 512).unwrap();
+
+        let parsed = parse_dns_address_response(&response, 512, 8).unwrap();
+        assert_eq!(parsed.transaction_id, query.transaction_id);
+        assert_eq!(parsed.hostname.as_str(), "blocked.example");
+        assert_eq!(parsed.query_type, DnsQueryType::A);
+        assert_eq!(parsed.response_code, DnsResponseCode::Refused);
+        assert!(parsed.addresses.is_empty());
+        assert_eq!(parsed.min_ttl_seconds, None);
+
+        assert_eq!(
+            build_dns_empty_response(&query, DnsResponseCode::Refused, 8),
+            Err(DnsBuildError::MessageTooLarge)
+        );
+        assert_eq!(
+            build_dns_empty_response(&query, DnsResponseCode::Other(16), 512),
+            Err(DnsBuildError::UnsupportedResponseCode)
+        );
+    }
+
+    #[test]
+    fn builds_dns_address_responses_with_matching_owner_type_and_ttl() {
+        let query = parse_dns_query(&dns_query("Example.COM", 1), 512).unwrap();
+        let response = build_dns_address_response(
+            &query,
+            [IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+            45,
+            512,
+            4,
+        )
+        .unwrap();
+
+        let parsed = parse_dns_address_response(&response, 512, 8).unwrap();
+        assert_eq!(parsed.hostname.as_str(), "example.com");
+        assert_eq!(parsed.query_type, DnsQueryType::A);
+        assert_eq!(parsed.response_code, DnsResponseCode::NoError);
+        assert_eq!(
+            parsed.addresses,
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
+        );
+        assert_eq!(parsed.min_ttl_seconds, Some(45));
+    }
+
+    #[test]
+    fn dns_address_response_builder_rejects_unsupported_or_unsafe_answers() {
+        let a_query = parse_dns_query(&dns_query("example.com", 1), 512).unwrap();
+        let aaaa_query = parse_dns_query(&dns_query("example.com", 28), 512).unwrap();
+        let txt_query = parse_dns_query(&dns_query("example.com", 16), 512).unwrap();
+
+        assert_eq!(
+            build_dns_address_response(
+                &txt_query,
+                [IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+                30,
+                512,
+                4,
+            ),
+            Err(DnsBuildError::UnsupportedQueryType)
+        );
+        assert_eq!(
+            build_dns_address_response(&a_query, [IpAddr::V6(Ipv6Addr::LOCALHOST)], 30, 512, 4,),
+            Err(DnsBuildError::AddressFamilyMismatch)
+        );
+        assert_eq!(
+            build_dns_address_response(
+                &aaaa_query,
+                [
+                    IpAddr::V6(Ipv6Addr::LOCALHOST),
+                    IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+                ],
+                30,
+                512,
+                1,
+            ),
+            Err(DnsBuildError::TooManyAnswers)
+        );
+        assert_eq!(
+            build_dns_address_response(
+                &a_query,
+                [IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+                30,
+                16,
+                4,
+            ),
+            Err(DnsBuildError::MessageTooLarge)
+        );
     }
 
     #[test]

@@ -25,8 +25,9 @@ pub use audit::{
 };
 pub use config::{Cidr, ConfigError, HostMatcher, PolicyConfig, PolicyRule, RuleAction};
 pub use dns::{
-    parse_dns_address_response, parse_dns_query, DnsAddressResponseMetadata, DnsAttributionCache,
-    DnsAttributionEntry, DnsParseError, DnsQueryMetadata, DnsQueryType, DnsResponseCode,
+    build_dns_address_response, build_dns_empty_response, parse_dns_address_response,
+    parse_dns_query, DnsAddressResponseMetadata, DnsAttributionCache, DnsAttributionEntry,
+    DnsBuildError, DnsParseError, DnsQueryMetadata, DnsQueryType, DnsResponseCode,
     DnsResponseObserveOutcome, DnsTransactionError, ObserveOutcome, PendingDnsObserveOutcome,
     PendingDnsObserveStatus, PendingDnsQuery, PendingDnsQueryTable,
 };
