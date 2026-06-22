@@ -4,8 +4,9 @@
 pub mod fd {
     use std::io;
     use std::mem::size_of;
-    use std::os::fd::RawFd;
+    use std::os::fd::{AsRawFd, RawFd};
     use std::os::raw::{c_int, c_void};
+    use std::os::unix::net::UnixStream;
 
     const SOL_SOCKET: c_int = 1;
     const SCM_RIGHTS: c_int = 1;
@@ -40,6 +41,7 @@ pub mod fd {
 
     extern "C" {
         fn recvmsg(fd: c_int, msg: *mut Msghdr, flags: c_int) -> isize;
+        fn sendmsg(fd: c_int, msg: *const Msghdr, flags: c_int) -> isize;
         fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
         fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
         fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
@@ -88,6 +90,49 @@ pub mod fd {
                 .cast::<RawFd>()
         };
         Ok(unsafe { *data })
+    }
+
+    pub fn send_fd_to_unix_socket(socket_path: &str, fd_to_send: RawFd) -> Result<(), String> {
+        let stream = UnixStream::connect(socket_path)
+            .map_err(|err| format!("failed to connect fd handoff socket {socket_path}: {err}"))?;
+        let socket_fd = stream.as_raw_fd();
+        let mut byte = [b'T'];
+        let mut iov = Iovec {
+            iov_base: byte.as_mut_ptr().cast(),
+            iov_len: byte.len(),
+        };
+        let mut control = vec![0_u8; cmsg_space(size_of::<RawFd>())];
+        let header = control.as_mut_ptr().cast::<Cmsghdr>();
+        unsafe {
+            (*header).cmsg_len = cmsg_len(size_of::<RawFd>());
+            (*header).cmsg_level = SOL_SOCKET;
+            (*header).cmsg_type = SCM_RIGHTS;
+            let data = control
+                .as_mut_ptr()
+                .add(cmsg_align(size_of::<Cmsghdr>()))
+                .cast::<RawFd>();
+            *data = fd_to_send;
+        }
+        let msg = Msghdr {
+            msg_name: std::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: &mut iov,
+            msg_iovlen: 1,
+            msg_control: control.as_mut_ptr().cast(),
+            msg_controllen: control.len(),
+            msg_flags: 0,
+        };
+        let sent = unsafe { sendmsg(socket_fd, &msg, 0) };
+        if sent == 1 {
+            Ok(())
+        } else if sent < 0 {
+            Err(format!(
+                "failed to send fd over handoff socket: {}",
+                io::Error::last_os_error()
+            ))
+        } else {
+            Err(format!("short fd handoff send: {sent}"))
+        }
     }
 
     pub fn fd_is_valid(fd: RawFd) -> bool {

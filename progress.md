@@ -875,3 +875,15 @@
 - Interpretation: Linux fd/device mechanics are now represented by a reusable crate boundary instead of being embedded in the harness CLI, aligning with the documented broker-device/module split.
 - Next verification gap: commit device crate extraction; remaining larger work is integrating setup-side fd send helpers into the same device crate or creating production async broker-device APIs.
 - Commit hash after commit: pending.
+
+## 2026-06-22T06:45:00Z — Setup fd send helper uses device crate
+
+- Command executed: `cargo fmt --all && cargo test --all`; `cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run handoff-smoke`
+- Environment assumptions: Unix `SCM_RIGHTS` fd handoff is available; bwrap/TUN fd handoff works locally.
+- Expected result: move setup-side fd send helper onto the reusable `foxprox-device` crate and remove duplicate cmsg/sendmsg helper code from `foxproxsetup`; handoff smoke must still receive a valid TUN fd after helper exit.
+- Observed result: pass. Workspace tests passed with no warnings: `foxprox-core` 58 tests, `foxprox-device` 2 tests, `foxprox-cli` 2 tests, `foxproxsetup` 6 tests. `handoff-smoke` emitted `decision":"allow"` and `fd_valid_after_helper_exit":"true"`.
+- Relevant output excerpt: `fd::tests::cmsg_space_includes_aligned_header_and_payload ... ok`; handoff `"reason":"foxproxsetup handed off a live TUN fd and target exited"`.
+- Changed files: `Cargo.lock`, `crates/foxprox-setup/{Cargo.toml,src/main.rs}`, `crates/foxprox-device/src/lib.rs`, `progress.md`.
+- Interpretation: both host-side fd receive and setup-side fd send now share the device crate boundary, further aligning the implementation with the documented broker-device split.
+- Next verification gap: commit device send extraction; remaining work is production async/device integration or broader crate decomposition.
+- Commit hash after commit: pending.

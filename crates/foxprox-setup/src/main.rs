@@ -244,11 +244,9 @@ fn print_usage() {
 mod linux_tun {
     use std::fs::OpenOptions;
     use std::io;
-    use std::mem::size_of;
     use std::net::IpAddr;
     use std::os::fd::{AsRawFd, IntoRawFd, RawFd};
     use std::os::raw::{c_char, c_int, c_short, c_ulong, c_void};
-    use std::os::unix::net::UnixStream;
 
     use foxprox_core::integration::TunSetupConfig;
 
@@ -270,9 +268,6 @@ mod linux_tun {
     const SIOCADDRT: c_ulong = 0x890b;
 
     const RTF_UP: u16 = 0x0001;
-
-    const SOL_SOCKET: c_int = 1;
-    const SCM_RIGHTS: c_int = 1;
 
     const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
     const CAP_NET_ADMIN: usize = 12;
@@ -315,30 +310,6 @@ mod linux_tun {
     }
 
     #[repr(C)]
-    struct Iovec {
-        iov_base: *mut c_void,
-        iov_len: usize,
-    }
-
-    #[repr(C)]
-    struct Msghdr {
-        msg_name: *mut c_void,
-        msg_namelen: u32,
-        msg_iov: *mut Iovec,
-        msg_iovlen: usize,
-        msg_control: *mut c_void,
-        msg_controllen: usize,
-        msg_flags: c_int,
-    }
-
-    #[repr(C)]
-    struct Cmsghdr {
-        cmsg_len: usize,
-        cmsg_level: c_int,
-        cmsg_type: c_int,
-    }
-
-    #[repr(C)]
     struct CapUserHeader {
         version: u32,
         pid: c_int,
@@ -356,7 +327,6 @@ mod linux_tun {
         fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
         fn close(fd: c_int) -> c_int;
         fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
-        fn sendmsg(fd: c_int, msg: *const Msghdr, flags: c_int) -> isize;
         fn capget(header: *mut CapUserHeader, data: *mut CapUserData) -> c_int;
         fn capset(header: *mut CapUserHeader, data: *const CapUserData) -> c_int;
     }
@@ -399,47 +369,8 @@ mod linux_tun {
     }
 
     pub(super) fn send_fd(socket_path: &str, fd_to_send: RawFd) -> Result<(), String> {
-        let stream = UnixStream::connect(socket_path).map_err(|err| {
-            format!("failed to connect setup handoff socket {socket_path}: {err}")
-        })?;
-        let socket_fd = stream.as_raw_fd();
-        let mut byte = [b'T'];
-        let mut iov = Iovec {
-            iov_base: byte.as_mut_ptr().cast(),
-            iov_len: byte.len(),
-        };
-        let mut control = vec![0_u8; cmsg_space(size_of::<RawFd>())];
-        let header = control.as_mut_ptr().cast::<Cmsghdr>();
-        unsafe {
-            (*header).cmsg_len = cmsg_len(size_of::<RawFd>());
-            (*header).cmsg_level = SOL_SOCKET;
-            (*header).cmsg_type = SCM_RIGHTS;
-            let data = control
-                .as_mut_ptr()
-                .add(cmsg_align(size_of::<Cmsghdr>()))
-                .cast::<RawFd>();
-            *data = fd_to_send;
-        }
-        let msg = Msghdr {
-            msg_name: std::ptr::null_mut(),
-            msg_namelen: 0,
-            msg_iov: &mut iov,
-            msg_iovlen: 1,
-            msg_control: control.as_mut_ptr().cast(),
-            msg_controllen: control.len(),
-            msg_flags: 0,
-        };
-        let sent = unsafe { sendmsg(socket_fd, &msg, 0) };
-        if sent == 1 {
-            Ok(())
-        } else if sent < 0 {
-            Err(format!(
-                "failed to send TUN fd over handoff socket: {}",
-                io::Error::last_os_error()
-            ))
-        } else {
-            Err(format!("short TUN fd handoff send: {sent}"))
-        }
+        foxprox_device::fd::send_fd_to_unix_socket(socket_path, fd_to_send)
+            .map_err(|err| err.replace("fd", "TUN fd"))
     }
 
     pub(super) fn drop_net_admin_capability() -> Result<(), String> {
@@ -624,19 +555,6 @@ mod linux_tun {
         }
     }
 
-    fn cmsg_align(len: usize) -> usize {
-        let align = size_of::<usize>();
-        (len + align - 1) & !(align - 1)
-    }
-
-    fn cmsg_len(payload_len: usize) -> usize {
-        cmsg_align(size_of::<Cmsghdr>()) + payload_len
-    }
-
-    fn cmsg_space(payload_len: usize) -> usize {
-        cmsg_align(size_of::<Cmsghdr>()) + cmsg_align(payload_len)
-    }
-
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -652,15 +570,6 @@ mod linux_tun {
             let addr = sockaddr_v4([10, 0, 2, 2]);
             assert_eq!(addr.sa_family, AF_INET as u16);
             assert_eq!(&addr.sa_data[2..6], &[10, 0, 2, 2]);
-        }
-
-        #[test]
-        fn cmsg_space_includes_aligned_header_and_payload() {
-            assert!(cmsg_space(size_of::<RawFd>()) >= size_of::<Cmsghdr>() + size_of::<RawFd>());
-            assert_eq!(
-                cmsg_len(size_of::<RawFd>()),
-                cmsg_align(size_of::<Cmsghdr>()) + size_of::<RawFd>()
-            );
         }
     }
 }
