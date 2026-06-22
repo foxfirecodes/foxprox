@@ -884,3 +884,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: lifecycle events are still fake-stack driven; no smoltcp byte bridge, live stream close/error capture, or socket backpressure handling exists.
 - Exact next step: commit TCP lifecycle audit outcomes, then add a minimal stream-bridge trait boundary that can transfer bytes only after a verified opened TCP flow.
+
+## 2026-06-22T01:35:22Z
+- Current objective: continue after TCP lifecycle audit commit toward the smoltcp TCP forwarding gate.
+- Git status summary: clean worktree after commit `68b534f`.
+- Intended slice: add a minimal stream-bridge trait/state boundary that transfers TCP bytes only for flows marked opened after policy/audit approval.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with fake bridge implementations.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`, and `learnings.md` if the bridge state reveals a new invariant.
+- Remaining risks: this remains an in-memory/fake bridge boundary; no smoltcp stream or real host socket byte loop is implemented in this slice.
+- Exact next step: implement opened-flow tracking and deterministic tests that deny bridging before a flow is opened and count bytes after bridging.
+
+## 2026-06-22T01:36:46Z
+- Current objective: add a minimal TCP stream-bridge state boundary for future smoltcp byte forwarding.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 70 runtime tests, and 7 setup tests passed. New tests prove TCP bytes cannot be bridged before a flow is marked open, opened flows transfer bytes to fake host/sandbox sides while counting byte totals, and non-TCP flow keys are rejected at open time.
+- Commit hash when committed: pending.
+- Remaining risks: this is not a live TCP stream bridge; no smoltcp stream, real host socket splitting, backpressure, half-close handling, or lifecycle audit integration is wired to this bridge yet.
+- Exact next step: commit TCP stream-bridge boundary, then connect bridge close accounting to TCP lifecycle audit events so byte counts can be logged when a verified open flow is closed.

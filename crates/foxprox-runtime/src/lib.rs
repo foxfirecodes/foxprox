@@ -327,6 +327,105 @@ fn tcp_lifecycle_audit_event(
     Ok(event)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TcpBridgeError {
+    FlowNotOpen,
+    IoFailed,
+    UnsupportedProtocol,
+}
+
+pub trait TcpStreamBridge {
+    fn write_to_host(&mut self, flow: &FlowKey, bytes: &[u8]) -> Result<(), TcpBridgeError>;
+    fn write_to_sandbox(&mut self, flow: &FlowKey, bytes: &[u8]) -> Result<(), TcpBridgeError>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenTcpFlow {
+    pub key: FlowKey,
+    pub bytes_from_sandbox: u64,
+    pub bytes_from_host: u64,
+}
+
+impl OpenTcpFlow {
+    pub fn new(key: FlowKey) -> Result<Self, TcpBridgeError> {
+        if key.protocol != Protocol::Tcp {
+            return Err(TcpBridgeError::UnsupportedProtocol);
+        }
+        Ok(Self {
+            key,
+            bytes_from_sandbox: 0,
+            bytes_from_host: 0,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub struct TcpStreamBridgeRuntime<B> {
+    bridge: B,
+    open_flows: HashMap<FlowKey, OpenTcpFlow>,
+}
+
+impl<B> TcpStreamBridgeRuntime<B> {
+    pub fn new(bridge: B) -> Self {
+        Self {
+            bridge,
+            open_flows: HashMap::new(),
+        }
+    }
+
+    pub fn bridge(&self) -> &B {
+        &self.bridge
+    }
+
+    pub fn open_flows(&self) -> &HashMap<FlowKey, OpenTcpFlow> {
+        &self.open_flows
+    }
+
+    pub fn mark_opened(&mut self, flow: FlowKey) -> Result<(), TcpBridgeError> {
+        let open_flow = OpenTcpFlow::new(flow.clone())?;
+        self.open_flows.insert(flow, open_flow);
+        Ok(())
+    }
+
+    pub fn mark_closed(&mut self, flow: &FlowKey) -> Option<OpenTcpFlow> {
+        self.open_flows.remove(flow)
+    }
+
+    pub fn into_parts(self) -> (B, HashMap<FlowKey, OpenTcpFlow>) {
+        (self.bridge, self.open_flows)
+    }
+}
+
+impl<B: TcpStreamBridge> TcpStreamBridgeRuntime<B> {
+    pub fn send_sandbox_bytes_to_host(
+        &mut self,
+        flow: &FlowKey,
+        bytes: &[u8],
+    ) -> Result<(), TcpBridgeError> {
+        let open_flow = self
+            .open_flows
+            .get_mut(flow)
+            .ok_or(TcpBridgeError::FlowNotOpen)?;
+        self.bridge.write_to_host(flow, bytes)?;
+        open_flow.bytes_from_sandbox += bytes.len() as u64;
+        Ok(())
+    }
+
+    pub fn send_host_bytes_to_sandbox(
+        &mut self,
+        flow: &FlowKey,
+        bytes: &[u8],
+    ) -> Result<(), TcpBridgeError> {
+        let open_flow = self
+            .open_flows
+            .get_mut(flow)
+            .ok_or(TcpBridgeError::FlowNotOpen)?;
+        self.bridge.write_to_sandbox(flow, bytes)?;
+        open_flow.bytes_from_host += bytes.len() as u64;
+        Ok(())
+    }
+}
+
 pub struct HttpProxyRuntime<E, S> {
     egress: E,
     kernel: VerificationKernel<S>,
@@ -1778,6 +1877,28 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct FakeTcpBridge {
+        host_writes: Vec<Vec<u8>>,
+        sandbox_writes: Vec<Vec<u8>>,
+    }
+
+    impl TcpStreamBridge for FakeTcpBridge {
+        fn write_to_host(&mut self, _flow: &FlowKey, bytes: &[u8]) -> Result<(), TcpBridgeError> {
+            self.host_writes.push(bytes.to_vec());
+            Ok(())
+        }
+
+        fn write_to_sandbox(
+            &mut self,
+            _flow: &FlowKey,
+            bytes: &[u8],
+        ) -> Result<(), TcpBridgeError> {
+            self.sandbox_writes.push(bytes.to_vec());
+            Ok(())
+        }
+    }
+
     impl Read for FakeTunIo {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             self.input.read(buf)
@@ -1979,6 +2100,57 @@ mod tests {
         };
         assert_eq!(decision.action, DecisionAction::FailClosed);
         assert_eq!(decision.reason, DecisionReason::UnsupportedProtocol);
+    }
+
+    #[test]
+    fn tcp_stream_bridge_rejects_bytes_before_flow_opened() {
+        let flow = tcp_flow_key();
+        let mut bridge = TcpStreamBridgeRuntime::new(FakeTcpBridge::default());
+
+        let error = bridge
+            .send_sandbox_bytes_to_host(&flow, b"GET / HTTP/1.1\r\n")
+            .unwrap_err();
+
+        assert_eq!(error, TcpBridgeError::FlowNotOpen);
+        assert!(bridge.bridge().host_writes.is_empty());
+    }
+
+    #[test]
+    fn tcp_stream_bridge_transfers_and_counts_open_flow_bytes() {
+        let flow = tcp_flow_key();
+        let mut bridge = TcpStreamBridgeRuntime::new(FakeTcpBridge::default());
+        bridge.mark_opened(flow.clone()).unwrap();
+
+        bridge
+            .send_sandbox_bytes_to_host(&flow, b"request")
+            .unwrap();
+        bridge
+            .send_host_bytes_to_sandbox(&flow, b"response")
+            .unwrap();
+
+        assert_eq!(bridge.bridge().host_writes, vec![b"request".to_vec()]);
+        assert_eq!(bridge.bridge().sandbox_writes, vec![b"response".to_vec()]);
+        let open = bridge.open_flows().get(&flow).unwrap();
+        assert_eq!(open.bytes_from_sandbox, 7);
+        assert_eq!(open.bytes_from_host, 8);
+        let closed = bridge.mark_closed(&flow).unwrap();
+        assert_eq!(closed.bytes_from_sandbox, 7);
+        assert!(bridge.open_flows().is_empty());
+    }
+
+    #[test]
+    fn tcp_stream_bridge_rejects_non_tcp_open_flow() {
+        let flow = FlowKey::new(
+            Protocol::Udp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 80),
+        );
+        let mut bridge = TcpStreamBridgeRuntime::new(FakeTcpBridge::default());
+
+        let error = bridge.mark_opened(flow).unwrap_err();
+
+        assert_eq!(error, TcpBridgeError::UnsupportedProtocol);
+        assert!(bridge.open_flows().is_empty());
     }
 
     #[test]
