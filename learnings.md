@@ -248,3 +248,7 @@ A narrow transparent UDP forwarding proof only needs to parse the TUN IPv4 UDP d
 ## 2026-06-22 — fd-backed UDP forwarding can be proven without namespaces first
 
 Before moving UDP forwarding into a live namespace smoke test, prove the runtime composition over a TUN-like fd stand-in: read raw IPv4 UDP bytes from `TunPacketIo`, forward payload through loopback `UdpEgress`, synthesize the response, and verify the fd peer receives the packet.
+
+## 2026-06-22 — live UDP forwarding smoke can use host loopback upstream
+
+To prove transparent UDP forwarding through a live bwrap-created TUN fd, run a host loopback UDP server, have the sandbox target send to the broker-side TUN IP, and let the broker forward only the payload to loopback egress before synthesizing a response back to the sandbox tuple.

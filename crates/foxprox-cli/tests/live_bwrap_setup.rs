@@ -1,13 +1,15 @@
 #![cfg(target_os = "linux")]
 
+use std::net::{Ipv4Addr, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
 use std::time::Duration;
 
+use foxprox_cli::forward_ipv4_udp_packet_once;
 use foxprox_device::TunPacketIo;
+use foxprox_egress::{HostUdpEgress, UdpTarget};
 use foxprox_integrations::fd_handoff::BrokerControlListener;
-use foxprox_packet::synthesize_ipv4_udp_response;
 
 #[test]
 #[ignore = "requires bwrap, /dev/net/tun, user namespaces, and Python in the sandbox"]
@@ -30,6 +32,16 @@ fn live_bwrap_foxproxsetup_hands_fd_and_exposes_target_udp_packet() {
     let socket_path = dir.join("broker.sock");
     let resolv_conf = dir.join("resolv.conf");
     let listener = BrokerControlListener::bind(&socket_path).unwrap();
+    let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let upstream_thread = std::thread::spawn(move || {
+        let mut buffer = [0_u8; 64];
+        let (length, peer) = upstream.recv_from(&mut buffer).unwrap();
+        assert_eq!(&buffer[..length], b"hi");
+        upstream.send_to(b"ok", peer).unwrap();
+    });
+    let egress = HostUdpEgress::new(Duration::from_secs(3)).unwrap();
+    let target = UdpTarget::new_ip(upstream_addr.ip(), upstream_addr.port()).unwrap();
     let (packet_tx, packet_rx) = mpsc::channel();
 
     let broker_thread = std::thread::spawn(move || {
@@ -37,7 +49,7 @@ fn live_bwrap_foxproxsetup_hands_fd_and_exposes_target_udp_packet() {
         let mut tun = TunPacketIo::from_owned_fd(received.fd, 4096).unwrap();
         loop {
             let packet = tun.read_packet().unwrap();
-            if let Ok(reply) = synthesize_ipv4_udp_response(&packet, b"ok") {
+            if let Ok(reply) = forward_ipv4_udp_packet_once(&packet, &egress, &target, 64) {
                 tun.write_packet(&reply).unwrap();
                 packet_tx.send(packet).unwrap();
                 break;
@@ -85,6 +97,7 @@ fn live_bwrap_foxproxsetup_hands_fd_and_exposes_target_udp_packet() {
         .recv_timeout(Duration::from_secs(5))
         .expect("broker reads target-generated IPv4 packet from received TUN fd");
     broker_thread.join().unwrap();
+    upstream_thread.join().unwrap();
 
     assert_eq!(packet[0] >> 4, 4);
     assert_eq!(packet[9], 17, "target packet should be UDP");

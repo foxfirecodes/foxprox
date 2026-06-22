@@ -1344,3 +1344,25 @@
 - What failed or surprised the agent: no behavior failures; datagram fd stand-ins continue to be the simplest way to prove packet boundaries around TUN-like IO.
 - What remains unproven: the same helper running against the live bwrap-created TUN fd with a real target socket and host UDP upstream.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — live bwrap UDP forwarding through host egress slice
+
+- Slice attempted: upgrade the live bwrap smoke test so target UDP traffic is forwarded through a host UDP socket before the broker writes the response back through TUN.
+- Why next: fd-backed UDP forwarding is proven with stand-ins; Milestone 4 needs the same behavior against a live bwrap-created TUN fd and unprivileged target socket.
+- Verification plan: add a loopback host UDP upstream to the ignored live smoke test, have the broker thread read the live TUN packet and call the production UDP forwarding helper, then assert the target receives the upstream response. Run the ignored live test explicitly plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — live bwrap UDP forwarding through host egress
+
+- Slice attempted: upgrade the live bwrap smoke test so target UDP traffic is forwarded through a host UDP socket before the broker writes the response back through TUN.
+- Why next: fd-backed UDP forwarding was proven with stand-ins; Milestone 4 needed the same behavior against a live bwrap-created TUN fd and unprivileged target socket.
+- What changed: the ignored live bwrap smoke now starts a loopback host UDP upstream. The broker thread reads packets from the live received TUN fd, uses the production `forward_ipv4_udp_packet_once` helper to send payload `hi` to host UDP egress, receives upstream payload `ok`, writes the synthesized IPv4 UDP packet back to TUN, and the bwrap target Python socket exits successfully only after receiving `ok`.
+- Verification:
+  - Explicit live smoke passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed; the live smoke remains ignored by default.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; the helper could run live once the broker thread skipped non-UDP packets by retrying until forwarding succeeded.
+- What this proves: a target inside a real bwrap network namespace can send UDP through TUN, the broker can forward the payload to a host UDP socket, and the target can receive the host response through TUN.
+- What remains unproven: long-running UDP flow table integration/live multi-flow behavior, DNS policy integration over live TUN, and TCP forwarding via a userspace stack.
+- Commit: this commit.
