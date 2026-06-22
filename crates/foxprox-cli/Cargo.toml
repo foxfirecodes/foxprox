@@ -23,4 +23,6 @@ name = "foxproxsetup"
 path = "src/bin/foxproxsetup.rs"
 
 [dev-dependencies]
+foxprox-dns = { path = "../foxprox-dns" }
+foxprox-inspect = { path = "../foxprox-inspect" }
 serde_json = { workspace = true }

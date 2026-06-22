@@ -1387,3 +1387,25 @@
 - What failed or surprised the agent: the DNS cache constructor takes no TTL argument; TTL handling is internal to recorded DNS answers.
 - What remains unproven: live bwrap DNS query through the TUN DNS handler and integration of DNS attribution with later live TCP/UDP flows.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — live bwrap DNS-over-TUN handler slice
+
+- Slice attempted: prove a target DNS query inside bwrap travels through the live TUN fd into the DNS broker handler, through host UDP upstream, and back to the target as a DNS response packet.
+- Why next: `handle_tun_dns_packet` is unit-proven; live generic UDP forwarding is proven; DNS policy/cache behavior still needs live TUN evidence.
+- Verification plan: add an ignored live DNS smoke using `DnsBrokerDatagramHandler`, fake host UDP DNS upstream, and bwrap target Python DNS query to the broker-side TUN IP. Run it explicitly plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — live bwrap DNS-over-TUN handler
+
+- Slice attempted: prove a target DNS query inside bwrap travels through the live TUN fd into the DNS broker handler, through host UDP upstream, and back to the target as a DNS response packet.
+- Why next: `handle_tun_dns_packet` was unit-proven; live generic UDP forwarding was proven; DNS policy/cache behavior still needed live TUN evidence.
+- What changed: the ignored live bwrap test file now includes a second smoke test that starts a fake host DNS UDP upstream, runs bwrap/`foxproxsetup`, has target Python send a DNS A query to the broker-side TUN IP, routes the live TUN packet through `DnsBrokerDatagramHandler`, writes the synthesized DNS response packet back through TUN, and asserts the target received a NOERROR response containing the expected A record.
+- Verification:
+  - Explicit live smoke passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture` with both live tests passing.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed; both live bwrap tests compile and remain ignored by default.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; direct Python DNS packet construction kept the target unprivileged and avoided relying on system resolver behavior inside bwrap.
+- What this proves: live bwrap/TUN DNS traffic can use the actual DNS broker policy/cache/forwarding path, not just raw UDP forwarding.
+- What remains unproven: live attribution of a later non-DNS flow using the DNS cache, and TCP forwarding through a userspace stack.
+- Commit: this commit.

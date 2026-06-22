@@ -256,3 +256,7 @@ To prove transparent UDP forwarding through a live bwrap-created TUN fd, run a h
 ## 2026-06-22 — TUN DNS should reuse DNS broker policy/cache semantics
 
 Transparent DNS packets from TUN should be parsed only enough to recover the UDP tuple and payload, then routed through `DnsBrokerDatagramHandler`. This preserves existing DNS allow/deny audit behavior, REFUSED/FORMERR synthesis, upstream forwarding, and attribution-cache recording.
+
+## 2026-06-22 — live DNS-over-TUN smoke should craft DNS bytes directly
+
+For live DNS broker tests inside bwrap, have the target Python process send a hand-built DNS query to the broker-side TUN IP. This avoids host resolver variability while still proving the TUN fd, DNS broker handler, host UDP upstream, response synthesis, and target receive path.
