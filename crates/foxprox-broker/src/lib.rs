@@ -9,12 +9,14 @@
 
 use foxprox_core::{
     AuditDecision, IcmpMessage, NormalizedEvent, PolicyEngine, PolicyEvaluation, Protocol,
+    UnsupportedNetworkEvent,
 };
 use foxprox_packet::{
-    parse_ipv4_packet, parse_ipv4_packet_fail_closed, synthesize_icmp_echo_reply, PacketContext,
+    parse_ipv4_packet, parse_ipv4_packet_fail_closed, parse_ipv6_packet,
+    parse_ipv6_packet_fail_closed, synthesize_icmp_echo_reply, PacketContext,
 };
 
-/// Result of processing one inbound IPv4 packet from a frontend.
+/// Result of processing one inbound IP packet from a frontend.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PacketProcessingResult {
     pub evaluation: PolicyEvaluation,
@@ -24,27 +26,24 @@ pub struct PacketProcessingResult {
 
 /// Platform-independent packet broker for one sandbox/session policy.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Ipv4PacketBroker {
+pub struct IpPacketBroker {
     policy: PolicyEngine,
 }
 
-impl Ipv4PacketBroker {
+impl IpPacketBroker {
     pub fn new(policy: PolicyEngine) -> Self {
         Self { policy }
     }
 
-    /// Process a single IPv4 packet and return audit plus any synthesized
-    /// outbound packet(s).
+    /// Process a single IPv4 or IPv6 packet and return audit plus any
+    /// synthesized outbound packet(s).
     pub fn process_packet(&self, context: &PacketContext, packet: &[u8]) -> PacketProcessingResult {
-        let event = match parse_ipv4_packet(context, packet) {
-            Ok(event) => event,
-            Err(_) => parse_ipv4_packet_fail_closed(context, packet),
-        };
+        let event = parse_ip_packet_fail_closed(context, packet);
         let evaluation = self.policy.evaluate(&event);
 
         let mut outbound_packets = Vec::new();
         let mut reply_error = None;
-        if should_synthesize_echo_reply(&event, &evaluation) {
+        if should_synthesize_ipv4_echo_reply(&event, &evaluation) {
             match synthesize_icmp_echo_reply(packet) {
                 Ok(reply) => outbound_packets.push(reply),
                 Err(error) => reply_error = Some(error.to_string()),
@@ -59,17 +58,70 @@ impl Ipv4PacketBroker {
     }
 }
 
-fn should_synthesize_echo_reply(event: &NormalizedEvent, evaluation: &PolicyEvaluation) -> bool {
+/// Compatibility wrapper for callers that have already constrained input to
+/// IPv4. New runtime code should prefer [`IpPacketBroker`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Ipv4PacketBroker {
+    inner: IpPacketBroker,
+}
+
+impl Ipv4PacketBroker {
+    pub fn new(policy: PolicyEngine) -> Self {
+        Self {
+            inner: IpPacketBroker::new(policy),
+        }
+    }
+
+    /// Process a single IPv4 packet and return audit plus any synthesized
+    /// outbound packet(s).
+    pub fn process_packet(&self, context: &PacketContext, packet: &[u8]) -> PacketProcessingResult {
+        self.inner.process_packet(context, packet)
+    }
+}
+
+fn parse_ip_packet_fail_closed(context: &PacketContext, packet: &[u8]) -> NormalizedEvent {
+    match packet.first().map(|byte| byte >> 4) {
+        Some(4) => match parse_ipv4_packet(context, packet) {
+            Ok(event) => event,
+            Err(_) => parse_ipv4_packet_fail_closed(context, packet),
+        },
+        Some(6) => match parse_ipv6_packet(context, packet) {
+            Ok(event) => event,
+            Err(_) => parse_ipv6_packet_fail_closed(context, packet),
+        },
+        Some(version) => NormalizedEvent::Unsupported(UnsupportedNetworkEvent {
+            sandbox_id: context.sandbox_id.clone(),
+            frontend: context.frontend,
+            source: None,
+            destination: None,
+            reason: format!("unsupported-ip-version: {version}"),
+        }),
+        None => NormalizedEvent::Unsupported(UnsupportedNetworkEvent {
+            sandbox_id: context.sandbox_id.clone(),
+            frontend: context.frontend,
+            source: None,
+            destination: None,
+            reason: "ip-packet-too-short: actual=0 minimum=1".to_owned(),
+        }),
+    }
+}
+
+fn should_synthesize_ipv4_echo_reply(
+    event: &NormalizedEvent,
+    evaluation: &PolicyEvaluation,
+) -> bool {
     if evaluation.audit.decision != AuditDecision::Allowed || event.protocol() != Protocol::Icmp {
         return false;
     }
     matches!(
         event,
         NormalizedEvent::IcmpMessage(IcmpMessage {
+            source,
+            destination,
             icmp_type: 8,
             icmp_code: 0,
             ..
-        })
+        }) if source.ip.is_ipv4() && destination.ip.is_ipv4()
     )
 }
 
@@ -81,7 +133,7 @@ mod tests {
         PolicyRule, RuleAction, SandboxId,
     };
     use foxprox_packet::parse_ipv4_packet;
-    use std::net::Ipv4Addr;
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     fn context() -> PacketContext {
         PacketContext::new(SandboxId::new("broker-test").unwrap(), FrontendKind::Tun)
@@ -106,6 +158,41 @@ mod tests {
             [10, 0, 0, 2],
             [203, 0, 113, 10],
             b"\x08\x00\x00\x00\xab\xcd\x00\x01payload",
+        )
+    }
+
+    fn ipv6_packet(
+        next_header: u8,
+        source: Ipv6Addr,
+        destination: Ipv6Addr,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut packet = vec![0_u8; 40 + payload.len()];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        packet[6] = next_header;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&source.octets());
+        packet[24..40].copy_from_slice(&destination.octets());
+        packet[40..].copy_from_slice(payload);
+        packet
+    }
+
+    fn icmpv6_destination_unreachable_packet() -> Vec<u8> {
+        ipv6_packet(
+            58,
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+            &[1, 0, 0, 0, 0, 0, 0, 0],
+        )
+    }
+
+    fn icmpv6_echo_request_packet() -> Vec<u8> {
+        ipv6_packet(
+            58,
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+            &[128, 0, 0, 0, 0xab, 0xcd, 0, 1],
         )
     }
 
@@ -201,5 +288,45 @@ mod tests {
         assert_eq!(result.evaluation.audit.decision, AuditDecision::Allowed);
         assert!(result.outbound_packets.is_empty());
         assert_eq!(result.reply_error, None);
+    }
+
+    #[test]
+    fn ip_broker_dispatches_ipv6_icmpv6_without_ipv4_reply_synthesis() {
+        let broker = IpPacketBroker::new(PolicyEngine::new(PolicyConfig::default()));
+
+        let result = broker.process_packet(&context(), &icmpv6_destination_unreachable_packet());
+
+        assert_eq!(result.evaluation.audit.decision, AuditDecision::Allowed);
+        assert_eq!(result.evaluation.audit.protocol, Protocol::Icmp);
+        assert!(result.outbound_packets.is_empty());
+        assert_eq!(result.reply_error, None);
+    }
+
+    #[test]
+    fn ip_broker_does_not_synthesize_ipv4_echo_reply_for_icmpv6_echo() {
+        let broker = IpPacketBroker::new(PolicyEngine::new(PolicyConfig {
+            rules: vec![PolicyRule::new("allow-icmp", RuleAction::Allow)
+                .unwrap()
+                .with_protocol(Protocol::Icmp)],
+            ..PolicyConfig::default()
+        }));
+
+        let result = broker.process_packet(&context(), &icmpv6_echo_request_packet());
+
+        assert_eq!(result.evaluation.audit.decision, AuditDecision::Allowed);
+        assert!(result.outbound_packets.is_empty());
+        assert_eq!(result.reply_error, None);
+    }
+
+    #[test]
+    fn ip_broker_fails_closed_on_unknown_or_empty_ip_version() {
+        let broker = IpPacketBroker::new(PolicyEngine::new(PolicyConfig::default()));
+
+        for packet in [&[][..], &[0xf0][..]] {
+            let result = broker.process_packet(&context(), packet);
+            assert_eq!(result.evaluation.audit.decision, AuditDecision::FailClosed);
+            assert_eq!(result.evaluation.audit.protocol, Protocol::Unsupported);
+            assert!(result.outbound_packets.is_empty());
+        }
     }
 }

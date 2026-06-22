@@ -1,7 +1,7 @@
 //! User-facing runtime harnesses for foxprox.
 //!
 //! This crate intentionally starts with a narrow, testable command path:
-//! process one IPv4 packet using a TOML policy config and emit structured audit
+//! process one IP packet using a TOML policy config and emit structured audit
 //! JSON. It is a process-boundary proof for the future long-running TUN runtime.
 
 #![forbid(unsafe_code)]
@@ -12,7 +12,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use foxprox_audit::{audit_record_to_json_line, AuditSinkError};
-use foxprox_broker::Ipv4PacketBroker;
+use foxprox_broker::IpPacketBroker;
 use foxprox_config::{policy_config_from_toml, ConfigError};
 use foxprox_core::{FrontendKind, PolicyEngine, SandboxId};
 use foxprox_packet::PacketContext;
@@ -87,7 +87,7 @@ pub fn process_packet_once(
     let sandbox_id =
         SandboxId::new(sandbox_id).map_err(|error| CliError::Core(error.to_string()))?;
     let context = PacketContext::new(sandbox_id, FrontendKind::Tun);
-    let broker = Ipv4PacketBroker::new(PolicyEngine::new(config));
+    let broker = IpPacketBroker::new(PolicyEngine::new(config));
     let result = broker.process_packet(&context, packet);
 
     if let Some(error) = result.reply_error {
@@ -216,6 +216,20 @@ mod tests {
         )
     }
 
+    fn icmpv6_destination_unreachable_packet() -> Vec<u8> {
+        let payload = [1, 0, 0, 0, 0, 0, 0, 0];
+        let mut packet = vec![0_u8; 40 + payload.len()];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&(payload.len() as u16).to_be_bytes());
+        packet[6] = 58;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&std::net::Ipv6Addr::LOCALHOST.octets());
+        packet[24..40]
+            .copy_from_slice(&std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).octets());
+        packet[40..].copy_from_slice(&payload);
+        packet
+    }
+
     #[test]
     fn packet_once_loads_config_and_emits_allowed_audit_with_reply_bytes() {
         let config = r#"
@@ -252,6 +266,28 @@ mod tests {
 
         assert_eq!(audit["decision"], "denied");
         assert_eq!(audit["reason"], "icmp-default-deny");
+        assert_eq!(summary.outbound_packet_count, 0);
+        assert_eq!(summary.outbound_byte_count, 0);
+        assert!(outbound.is_empty());
+    }
+
+    #[test]
+    fn packet_once_dispatches_ipv6_packet_to_policy_audit_without_reply_bytes() {
+        let mut outbound = Vec::new();
+
+        let summary = process_packet_once(
+            "",
+            "cli-test",
+            &icmpv6_destination_unreachable_packet(),
+            &mut outbound,
+        )
+        .expect("IPv6 packet-once succeeds");
+        let audit: Value = serde_json::from_str(&summary.audit_json_line).unwrap();
+
+        assert_eq!(audit["sandbox_id"], "cli-test");
+        assert_eq!(audit["protocol"], "icmp");
+        assert_eq!(audit["decision"], "allowed");
+        assert_eq!(audit["source"]["ip"], "::1");
         assert_eq!(summary.outbound_packet_count, 0);
         assert_eq!(summary.outbound_byte_count, 0);
         assert!(outbound.is_empty());

@@ -84,3 +84,7 @@ Fixed-header IPv6 TCP/UDP/ICMPv6 parsing can reuse normalized core events, but e
 ## 2026-06-21 — ICMP type semantics depend on IP family
 
 The normalized `IcmpMessage` type can still distinguish ICMPv4 from ICMPv6 by endpoint address family. Use IPv6 error types 1–4 and echo type 128 for ICMPv6; do not reuse IPv4 type 8/3/11/12 semantics blindly.
+
+## 2026-06-21 — dispatch IP version before fail-closed parsing
+
+The broker-facing packet boundary should inspect only the first version nibble, then hand raw bytes to the appropriate packet parser. Unknown or empty input becomes an unsupported normalized event, while IPv4-only packet synthesis must remain guarded by IPv4 endpoints and ICMPv4 type numbers.

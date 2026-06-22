@@ -460,3 +460,26 @@
 - What failed or surprised the agent: no failures; the existing endpoint IP family was enough to avoid adding protocol-version fields to `IcmpMessage`.
 - What remains unproven: ICMPv6 echo reply synthesis, neighbor discovery handling, IPv6 extension-header traversal, IPv6 checksums, and broker/TUN runtime dispatch between IPv4 and IPv6 are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — IP version dispatch → broker/CLI audit slice
+
+- Slice attempted: replace the IPv4-only broker/CLI packet path with an IP-version-dispatching handler that can process IPv4 and IPv6 packets through the same policy/audit boundary.
+- Why next: packet parsing and ICMPv6 defaults are verified separately, but the broker-facing runtime path still assumes IPv4; alpha TUN handling must dispatch mixed IP packets before live TUN IO is useful.
+- Verification plan: add a platform-independent `IpPacketBroker` that dispatches by version nibble, fails closed for unknown/empty packets, preserves IPv4 echo reply synthesis, processes IPv6 without write-back synthesis, update `packet-once` to use it, and run focused broker/CLI tests plus formatting, clippy, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — IP version dispatch → broker/CLI audit
+
+- Slice attempted: process mixed IPv4/IPv6 packet bytes through one broker-facing packet handler and CLI harness.
+- Why next: IPv4 and IPv6 parsers existed, but the broker/CLI runtime path still assumed IPv4; live TUN IO will need version dispatch at this boundary.
+- What changed: added `IpPacketBroker` with first-nibble IP version dispatch, fail-closed unsupported/empty IP packet handling, IPv6 parsing through policy/audit, IPv4-only echo reply synthesis guard, kept `Ipv4PacketBroker` as a compatibility wrapper, and updated `packet-once` to use the version-dispatching broker.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting; `cargo fmt` was run.
+  - Focused broker checks passed: `cargo test -p foxprox-broker ip_broker` ran 3 dispatch/fail-closed/reply-suppression tests.
+  - Focused CLI check passed: `cargo test -p foxprox-cli ipv6` verified IPv6 ICMPv6 audit output without reply bytes.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 5 `foxprox-flow` tests, 18 `foxprox-inspect` tests, 15 `foxprox-packet` tests, and doc tests.
+  - `cargo fmt --check` passed after formatting.
+- What failed or surprised the agent: no behavioral failures; keeping IPv4 reply synthesis behind an address-family/type guard prevents accidental ICMPv6 echo handling by the IPv4 packet builder.
+- What remains unproven: real TUN reads/writes, ICMPv6 echo reply synthesis, IPv6 extension header traversal, TCP/UDP forwarding, and long-running runtime audit flushing are still absent.
+- Commit: this commit.
