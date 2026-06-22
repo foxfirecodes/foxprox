@@ -891,3 +891,23 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * bypass-sensitive denials such as direct DNS are applied before allow rules and remain auditable at the packet-handler boundary.
 * Audit evidence: packet handler tests assert audit kinds, endpoints, decisions, denial reasons, rule IDs, and unsupported protocol number preservation.
 * Residual risk: no live TUN fd read/write loop, smoltcp integration, host egress forwarding, packet response synthesis, or audit-buffer push/drain integration exists yet; this is the pure packet decision boundary.
+
+## 2026-06-21 - ICMPv4 echo reply synthesis proof
+
+* Invariant under work: packet write-back proof must synthesize only validated ICMP echo replies with correct source/destination reversal and checksums, and fail closed for non-echo, malformed, or unsupported packet inputs.
+* Threat or failure mode addressed: reply synthesis that trusts unchecked packet bytes could emit spoofed or corrupt packets, while permissive ICMP handling could answer unusual ICMP types the policy says to deny by default.
+* Planned verification: add ICMPv4 echo reply synthesis tests for valid request-to-reply checksum/endpoint reversal, non-echo denial, malformed checksum rejection, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - ICMPv4 echo reply synthesis proof results
+
+* Tests added/updated:
+  * valid IPv4 ICMP echo requests synthesize echo replies with source/destination reversal, type change to echo-reply, payload preservation, and valid IPv4/ICMP checksums accepted by the strict packet parser.
+  * unusual/non-echo ICMP messages are rejected for synthesis instead of answered permissively.
+  * malformed echo requests with invalid transport checksums fail closed before synthesis.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 131 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * the packet write-back proof now has a bounded, boring synthesis path for one explicitly supported ICMPv4 echo request case.
+  * unsupported ICMP types and malformed packets cannot produce outbound replies.
+* Audit evidence: no new audit builder was needed for synthesis itself; packet handler and ICMP policy tests already audit ICMP allow/deny/fail-closed decisions before a runtime would call synthesis.
+* Residual risk: synthesis is IPv4 echo-only; no live TUN write-back, IPv6 echo reply, ICMP unreachable synthesis, rate limiting, or policy-to-synthesis runtime coupling exists yet.

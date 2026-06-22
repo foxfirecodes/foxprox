@@ -161,3 +161,7 @@ SOCKS domain CONNECT requests can be high-confidence explicit-proxy hostname evi
 ## 2026-06-21 - TUN forwarding should start from a pure parse-policy-audit boundary
 
 A live TUN loop should call a core helper that strictly parses packet bytes, normalizes metadata, decides policy, and builds audit before any forwarding. Malformed and unsupported packets should not return forwardable bytes; bypass denials such as direct DNS should be visible at this boundary.
+
+## 2026-06-21 - ICMP synthesis must follow strict packet validation
+
+Synthetic ICMP replies should be generated only after the packet parser validates IP and transport checksums. The echo-reply proof should reject unusual ICMP types and preserve payload/checksum correctness rather than becoming a generic permissive ICMP responder.

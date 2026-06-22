@@ -12,6 +12,7 @@ pub mod dns;
 pub mod dns_handler;
 pub mod flow;
 pub mod http;
+pub mod icmp;
 pub mod packet;
 pub mod packet_handler;
 pub mod policy;
@@ -48,6 +49,7 @@ pub use http::{
     parse_http_request_head, parse_https_connect_head, HttpParseError, HttpRequestMetadata,
     HttpsConnectMetadata,
 };
+pub use icmp::{synthesize_icmpv4_echo_reply, IcmpSynthesisError};
 pub use packet::{parse_ip_packet, PacketParseError, PacketSummary};
 pub use packet_handler::{handle_tun_packet, TunPacketContext, TunPacketOutcome};
 pub use policy::{Decision, DenialReason, DenyBehavior, PolicyEngine, PolicyRequest};
