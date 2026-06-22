@@ -743,3 +743,15 @@
 - Interpretation: both allow and deny TCP bridge environment paths now exercise the reusable core bridge runtime; CLI smoke code is reduced to fd IO, child process management, and host fixture egress.
 - Next verification gap: wire bounded audit buffers into reusable runtime paths instead of keeping `Vec<AuditRecord>` as the only sink.
 - Commit hash after commit: pending.
+
+## 2026-06-22T03:55:00Z — Bounded audit flush for reusable runtimes
+
+- Command executed: `cargo fmt --all && cargo test --all`
+- Environment assumptions: deterministic core tests; bounded sink behavior is in-memory and independent of Linux/TUN.
+- Expected result: reusable runtimes can flush pending audit records into a bounded audit buffer, preserving records and reporting failure when the sink is full.
+- Observed result: pass. `foxprox-core` increased to 52 tests; `foxprox-cli` ran 2 tests; `foxproxsetup` ran 7 tests.
+- Relevant output excerpt: `runtime::tests::audit_flush_preserves_record_when_bounded_sink_is_full ... ok`; `runtime::tests::tcp_bridge_runtime_flushes_audit_to_bounded_sink ... ok`.
+- Changed files: `crates/foxprox-core/src/runtime.rs`, `progress.md`.
+- Interpretation: audit backpressure is now wired into the reusable TCP bridge runtime boundary via `flush_audit_to`, not just modeled as a standalone buffer. Other runtime paths can use the same helper and should be migrated before production forwarding.
+- Next verification gap: add a small reusable host egress abstraction for TCP byte bridging so CLI smokes no longer hand-roll host TCP egress around the core bridge runtime.
+- Commit hash after commit: pending.

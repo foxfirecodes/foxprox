@@ -1,7 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::audit::{
-    AttributionConfidence, AttributionSource, AuditRecord, Decision, EventKind, Frontend, Protocol,
+    AttributionConfidence, AttributionSource, AuditRecord, BoundedAuditBuffer, Decision, EventKind,
+    Frontend, Protocol,
 };
 use crate::dns::DnsCache;
 use crate::egress::{EgressBackend, EgressRequest};
@@ -12,6 +13,32 @@ use crate::packet::{
 };
 use crate::policy::{PolicyEngine, PolicyRequest};
 use crate::smoltcp_gate::SmoltcpTcpServerHarness;
+
+/// Flush pending runtime audit records into a bounded sink.
+///
+/// If the sink is full, the rejected record is preserved in `records` and callers can fail closed
+/// without losing audit evidence or allocating an unbounded queue.
+pub fn flush_audit_to_buffer(
+    records: &mut Vec<AuditRecord>,
+    sink: &mut BoundedAuditBuffer,
+) -> Result<usize, String> {
+    let mut flushed = 0;
+    while !records.is_empty() {
+        let record = records.remove(0);
+        match sink.push(record) {
+            Ok(()) => flushed += 1,
+            Err(record) => {
+                records.insert(0, record);
+                return Err(format!(
+                    "audit buffer full after flushing {flushed} record(s); capacity={}, queued={}",
+                    sink.capacity(),
+                    sink.len()
+                ));
+            }
+        }
+    }
+    Ok(flushed)
+}
 
 /// Minimal transparent TUN UDP runtime boundary used by the harness and future broker runtime.
 ///
@@ -437,6 +464,10 @@ impl TransparentTcpBridgeRuntime {
     pub fn poll(&mut self) -> Result<Vec<Vec<u8>>, String> {
         self.stack.poll()?;
         Ok(self.stack.drain_emitted_packets())
+    }
+
+    pub fn flush_audit_to(&mut self, sink: &mut BoundedAuditBuffer) -> Result<usize, String> {
+        flush_audit_to_buffer(&mut self.audit, sink)
     }
 }
 
@@ -961,6 +992,39 @@ mod tests {
         assert!(reply.is_none());
         assert!(runtime.egress.requests.is_empty());
         assert_eq!(runtime.audit[0].decision, Decision::DenyDrop);
+    }
+
+    #[test]
+    fn audit_flush_preserves_record_when_bounded_sink_is_full() {
+        let mut records = vec![
+            AuditRecord::new(EventKind::BrokerStarted, "lab", Decision::Allow, "started"),
+            AuditRecord::new(
+                EventKind::BrokerError,
+                "lab",
+                Decision::FailClosed,
+                "second",
+            ),
+        ];
+        let mut sink = BoundedAuditBuffer::new(1);
+        let err = flush_audit_to_buffer(&mut records, &mut sink).unwrap_err();
+        assert!(err.contains("audit buffer full"));
+        assert_eq!(sink.len(), 1);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].reason, "second");
+    }
+
+    #[test]
+    fn tcp_bridge_runtime_flushes_audit_to_bounded_sink() {
+        let destination = Ipv4Addr::new(203, 0, 113, 22);
+        let policy = PolicyEngine::new(PolicyConfig::deny_by_default());
+        let mut runtime = TransparentTcpBridgeRuntime::listen(destination, 80, policy).unwrap();
+        let packet = tcp_syn_packet(IpAddr::V4(destination), 80);
+        runtime.handle_ipv4_packet("lab", &packet).unwrap();
+        let mut sink = BoundedAuditBuffer::new(2);
+        let flushed = runtime.flush_audit_to(&mut sink).unwrap();
+        assert_eq!(flushed, 1);
+        assert_eq!(runtime.audit.len(), 0);
+        assert_eq!(sink.len(), 1);
     }
 
     #[test]
