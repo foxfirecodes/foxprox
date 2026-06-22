@@ -731,3 +731,15 @@
 - Interpretation: the highest-priority reviewer gap is partly closed: the core now contains a reusable TCP bridge runtime boundary rather than keeping all positive bridge orchestration in `foxprox-lab`. Host fd IO and host socket egress remain in the CLI/future device-egress crates by design.
 - Next verification gap: factor the denied TCP bridge smoke onto the same reusable runtime, then begin wiring bounded audit buffers into runtime paths instead of storing audit in unbounded `Vec`s.
 - Commit hash after commit: pending.
+
+## 2026-06-22T03:40:00Z — Denied TCP bridge smoke on reusable runtime
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run tcp-bridge-deny-smoke`
+- Environment assumptions: bwrap/TUN fd handoff works locally; denied sandbox TCP connect should receive a runtime-synthesized RST with no host egress.
+- Expected result: denied environment smoke uses the same reusable `TransparentTcpBridgeRuntime` as the allow bridge path, emits a deny audit record, writes a TCP RST, and performs zero host egress calls.
+- Observed result: pass. Workspace tests remained green (`foxprox-core` 50, `foxprox-cli` 2, `foxproxsetup` 7). `tcp-bridge-deny-smoke` emitted `decision":"deny_reset"`, `rst_written":"true"`, and `egress_calls":"0"`.
+- Relevant output excerpt: `"runtime_audit":"{...\"event\":\"tcp_connect_attempt\"...\"decision\":\"deny_reset\"...}"`; `"status":"exit status: 0"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: both allow and deny TCP bridge environment paths now exercise the reusable core bridge runtime; CLI smoke code is reduced to fd IO, child process management, and host fixture egress.
+- Next verification gap: wire bounded audit buffers into reusable runtime paths instead of keeping `Vec<AuditRecord>` as the only sink.
+- Commit hash after commit: pending.

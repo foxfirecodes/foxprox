@@ -2150,11 +2150,14 @@ fn run_tcp_bridge_deny_smoke() -> Result<AuditRecord, String> {
 
     let fd = accept_handoff_fd(&handoff_listener, &mut child, Duration::from_secs(10))?;
     fd_handoff::set_nonblocking(fd)?;
+    let bridge_destination: std::net::Ipv4Addr = "203.0.113.23"
+        .parse()
+        .map_err(|err| format!("invalid TCP bridge deny destination IP: {err}"))?;
     let policy = PolicyEngine::new(PolicyConfig::deny_by_default());
+    let mut bridge_runtime = TransparentTcpBridgeRuntime::listen(bridge_destination, 8083, policy)?;
     let mut buf = [0_u8; 2048];
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut packets_read = 0_u64;
-    let mut denied_record = None;
     let mut rst_written = false;
     while Instant::now() < deadline {
         match fd_handoff::read_fd(fd, &mut buf) {
@@ -2162,49 +2165,14 @@ fn run_tcp_bridge_deny_smoke() -> Result<AuditRecord, String> {
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
-                let parsed = match foxprox_core::packet::parse_ipv4(packet) {
-                    Ok(parsed) => parsed,
-                    Err(_) => continue,
-                };
-                if parsed.protocol_number != 6 {
-                    continue;
-                }
-                let tcp = match foxprox_core::packet::parse_tcp(parsed.payload) {
-                    Ok(tcp) => tcp,
-                    Err(_) => continue,
-                };
-                if tcp.destination_port != 8083 || !tcp.syn || tcp.ack {
-                    continue;
-                }
-                let source =
-                    std::net::SocketAddr::new(std::net::IpAddr::V4(parsed.source), tcp.source_port);
-                let destination = std::net::SocketAddr::new(
-                    std::net::IpAddr::V4(parsed.destination),
-                    tcp.destination_port,
-                );
-                let request =
-                    PolicyRequest::new("tcp-bridge-deny-smoke", Frontend::Tun, Protocol::Tcp)
-                        .with_source(source.ip(), source.port())
-                        .with_destination(destination.ip(), destination.port());
-                let outcome = policy.evaluate(&request);
-                denied_record = Some(
-                    AuditRecord::new(
-                        EventKind::TcpConnectAttempt,
-                        "tcp-bridge-deny-smoke",
-                        outcome.decision,
-                        outcome.reason,
-                    )
-                    .with_frontend(Frontend::Tun)
-                    .with_protocol(Protocol::Tcp)
-                    .with_addresses(Some(source), Some(destination))
-                    .with_rule(outcome.rule_id),
-                );
-                if !outcome.decision.is_allow() {
-                    let rst = foxprox_core::packet::synthesize_tcp_rst(packet)?;
-                    fd_handoff::write_all_fd(fd, &rst)?;
+                let step = bridge_runtime.handle_ipv4_packet("tcp-bridge-deny-smoke", packet)?;
+                for emitted in step.emitted_packets {
+                    fd_handoff::write_all_fd(fd, &emitted)?;
                     rst_written = true;
                 }
-                break;
+                if rst_written {
+                    break;
+                }
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
@@ -2223,7 +2191,12 @@ fn run_tcp_bridge_deny_smoke() -> Result<AuditRecord, String> {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    let Some(audit) = denied_record else {
+    let Some(audit) = bridge_runtime
+        .audit
+        .iter()
+        .find(|audit| audit.kind == EventKind::TcpConnectAttempt)
+        .cloned()
+    else {
         return Err("timed out waiting for TCP SYN to deny".to_string());
     };
     if audit.decision.is_allow() {
