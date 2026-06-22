@@ -212,3 +212,7 @@ For tests that need to prove multiple TUN packet reads remain separate, a Unix d
 ## 2026-06-22 — setup command tests can prove the process boundary without privileges
 
 Keep the production `foxproxsetup` path responsible for creating the real TUN fd, but expose a setup-sequence test seam that accepts a raw TUN-like fd. A Unix listener plus fake `ip` command can prove parser shape, resolver writes, SCM_RIGHTS handoff, and broker-side fd usability without requiring `CAP_NET_ADMIN`.
+
+## 2026-06-22 — Linux capability syscalls need local FFI layouts
+
+The Rust `libc` crate may not expose `CAP_NET_ADMIN` or `__user_cap_*` structs on this target. For narrow `capget`/`capset` usage, define the Linux v3 capability header/data as small `repr(C)` structs and keep tests on pure bitset mutation so the test process does not drop its own capabilities.

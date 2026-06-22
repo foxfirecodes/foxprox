@@ -1159,3 +1159,25 @@
 - What failed or surprised the agent: `AsRawFd` bounds were simpler and clearer as an explicit `RawFd` test seam; clippy also required removing a needless `return` in the Linux-only setup entrypoint.
 - What remains unproven: actual privileged bwrap execution, `/dev/net/tun` creation inside a bwrap net namespace, capability drop before target exec, and live sandbox packet logs are still absent.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — setup helper drops CAP_NET_ADMIN before exec slice
+
+- Slice attempted: make the executable setup helper drop sandbox network setup capability before it execs the target.
+- Why next: `foxproxsetup` now exists and can hand off a TUN fd, but Milestone 0 still explicitly requires that `CAP_NET_ADMIN` not remain available to the target process.
+- Verification plan: add a Linux capability helper that clears `CAP_NET_ADMIN` from effective/permitted/inheritable sets, call it between setup fd handoff and target exec, unit-test the pure capability-set mutation, then run focused integration/CLI tests plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — setup helper drops CAP_NET_ADMIN before exec
+
+- Slice attempted: make the executable setup helper drop sandbox network setup capability before it execs the target.
+- Why next: `foxproxsetup` can now hand off a TUN fd, but Milestone 0 explicitly requires that `CAP_NET_ADMIN` not remain available to the target process.
+- What changed: `foxprox-integrations` now has a Linux capability helper that reads current capability sets with `capget`, clears `CAP_NET_ADMIN` from effective/permitted/inheritable sets with `capset`, and verifies the capability is gone. `foxproxsetup` calls this helper after fd handoff and setup-side TUN fd close, immediately before target `exec`.
+- Verification:
+  - Focused check passed: `cargo test -p foxprox-integrations capability_sets -- --nocapture` verified the pure capability-set mutation clears `CAP_NET_ADMIN` from all current-process sets while leaving other slots untouched.
+  - Focused setup command checks still passed: `cargo test -p foxprox-cli setup_ -- --nocapture`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 12 `foxprox-integrations` tests and 8 `foxprox-cli` tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: the `libc` crate does not expose the Linux capability structs/constants used here, so the helper defines the small `repr(C)` `capget/capset` layouts and `CAP_NET_ADMIN = 12` directly.
+- What remains unproven: a privileged live run proving `capget/capset` succeeds inside the bwrap setup context, and live target process evidence that `CAP_NET_ADMIN` is absent after exec.
+- Commit: this commit.

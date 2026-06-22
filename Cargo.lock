@@ -124,6 +124,7 @@ name = "foxprox-integrations"
 version = "0.1.0"
 dependencies = [
  "foxprox-device",
+ "libc",
  "nix",
 ]
 

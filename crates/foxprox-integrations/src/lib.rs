@@ -373,6 +373,167 @@ fn validate_program(field: &'static str, path: &Path) -> Result<(), IntegrationP
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+#[cfg(target_os = "linux")]
+const CAP_NET_ADMIN_U32: u32 = 12;
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LinuxCapHeader {
+    version: u32,
+    pid: i32,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LinuxCapData {
+    effective: u32,
+    permitted: u32,
+    inheritable: u32,
+}
+
+/// Evidence that setup-only Linux capabilities were removed before target exec.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CapabilityDropResult {
+    pub capability: u32,
+    pub was_present: bool,
+    pub is_present_after_drop: bool,
+}
+
+/// Linux capability drop errors.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CapabilityDropError {
+    CapGet(String),
+    CapSet(String),
+    StillPresent { capability: u32 },
+}
+
+#[cfg(target_os = "linux")]
+impl fmt::Display for CapabilityDropError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CapGet(error) => write!(f, "capability-drop-capget-error: {error}"),
+            Self::CapSet(error) => write!(f, "capability-drop-capset-error: {error}"),
+            Self::StillPresent { capability } => {
+                write!(f, "capability-drop-still-present: capability={capability}")
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl std::error::Error for CapabilityDropError {}
+
+/// Drop `CAP_NET_ADMIN` from the current process before execing the target app.
+#[cfg(target_os = "linux")]
+pub fn drop_net_admin_capability() -> Result<CapabilityDropResult, CapabilityDropError> {
+    let mut sets = read_current_capabilities()?;
+    let was_present = sets.contains(CAP_NET_ADMIN_U32);
+    sets.clear(CAP_NET_ADMIN_U32);
+    write_current_capabilities(&sets)?;
+    let verified = read_current_capabilities()?;
+    let is_present_after_drop = verified.contains(CAP_NET_ADMIN_U32);
+    if is_present_after_drop {
+        return Err(CapabilityDropError::StillPresent {
+            capability: CAP_NET_ADMIN_U32,
+        });
+    }
+    Ok(CapabilityDropResult {
+        capability: CAP_NET_ADMIN_U32,
+        was_present,
+        is_present_after_drop,
+    })
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LinuxCapabilitySets {
+    data: [LinuxCapData; 2],
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxCapabilitySets {
+    fn contains(&self, capability: u32) -> bool {
+        let index = (capability / 32) as usize;
+        let mask = 1_u32 << (capability % 32);
+        self.data
+            .get(index)
+            .is_some_and(|set| (set.effective | set.permitted | set.inheritable) & mask != 0)
+    }
+
+    fn clear(&mut self, capability: u32) {
+        let index = (capability / 32) as usize;
+        let mask = !(1_u32 << (capability % 32));
+        if let Some(set) = self.data.get_mut(index) {
+            set.effective &= mask;
+            set.permitted &= mask;
+            set.inheritable &= mask;
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_current_capabilities() -> Result<LinuxCapabilitySets, CapabilityDropError> {
+    let mut header = LinuxCapHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let mut data = [
+        LinuxCapData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        },
+        LinuxCapData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        },
+    ];
+    let result = unsafe_capget(&mut header, data.as_mut_ptr());
+    if result != 0 {
+        return Err(CapabilityDropError::CapGet(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    Ok(LinuxCapabilitySets { data })
+}
+
+#[cfg(target_os = "linux")]
+fn write_current_capabilities(sets: &LinuxCapabilitySets) -> Result<(), CapabilityDropError> {
+    let mut header = LinuxCapHeader {
+        version: LINUX_CAPABILITY_VERSION_3,
+        pid: 0,
+    };
+    let mut data = sets.data;
+    let result = unsafe_capset(&mut header, data.as_mut_ptr());
+    if result != 0 {
+        return Err(CapabilityDropError::CapSet(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn unsafe_capget(header: *mut LinuxCapHeader, data: *mut LinuxCapData) -> libc::c_long {
+    // SAFETY: `header` and `data` point to initialized local structs with the
+    // Linux capability v3 layout expected by `capget(2)`.
+    unsafe { libc::syscall(libc::SYS_capget, header, data) }
+}
+
+#[cfg(target_os = "linux")]
+fn unsafe_capset(header: *mut LinuxCapHeader, data: *mut LinuxCapData) -> libc::c_long {
+    // SAFETY: `header` and `data` point to initialized local structs with the
+    // Linux capability v3 layout expected by `capset(2)`.
+    unsafe { libc::syscall(libc::SYS_capset, header, data) }
+}
+
 #[cfg(unix)]
 pub mod fd_handoff {
     //! Unix fd handoff helpers for `foxproxsetup` → broker control channels.
@@ -570,6 +731,34 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("foxprox-{prefix}-{}-{nanos}", std::process::id()))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn capability_sets_clear_net_admin_from_all_current_process_sets() {
+        let mask = 1_u32 << (CAP_NET_ADMIN_U32 % 32);
+        let mut sets = LinuxCapabilitySets {
+            data: [
+                LinuxCapData {
+                    effective: mask,
+                    permitted: mask,
+                    inheritable: mask,
+                },
+                LinuxCapData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: u32::MAX,
+                },
+            ],
+        };
+
+        assert!(sets.contains(CAP_NET_ADMIN_U32));
+        sets.clear(CAP_NET_ADMIN_U32);
+        assert!(!sets.contains(CAP_NET_ADMIN_U32));
+        assert_eq!(sets.data[0].effective & mask, 0);
+        assert_eq!(sets.data[0].permitted & mask, 0);
+        assert_eq!(sets.data[0].inheritable & mask, 0);
+        assert_eq!(sets.data[1].effective, u32::MAX);
     }
 
     #[cfg(unix)]

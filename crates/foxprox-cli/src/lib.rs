@@ -29,6 +29,8 @@ use foxprox_core::{FrontendKind, PolicyEngine, SandboxId};
 use foxprox_device::{TunIoError, TunPacketIo};
 use foxprox_packet::PacketContext;
 
+#[cfg(target_os = "linux")]
+use foxprox_integrations::{drop_net_admin_capability, CapabilityDropError};
 #[cfg(unix)]
 use foxprox_integrations::{
     fd_handoff::{run_setup_sequence, SetupSequenceConfig, SetupSequenceError},
@@ -50,6 +52,8 @@ pub enum CliError {
     TunIo(TunIoError),
     #[cfg(unix)]
     SetupSequence(SetupSequenceError),
+    #[cfg(target_os = "linux")]
+    CapabilityDrop(CapabilityDropError),
 }
 
 impl fmt::Display for CliError {
@@ -64,6 +68,8 @@ impl fmt::Display for CliError {
             Self::TunIo(error) => write!(f, "{error}"),
             #[cfg(unix)]
             Self::SetupSequence(error) => write!(f, "{error}"),
+            #[cfg(target_os = "linux")]
+            Self::CapabilityDrop(error) => write!(f, "{error}"),
         }
     }
 }
@@ -77,6 +83,8 @@ impl std::error::Error for CliError {
             Self::TunIo(error) => Some(error),
             #[cfg(unix)]
             Self::SetupSequence(error) => Some(error),
+            #[cfg(target_os = "linux")]
+            Self::CapabilityDrop(error) => Some(error),
             Self::Usage(_) | Self::Core(_) | Self::Reply(_) => None,
         }
     }
@@ -104,6 +112,13 @@ impl From<TunIoError> for CliError {
 impl From<SetupSequenceError> for CliError {
     fn from(value: SetupSequenceError) -> Self {
         Self::SetupSequence(value)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<CapabilityDropError> for CliError {
+    fn from(value: CapabilityDropError) -> Self {
+        Self::CapabilityDrop(value)
     }
 }
 
@@ -255,6 +270,7 @@ pub fn run_linux_setup_command(config: &SetupCommandConfig) -> Result<(), CliErr
     .map_err(|error| CliError::Core(error.to_string()))?;
     run_setup_command_with_existing_fd(config, tun.fd.as_raw_fd())?;
     drop(tun);
+    drop_net_admin_capability()?;
     exec_setup_target(&config.target_argv)
 }
 
