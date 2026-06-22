@@ -718,3 +718,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: no actual process spawning, fd flag manipulation, or bwrap smoke execution exists yet.
 - Exact next step: commit spawn descriptor, then add a bounded packet-processing session that combines DNS/ICMP/UDP handling into one reusable runtime object for live TUN fd ownership.
+
+## 2026-06-22T01:55:10Z
+- Current objective: continue after spawn descriptor toward a reusable live-TUN packet processing session boundary.
+- Git status summary: clean worktree after commit `e433270`.
+- Intended slice: add a bounded `TunBrokerSession` that owns a TUN-like IO object plus DNS resolver/cache and verification kernel, and runs the unified policy-gated packet handler for one packet at a time.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with fake TUN IO.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this session still uses fake IO in tests and does not poll host UDP/TCP sockets or integrate smoltcp stream bridging.
+- Exact next step: refactor unified packet handling into a reusable helper and wrap it in an owning TUN broker session.
+
+## 2026-06-22T02:02:20Z
+- Current objective: add an owning TUN broker session for unified policy-gated packet processing.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on rustfmt wrapping; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 54 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 55 runtime tests, and 7 setup tests passed. New runtime tests prove `TunBrokerSession` owns fake TUN IO plus resolver/cache/kernel, answers broker DNS while updating cache, and applies ICMP policy through its owned verification kernel.
+- Commit hash when committed: pending.
+- Remaining risks: the session still processes one packet at a time with fake IO; generic UDP host egress and TCP stack handling remain separate session types, and no real TUN fd smoke has run.
+- Exact next step: commit TUN broker session, then add DNS-cache hostname attribution lookup into UDP/TCP event conversion for TUN flows.

@@ -855,6 +855,57 @@ pub struct BrokerDnsRuntime<'a, S> {
     pub kernel: &'a mut VerificationKernel<S>,
 }
 
+pub struct TunBrokerSession<T, S> {
+    device: T,
+    sandbox_id: SandboxId,
+    resolver: StaticDnsResolver,
+    cache: DnsCache,
+    broker_dns: Vec<IpAddr>,
+    kernel: VerificationKernel<S>,
+    buffer: Vec<u8>,
+}
+
+impl<T, S> TunBrokerSession<T, S> {
+    pub fn new(device: T, components: BrokerRuntimeComponents, audit_sink: S, mtu: usize) -> Self {
+        Self {
+            device,
+            sandbox_id: components.sandbox_id,
+            resolver: components.resolver,
+            cache: components.cache,
+            broker_dns: components.broker_dns,
+            kernel: VerificationKernel::new(components.policy_engine, audit_sink),
+            buffer: vec![0; mtu],
+        }
+    }
+
+    pub fn cache(&self) -> &DnsCache {
+        &self.cache
+    }
+
+    pub fn kernel(&self) -> &VerificationKernel<S> {
+        &self.kernel
+    }
+
+    pub fn into_parts(self) -> (T, DnsCache, VerificationKernel<S>) {
+        (self.device, self.cache, self.kernel)
+    }
+}
+
+impl<T: Read + Write, S: AuditSink> TunBrokerSession<T, S> {
+    pub fn run_once(&mut self, timestamp_millis: u128) -> io::Result<TunPacketOutcome> {
+        let bytes_read = self.device.read(&mut self.buffer)?;
+        let packet = &self.buffer[..bytes_read];
+        let mut runtime = BrokerDnsRuntime {
+            sandbox_id: self.sandbox_id.clone(),
+            resolver: &self.resolver,
+            cache: &mut self.cache,
+            broker_dns: &self.broker_dns,
+            kernel: &mut self.kernel,
+        };
+        handle_tun_packet_with_policy(packet, &mut self.device, &mut runtime, timestamp_millis)
+    }
+}
+
 pub fn handle_one_tun_packet_with_policy<R: Read, W: Write, S: AuditSink>(
     reader: &mut R,
     writer: &mut W,
@@ -863,7 +914,15 @@ pub fn handle_one_tun_packet_with_policy<R: Read, W: Write, S: AuditSink>(
     timestamp_millis: u128,
 ) -> io::Result<TunPacketOutcome> {
     let bytes_read = reader.read(buffer)?;
-    let packet = &buffer[..bytes_read];
+    handle_tun_packet_with_policy(&buffer[..bytes_read], writer, runtime, timestamp_millis)
+}
+
+fn handle_tun_packet_with_policy<W: Write, S: AuditSink>(
+    packet: &[u8],
+    writer: &mut W,
+    runtime: &mut BrokerDnsRuntime<'_, S>,
+    timestamp_millis: u128,
+) -> io::Result<TunPacketOutcome> {
     match parse_ip_packet(packet) {
         Ok(ParsedIpPacket::Icmpv4EchoRequest(request)) => {
             let event = NormalizedEvent::IcmpMessage {
@@ -1600,6 +1659,72 @@ mod tests {
             build_runtime_components(zero_ttl),
             Err(RuntimeConfigError::ZeroDnsTtl)
         ));
+    }
+
+    #[test]
+    fn tun_broker_session_answers_broker_dns_and_updates_cache() {
+        let mut dns_rule = PolicyRule::allow("allow-broker-dns");
+        dns_rule.protocol = Some(Protocol::Dns);
+        let mut rules = RuleSet::default();
+        rules.push(dns_rule);
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("tun-session-dns").unwrap(),
+            policy: PolicyConfig {
+                broker_dns: vec![IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+                rules,
+                ..PolicyConfig::default()
+            },
+            static_dns_ttl_secs: 30,
+            static_dns_records: vec![StaticDnsRecord {
+                hostname: Hostname::normalize("example.com").unwrap(),
+                addresses: vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+            }],
+        })
+        .unwrap();
+        let fake = FakeTunIo {
+            input: std::io::Cursor::new(build_dns_udp_ipv4_packet()),
+            output: Vec::new(),
+        };
+        let mut session = TunBrokerSession::new(fake, components, VecAuditSink::bounded(8), 1500);
+
+        let outcome = session.run_once(100).unwrap();
+        let (fake, cache, kernel) = session.into_parts();
+
+        assert!(matches!(
+            outcome,
+            TunPacketOutcome::DnsResponseWritten { cached: true, .. }
+        ));
+        assert!(!fake.output.is_empty());
+        assert!(cache
+            .lookup_ip(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 100)
+            .is_some());
+        assert_eq!(kernel.audit_sink().events().len(), 1);
+    }
+
+    #[test]
+    fn tun_broker_session_applies_icmp_policy_with_owned_kernel() {
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("tun-session-icmp").unwrap(),
+            policy: PolicyConfig {
+                allow_ping: true,
+                ..PolicyConfig::default()
+            },
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+        })
+        .unwrap();
+        let fake = FakeTunIo {
+            input: std::io::Cursor::new(build_ipv4_packet(1, &[8, 0, 0, 0, 0x12, 0x34, 0, 7])),
+            output: Vec::new(),
+        };
+        let mut session = TunBrokerSession::new(fake, components, VecAuditSink::bounded(8), 1500);
+
+        let outcome = session.run_once(100).unwrap();
+        let (fake, _, kernel) = session.into_parts();
+
+        assert!(matches!(outcome, TunPacketOutcome::EchoReplyWritten { .. }));
+        assert!(!fake.output.is_empty());
+        assert_eq!(kernel.audit_sink().events().len(), 1);
     }
 
     #[test]
