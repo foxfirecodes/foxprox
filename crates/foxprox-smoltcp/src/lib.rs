@@ -108,6 +108,19 @@ impl<B> SmoltcpTcpBridgeSession<B> {
         (self.adapter, self.flow_runtime)
     }
 
+    pub fn mark_opened_connect(
+        &mut self,
+        attempt: &TcpStackConnectAttempt,
+    ) -> Result<FlowKey, TcpBridgeError> {
+        let flow = FlowKey::new(
+            Protocol::Tcp,
+            attempt.source.clone(),
+            attempt.destination.clone(),
+        );
+        self.flow_runtime.mark_opened(flow.clone())?;
+        Ok(flow)
+    }
+
     pub fn close_flow(
         &mut self,
         flow: &FlowKey,
@@ -1139,6 +1152,70 @@ mod tests {
             }
         );
         assert_eq!(server.join().unwrap(), b"session-host".to_vec());
+    }
+
+    #[test]
+    fn policy_allowed_packet_pumped_connect_marks_session_flow_open() {
+        let mut adapter = packet_pumped_adapter_with_unread_payload(b"policy-session");
+        adapter.set_connect_report_mode(TcpConnectReportMode::AcceptedListenerSockets);
+        let mut rule = PolicyRule::allow("allow-policy-session");
+        rule.protocol = Some(Protocol::Tcp);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = TcpStackRuntime::new(
+            adapter,
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("policy-session").unwrap(),
+        );
+        let outcome = runtime.handle_next_connect(2).unwrap();
+        let (adapter, egress, kernel) = runtime.into_parts();
+        let attempt = match outcome {
+            TcpStackOutcome::HostConnectOpened { attempt, .. } => attempt,
+            other => panic!("expected opened connect, got {other:?}"),
+        };
+        let flow = FlowKey::new(
+            Protocol::Tcp,
+            attempt.source.clone(),
+            attempt.destination.clone(),
+        );
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = vec![0; b"policy-session".len()];
+            stream.read_exact(&mut received).unwrap();
+            received
+        });
+        let host_stream = TcpStream::connect(listen_addr).unwrap();
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("policy-session-components").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let bridge = StdTcpStreamBridge::new(flow.clone(), host_stream, Vec::new()).unwrap();
+        let flow_runtime = TcpFlowRuntime::new(&components, bridge);
+        let mut session = SmoltcpTcpBridgeSession::new(adapter, flow_runtime);
+
+        let opened_flow = session.mark_opened_connect(&attempt).unwrap();
+        let forwarded = session.forward_sandbox_payload_once(8080, 64).unwrap();
+
+        assert_eq!(egress.tcp_attempts, 1);
+        assert_eq!(kernel.audit_sink().events().len(), 1);
+        assert_eq!(opened_flow, flow);
+        assert_eq!(forwarded.bytes_forwarded, b"policy-session".len());
+        assert_eq!(server.join().unwrap(), b"policy-session".to_vec());
     }
 
     #[test]

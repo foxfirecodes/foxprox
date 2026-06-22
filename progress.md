@@ -1610,3 +1610,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: the lifecycle event is returned but not emitted through `VerificationKernel::emit_audit_event` by the session harness; continuous live fd loop remains.
 - Exact next step: commit session close accounting, then add a policy-open helper that marks the `TcpFlowRuntime` flow opened when `TcpStackRuntime` allows an accepted smoltcp connect, eliminating manual `mark_opened` in packet-pumped bridge tests.
+
+## 2026-06-22T22:38:25Z
+- Current objective: continue after session close accounting by joining policy-open attempts to flow-runtime open state.
+- Git status summary: clean worktree after commit `3dc7b41`.
+- Intended slice: add a session helper that converts an allowed `TcpStackConnectAttempt` into an open `FlowKey` in `TcpFlowRuntime`, and verify a packet-pumped accepted connect can be policy-gated before session bridge forwarding without manual `mark_opened` calls.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: host egress opened by `TcpStackRuntime` is still fake in this slice; real host stream creation remains test-provided.
+- Exact next step: add the helper and policy-open-to-session regression.
+
+## 2026-06-22T22:40:05Z
+- Current objective: join policy-allowed smoltcp connect attempts to session flow-open state.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 29 smoltcp adapter tests passed. `SmoltcpTcpBridgeSession::mark_opened_connect` converts an allowed `TcpStackConnectAttempt` into the matching TCP `FlowKey` and opens it in `TcpFlowRuntime`; regression proves packet-pumped accepted connects can be policy-gated, marked open through the session helper, and forwarded to a real host listener without manual flow-open calls.
+- Commit hash when committed: pending.
+- Remaining risks: `TcpStackRuntime` still uses fake host egress in this proof; production host stream creation is not yet unified with policy-open handling.
+- Exact next step: commit policy-open session helper, then add audit emission for session close lifecycle events through `VerificationKernel::emit_audit_event`.
