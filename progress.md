@@ -697,3 +697,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: prepared sessions still do not spawn bwrap, preserve fds through exec, wait for TUN handoff, or start a live broker runtime loop.
 - Exact next step: commit broker session preparation, then add a process-spawn command descriptor that records fd-preservation requirements without executing bwrap.
+
+## 2026-06-22T01:51:05Z
+- Current objective: continue after broker session preparation toward explicit spawn requirements for bwrap fd preservation.
+- Git status summary: clean worktree after commit `581581b`.
+- Intended slice: add a deterministic process-spawn descriptor that records the bwrap program/args and the helper fd that must be preserved into `foxproxsetup`, without executing bwrap.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-launcher/src/lib.rs`, `progress.md`.
+- Remaining risks: this still does not spawn bwrap or enforce fd flags in a child process; it only makes requirements auditable and testable.
+- Exact next step: implement a spawn descriptor from `PreparedBwrapLaunch` and prove it carries the helper fd referenced in command args.
+
+## 2026-06-22T01:54:25Z
+- Current objective: make bwrap spawn fd-preservation requirements explicit and testable without executing bwrap.
+- Files changed: `crates/foxprox-launcher/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 54 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 53 runtime tests, and 7 setup tests passed. New launcher test proves `PreparedBwrapLaunch` emits a `BwrapSpawnSpec` containing the bwrap program/args and the live helper fd that must be preserved and is referenced by `--handoff-fd`.
+- Commit hash when committed: pending.
+- Remaining risks: no actual process spawning, fd flag manipulation, or bwrap smoke execution exists yet.
+- Exact next step: commit spawn descriptor, then add a bounded packet-processing session that combines DNS/ICMP/UDP handling into one reusable runtime object for live TUN fd ownership.

@@ -24,8 +24,33 @@ impl PreparedBwrapLaunch {
         self.control.helper_fd() as u32
     }
 
+    pub fn spawn_spec(&self) -> BwrapSpawnSpec {
+        BwrapSpawnSpec {
+            program: self.command.program.clone(),
+            args: self.command.args.clone(),
+            preserve_fds: vec![self.helper_fd()],
+        }
+    }
+
     pub fn receive_tun_file(&self) -> Result<File, LauncherError> {
         self.control.receive_file().map_err(LauncherError::Device)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BwrapSpawnSpec {
+    pub program: String,
+    pub args: Vec<String>,
+    pub preserve_fds: Vec<u32>,
+}
+
+impl BwrapSpawnSpec {
+    pub fn preserves_helper_fd_referenced_by_args(&self) -> bool {
+        self.preserve_fds.iter().any(|fd| {
+            self.args
+                .windows(2)
+                .any(|pair| pair[0] == "--handoff-fd" && pair[1] == fd.to_string())
+        })
     }
 }
 
@@ -149,6 +174,16 @@ mod tests {
                 RuntimeConfigError::InvalidPolicy(_)
             ))
         ));
+    }
+
+    #[test]
+    fn bwrap_spawn_spec_records_helper_fd_preservation_requirement() {
+        let prepared = prepare_bwrap_launch(plan(), &["curl".to_string()]).unwrap();
+        let spec = prepared.spawn_spec();
+
+        assert_eq!(spec.program, "bwrap");
+        assert_eq!(spec.preserve_fds, vec![prepared.helper_fd()]);
+        assert!(spec.preserves_helper_fd_referenced_by_args());
     }
 
     #[test]
