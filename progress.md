@@ -2344,3 +2344,38 @@ Added `SmoltcpBridgeLoopReport` and `SmoltcpTunBridge::process_packet_loop(...)`
 
 ### Remaining blind spots
 - The smoltcp loop is still synchronous/caller-bounded. Final runtime must drive it from actual TUN readiness and smoltcp timers and join it through the named task expectation model.
+
+## 2026-06-22 — Require named task reports for expected runtime tasks
+
+### Commands run
+- `cargo fmt` — applied formatting for task-report completeness fixes and smoltcp loop proof.
+- `cargo test -p foxprox-core runtime::tests --all-targets --all-features` — passed, 24 runtime tests.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_exit --all-targets --all-features` — passed, 2 blocking proxy runtime exit tests.
+- `cargo test -p foxprox-stack smoltcp_tun_bridge_loop --all-targets --all-features` — passed.
+- `cargo test -p foxprox-stack smoltcp_tun_bridge_read_failure_is_audited_and_reported --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 142 core tests, 3 device tests, 38 egress tests, and 10 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_lifecycle_expected_tasks_without_report_fail_closed ... ok`
+- `runtime::tests::runtime_lifecycle_incomplete_expectation_list_keeps_component_coverage ... ok`
+- `runtime::tests::runtime_lifecycle_missing_expected_task_name_is_fail_closed ... ok`
+- `tests::smoltcp_tun_bridge_read_failure_is_audited_and_reported ... ok`
+- `tests::smoltcp_tun_bridge_loop_reports_budget_cancellation ... ok`
+
+### Interpretation
+Addressed round-44 high findings. If lifecycle start includes named `RuntimeTaskExpectation`s, exit without any `RuntimeTaskJoinReport` now fails closed with `task_join_status=not_recorded` and all expected task names listed as missing. Named expectations no longer weaken component coverage: components without any named expectation are still listed in `missing_runtime_tasks`. Blocking runtimes declare named listener expectations, so plain `exit(...)` can no longer silently claim task completion when expected task evidence is absent.
+
+Also extended the smoltcp bridge proof committed in `a00f13c`: the smoltcp TUN bridge now has a bounded loop report with failed read and budget-cancelled task outcomes, matching the TUN loop task model.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `crates/foxprox-stack/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Runtime task expectations are still harness-declared. The final async runtime must derive expected task names from actual spawned handles and route real join/cancel results through lifecycle exit and global audit fan-in.

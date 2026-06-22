@@ -218,3 +218,8 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — smoltcp bridge loops need the same task/outcome contract as TUN
 
 - Userspace stack bridges can stop before packet parsing when the device read fails. smoltcp/TUN bridge loops should emit structured read-failure audit evidence and return `RuntimeTaskOutcome` so lifecycle exit can explain stack-loop shutdown.
+
+## 2026-06-22 — Expected task reports must be mandatory and name-complete
+
+- Once lifecycle start records expected runtime task names, exit without a task report must fail closed with `task_join_status=not_recorded`; otherwise clean shutdown can overclaim success.
+- Named task expectations must not replace component coverage. If any started component has no expected task, missing task evidence should still include that component.
