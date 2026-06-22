@@ -1035,6 +1035,28 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
         &self.lifecycle
     }
 
+    pub fn audit_records(&self) -> Vec<AuditRecord> {
+        let mut records = Vec::new();
+        records.extend(self.lifecycle.audit().records().cloned());
+        records.extend(
+            self.dns_server
+                .handler()
+                .broker()
+                .audit()
+                .records()
+                .cloned(),
+        );
+        records.extend(
+            self.http_proxy_server
+                .frontend()
+                .broker()
+                .audit()
+                .records()
+                .cloned(),
+        );
+        records
+    }
+
     pub fn dns_server(&self) -> &BlockingDnsBrokerServer<U> {
         &self.dns_server
     }
@@ -1211,6 +1233,36 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
 
     pub fn lifecycle(&self) -> &RuntimeLifecycleHarness {
         &self.lifecycle
+    }
+
+    pub fn audit_records(&self) -> Vec<AuditRecord> {
+        let mut records = Vec::new();
+        records.extend(self.lifecycle.audit().records().cloned());
+        records.extend(
+            self.dns_server
+                .handler()
+                .broker()
+                .audit()
+                .records()
+                .cloned(),
+        );
+        records.extend(
+            self.http_proxy_server
+                .frontend()
+                .broker()
+                .audit()
+                .records()
+                .cloned(),
+        );
+        records.extend(
+            self.socks5_proxy_server
+                .frontend()
+                .broker()
+                .audit()
+                .records()
+                .cloned(),
+        );
+        records
     }
 
     pub fn dns_server(&self) -> &BlockingDnsBrokerServer<U> {
@@ -2697,6 +2749,22 @@ mod tests {
             lifecycle_records[3].details["cleanup_actions"],
             "dns_listener,http_proxy_listener"
         );
+        let aggregate = runtime.audit_records();
+        assert!(aggregate
+            .iter()
+            .any(|record| record.kind == AuditKind::NetworkSessionStart));
+        assert!(aggregate
+            .iter()
+            .any(|record| record.kind == AuditKind::DnsQueryDecision));
+        assert!(aggregate
+            .iter()
+            .any(|record| record.kind == AuditKind::ProxyDestinationResolved));
+        assert!(aggregate
+            .iter()
+            .any(|record| record.kind == AuditKind::HttpRequestDecision));
+        assert!(aggregate
+            .iter()
+            .any(|record| record.kind == AuditKind::NetworkSessionExit));
     }
 
     #[test]
@@ -2864,6 +2932,22 @@ mod tests {
             lifecycle_records[4].details["cleanup_actions"],
             "dns_listener,http_proxy_listener,socks5_listener"
         );
+        let aggregate = runtime.audit_records();
+        assert!(aggregate
+            .iter()
+            .any(|record| record.kind == AuditKind::NetworkSessionStart));
+        assert!(aggregate
+            .iter()
+            .any(|record| record.kind == AuditKind::DnsQueryDecision));
+        assert!(aggregate
+            .iter()
+            .any(|record| record.kind == AuditKind::ProxyDestinationResolved));
+        assert!(aggregate
+            .iter()
+            .any(|record| record.kind == AuditKind::SocksConnectDecision));
+        assert!(aggregate
+            .iter()
+            .any(|record| record.kind == AuditKind::NetworkSessionExit));
     }
 
     #[test]

@@ -1877,3 +1877,29 @@ Addressed the round-27 high observability note for listener readiness evidence. 
 
 ### Remaining blind spots
 - Shared policy/audit is still represented by shared core subsystem types and per-component broker ledgers, not a single shared runtime audit sink. Final runtime still needs concrete async supervision, TUN/smoltcp task wiring, child exit status, and real cleanup execution.
+
+## 2026-06-22 — Aggregate runtime audit evidence
+
+### Commands run
+- `cargo fmt` — applied formatting for aggregate runtime audit access.
+- `cargo test -p foxprox-egress blocking_dns_http_runtime --all-targets --all-features` — passed, DNS/HTTP runtime aggregate audit proof.
+- `cargo test -p foxprox-egress blocking_proxy_runtime --all-targets --all-features` — passed, DNS/HTTP/SOCKS runtime aggregate audit proof.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 122 core tests, 3 device tests, 28 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners ... ok`
+- `foxprox_egress::tests::blocking_proxy_runtime_shares_delivered_dns_cache_with_socks_listener ... ok`
+- Aggregate assertions cover `network_session_start`, `dns_query_decision`, `proxy_destination_resolved`, `http_request_decision`/`socks_connect_decision`, and `network_session_exit` for one runtime proof.
+
+### Interpretation
+Added aggregate audit accessors to the blocking runtime harnesses so validation can inspect lifecycle, listener configuration, DNS, and proxy decision records as one session evidence set. This narrows the round-27 concern about fragmented observability while preserving each component's bounded broker ledger behavior in the current blocking proof.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This is an aggregate snapshot over component ledgers, not yet a single shared async audit sink. Final runtime still needs one concrete supervised audit output path with global backpressure behavior across all concurrently running tasks.

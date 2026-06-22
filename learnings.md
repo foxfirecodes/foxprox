@@ -148,3 +148,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Listener bind evidence belongs in lifecycle ledger
 
 - Runtime start evidence that only lists component names is not enough for proxy/DNS reachability. Listener setup must emit structured `proxy_listener_configured` records with component, protocol, bind address, and sandbox-reachable address, and listener-config audit backpressure must fail closed before claiming readiness.
+
+## 2026-06-22 — Runtime proofs need aggregate audit access
+
+- Even when components keep bounded per-broker ledgers in harnesses, runtime-level proofs should expose an aggregate audit view that includes lifecycle, listener configuration, DNS, and proxy decision records so validation can inspect one session's evidence end-to-end.
