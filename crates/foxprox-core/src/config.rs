@@ -21,6 +21,12 @@ pub struct PolicyConfig {
 
 impl PolicyConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
+        for broker_dns_server in &self.broker_dns_servers {
+            if is_invalid_broker_dns_server(*broker_dns_server) {
+                return Err(ConfigError::InvalidBrokerDnsServer);
+            }
+        }
+
         for (index, rule) in self.rules.iter().enumerate() {
             if rule.id.trim().is_empty() {
                 return Err(ConfigError::EmptyRuleId);
@@ -263,6 +269,13 @@ pub enum ConfigError {
     InvalidCidrPrefix { prefix: u8, max: u8 },
     InvalidHttpMethodMatcher,
     InvalidHttpPathPrefixMatcher,
+    InvalidBrokerDnsServer,
+}
+
+fn is_invalid_broker_dns_server(ip: IpAddr) -> bool {
+    ip.is_unspecified()
+        || ip.is_multicast()
+        || matches!(ip, IpAddr::V4(ip) if ip == Ipv4Addr::BROADCAST || ip.octets()[3] == 255)
 }
 
 fn is_valid_http_method(method: &str) -> bool {
@@ -364,6 +377,24 @@ mod tests {
             config.validate(),
             Err(ConfigError::InvalidHttpPathPrefixMatcher)
         );
+    }
+
+    #[test]
+    fn invalid_broker_dns_servers_are_rejected() {
+        for invalid in [
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            IpAddr::V4(Ipv4Addr::BROADCAST),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 255)),
+            "224.0.0.251".parse().unwrap(),
+            Ipv6Addr::UNSPECIFIED.into(),
+            "ff02::fb".parse().unwrap(),
+        ] {
+            let config = PolicyConfig {
+                broker_dns_servers: vec![invalid],
+                ..PolicyConfig::default()
+            };
+            assert_eq!(config.validate(), Err(ConfigError::InvalidBrokerDnsServer));
+        }
     }
 
     #[test]

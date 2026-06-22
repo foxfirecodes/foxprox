@@ -1021,6 +1021,28 @@ mod tests {
     }
 
     #[test]
+    fn invalid_broker_dns_server_config_fails_closed_before_dns_exemption() {
+        let config = PolicyConfig {
+            broker_dns_servers: vec![IpAddr::V4(Ipv4Addr::BROADCAST)],
+            rules: vec![PolicyRule::allow_ip(
+                "allow-all",
+                "0.0.0.0/0".parse().unwrap(),
+                None,
+            )],
+            ..PolicyConfig::default()
+        };
+        let request = PolicyRequest::new(Protocol::Dns)
+            .with_destination(Endpoint::udp(IpAddr::V4(Ipv4Addr::BROADCAST), 53));
+
+        assert_eq!(
+            PolicyEngine::decide(&config, &request),
+            Decision::FailClosed {
+                reason: DenialReason::InvalidConfig,
+            }
+        );
+    }
+
+    #[test]
     fn duplicate_rule_ids_fail_closed_before_policy_use() {
         let mut config = PolicyConfig::default();
         config.rules.push(PolicyRule::allow_ip(

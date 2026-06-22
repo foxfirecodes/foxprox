@@ -109,3 +109,7 @@ DNS response audit records should preserve response code, answer count, and TTL 
 ## 2026-06-21 - Packet checksum validation protects policy metadata
 
 Packet parsing should validate IPv4 header and transport checksums before exposing ports, DNS/QUIC classification, or ICMP type/code to policy. IPv4 UDP checksum zero is a protocol-permitted exception, but IPv6 UDP checksum zero should fail closed.
+
+## 2026-06-21 - DNS bypass exemptions need config validation
+
+Direct-DNS bypass checks are only as safe as the broker DNS server list. Treating multicast, broadcast, directed-broadcast, or unspecified addresses as broker-controlled DNS would weaken bypass prevention, so those addresses should be rejected during policy config validation.

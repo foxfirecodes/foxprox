@@ -635,3 +635,22 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; checksum failures surface as parser errors that future runtime code should audit as fail-closed unsupported/malformed packet decisions.
 * Residual risk: packet parser still rejects IPv4 fragments and IPv6 extension headers rather than reassembling/processing them; no runtime TUN integration currently couples parser errors to audit sink emission.
 * Commit hash: 4e68422 fail closed on invalid packet checksums.
+
+## 2026-06-21 - Broker DNS exemption config validation
+
+* Invariant under work: broker DNS resolver exemptions must only be configured with plausible unicast broker endpoints, and invalid broker DNS server configuration must fail closed before direct-DNS bypass checks can exempt traffic.
+* Threat or failure mode addressed: if malformed, multicast, broadcast, or unspecified addresses are accepted as broker DNS servers, direct DNS bypass prevention could treat unsafe destinations as broker-controlled DNS and skip denial.
+* Planned verification: reject invalid broker DNS server addresses in config validation, assert policy fail-closes with invalid broker DNS configuration before rule matching or DNS exemptions, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Broker DNS exemption config validation results
+
+* Tests added/updated:
+  * config validation rejects unspecified IPv4/IPv6, multicast IPv4/IPv6, limited broadcast, and conservative IPv4 directed-broadcast broker DNS server addresses.
+  * policy evaluation fail-closes with `InvalidConfig` when an invalid broker DNS server would otherwise be used as a direct-DNS exemption.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 97 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * direct-DNS bypass exemptions cannot be configured for multicast, broadcast, or unspecified addresses.
+  * invalid DNS exemption configuration fails closed before any allow-all rule can authorize the DNS packet.
+* Audit evidence: not applicable in this commit; invalid config surfaces as `Decision::FailClosed { reason: InvalidConfig }` for future audit emission.
+* Residual risk: config file deserialization/loading and interface-aware validation of broker resolver reachability remain future work.
