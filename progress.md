@@ -440,3 +440,21 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: e73124b.
 - Remaining boundary risks: per-backend socket/file-descriptor limits, per-sandbox byte/flow-rate accounting, production timer cleanup, and memory budgeting for stream buffers remain.
+
+## 2026-06-21 — Boundary objective: proxy authority normalization robustness
+
+- Boundary under work: HTTP/CONNECT authority parsing for bracketed IPv6 destinations.
+- Allowed dependency direction: frontend parser code emits normalized `DestinationHost` values from `foxprox-core`; policy and egress continue to consume normalized host/IP plus port only.
+- Dependency-risk assessment: explicit proxy parsing is a bypass-sensitive boundary. IPv6 authority parsing should be fixed in the frontend without introducing parser crate types or ad-hoc string destinations into policy.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: initial `cargo test --workspace` failed because the new IPv6 assertion had an ambiguous `parse()` type; after specifying `IpAddr`, all verification passed.
+- Changed files:
+  - `crates/foxprox-frontends/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 62 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: production proxy listener IO, response/CONNECT stream bridging, request-size limits, and stricter malformed authority coverage remain.

@@ -199,19 +199,39 @@ fn parse_host_port(
     if value.is_empty() {
         return Err(FrontendError::MalformedHttp("empty host"));
     }
+
+    if let Some(rest) = value.strip_prefix('[') {
+        let Some(end) = rest.find(']') else {
+            return Err(FrontendError::MalformedHttp("unterminated IPv6 authority"));
+        };
+        let host = &rest[..end];
+        let remainder = &rest[end + 1..];
+        let port = if let Some(port) = remainder.strip_prefix(':') {
+            port.parse()
+                .map_err(|_| FrontendError::MalformedHttp("bad port"))?
+        } else if remainder.is_empty() {
+            default_port
+        } else {
+            return Err(FrontendError::MalformedHttp("bad bracketed authority"));
+        };
+        return Ok((parse_destination_host(host)?, port));
+    }
+
+    if let Ok(ip) = value.parse::<IpAddr>() {
+        return Ok((DestinationHost::Ip(ip), default_port));
+    }
+
     if let Some((host, port)) = value.rsplit_once(':') {
-        if !host.contains(']') {
-            let port = port
-                .parse()
-                .map_err(|_| FrontendError::MalformedHttp("bad port"))?;
-            return Ok((parse_destination_host(host)?, port));
-        }
+        let port = port
+            .parse()
+            .map_err(|_| FrontendError::MalformedHttp("bad port"))?;
+        return Ok((parse_destination_host(host)?, port));
     }
     Ok((parse_destination_host(value)?, default_port))
 }
 
 fn parse_destination_host(value: &str) -> Result<DestinationHost, FrontendError> {
-    let value = value.trim().trim_start_matches('[').trim_end_matches(']');
+    let value = value.trim();
     if let Ok(ip) = value.parse::<IpAddr>() {
         Ok(DestinationHost::Ip(ip))
     } else {
@@ -339,6 +359,38 @@ mod tests {
         );
 
         assert_eq!(event.protocol(), Protocol::HttpsConnect);
+    }
+
+    #[test]
+    fn parses_bracketed_ipv6_proxy_authorities() {
+        let connect = parse_http_request(
+            sandbox(),
+            FrontendKind::HttpProxy,
+            b"CONNECT [2001:db8::1]:443 HTTP/1.1\r\nHost: [2001:db8::1]\r\n\r\n",
+        );
+        let NormalizedEvent::HttpsConnect(connect) = connect else {
+            panic!("expected CONNECT");
+        };
+        assert_eq!(
+            connect.host.ip().unwrap(),
+            "2001:db8::1".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(connect.port, 443);
+
+        let request = parse_http_request(
+            sandbox(),
+            FrontendKind::HttpProxy,
+            b"GET http://[2001:db8::2]:8080/path HTTP/1.1\r\nHost: [2001:db8::2]\r\n\r\n",
+        );
+        let NormalizedEvent::HttpRequest(request) = request else {
+            panic!("expected HTTP request");
+        };
+        assert_eq!(
+            request.host.ip().unwrap(),
+            "2001:db8::2".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(request.port, 8080);
+        assert_eq!(request.path_query, "/path");
     }
 
     #[test]

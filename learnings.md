@@ -92,3 +92,8 @@
 
 - Flow count limits belong in the normalized runtime config, not launcher-specific code, so the network flow table can enforce bounded state for transparent and proxy paths consistently.
 - Flow-table replacement of an existing key should remain allowed at capacity; otherwise refreshing byte counts or timeout state could be blocked by the same limit meant to prevent new flow growth.
+
+## 2026-06-21 — Proxy authority IPv6 parsing
+
+- HTTP proxy and CONNECT authority parsing must handle bracketed IPv6 before generic `host:port` splitting; otherwise IPv6 literals can be mis-normalized as host strings or malformed ports.
+- Frontend fixes should still emit only `DestinationHost::Ip` plus port, keeping policy and egress independent from request-line syntax.
