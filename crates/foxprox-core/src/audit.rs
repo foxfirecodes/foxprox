@@ -50,6 +50,7 @@ pub struct AuditPolicyContext {
     pub hostname: Option<Hostname>,
     pub hostname_source: HostnameSource,
     pub hostname_confidence: HostnameConfidence,
+    pub dns_query_type: Option<DnsQueryType>,
     pub http_method: Option<String>,
     pub http_path_query: Option<String>,
 }
@@ -72,6 +73,7 @@ impl AuditPolicyContext {
             hostname: request.attribution.hostname.clone(),
             hostname_source: request.attribution.source,
             hostname_confidence: request.attribution.confidence,
+            dns_query_type: request.dns_query_type,
             http_method: request.http_method.clone(),
             http_path_query: request.http_path_query.clone(),
         }
@@ -94,7 +96,7 @@ impl AuditEvent {
             hostname: context.hostname,
             hostname_source: context.hostname_source,
             hostname_confidence: context.hostname_confidence,
-            dns_query_type: None,
+            dns_query_type: context.dns_query_type,
             dns_response_code: None,
             dns_answer_count: None,
             dns_min_ttl_seconds: None,
@@ -767,6 +769,7 @@ mod tests {
                 hostname: None,
                 hostname_source: HostnameSource::None,
                 hostname_confidence: HostnameConfidence::None,
+                dns_query_type: None,
                 http_method: None,
                 http_path_query: None,
             },
@@ -901,6 +904,47 @@ mod tests {
         );
         assert_eq!(event.reason, Some(DenialReason::RuleDeny));
         assert_eq!(event.rule_id.as_deref(), Some("deny-debug"));
+    }
+
+    #[test]
+    fn policy_derived_dns_audit_preserves_query_type() {
+        let metadata = crate::dns::parse_dns_query(
+            &[
+                0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'e',
+                b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, 0x00, 0x1c, 0x00,
+                0x01,
+            ],
+            512,
+        )
+        .unwrap();
+        let source = Endpoint::udp(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 40000);
+        let destination = Endpoint::udp(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 3)), 53);
+        let request = PolicyRequest::from_dns_query_metadata(
+            Frontend::Tun,
+            Some(source),
+            Some(destination),
+            metadata,
+        );
+
+        let event = AuditEvent::from_policy_decision(
+            AuditPolicyContext::from_request(98, AuditEventKind::DnsQuery, &request),
+            &Decision::Deny {
+                behavior: DenyBehavior::Drop,
+                reason: DenialReason::RuleDeny,
+                rule_id: Some("deny-dns".into()),
+            },
+        );
+
+        assert_eq!(event.kind, AuditEventKind::DnsQuery);
+        assert_eq!(event.source, Some(source));
+        assert_eq!(event.destination, Some(destination));
+        assert_eq!(event.requested_port, Some(53));
+        assert_eq!(event.hostname.as_ref().unwrap().as_str(), "example.com");
+        assert_eq!(event.hostname_source, HostnameSource::BrokerDnsQuery);
+        assert_eq!(event.hostname_confidence, HostnameConfidence::High);
+        assert_eq!(event.dns_query_type, Some(crate::dns::DnsQueryType::Aaaa));
+        assert_eq!(event.reason, Some(DenialReason::RuleDeny));
+        assert_eq!(event.rule_id.as_deref(), Some("deny-dns"));
     }
 
     #[test]
@@ -1076,6 +1120,7 @@ mod tests {
                 hostname: None,
                 hostname_source: HostnameSource::None,
                 hostname_confidence: HostnameConfidence::None,
+                dns_query_type: None,
                 http_method: None,
                 http_path_query: None,
             },

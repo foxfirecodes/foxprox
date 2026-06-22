@@ -2,6 +2,7 @@ use std::net::IpAddr;
 
 use crate::attribution::{HostAttribution, Hostname};
 use crate::config::{DestinationMatcher, PolicyConfig, PolicyRule, RuleAction};
+use crate::dns::{DnsQueryMetadata, DnsQueryType};
 use crate::http::{HttpRequestMetadata, HttpsConnectMetadata};
 use crate::quic::QuicPacketMetadata;
 use crate::socks::{Socks5ConnectMetadata, Socks5Destination};
@@ -73,6 +74,7 @@ pub struct PolicyRequest {
     pub dns_attribution: Option<Hostname>,
     pub presented_hostname: Option<Hostname>,
     pub icmp: Option<IcmpMessage>,
+    pub dns_query_type: Option<DnsQueryType>,
     pub http_method: Option<String>,
     pub http_path_query: Option<String>,
     pub malformed: bool,
@@ -92,6 +94,7 @@ impl PolicyRequest {
             dns_attribution: None,
             presented_hostname: None,
             icmp: None,
+            dns_query_type: None,
             http_method: None,
             http_path_query: None,
             malformed: false,
@@ -133,6 +136,26 @@ impl PolicyRequest {
         self.http_method = Some(method.into());
         self.http_path_query = Some(path_query.into());
         self
+    }
+
+    pub fn from_dns_query_metadata(
+        frontend: Frontend,
+        source: Option<Endpoint>,
+        destination: Option<Endpoint>,
+        metadata: DnsQueryMetadata,
+    ) -> Self {
+        let mut request = Self::new(Protocol::Dns).with_attribution(HostAttribution::new(
+            metadata.hostname,
+            crate::types::HostnameSource::BrokerDnsQuery,
+            crate::types::HostnameConfidence::High,
+        ));
+        request.frontend = frontend;
+        request.source = source;
+        request.dns_query_type = Some(metadata.query_type);
+        if let Some(destination) = destination {
+            request = request.with_destination(destination);
+        }
+        request
     }
 
     pub fn from_http_request_metadata(
@@ -452,6 +475,7 @@ mod tests {
 
     use crate::attribution::{HostAttribution, Hostname};
     use crate::config::{Cidr, HostMatcher, PolicyRule};
+    use crate::dns::parse_dns_query;
     use crate::http::{parse_http_request_head, parse_https_connect_head};
     use crate::socks::parse_socks5_connect_request;
     use crate::types::{HostnameConfidence, HostnameSource};
@@ -915,6 +939,61 @@ mod tests {
             Some(443),
         ));
         assert!(PolicyEngine::decide(&ip_config, &unattributed).is_allow());
+    }
+
+    #[test]
+    fn dns_query_metadata_normalizes_into_policy_requests() {
+        let metadata = parse_dns_query(
+            &[
+                0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'e',
+                b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, 0x00, 0x01, 0x00,
+                0x01,
+            ],
+            512,
+        )
+        .unwrap();
+        let source = Endpoint::udp(ip([10, 0, 0, 2]), 40000);
+        let destination = Endpoint::udp(ip([10, 0, 2, 3]), 53);
+        let request = PolicyRequest::from_dns_query_metadata(
+            Frontend::Tun,
+            Some(source),
+            Some(destination),
+            metadata,
+        );
+
+        assert_eq!(request.protocol, Protocol::Dns);
+        assert_eq!(request.source, Some(source));
+        assert_eq!(request.destination, Some(destination));
+        assert_eq!(request.requested_port, Some(53));
+        assert_eq!(request.dns_query_type, Some(DnsQueryType::A));
+        assert_eq!(request.attribution.source, HostnameSource::BrokerDnsQuery);
+        assert_eq!(request.attribution.confidence, HostnameConfidence::High);
+        assert_eq!(
+            request.attribution.hostname.as_ref().unwrap().as_str(),
+            "example.com"
+        );
+
+        let mut config = PolicyConfig {
+            broker_dns_servers: vec![destination.ip],
+            ..PolicyConfig::default()
+        };
+        config.rules.push(PolicyRule::allow_domain(
+            "allow-dns-query",
+            HostMatcher::exact("example.com").unwrap(),
+            Some(53),
+        ));
+        assert!(PolicyEngine::decide(&config, &request).is_allow());
+
+        config.rules.clear();
+        config.rules.push(PolicyRule::allow_domain(
+            "allow-other-dns-query",
+            HostMatcher::exact("other.example").unwrap(),
+            Some(53),
+        ));
+        assert_eq!(
+            PolicyEngine::decide(&config, &request).reason(),
+            Some(DenialReason::DefaultDeny)
+        );
     }
 
     #[test]

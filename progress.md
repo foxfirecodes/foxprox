@@ -717,3 +717,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * address answers are limited to A-for-A and AAAA-for-AAAA responses and are size/count bounded.
 * Audit evidence: response synthesis round trips through the strict DNS response parser, preserving response code, answer count, and TTL metadata used by existing DNS response audit builders.
 * Residual risk: no async DNS socket handler, upstream forwarding loop, retry policy, or automatic coupling between DNS policy decisions, synthesized responses, pending transactions, and audit sinks exists yet.
+
+## 2026-06-21 - DNS query policy normalization
+
+* Invariant under work: validated broker DNS query metadata must enter policy through a single normalization helper that preserves hostname attribution source/confidence, query type context, endpoints, frontend, and requested port.
+* Threat or failure mode addressed: future DNS handler code could hand-build policy requests and omit broker-DNS hostname attribution or endpoint metadata, causing domain rules, direct-DNS exemptions, and audit records to diverge from validated DNS parser output.
+* Planned verification: add normalization tests for broker DNS query metadata, domain-rule allow/deny through normalized requests, source/destination/requested-port preservation in audit context, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - DNS query policy normalization results
+
+* Tests added/updated:
+  * validated DNS query metadata normalizes into `Protocol::Dns` policy requests with broker-DNS high-confidence hostname attribution, source endpoint, broker destination endpoint, requested port, and DNS query type.
+  * normalized DNS query requests can satisfy port-scoped domain rules only when the destination is configured as a valid broker DNS server; nonmatching domain rules default-deny.
+  * policy-derived DNS audit events now preserve DNS query type, endpoints, requested port, hostname attribution, decision reason, and rule ID.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` found the new policy test was correctly denied as direct-DNS bypass until the test config declared the destination as a broker DNS server.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 104 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * broker-DNS query metadata now has a single policy normalization path instead of requiring callers to hand-build attribution and query-type fields.
+  * direct-DNS bypass protection still runs before domain allow rules unless the destination is explicitly configured as a broker DNS server.
+* Audit evidence: unit tests assert DNS query type and attribution survive both DNS-specific and policy-derived audit event construction.
+* Residual risk: actual DNS handler wiring still needs to parse query packets, call policy, synthesize allow/deny responses, update pending transactions, and push audit records automatically.

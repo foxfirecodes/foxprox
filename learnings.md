@@ -129,3 +129,7 @@ I paused to ask which runtime implementation track to take even though the sourc
 ## 2026-06-21 - DNS response synthesis should round trip through strict parsing
 
 DNS response builders should consume already-validated query metadata, preserve transaction IDs and normalized owner names, and produce responses that the strict DNS response parser accepts. Error responses should be empty-answer and bounded; address responses should reject unsupported query types and A/AAAA family mismatches rather than silently dropping or rewriting records.
+
+## 2026-06-21 - Broker DNS query policy requires configured broker destination
+
+Even validated DNS query metadata should be denied by direct-DNS bypass checks unless the destination IP is configured as a broker DNS server. Tests for DNS query policy normalization should include the broker DNS server in policy config so domain-rule behavior is exercised without weakening bypass prevention.
