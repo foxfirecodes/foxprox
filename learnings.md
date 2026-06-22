@@ -93,3 +93,7 @@ Audit JSON should not collapse `Protocol::Unsupported(n)` to a generic string. T
 ## 2026-06-21 - UDP expiration needs auditable entry data
 
 A flow table that only reports an expiration count cannot emit complete expiration audit records by itself. Lifecycle audit builders need the expired `UdpFlowEntry` data so byte counts, endpoints, class, and duration survive cleanup.
+
+## 2026-06-21 - Expiration APIs should return consumed state for audit
+
+For bounded state tables, auditability and cleanup should be linked: returning expired entries lets the runtime log exact flow data while removing stale state immediately, instead of choosing between complete audit records and bounded memory.

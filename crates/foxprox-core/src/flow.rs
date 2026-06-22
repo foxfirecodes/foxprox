@@ -159,10 +159,23 @@ impl UdpFlowTable {
     }
 
     pub fn expire(&mut self, now_millis: u64) -> usize {
-        let before = self.flows.len();
-        self.flows
-            .retain(|entry| entry.expires_at_millis > now_millis);
-        before - self.flows.len()
+        self.expire_collect(now_millis).len()
+    }
+
+    pub fn expire_collect(&mut self, now_millis: u64) -> Vec<UdpFlowEntry> {
+        let mut retained = VecDeque::with_capacity(self.max_flows);
+        let mut expired = Vec::new();
+
+        while let Some(entry) = self.flows.pop_front() {
+            if entry.expires_at_millis <= now_millis {
+                expired.push(entry);
+            } else {
+                retained.push_back(entry);
+            }
+        }
+
+        self.flows = retained;
+        expired
     }
 
     pub fn get(&self, key: UdpFlowKey) -> Option<&UdpFlowEntry> {
@@ -263,6 +276,32 @@ mod tests {
         assert_eq!(table.expire(15), 1);
         assert!(table.get(dns).is_none());
         assert!(table.get(quic).is_some());
+    }
+
+    #[test]
+    fn expire_collect_returns_auditable_expired_entries() {
+        let mut table = UdpFlowTable::new(
+            8,
+            UdpFlowTimeouts {
+                dns_millis: 5,
+                generic_millis: 30,
+                quic_millis: 120,
+                ntp_like_millis: 3,
+            },
+        );
+        let dns = key(40000, endpoint([10, 0, 2, 3], 53));
+        let quic = key(40001, endpoint([203, 0, 113, 20], 443));
+        table.observe_from_sandbox(dns, Protocol::Dns, 20, 10);
+        table.observe_from_sandbox(quic, Protocol::QuicCandidate, 40, 10);
+
+        let expired = table.expire_collect(15);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].key, dns);
+        assert_eq!(expired[0].class, UdpFlowClass::Dns);
+        assert_eq!(expired[0].bytes_from_sandbox, 20);
+        assert!(table.get(dns).is_none());
+        assert!(table.get(quic).is_some());
+        assert_eq!(table.len(), 1);
     }
 
     #[test]

@@ -545,3 +545,23 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Residual risk: the flow table still returns only expiration counts rather than expired entries for automatic audit emission; UDP socket forwarding and reply routing remain future work.
 
 * Commit hash: 07c37ac audit udp flow lifecycle metadata.
+
+## 2026-06-21 - UDP expiration returns auditable entries
+
+* Invariant under work: UDP flow expiration must expose the expired flow entries, not only a count, so cleanup can emit complete audit records without retaining stale state or dropping byte/endpoint evidence.
+* Threat or failure mode addressed: if expiration only reports counts, a future runtime could either omit expiration audit details or retain expired state longer than necessary to log it, weakening bounded memory behavior.
+* Planned verification: add `expire_collect` coverage proving expired entries are removed and returned with byte counts/classification while non-expired flows remain; preserve existing count-based behavior; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - UDP expiration returns auditable entries results
+
+* Tests added/updated:
+  * `expire_collect` returns expired UDP flow entries with key, class, and byte count intact while removing them from the table.
+  * non-expired flows remain in the table after collection.
+  * existing count-based `expire` behavior remains intact for callers that only need counts.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 91 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * cleanup can now emit complete expiration audit events without retaining stale expired flow state.
+  * flow memory remains bounded because expired entries are removed during collection.
+* Audit evidence: flow tests preserve the data required by `AuditEvent::from_udp_flow_entry` for expiration records.
+* Residual risk: UDP forwarding, response routing, and automatic runtime coupling between `expire_collect` and audit sinks remain future work.
