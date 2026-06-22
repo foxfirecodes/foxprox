@@ -737,5 +737,5 @@
   - `cargo tree -p foxprox-device` — device has no project crate dependencies.
   - `cargo tree -p foxprox-policy` — policy depends only on `foxprox-core`.
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
-- Commit hash after commit: pending.
+- Commit hash after commit: fa6cee9.
 - Remaining boundary risks: raw fd ownership conventions, Linux TUN ioctl creation/configuration, bwrap fd handoff, async readiness, and namespace setup remain.
