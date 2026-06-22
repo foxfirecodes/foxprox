@@ -10,8 +10,6 @@ rust-version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+foxprox-core = { path = "../foxprox-core" }
 foxprox-egress = { path = "../foxprox-egress" }
 foxprox-inspect = { path = "../foxprox-inspect" }
-
-[dev-dependencies]
-foxprox-core = { path = "../foxprox-core" }

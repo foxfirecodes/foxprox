@@ -120,3 +120,7 @@ A UDP socket can connect locally without proving a peer exists. Verify UDP egres
 ## 2026-06-21 — DNS forwarding can feed attribution from response answers
 
 The DNS forwarder does not need to trust or retain the original query name to populate attribution. It can parse answer owner names from the upstream response and record A/AAAA TTLs into the attribution cache, provided malformed responses fail closed.
+
+## 2026-06-21 — DNS broker denial should answer before egress
+
+A broker-owned DNS resolver needs a pre-egress request boundary: parse the question into a policy event, audit the decision, and synthesize REFUSED/FORMERR/SERVFAIL responses for denied, malformed, or upstream-failed queries. This prevents direct fallback behavior while keeping upstream UDP egress reserved for allowed queries only.

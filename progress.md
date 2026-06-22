@@ -655,3 +655,25 @@
 - What failed or surprised the agent: no failures; forwarding can record cache entries without parsing the original query because the DNS response answer parser already validates and extracts compressed answer names.
 - What remains unproven: DNS listener reachable from sandbox, DNS denial response synthesis, direct DNS bypass runtime interception, negative response handling, transaction matching, and UDP reply packet routing to TUN are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — DNS broker datagram → policy/upstream/response slice
+
+- Slice attempted: handle one broker-received DNS datagram by parsing the question, evaluating shared policy/audit, forwarding allowed queries through UDP egress, and synthesizing client-visible DNS error responses for denied or malformed queries.
+- Why next: upstream DNS forwarding and DNS query audit are individually proven, but the DNS broker boundary still lacks request policy enforcement and denial/fail-closed responses before a live listener is added.
+- Verification plan: extend `foxprox-dns` with a single-datagram handler, verify allowed queries reach a loopback upstream and populate attribution cache, denied queries return DNS REFUSED without calling egress, malformed queries fail closed with FORMERR, then run formatting, clippy, focused DNS tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — DNS broker datagram → policy/upstream/response
+
+- Slice attempted: single-datagram broker DNS handling from raw query bytes to policy/audit, upstream UDP forwarding, attribution-cache recording, and client-visible denial/error responses.
+- Why next: DNS upstream forwarding and DNS query audit existed separately, but a broker resolver boundary still needed to prove that allowed queries forward, denied queries do not egress, and malformed queries fail closed with deterministic responses.
+- What changed: `foxprox-dns` now has `DnsBrokerDatagramHandler`, `DnsDatagramResult`, broker-side DNS question parsing into `DnsQuery` events, fail-closed unsupported events for malformed queries, REFUSED response synthesis for policy denials, FORMERR for malformed queries, and SERVFAIL for allowed queries whose upstream forwarding fails.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in `foxprox-dns`; `cargo fmt` was run.
+  - Focused checks passed: `cargo test -p foxprox-dns dns_broker_handler -- --nocapture` ran 3 tests covering allowed forwarding/cache attribution, denied REFUSED without egress, and malformed FORMERR without egress.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 5 `foxprox-dns` tests, 4 `foxprox-egress` tests, 5 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 15 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed after formatting.
+- What failed or surprised the agent: broker DNS handling needed a small request parser separate from response parsing so malformed requests can still produce fail-closed audit and DNS error responses before any upstream egress is attempted.
+- What remains unproven: live UDP listener reachability from the sandbox, transaction matching beyond one datagram, UDP reply packet routing back to TUN, negative response handling, DNS cache limits, and runtime integration with packet/flow loops are still absent.
+- Commit: this commit.
