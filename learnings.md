@@ -99,3 +99,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Explicit proxy host egress proof boundary
 
 - Concrete HTTP/SOCKS proxy host egress belongs in `foxprox-egress`: it can use blocking host sockets while `foxprox-core` continues to own only parse, policy, and audit contracts. Listener tests should prove host-socket reachability only after shared allow audit evidence exists.
+
+## 2026-06-22 — Setup execution harness boundary
+
+- Setup execution can be made observable without tying core to Linux command execution by running `SetupHelperPlan` steps through an injectable runner. The harness should stop at the first failed step and emit `broker_error` with `setup_step`, `setup_step_index`, and `completed_steps`.

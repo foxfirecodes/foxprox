@@ -51,7 +51,8 @@ pub use proxy_frontend::{
     ProxyEgressError,
 };
 pub use setup::{
-    BwrapSetupPlan, NetworkSetupConfig, ProxyEnvironment, SetupHelperPlan, SetupHelperStep,
+    BwrapSetupPlan, NetworkSetupConfig, ProxyEnvironment, SetupExecutionReport, SetupHelperPlan,
+    SetupHelperStep, SetupStepRunError, SetupStepRunner,
 };
 pub use tcp::{InMemoryTcpEgress, TcpEgress, TcpEgressError, TcpForwardResult, TcpForwarder};
 pub use tun::{DeviceIoError, InMemoryPacketDevice, PacketDevice, TunPacketHarness};

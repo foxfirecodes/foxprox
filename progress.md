@@ -1467,3 +1467,37 @@ The egress crate now includes `BlockingExplicitProxyEgress`, a concrete host-soc
 
 ### Remaining blind spots
 - Explicit proxy host egress is still blocking and proof-oriented: it does not yet stream bidirectional CONNECT bytes, relay host HTTP responses to clients, supervise async accept loops, or integrate listener lifecycle with bwrap/TUN setup.
+
+## 2026-06-22 — Setup helper execution harness cycle
+
+### Behavior under work
+Add a bounded setup-helper execution harness over the existing `SetupHelperPlan`, using an injectable command runner so setup step ordering, fail-closed behavior, and structured evidence can be tested without embedding Linux-specific command execution in `foxprox-core`.
+
+### Expected evidence
+- Successful setup execution records each step and produces `tun_configured` audit evidence before target exec in the harness.
+- A failing setup step stops execution before later privileged/drop/exec steps and emits structured `broker_error` evidence with step name/index.
+
+## 2026-06-22 — Setup helper execution harness
+
+### Commands run
+- `cargo fmt` — applied formatting for setup execution harness.
+- `cargo test -p foxprox-core --all-targets --all-features` — passed, 106 core tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 106 core tests, 3 device tests, 21 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_core::setup::tests::setup_execution_harness_records_successful_steps ... ok`
+- `foxprox_core::setup::tests::setup_execution_harness_stops_and_audits_failed_step ... ok`
+
+### Interpretation
+The setup helper path now has an executable harness over `SetupHelperPlan` using an injectable `SetupStepRunner`. Successful harness execution records all setup steps and emits structured `tun_configured` evidence with executed step count and target-exec readiness. A failing setup step stops execution before later setup/drop/exec steps and emits structured `broker_error` evidence with `setup_step`, `setup_step_index`, `setup_error`, and `completed_steps`.
+
+### Changed files
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-core/src/setup.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The harness intentionally does not run Linux `ip`, open `/dev/net/tun`, pass real fds, or exec a target process. Concrete privileged setup execution and fd handoff remain runtime integration work outside the platform-independent core.

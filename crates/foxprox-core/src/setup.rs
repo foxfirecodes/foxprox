@@ -1,5 +1,5 @@
 use crate::audit::AuditRecord;
-use crate::types::{AuditKind, Decision, Frontend, NetworkEndpoint};
+use crate::types::{AuditKind, Decision, DenialReason, Frontend, NetworkEndpoint};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
@@ -206,6 +206,69 @@ impl SetupHelperPlan {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SetupExecutionReport {
+    pub completed_steps: Vec<String>,
+    pub failed_step: Option<String>,
+    pub failed_step_index: Option<usize>,
+    pub target_exec_ready: bool,
+    pub audit: AuditRecord,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SetupStepRunError {
+    pub detail: String,
+}
+
+impl SetupStepRunError {
+    pub fn new(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+        }
+    }
+}
+
+pub trait SetupStepRunner {
+    fn run_setup_step(&mut self, step: &SetupHelperStep) -> Result<(), SetupStepRunError>;
+}
+
+impl SetupHelperPlan {
+    pub fn execute_with<R: SetupStepRunner>(&self, runner: &mut R) -> SetupExecutionReport {
+        let mut completed_steps = Vec::new();
+        for (index, step) in self.steps.iter().enumerate() {
+            if let Err(error) = runner.run_setup_step(step) {
+                let audit =
+                    AuditRecord::new(AuditKind::BrokerError, self.config.sandbox_id.clone())
+                        .with_frontend(Frontend::Setup)
+                        .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+                        .with_detail("setup_step", step.name.clone())
+                        .with_detail("setup_step_index", index.to_string())
+                        .with_detail("setup_error", error.detail)
+                        .with_detail("completed_steps", completed_steps.len().to_string());
+                return SetupExecutionReport {
+                    completed_steps,
+                    failed_step: Some(step.name.clone()),
+                    failed_step_index: Some(index),
+                    target_exec_ready: false,
+                    audit,
+                };
+            }
+            completed_steps.push(step.name.clone());
+        }
+        let audit = self
+            .audit_record()
+            .with_detail("executed_steps", completed_steps.len().to_string())
+            .with_detail("target_exec_ready", "true");
+        SetupExecutionReport {
+            completed_steps,
+            failed_step: None,
+            failed_step_index: None,
+            target_exec_ready: true,
+            audit,
+        }
+    }
+}
+
 impl BwrapSetupPlan {
     pub fn new(config: NetworkSetupConfig, target_command: &[String]) -> Self {
         let mut bwrap_args = vec![
@@ -353,6 +416,73 @@ mod tests {
         assert_eq!(audit.details["setup_helper"], "foxproxsetup");
         assert_eq!(audit.details["drops_capability"], "CAP_NET_ADMIN");
         assert_eq!(audit.details["steps"], "9");
+    }
+
+    #[derive(Default)]
+    struct ScriptedSetupRunner {
+        ran_steps: Vec<String>,
+        fail_step: Option<String>,
+    }
+
+    impl SetupStepRunner for ScriptedSetupRunner {
+        fn run_setup_step(&mut self, step: &SetupHelperStep) -> Result<(), SetupStepRunError> {
+            if self.fail_step.as_deref() == Some(step.name.as_str()) {
+                return Err(SetupStepRunError::new(format!("{} failed", step.name)));
+            }
+            self.ran_steps.push(step.name.clone());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn setup_execution_harness_records_successful_steps() {
+        let plan = SetupHelperPlan::new(
+            NetworkSetupConfig::alpha_default("s1"),
+            &["true".to_string()],
+        );
+        let mut runner = ScriptedSetupRunner::default();
+        let report = plan.execute_with(&mut runner);
+
+        assert!(report.failed_step.is_none());
+        assert!(report.target_exec_ready);
+        assert_eq!(report.completed_steps, runner.ran_steps);
+        assert_eq!(report.completed_steps.last().unwrap(), "exec_target");
+        assert_eq!(report.audit.kind, AuditKind::TunConfigured);
+        assert_eq!(report.audit.decision, Some(Decision::Allow));
+        assert_eq!(report.audit.details["executed_steps"], "9");
+        assert_eq!(report.audit.details["target_exec_ready"], "true");
+    }
+
+    #[test]
+    fn setup_execution_harness_stops_and_audits_failed_step() {
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.setup_control_fd = Some(9);
+        let plan = SetupHelperPlan::new(config, &["true".to_string()]);
+        let mut runner = ScriptedSetupRunner {
+            fail_step: Some("configure_dns".to_string()),
+            ..ScriptedSetupRunner::default()
+        };
+        let report = plan.execute_with(&mut runner);
+
+        assert_eq!(report.failed_step.as_deref(), Some("configure_dns"));
+        assert_eq!(report.failed_step_index, Some(4));
+        assert!(!report.target_exec_ready);
+        assert_eq!(
+            runner.ran_steps,
+            vec![
+                "create_tun".to_string(),
+                "assign_tun_address".to_string(),
+                "set_tun_mtu_up".to_string(),
+                "configure_default_route".to_string(),
+            ]
+        );
+        assert_eq!(report.completed_steps, runner.ran_steps);
+        assert_eq!(report.audit.kind, AuditKind::BrokerError);
+        assert_eq!(report.audit.decision, Some(Decision::FailClosed));
+        assert_eq!(report.audit.reason, Some(DenialReason::SetupFailed));
+        assert_eq!(report.audit.details["setup_step"], "configure_dns");
+        assert_eq!(report.audit.details["setup_step_index"], "4");
+        assert_eq!(report.audit.details["completed_steps"], "4");
     }
 
     #[test]
