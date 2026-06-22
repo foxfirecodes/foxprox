@@ -14,7 +14,9 @@ use foxprox_core::{
     AuditDecision, Endpoint, FrontendKind, NormalizedEvent, PolicyEngine, PolicyEvaluation,
     SandboxId, UnsupportedNetworkEvent,
 };
-use foxprox_egress::{EgressError, TcpEgress, TcpEgressConnection, TcpTarget};
+use foxprox_egress::{
+    bridge_tcp_streams, EgressError, TcpBridgeStats, TcpEgress, TcpEgressConnection, TcpTarget,
+};
 use foxprox_inspect::{
     parse_http_proxy_request, parse_https_connect_request, parse_socks5_connect_request,
 };
@@ -89,6 +91,22 @@ pub struct HttpConnectTunnel {
     pub preflight: HttpConnectPreflight,
     pub connection: Option<TcpEgressConnection>,
     pub egress_error: Option<EgressError>,
+}
+
+/// Result of serving one HTTP CONNECT TCP connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HttpConnectServeOneResult {
+    pub peer: SocketAddr,
+    pub preflight: HttpConnectPreflight,
+    pub outcome: HttpConnectServeOutcome,
+    pub egress_error: Option<EgressError>,
+}
+
+/// Runtime outcome for one HTTP CONNECT connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum HttpConnectServeOutcome {
+    Bridged(TcpBridgeStats),
+    Responded(HttpProxyResponse),
 }
 
 /// Next frontend action after HTTP proxy preflight.
@@ -451,6 +469,53 @@ pub fn serve_one_http_proxy_connection<E: TcpEgress>(
             })
         }
     }
+}
+
+/// Accept and serve one HTTP CONNECT proxy connection from a TCP listener.
+pub fn serve_one_http_connect_connection<E: TcpEgress>(
+    listener: &TcpListener,
+    handler: &HttpProxyPreflight,
+    egress: &E,
+    sandbox_id: SandboxId,
+) -> Result<HttpConnectServeOneResult, HttpProxyServeError> {
+    let (mut client, peer) = listener.accept().map_err(HttpProxyServeError::from)?;
+    let request_head = read_http_request_head(&mut client, 16 * 1024)?;
+    let source = Endpoint::tcp(peer.ip(), peer.port());
+    let mut tunnel =
+        handler.establish_connect_tunnel(sandbox_id, Some(source), &request_head, egress);
+    client
+        .write_all(tunnel.preflight.response.as_bytes())
+        .map_err(HttpProxyServeError::from)?;
+
+    if tunnel.preflight.response != HttpProxyResponse::ConnectionEstablished {
+        let response = tunnel.preflight.response;
+        return Ok(HttpConnectServeOneResult {
+            peer,
+            preflight: tunnel.preflight,
+            outcome: HttpConnectServeOutcome::Responded(response),
+            egress_error: tunnel.egress_error,
+        });
+    }
+
+    let Some(connection) = tunnel.connection.take() else {
+        return Ok(HttpConnectServeOneResult {
+            peer,
+            preflight: tunnel.preflight,
+            outcome: HttpConnectServeOutcome::Responded(HttpProxyResponse::BadGateway),
+            egress_error: Some(EgressError::InvalidTarget(
+                "missing CONNECT egress connection after 200 response".to_owned(),
+            )),
+        });
+    };
+    let stats = bridge_tcp_streams(client, connection)
+        .map_err(|error| HttpProxyServeError::Io(format!("http-connect-bridge-error: {error}")))?;
+
+    Ok(HttpConnectServeOneResult {
+        peer,
+        preflight: tunnel.preflight,
+        outcome: HttpConnectServeOutcome::Bridged(stats),
+        egress_error: None,
+    })
 }
 
 /// Minimal SOCKS5 frontend preflight handler for CONNECT requests after method
@@ -1120,6 +1185,61 @@ mod tests {
         let server_request = server.join().unwrap();
         assert_eq!(&server_request, b"ping");
         assert_eq!(&response, b"pong");
+    }
+
+    #[test]
+    fn http_connect_listener_serves_one_tunnel_and_bridges_bytes() {
+        let upstream_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream = thread::spawn(move || {
+            let (mut stream, _) = upstream_listener.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            stream.write_all(b"pong").unwrap();
+            request
+        });
+        let proxy_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let handler = HttpProxyPreflight::new(PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        }));
+        let egress = HostTcpEgress::new(Duration::from_secs(1)).unwrap();
+        let server = thread::spawn(move || {
+            serve_one_http_connect_connection(&proxy_listener, &handler, &egress, sandbox_id())
+                .unwrap()
+        });
+
+        let mut client = std::net::TcpStream::connect(proxy_addr).unwrap();
+        let request = format!(
+            "CONNECT 127.0.0.1:{} HTTP/1.1\r\n\r\n",
+            upstream_addr.port()
+        );
+        client.write_all(request.as_bytes()).unwrap();
+        let mut connect_response =
+            vec![0_u8; HttpProxyResponse::ConnectionEstablished.as_bytes().len()];
+        client.read_exact(&mut connect_response).unwrap();
+        assert_eq!(
+            connect_response,
+            HttpProxyResponse::ConnectionEstablished.as_bytes()
+        );
+        client.write_all(b"ping").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+
+        let served = server.join().unwrap();
+        let upstream_request = upstream.join().unwrap();
+        assert_eq!(&upstream_request, b"ping");
+        assert_eq!(&response, b"pong");
+        assert!(matches!(
+            served.outcome,
+            HttpConnectServeOutcome::Bridged(TcpBridgeStats {
+                client_to_target_bytes: 4,
+                target_to_client_bytes: 4,
+            })
+        ));
+        assert_eq!(served.egress_error, None);
     }
 
     #[test]

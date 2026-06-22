@@ -148,3 +148,7 @@ When testing a broker DNS socket on loopback with an ephemeral port, construct t
 ## 2026-06-21 — one-request proxy listeners prove socket boundaries without async runtime
 
 A blocking one-request TCP listener is enough to prove explicit proxy reachability and egress integration with deterministic loopback tests. Keep it narrow: read a bounded request head, reuse preflight/egress helpers, and defer concurrency, body streaming, and backpressure to later runtime slices.
+
+## 2026-06-21 — CONNECT listeners should send the proxy response before bridging
+
+For HTTPS CONNECT, perform policy and egress setup first, write the `200 Connection Established` response to the client, and only then hand the client stream plus egress connection to the bidirectional bridge. This keeps proxy handshake bytes out of tunnel byte counts.

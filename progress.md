@@ -809,3 +809,25 @@
 - What failed or surprised the agent: no behavior failures; a one-request listener can reuse the existing forwarding helper and remain intentionally limited to header-only plaintext HTTP until body streaming/backpressure is added.
 - What remains unproven: long-running/concurrent HTTP proxy listener loop, request body streaming, CONNECT/SOCKS listener runtimes, tunnel close-audit integration, resource limits beyond request-head size, and TUN forwarding are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — HTTPS CONNECT listener tunnel runtime slice
+
+- Slice attempted: serve one HTTP CONNECT proxy TCP connection through a real listener, establish shared egress, send the 200 response, and bridge tunnel bytes bidirectionally with byte-count evidence.
+- Why next: plaintext HTTP proxy has a listener runtime and CONNECT has preflight/egress plus a generic bridge, but no listener-facing CONNECT tunnel path yet; this is the next explicit-proxy runtime gap.
+- Verification plan: add `serve_one_http_connect_connection`, verify a loopback client receives `200 Connection Established`, sends bytes through the tunnel to an upstream server, receives the response, and gets bridge stats; run formatting, clippy, focused proxy tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — HTTPS CONNECT listener tunnel runtime
+
+- Slice attempted: serve one HTTP CONNECT proxy TCP connection through listener accept, policy preflight, shared egress, 200 response, and bidirectional tunnel bridge.
+- Why next: CONNECT preflight/egress and generic TCP bridging were proven separately, but no listener-facing CONNECT runtime existed for explicit proxy clients.
+- What changed: added `HttpConnectServeOneResult`, `HttpConnectServeOutcome`, and `serve_one_http_connect_connection`; it accepts one TCP client, reads a bounded CONNECT request head, establishes egress only after allow, writes the CONNECT response, bridges tunnel bytes with `bridge_tcp_streams`, and reports bridge stats or denial/error response outcomes.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in the new CONNECT listener code; `cargo fmt` was run.
+  - Focused check passed: `cargo test -p foxprox-proxy http_connect_listener -- --nocapture` verified a loopback client received `200 Connection Established`, sent `ping` through the proxy tunnel to an upstream server, received `pong`, and the listener returned 4-byte bridge stats in both directions.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 6 `foxprox-dns` tests, 5 `foxprox-egress` tests, 6 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 22 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; writing the CONNECT response before starting the bridge keeps client-visible proxy semantics separate from tunnel byte copying.
+- What remains unproven: SOCKS5 listener runtime, close-audit emission from listener completion, concurrent listener loops, cancellation/resource limits, and transparent TUN TCP forwarding are still absent.
+- Commit: this commit.
