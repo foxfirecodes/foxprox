@@ -95,3 +95,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — SOCKS5 listener proof boundary
 
 - A bounded SOCKS5 listener proof should separate the method handshake from CONNECT policy evaluation: only the CONNECT request enters `ExplicitProxyFrontend`, while the listener step records greeting length, request length, reply code, send status, decision, and forwarding status.
+
+## 2026-06-22 — Explicit proxy host egress proof boundary
+
+- Concrete HTTP/SOCKS proxy host egress belongs in `foxprox-egress`: it can use blocking host sockets while `foxprox-core` continues to own only parse, policy, and audit contracts. Listener tests should prove host-socket reachability only after shared allow audit evidence exists.

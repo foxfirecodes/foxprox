@@ -69,7 +69,9 @@ pub enum ProxyParseError {
     Truncated,
     UnsupportedSocksVersion,
     UnsupportedSocksCommand,
+    UnsupportedSocksReserved,
     UnsupportedSocksAddressType,
+    UnsupportedSocksAuthentication,
     EmptySocksDomain,
 }
 
@@ -84,7 +86,9 @@ impl ProxyParseError {
             Self::Truncated => "truncated",
             Self::UnsupportedSocksVersion => "unsupported_socks_version",
             Self::UnsupportedSocksCommand => "unsupported_socks_command",
+            Self::UnsupportedSocksReserved => "unsupported_socks_reserved",
             Self::UnsupportedSocksAddressType => "unsupported_socks_address_type",
+            Self::UnsupportedSocksAuthentication => "unsupported_socks_authentication",
             Self::EmptySocksDomain => "empty_socks_domain",
         }
     }
@@ -221,6 +225,9 @@ pub fn parse_socks5_connect_request(bytes: &[u8]) -> Result<SocksConnectMetadata
     }
     if bytes[1] != 0x01 {
         return Err(ProxyParseError::UnsupportedSocksCommand);
+    }
+    if bytes[2] != 0x00 {
+        return Err(ProxyParseError::UnsupportedSocksReserved);
     }
     let atyp = bytes[3];
     let mut cursor = 4usize;
@@ -389,6 +396,25 @@ mod tests {
             Some("203.0.113.42".parse().unwrap())
         );
         assert_eq!(policy_request.destination.port, Some(80));
+    }
+
+    #[test]
+    fn socks5_nonzero_reserved_byte_fails_closed_with_structured_detail() {
+        let request = [0x05, 0x01, 0x7f, 0x01, 203, 0, 113, 42, 0x00, 0x50];
+        let error = parse_socks5_connect_request(&request).unwrap_err();
+        assert_eq!(error, ProxyParseError::UnsupportedSocksReserved);
+        let mut broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 4);
+        let decision =
+            broker.evaluate(&malformed_proxy_request("s1", Frontend::Socks5Proxy, error));
+        assert_eq!(decision.decision, Decision::FailClosed);
+        let record = broker.audit().records().next().unwrap();
+        assert_eq!(record.kind, AuditKind::UnsupportedDenied);
+        assert_eq!(record.frontend, Some(Frontend::Socks5Proxy));
+        assert_eq!(record.reason, Some(DenialReason::ProxyMalformed));
+        assert_eq!(
+            record.details["proxy_parse_error"],
+            "unsupported_socks_reserved"
+        );
     }
 
     #[test]

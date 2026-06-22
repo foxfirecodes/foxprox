@@ -1425,3 +1425,45 @@ The egress crate now includes a concrete single-step blocking SOCKS5 proxy liste
 
 ### Remaining blind spots
 - Explicit proxy listeners are still blocking single-step proofs. Final runtime still needs bidirectional CONNECT stream tunneling, HTTP response streaming, asynchronous accept loops, and lifecycle supervision integrated with sandbox setup.
+
+## 2026-06-22 — Blocking explicit proxy host egress proof cycle
+
+### Behavior under work
+Add concrete host-socket explicit proxy egress for HTTP proxy forwarding and SOCKS5 CONNECT destinations, keeping host socket APIs outside `foxprox-core` while proving listener/frontend decisions can reach a real local TCP peer.
+
+### Expected evidence
+- HTTP proxy egress connects to a local host TCP listener and sends the parsed proxy request bytes after shared policy/audit allow.
+- SOCKS5 CONNECT egress opens a local host TCP connection for an allowed destination.
+- Missing or unavailable destinations fail closed via existing proxy egress error paths.
+
+## 2026-06-22 — Round-16 SOCKS hardening and explicit proxy egress proof
+
+### Commands run
+- `cargo fmt` — applied formatting for SOCKS hardening and explicit proxy egress proof.
+- `cargo test -p foxprox-core --all-targets --all-features` — passed, 104 core tests.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 21 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 104 core tests, 3 device tests, 21 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_core::proxy::tests::socks5_nonzero_reserved_byte_fails_closed_with_structured_detail ... ok`
+- `foxprox_egress::tests::blocking_socks5_proxy_server_fails_closed_for_truncated_connect_request ... ok`
+- `foxprox_egress::tests::blocking_socks5_proxy_server_rejects_nonzero_reserved_byte_without_forwarding ... ok`
+- `foxprox_egress::tests::blocking_socks5_proxy_server_rejects_unsupported_greeting ... ok`
+- `foxprox_egress::tests::blocking_explicit_proxy_http_egress_reaches_host_socket_after_policy ... ok`
+- `foxprox_egress::tests::blocking_explicit_proxy_socks_egress_opens_host_socket_after_policy ... ok`
+
+### Interpretation
+Round-16 blocker/high findings are fixed and the earlier clippy evidence overclaim is corrected by rerunning the full validation sequence successfully. SOCKS5 CONNECT parsing now rejects nonzero RSV bytes with stable `unsupported_socks_reserved` evidence. Unsupported greetings and truncated CONNECT reads no longer escape as unstructured listener errors: they fail closed with client-visible SOCKS failure replies, structured step evidence, and shared `unsupported_denied` audit records. The listener regression also proves malformed RSV requests do not forward to egress.
+
+The egress crate now includes `BlockingExplicitProxyEgress`, a concrete host-socket proof for explicit HTTP proxy forwarding and SOCKS5 CONNECT. Tests show allowed proxy requests reach a local host TCP peer only after shared policy/audit allow evidence has been recorded.
+
+### Changed files
+- `crates/foxprox-core/src/proxy.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Explicit proxy host egress is still blocking and proof-oriented: it does not yet stream bidirectional CONNECT bytes, relay host HTTP responses to clients, supervise async accept loops, or integrate listener lifecycle with bwrap/TUN setup.
