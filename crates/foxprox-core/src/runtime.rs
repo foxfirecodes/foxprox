@@ -235,6 +235,8 @@ impl RuntimeAuditFanIn {
                             )
                             .with_detail("source_sequence", record.sequence.to_string()),
                     );
+                    self.last_source_sequences
+                        .insert(source.clone(), last_sequence);
                     return Err(RuntimeAuditFanInError::AuditBackpressure {
                         source,
                         attempted_kind,
@@ -643,6 +645,35 @@ mod tests {
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].kind, AuditKind::NetworkSessionStart);
         assert_eq!(records[1].kind, AuditKind::DnsQueryDecision);
+    }
+
+    #[test]
+    fn runtime_audit_fan_in_backpressure_preserves_accepted_cursor() {
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 2);
+        let mut start = AuditRecord::new_at(AuditKind::NetworkSessionStart, "s1", 1_000);
+        start.sequence = 1;
+        let mut dns = AuditRecord::new_at(AuditKind::DnsQueryDecision, "s1", 1_010);
+        dns.sequence = 2;
+        let mut listener = AuditRecord::new_at(AuditKind::ProxyListenerConfigured, "s1", 1_020);
+        listener.sequence = 3;
+        let source_records = vec![start, dns, listener];
+
+        let error = fan_in.ingest("runtime", &source_records).unwrap_err();
+
+        assert_eq!(
+            error,
+            RuntimeAuditFanInError::AuditBackpressure {
+                source: "runtime".to_string(),
+                attempted_kind: AuditKind::ProxyListenerConfigured,
+            }
+        );
+        assert_eq!(fan_in.last_source_sequence("runtime"), 2);
+        let records: Vec<_> = fan_in.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::DnsQueryDecision);
+        assert_eq!(records[1].kind, AuditKind::AuditBackpressure);
+        assert_eq!(records[1].details["source"], "runtime");
+        assert_eq!(records[1].details["source_sequence"], "3");
     }
 
     #[test]

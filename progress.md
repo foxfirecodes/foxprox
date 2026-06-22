@@ -2095,3 +2095,28 @@ Addressed round-36 child-session terminality. If `RuntimeComponent::ChildProcess
 
 ### Remaining blind spots
 - `RuntimeAuditFanIn` is still an in-memory contract, not a concrete async writer shared by runtime tasks. Final runtime must wire lifecycle, listener, TUN/smoltcp, child, and cleanup tasks into one supervised sink with real backpressure propagation.
+
+## 2026-06-22 — Preserve fan-in cursor across partial backpressure
+
+### Commands run
+- `cargo fmt` — applied formatting for fan-in cursor fix.
+- `cargo test -p foxprox-core runtime::tests::runtime_audit_fan_in --all-targets --all-features` — passed, 3 fan-in tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 131 core tests, 3 device tests, 34 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_audit_fan_in_backpressure_preserves_accepted_cursor ... ok`
+- `runtime::tests::runtime_audit_fan_in_backpressure_is_observable ... ok`
+- `runtime::tests::runtime_audit_fan_in_ingests_sequence_ordered_sources ... ok`
+
+### Interpretation
+Addressed round-37 high finding. `RuntimeAuditFanIn::ingest` now persists the per-source cursor for records accepted before a later record hits audit backpressure. This preserves the skip-duplicates contract under bounded-ledger pressure while still returning structured `audit_backpressure` evidence for the blocked source sequence.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Fan-in is still a platform-independent contract only; concrete async runtime wiring must connect actual lifecycle, listener, TUN/smoltcp, child wait, join/cancel, cleanup, and audit sink tasks into this fail-closed pattern.

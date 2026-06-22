@@ -180,3 +180,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Child sessions require terminal status and fan-in needs backpressure proof
 
 - If a runtime session includes `child_process`, exiting without child status is not clean; it must emit `child_status=unknown` and fail closed. A runtime-level audit fan-in contract should ingest records by per-source sequence and surface fan-in backpressure as structured `audit_backpressure` evidence.
+
+## 2026-06-22 — Fan-in cursor updates must survive partial backpressure
+
+- Runtime audit fan-in batches can accept some source records before a later record hits bounded-ledger backpressure. Persist the last accepted source sequence before returning backpressure so retries skip already archived records instead of reattempting from a stale cursor.
