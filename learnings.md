@@ -133,3 +133,7 @@ DNS response builders should consume already-validated query metadata, preserve 
 ## 2026-06-21 - Broker DNS query policy requires configured broker destination
 
 Even validated DNS query metadata should be denied by direct-DNS bypass checks unless the destination IP is configured as a broker DNS server. Tests for DNS query policy normalization should include the broker DNS server in policy config so domain-rule behavior is exercised without weakening bypass prevention.
+
+## 2026-06-21 - DNS handler should separate malformed drops from validated denials
+
+Malformed DNS bytes may not contain a trustworthy transaction ID or question, so the safe core behavior is fail-closed audit plus drop. Once a query is strictly parsed, policy denials can synthesize bounded empty error responses such as REFUSED while preserving audit metadata.

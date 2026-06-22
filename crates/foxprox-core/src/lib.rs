@@ -9,6 +9,7 @@ pub mod attribution;
 pub mod audit;
 pub mod config;
 pub mod dns;
+pub mod dns_handler;
 pub mod flow;
 pub mod http;
 pub mod packet;
@@ -31,6 +32,7 @@ pub use dns::{
     DnsResponseObserveOutcome, DnsTransactionError, ObserveOutcome, PendingDnsObserveOutcome,
     PendingDnsObserveStatus, PendingDnsQuery, PendingDnsQueryTable,
 };
+pub use dns_handler::{handle_broker_dns_query, BrokerDnsQueryContext, BrokerDnsQueryOutcome};
 pub use flow::{
     UdpFlowClass, UdpFlowEntry, UdpFlowKey, UdpFlowObserveOutcome, UdpFlowObserveStatus,
     UdpFlowTable, UdpFlowTimeouts,

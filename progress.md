@@ -738,3 +738,25 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * direct-DNS bypass protection still runs before domain allow rules unless the destination is explicitly configured as a broker DNS server.
 * Audit evidence: unit tests assert DNS query type and attribution survive both DNS-specific and policy-derived audit event construction.
 * Residual risk: actual DNS handler wiring still needs to parse query packets, call policy, synthesize allow/deny responses, update pending transactions, and push audit records automatically.
+
+## 2026-06-21 - Broker DNS query decision helper
+
+* Invariant under work: broker DNS query handling must connect strict query parsing, normalized policy decisions, structured audit events, and bounded denial response synthesis through one fail-closed helper.
+* Threat or failure mode addressed: a future DNS socket loop could parse and decide in ad hoc steps, accidentally forwarding malformed queries, skipping audit, or denying without a bounded DNS response when query metadata is available.
+* Planned verification: add pure handler tests for allowed broker DNS forwarding, policy-denied refused responses, malformed query fail-closed drop/audit, response-size synthesis failure drop/audit, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Broker DNS query decision helper results
+
+* Tests added/updated:
+  * allowed broker DNS queries return a forward outcome with validated query metadata and allow audit preserving query type, broker destination, requested port, rule ID, and hostname attribution.
+  * denied broker DNS queries return bounded DNS `REFUSED` responses that round trip through the strict response parser and preserve deny audit evidence.
+  * malformed DNS query bytes fail closed with a drop outcome and structured malformed-input audit instead of forwarding or synthesizing ambiguous responses.
+  * denial response synthesis failures caused by too-small response bounds drop the packet while preserving the original audited deny decision and response build error.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 109 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * the core now has a single pure path connecting DNS wire parsing, DNS query policy normalization, policy decision, audit event construction, and denial response synthesis.
+  * malformed DNS input is never forwarded upstream and lacks a response unless a valid transaction/query can be parsed.
+  * policy-denied validated DNS queries receive refused responses when response bounds permit; otherwise they are dropped with audit evidence.
+* Audit evidence: handler tests assert allow, deny, and fail-closed audit decisions with DNS query type, endpoints, requested port, denial reason, and rule provenance.
+* Residual risk: this is still a pure core helper; no UDP socket loop, upstream DNS forwarding, pending transaction observation on forwarded queries, response-cache insertion, or audit-buffer push/drain integration exists yet.
