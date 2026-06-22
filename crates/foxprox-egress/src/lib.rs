@@ -1478,10 +1478,70 @@ pub enum ChildSupervisorError {
     WaitFailed,
 }
 
+impl ChildSupervisorError {
+    fn as_detail(&self) -> &'static str {
+        match self {
+            Self::SpawnFailed => "spawn_failed",
+            Self::WaitFailed => "wait_failed",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockingChildSessionOutcome {
+    Exited(RuntimeChildExit),
+    SupervisionError(ChildSupervisorError),
+}
+
+#[derive(Clone, Debug)]
+pub struct BlockingChildSession {
+    pub lifecycle: RuntimeLifecycleHarness,
+    pub outcome: BlockingChildSessionOutcome,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BlockingChildSupervisor;
 
 impl BlockingChildSupervisor {
+    pub fn run_session_to_exit<P, I, S>(
+        &mut self,
+        sandbox_id: impl Into<String>,
+        lifecycle_audit_capacity: usize,
+        program: P,
+        args: I,
+        start_ms: u64,
+        exit_ms: u64,
+    ) -> Result<BlockingChildSession, RuntimeLifecycleError>
+    where
+        P: AsRef<OsStr>,
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut lifecycle = RuntimeLifecycleHarness::new(sandbox_id, lifecycle_audit_capacity);
+        lifecycle.start(vec![RuntimeComponent::ChildProcess], start_ms)?;
+        let outcome = match self.run_to_exit(program, args) {
+            Ok(child_exit) => {
+                lifecycle.exit_with_cleanup_and_child(
+                    RuntimeExitStatus::Clean,
+                    RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::ChildProcess]),
+                    Some(child_exit.clone()),
+                    exit_ms,
+                )?;
+                BlockingChildSessionOutcome::Exited(child_exit)
+            }
+            Err(error) => {
+                lifecycle.record_child_supervision_error(error.as_detail(), exit_ms)?;
+                lifecycle.exit_with_cleanup(
+                    RuntimeExitStatus::Clean,
+                    RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::ChildProcess]),
+                    exit_ms,
+                )?;
+                BlockingChildSessionOutcome::SupervisionError(error)
+            }
+        };
+        Ok(BlockingChildSession { lifecycle, outcome })
+    }
+
     pub fn run_to_exit<P, I, S>(
         &mut self,
         program: P,
@@ -1692,6 +1752,43 @@ mod tests {
         assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
         assert_eq!(records[1].details["child_status"], "signaled");
         assert_eq!(records[1].details["child_signal"], "15");
+    }
+
+    #[test]
+    fn blocking_child_supervisor_session_spawn_failure_exits_fail_closed() {
+        let mut supervisor = BlockingChildSupervisor;
+        let session = supervisor
+            .run_session_to_exit(
+                "child-sandbox",
+                8,
+                "/definitely/not/a/real/foxprox-child",
+                std::iter::empty::<&str>(),
+                1_000,
+                1_010,
+            )
+            .unwrap();
+
+        assert_eq!(
+            session.outcome,
+            BlockingChildSessionOutcome::SupervisionError(ChildSupervisorError::SpawnFailed)
+        );
+        let records: Vec<_> = session.lifecycle.audit().records().collect();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].kind, AuditKind::NetworkSessionStart);
+        assert_eq!(records[1].kind, AuditKind::BrokerError);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(
+            records[1].details["runtime_error"],
+            "child_supervision_error"
+        );
+        assert_eq!(
+            records[1].details["child_supervision_error"],
+            "spawn_failed"
+        );
+        assert_eq!(records[2].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[2].decision, Some(Decision::FailClosed));
+        assert_eq!(records[2].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[2].details["child_status"], "unknown");
     }
 
     #[test]

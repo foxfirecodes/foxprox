@@ -2120,3 +2120,28 @@ Addressed round-37 high finding. `RuntimeAuditFanIn::ingest` now persists the pe
 
 ### Remaining blind spots
 - Fan-in is still a platform-independent contract only; concrete async runtime wiring must connect actual lifecycle, listener, TUN/smoltcp, child wait, join/cancel, cleanup, and audit sink tasks into this fail-closed pattern.
+
+## 2026-06-22 — Child supervisor session emits terminal failure on spawn error
+
+### Commands run
+- `cargo fmt` — applied formatting for blocking child session helper.
+- `cargo test -p foxprox-egress blocking_child_supervisor --all-targets --all-features` — passed, 5 blocking child supervisor tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 131 core tests, 3 device tests, 35 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_child_supervisor_session_spawn_failure_exits_fail_closed ... ok`
+- `tests::blocking_child_supervisor_spawn_failure_is_audited ... ok`
+- `tests::blocking_child_supervisor_signal_exit_is_fail_closed_in_lifecycle ... ok`
+
+### Interpretation
+Added `BlockingChildSupervisor::run_session_to_exit`, a concrete blocking proof that brackets child execution with lifecycle evidence. It starts the lifecycle before spawning, records structured `child_supervision_error` on spawn failure, and emits terminal `network_session_exit` that fail-closes with `child_status=unknown` when no child status exists. This closes the earlier overclaim where spawn failure evidence could stop at `broker_error` without terminal session exit.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This is still a blocking single-child proof. The final runtime still needs async child wait, task cancellation/join handling, TUN/smoltcp listener shutdown, and one shared audit sink with propagated backpressure.

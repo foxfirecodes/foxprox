@@ -184,3 +184,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Fan-in cursor updates must survive partial backpressure
 
 - Runtime audit fan-in batches can accept some source records before a later record hits bounded-ledger backpressure. Persist the last accepted source sequence before returning backpressure so retries skip already archived records instead of reattempting from a stale cursor.
+
+## 2026-06-22 — Supervised child proof should own start-to-exit evidence
+
+- A child supervisor proof is stronger when it owns the lifecycle: emit `network_session_start` before spawn, record structured `broker_error` on spawn/wait failure, and always emit terminal `network_session_exit`. Spawn failure must not leave only a running lifecycle plus broker error.
