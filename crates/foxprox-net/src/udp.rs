@@ -18,7 +18,9 @@ use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// Configuration for the UDP/DNS forwarding proof.
@@ -50,6 +52,8 @@ pub struct UdpDnsProofConfig {
     pub policy: PolicyRuleSet,
     /// Maximum queued audit events before UDP proof paths fail closed.
     pub audit_queue_capacity: usize,
+    /// Maximum simultaneous DNS/UDP host worker threads.
+    pub max_worker_threads: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -62,6 +66,64 @@ struct UdpForwardDatagram {
     socket: UdpForwardSocket,
     payload: Vec<u8>,
     metadata: udp::UdpMetadata,
+}
+
+#[derive(Clone)]
+struct WorkerLimiter {
+    max_workers: usize,
+    active: Arc<AtomicUsize>,
+}
+
+impl WorkerLimiter {
+    fn new(max_workers: usize) -> io::Result<Self> {
+        if max_workers == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "max worker threads must be non-zero",
+            ));
+        }
+        Ok(Self {
+            max_workers,
+            active: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    fn try_acquire(&self) -> Option<WorkerPermit> {
+        let mut current = self.active.load(Ordering::Acquire);
+        loop {
+            if current >= self.max_workers {
+                return None;
+            }
+            match self.active.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(WorkerPermit {
+                        active: Arc::clone(&self.active),
+                    })
+                }
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn active_count(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+struct WorkerPermit {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for WorkerPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 enum UdpWorkerResult {
@@ -98,6 +160,7 @@ impl UdpDnsProofConfig {
             udp_forward_timeout: Duration::from_secs(3),
             policy: PolicyRuleSet::default(),
             audit_queue_capacity: 8192,
+            max_worker_threads: 1024,
         }
     }
 }
@@ -117,6 +180,7 @@ where
     F: FnOnce() -> io::Result<()>,
 {
     let mut audit = audit_buffer(config.audit_queue_capacity)?;
+    let worker_limiter = WorkerLimiter::new(config.max_worker_threads)?;
     set_nonblocking(tun_fd.as_raw_fd())?;
     let raw_fd = tun_fd.into_raw_fd();
     let mut device = TunTapInterface::from_fd(raw_fd, Medium::Ip, config.mtu).map_err(|error| {
@@ -192,9 +256,14 @@ where
             }
         }
         for (payload, metadata) in received {
-            if let Err(error) =
-                handle_dns_datagram(&config, &mut audit, worker_tx.clone(), payload, metadata)
-            {
+            if let Err(error) = handle_dns_datagram(
+                &config,
+                &mut audit,
+                &worker_limiter,
+                worker_tx.clone(),
+                payload,
+                metadata,
+            ) {
                 eprintln!("foxprox-net: dns datagram handling failed: {error}");
             }
         }
@@ -220,6 +289,7 @@ where
                 &cache,
                 &mut udp_flows,
                 &mut audit,
+                &worker_limiter,
                 worker_tx.clone(),
                 UdpForwardDatagram {
                     socket: forward_socket,
@@ -366,6 +436,7 @@ fn handle_worker_results(
 fn handle_dns_datagram(
     config: &UdpDnsProofConfig,
     audit: &mut AuditBuffer,
+    worker_limiter: &WorkerLimiter,
     worker_tx: Sender<UdpWorkerResult>,
     payload: Vec<u8>,
     metadata: udp::UdpMetadata,
@@ -419,10 +490,15 @@ fn handle_dns_datagram(
     );
     emit_udp_audit(audit, &event, Decision::allow("broker-dns"))?;
 
+    let Some(permit) = worker_limiter.try_acquire() else {
+        eprintln!("foxprox-net: drop DNS query: worker limit reached");
+        return Ok(());
+    };
     let upstream = config.upstream_dns;
     let timeout = config.upstream_timeout;
     let sandbox_id = config.sandbox_id.clone();
     std::thread::spawn(move || {
+        let _permit = permit;
         let response = forward_dns_query(&payload, upstream, timeout);
         let cache_entries = response
             .as_ref()
@@ -447,6 +523,7 @@ fn handle_udp_forward_datagram(
     cache: &DnsCache,
     flows: &mut UdpFlowTable,
     audit: &mut AuditBuffer,
+    worker_limiter: &WorkerLimiter,
     worker_tx: Sender<UdpWorkerResult>,
     datagram: UdpForwardDatagram,
 ) -> io::Result<()> {
@@ -492,10 +569,15 @@ fn handle_udp_forward_datagram(
     if !decision.is_allowed() {
         return Ok(());
     }
+    let Some(permit) = worker_limiter.try_acquire() else {
+        eprintln!("foxprox-net: drop UDP forward: worker limit reached");
+        return Ok(());
+    };
     flows.record_sandbox_datagram(key, timeout_class, attribution, datagram.payload.len(), now);
 
     let timeout = config.udp_forward_timeout;
     std::thread::spawn(move || {
+        let _permit = permit;
         let response = forward_udp_datagram(
             &datagram.payload,
             SocketAddr::new(destination.ip, destination.port),
@@ -732,6 +814,7 @@ mod tests {
         assert!(config.upstream_timeout <= Duration::from_secs(5));
         assert!(config.udp_forward_timeout <= Duration::from_secs(3));
         assert!(config.audit_queue_capacity > 0);
+        assert!(config.max_worker_threads > 0);
     }
 
     #[test]
@@ -760,6 +843,26 @@ mod tests {
         assert!(!PolicyEngine::new(config.policy)
             .evaluate(&event)
             .is_allowed());
+    }
+
+    #[test]
+    fn worker_limiter_enforces_capacity_and_releases_on_drop() {
+        let limiter = WorkerLimiter::new(1).unwrap();
+        let permit = limiter.try_acquire().unwrap();
+        assert_eq!(limiter.active_count(), 1);
+        assert!(limiter.try_acquire().is_none());
+        drop(permit);
+        assert_eq!(limiter.active_count(), 0);
+        assert!(limiter.try_acquire().is_some());
+    }
+
+    #[test]
+    fn worker_limiter_rejects_zero_capacity() {
+        let error = match WorkerLimiter::new(0) {
+            Ok(_) => panic!("zero-capacity worker limiter unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]

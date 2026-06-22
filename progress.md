@@ -1137,6 +1137,46 @@
 - Current git status summary after commit: clean `autonomous-crew` branch.
 - Next exact action: implement bounded UDP/DNS worker limiter in `crates/foxprox-net/src/udp.rs` and CLI wiring.
 
+## 2026-06-22T00:21:43Z — UDP/DNS worker limit pending review
+
+- Current objective: commit UDP/DNS worker resource-limit enforcement.
+- Changes implemented:
+  - Added `max_worker_threads` to `UdpDnsProofConfig`, defaulting to 1024.
+  - Added `WorkerLimiter` with atomic active count and RAII `WorkerPermit` release on DNS/UDP worker thread exit.
+  - `run_udp_dns_proof_with_ready` validates non-zero max workers before TUN/smoltcp setup.
+  - Broker DNS path emits audit, then acquires a worker permit before spawning upstream DNS worker; worker exhaustion drops the query before upstream egress.
+  - UDP/QUIC forwarding emits audit, confirms policy allow, then acquires a worker permit before recording a UDP flow or spawning host UDP worker; worker exhaustion drops before host egress.
+  - CLI `proof-udp-dns` documents and parses `--max-workers` with non-zero validation.
+  - Tests cover worker limiter capacity/release, zero-capacity rejection, and bounded defaults.
+- Subagents/reviews requested: `udp-worker-limit-final` is running.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-net -p foxprox-cli -- --nocapture` passed: 20 net tests, 7 CLI tests.
+  - `cargo test --workspace` passed: 51 core tests, 9 device tests, 20 net tests, 26 proxy tests, 7 CLI tests, setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net` and `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-net/src/udp.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: UDP net/CLI/progress modified; review artifact pending.
+- Next exact action: read UDP/DNS worker-limit review, fix blockers if any, then commit.
+
+## 2026-06-22T00:23:03Z — UDP/DNS worker limit review passed
+
+- Current objective: commit UDP/DNS worker resource-limit enforcement.
+- Review result: `udp-worker-limit-final` found no blockers.
+- Confirmed behavior:
+  - `run_udp_dns_proof_with_ready` constructs `WorkerLimiter` before TUN setup or UDP socket binding, so zero max-workers rejects before setup.
+  - DNS path acquires a permit before spawning upstream DNS worker and before `forward_dns_query`; permit releases on worker exit.
+  - UDP forwarding path acquires a permit before recording UDP flow or running host egress, so exhaustion returns without flow recording or `forward_udp_datagram`.
+  - CLI usage/parsing includes `--max-workers` with non-zero validation.
+  - Tests cover bounded defaults and limiter capacity/release/zero rejection.
+  - No dependency creep.
+- Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed; reviewer also ran focused UDP and CLI tests successfully.
+- Files changed: `crates/foxprox-net/src/udp.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: UDP net/CLI/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit UDP/DNS worker limit, then address unsupported-path audit consistency.
+
 ## 2026-06-22T00:12:18Z — ICMP audit/cleanup rereview passed
 
 - Current objective: commit cleanup-safe setup socket binding plus ICMP proof audit coverage.
