@@ -844,3 +844,22 @@
 - Commit hash when committed: pending.
 - Remaining risks: no TCP sequence/retransmit handling, stream lifecycle hook, or smoltcp byte bridge feeds these per-flow buffers yet.
 - Exact next step: commit per-flow metadata buffers, then add TCP flow lifecycle audit outcomes for opened/closed/error events from the stack adapter boundary.
+
+## 2026-06-22T01:27:57Z
+- Current objective: resume immediately after mistakenly final-answering at a commit checkpoint.
+- Git status summary: clean worktree at resume.
+- Intended slice: add TCP flow lifecycle audit outcomes for opened/closed/error events from the stack adapter boundary, as recorded in the prior next step.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-core/src/kernel.rs`, `crates/foxprox-runtime/src/lib.rs`, `progress.md`, and `learnings.md` if the stop/resume mistake is recorded.
+- Remaining risks: this does not implement smoltcp byte bridging; it only makes lifecycle audit emission explicit and bounded by audit sink behavior.
+- Exact next step: add an audit emission method and runtime TCP lifecycle event handling tests.
+
+## 2026-06-22T01:33:05Z
+- Current objective: update implementation approach documentation to prevent stopping after commit checkpoints.
+- Files changed: `docs/implementation-approach-verification-kernel.md`, `learnings.md`, `progress.md`.
+- Verification commands run:
+  - Documentation-only change; no code verification required.
+- Observed result: implementation approach now explicitly says to immediately begin the next cycle after each successful commit and that a successful commit, clean verification run, or progress summary is never a stop condition by itself.
+- Commit hash when committed: pending.
+- Remaining risks: none for this documentation clarification.
+- Exact next step: commit this documentation clarification and wait for further instruction as requested.

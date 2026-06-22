@@ -32,3 +32,9 @@
 
 ## 2026-06-22T01:28:05Z
 - Explicit proxy runtime needs a resolution boundary: policy can evaluate hostname/origin metadata, but the current host egress trait still requires an IP endpoint, so this slice accepts a caller-resolved IP until DNS/egress resolution is integrated.
+
+## 2026-06-22T01:27:57Z
+- A verified commit is not a stopping point for this goal; after each commit the next progress-ledger step must be executed immediately unless a documented stop condition is hit.
+
+## 2026-06-22T01:33:05Z
+- The verification-kernel implementation approach now explicitly forbids user-facing checkpoint summaries after successful commits; a clean commit or verification run is never a stop condition by itself.

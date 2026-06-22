@@ -107,6 +107,8 @@ A commit is meaningful when it has:
 
 Use concise commit messages that name the verified behavior or invariant.
 
+After every successful commit, immediately begin the next cycle by selecting the next gap and updating `progress.md`. Do not send a user-facing summary, checkpoint report, or final answer unless a documented stop condition is met.
+
 ## Autonomy Rules
 
 Continue without asking for permission when the next step is consistent with `docs/arch.md`, `docs/initial-impl.md`, and the current verified state.
@@ -114,7 +116,7 @@ Continue without asking for permission when the next step is consistent with `do
 Autonomy means proceed by default. Pause only for decisions that are scope-changing, security-sensitive, hard to reverse, or explicitly outside the source docs. For ordinary implementation choices, choose the safest documented option, record the assumption in `progress.md`, and continue.
 
 
-A verified commit is a checkpoint, not a completion signal. After each meaningful commit, continue by selecting the next highest-value documented implementation or verification gap from `progress.md`, `learnings.md`, or the source docs.
+A verified commit is a checkpoint, not a completion signal. After each meaningful commit, continue by selecting the next highest-value documented implementation or verification gap from `progress.md`, `learnings.md`, or the source docs. A successful commit, clean verification run, or useful progress summary is never a stop condition by itself.
 
 Do not continue by making ledger-only, cosmetic, or speculative changes. Each loop must advance product code, tests, harnesses, verification coverage, or an explicitly required architecture boundary.
 
