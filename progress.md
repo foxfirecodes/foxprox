@@ -2466,3 +2466,30 @@ Also added `RuntimeAuditFanIn::drain_to_sink(...)`, a concrete sink-drain proof 
 
 ### Remaining blind spots
 - The fan-in drain proof is synchronous and in-memory. Final runtime still needs one async audit writer task and backpressure propagation from real task fan-in to lifecycle exit/cleanup.
+
+## 2026-06-22 — Add blocking runtime task-set proof
+
+### Commands run
+- `cargo fmt` — applied formatting for blocking runtime task-set proof.
+- `cargo test -p foxprox-egress blocking_runtime_task_set --all-targets --all-features` — passed, 3 blocking task-set tests.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed during targeted validation.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 146 core tests, 3 device tests, 41 egress tests, and 12 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed after full tests.
+
+### Evidence excerpts
+- `tests::blocking_runtime_task_set_feeds_clean_lifecycle_exit ... ok`
+- `tests::blocking_runtime_task_set_panic_is_join_failed ... ok`
+- `tests::blocking_runtime_task_set_rejects_duplicate_task_names ... ok`
+- `runtime::tests::runtime_task_supervisor_rejects_unknown_duplicate_names_and_duplicate_outcomes ... ok`
+
+### Interpretation
+Added `BlockingRuntimeTaskSet`, a concrete `std::thread`-backed proof that registered runtime task handles can derive lifecycle expectations and join reports from actual spawned work. Clean/completed and cancelled thread outcomes produce a clean lifecycle exit; a panicking thread maps to `RuntimeTaskStatus::JoinFailed` and fail-closes `network_session_exit`; duplicate task names are rejected through the core supervisor before spawning ambiguous tasks.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This is a blocking thread proof, not async runtime scheduling. Final runtime still needs actual listener/TUN/smoltcp/child tasks registered through the supervisor and drained through one shared audit fan-in path.

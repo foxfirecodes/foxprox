@@ -13,7 +13,8 @@ use foxprox_core::{
     ExplicitProxyFrontend, Frontend, HttpProxyRequestMetadata, NetworkEndpoint, PolicyRequest,
     Protocol, ProxyEgressError, ProxyParseError, RuntimeChildExit, RuntimeCleanupAction,
     RuntimeCleanupReport, RuntimeComponent, RuntimeExitStatus, RuntimeLifecycleError,
-    RuntimeLifecycleHarness, RuntimeListenerConfig, RuntimeTaskExpectation, RuntimeTaskJoinReport,
+    RuntimeLifecycleHarness, RuntimeListenerConfig, RuntimeTaskExpectation, RuntimeTaskHandle,
+    RuntimeTaskJoinReport, RuntimeTaskStatus, RuntimeTaskSupervisor, RuntimeTaskSupervisorError,
     SharedDnsCache, SocksConnectMetadata, TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
 };
 use std::ffi::OsStr;
@@ -22,6 +23,7 @@ use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -1512,6 +1514,49 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
     }
 }
 
+#[derive(Debug, Default)]
+pub struct BlockingRuntimeTaskSet {
+    supervisor: RuntimeTaskSupervisor,
+    tasks: Vec<(RuntimeTaskHandle, JoinHandle<RuntimeTaskStatus>)>,
+}
+
+impl BlockingRuntimeTaskSet {
+    pub fn new() -> Self {
+        Self {
+            supervisor: RuntimeTaskSupervisor::new(),
+            tasks: Vec::new(),
+        }
+    }
+
+    pub fn spawn_task<F>(
+        &mut self,
+        component: RuntimeComponent,
+        task_name: impl Into<String>,
+        task: F,
+    ) -> Result<RuntimeTaskHandle, RuntimeTaskSupervisorError>
+    where
+        F: FnOnce() -> RuntimeTaskStatus + Send + 'static,
+    {
+        let handle = self.supervisor.register_task(component, task_name)?;
+        self.tasks.push((handle, std::thread::spawn(task)));
+        Ok(handle)
+    }
+
+    pub fn expectations(&self) -> Vec<RuntimeTaskExpectation> {
+        self.supervisor.expectations()
+    }
+
+    pub fn join_all(mut self) -> RuntimeTaskJoinReport {
+        for (handle, task) in self.tasks {
+            let status = task.join().unwrap_or(RuntimeTaskStatus::JoinFailed);
+            self.supervisor
+                .record_outcome(handle, status)
+                .expect("joined task was registered once");
+        }
+        self.supervisor.join_report()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChildSupervisorError {
     SpawnFailed,
@@ -1747,6 +1792,114 @@ mod tests {
         fn flush(&mut self) -> IoResult<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn blocking_runtime_task_set_feeds_clean_lifecycle_exit() {
+        let mut task_set = BlockingRuntimeTaskSet::new();
+        task_set
+            .spawn_task(RuntimeComponent::DnsListener, "dns_accept_loop", || {
+                RuntimeTaskStatus::Completed
+            })
+            .unwrap();
+        task_set
+            .spawn_task(
+                RuntimeComponent::HttpProxyListener,
+                "http_accept_loop",
+                || RuntimeTaskStatus::Cancelled,
+            )
+            .unwrap();
+        let expectations = task_set.expectations();
+
+        let mut lifecycle = RuntimeLifecycleHarness::new("task-sandbox", 4);
+        lifecycle
+            .start_with_task_expectations(
+                vec![
+                    RuntimeComponent::DnsListener,
+                    RuntimeComponent::HttpProxyListener,
+                ],
+                expectations,
+                1_000,
+            )
+            .unwrap();
+        let report = task_set.join_all();
+        lifecycle
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![
+                    RuntimeCleanupAction::DnsListener,
+                    RuntimeCleanupAction::HttpProxyListener,
+                ]),
+                None,
+                Some(report),
+                1_100,
+            )
+            .unwrap();
+
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::Allow));
+        assert_eq!(records[1].details["task_join_status"], "complete");
+        assert_eq!(records[1].details["failed_runtime_task_count"], "0");
+        assert_eq!(records[1].details["missing_runtime_task_count"], "0");
+    }
+
+    #[test]
+    fn blocking_runtime_task_set_panic_is_join_failed() {
+        let mut task_set = BlockingRuntimeTaskSet::new();
+        task_set
+            .spawn_task(RuntimeComponent::DnsListener, "dns_accept_loop", || {
+                panic!("deterministic task panic")
+            })
+            .unwrap();
+        let expectations = task_set.expectations();
+
+        let mut lifecycle = RuntimeLifecycleHarness::new("task-sandbox", 4);
+        lifecycle
+            .start_with_task_expectations(vec![RuntimeComponent::DnsListener], expectations, 1_000)
+            .unwrap();
+        let report = task_set.join_all();
+        lifecycle
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::DnsListener]),
+                None,
+                Some(report),
+                1_100,
+            )
+            .unwrap();
+
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["task_join_status"], "failed");
+        assert_eq!(
+            records[1].details["runtime_tasks"],
+            "dns_listener:dns_accept_loop:join_failed"
+        );
+        assert_eq!(records[1].details["failed_runtime_task_count"], "1");
+    }
+
+    #[test]
+    fn blocking_runtime_task_set_rejects_duplicate_task_names() {
+        let mut task_set = BlockingRuntimeTaskSet::new();
+        task_set
+            .spawn_task(RuntimeComponent::DnsListener, "dns_accept_loop", || {
+                RuntimeTaskStatus::Completed
+            })
+            .unwrap();
+        assert_eq!(
+            task_set.spawn_task(RuntimeComponent::DnsListener, "dns_accept_loop", || {
+                RuntimeTaskStatus::Completed
+            }),
+            Err(RuntimeTaskSupervisorError::DuplicateTaskName {
+                component: RuntimeComponent::DnsListener,
+                task_name: "dns_accept_loop".to_string(),
+            })
+        );
+        let report = task_set.join_all();
+        assert_eq!(report.outcomes.len(), 1);
     }
 
     #[test]

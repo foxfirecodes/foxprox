@@ -236,3 +236,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 
 - If task join reports match outcomes to expectations by `(component, task_name)`, the task supervisor must reject duplicate registrations for that pair. Otherwise one outcome can satisfy multiple same-named expected tasks.
 - Runtime audit fan-in also needs a concrete drain-to-sink contract: successful drains should advance a drain cursor, and sink write failures should leave structured fail-closed evidence in the fan-in ledger.
+
+## 2026-06-22 — Blocking thread tasks can prove supervisor integration
+
+- A concrete blocking task-set proof can bridge the gap between abstract task reports and real handles: register task names, spawn threads, translate join success/panic into runtime task statuses, and feed the resulting report into lifecycle exit.
