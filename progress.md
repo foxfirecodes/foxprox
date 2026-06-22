@@ -1584,3 +1584,35 @@ The prior “Explicit proxy broker-DNS egress resolution” entry overclaimed su
 
 ### Remaining blind spots
 - Domain-based explicit proxy host egress still needs a per-request audited broker DNS resolution path with selected-IP/source/TTL evidence and audit-backpressure gating before TCP connect.
+
+## 2026-06-22 — Audit-gated explicit proxy DNS resolution
+
+### Commands run
+- `cargo fmt` — applied formatting for audit-gated proxy DNS resolution.
+- `cargo test -p foxprox-core --all-targets --all-features` — passed, 109 core tests.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 24 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 109 core tests, 3 device tests, 24 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_core::proxy_frontend::tests::http_proxy_domain_resolution_is_audited_before_egress ... ok`
+- `foxprox_core::proxy_frontend::tests::socks_domain_resolution_is_audited_before_egress ... ok`
+- `foxprox_egress::tests::blocking_explicit_proxy_http_domain_uses_frontend_broker_dns_resolution ... ok`
+- `foxprox_egress::tests::blocking_explicit_proxy_socks_egress_rejects_domain_without_host_dns ... ok`
+
+### Interpretation
+The round-19 compile/format blocker is fixed and the proxy domain path is now implemented at the correct boundary. Domain resolution happens in `ExplicitProxyFrontend` with a per-request timestamp and optional broker DNS cache, not inside host egress. The frontend appends `proxy_destination_resolved` evidence with `resolution_source=broker_dns`, `selected_ip`, DNS query type, TTL remaining, hostname attribution, and destination IP before policy evaluation and before socket egress. If no audited DNS cache entry exists, concrete egress remains fail-closed. Blocking HTTP proxy egress proves a domain request can reach a local TCP peer only after frontend broker-DNS resolution evidence and policy allow evidence are recorded.
+
+### Changed files
+- `crates/foxprox-core/src/flow.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-core/src/proxy.rs`
+- `crates/foxprox-core/src/proxy_frontend.rs`
+- `crates/foxprox-core/src/types.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The DNS cache is still passed into the frontend as a snapshot for these proofs. Final runtime must wire the live delivered-response DNS cache into proxy frontends and keep the per-request resolution audit/backpressure boundary while handling continuous expiry/retry/lifecycle.

@@ -15,6 +15,7 @@ pub struct HttpProxyRequestMetadata {
     pub path_query: String,
     pub is_connect: bool,
     pub attribution: HostnameAttribution,
+    pub resolved_destination_ip: Option<IpAddr>,
 }
 
 impl HttpProxyRequestMetadata {
@@ -26,7 +27,7 @@ impl HttpProxyRequestMetadata {
         };
         let mut request = PolicyRequest::new(sandbox_id, Frontend::HttpProxy, protocol)
             .with_destination(NetworkEndpoint {
-                ip: None,
+                ip: self.resolved_destination_ip,
                 port: Some(self.port),
             })
             .with_attribution(self.attribution)
@@ -135,6 +136,7 @@ pub fn parse_http_proxy_request(bytes: &[u8]) -> Result<HttpProxyRequestMetadata
                 AttributionSource::ExplicitProxyHost,
                 AttributionConfidence::High,
             ),
+            resolved_destination_ip: None,
         });
     }
 
@@ -158,6 +160,7 @@ pub fn parse_http_proxy_request(bytes: &[u8]) -> Result<HttpProxyRequestMetadata
             AttributionSource::ExplicitProxyHost,
             AttributionConfidence::High,
         ),
+        resolved_destination_ip: None,
     })
 }
 

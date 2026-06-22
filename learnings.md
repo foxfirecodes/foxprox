@@ -112,3 +112,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Proxy egress broker-DNS resolution boundary
 
 - Explicit proxy host egress can support domain destinations without libc DNS by resolving through `DnsCache::addresses_for_hostname` populated by delivered broker DNS observations. Without a live broker-DNS cache entry, domain proxy egress should fail closed rather than resolve on the host.
+
+## 2026-06-22 — Audit-gated proxy DNS resolution
+
+- Explicit proxy domain egress must resolve hostnames in the frontend with a per-request timestamp, append `proxy_destination_resolved` evidence containing selected IP/source/query type/TTL, and only then evaluate policy/open egress. Keeping resolution outside egress avoids hidden libc DNS and makes audit backpressure fail closed before sockets open.

@@ -37,7 +37,7 @@ pub use dns_handler::{
     parse_dns_response_addresses, DnsAnswerSummary, DnsBrokerHandler, DnsHandlerResult,
     DnsUpstream, DnsUpstreamError,
 };
-pub use flow::{DnsCache, FlowKey, FlowProtocol, UdpFlowManager, UdpTimeoutConfig};
+pub use flow::{DnsCache, DnsResolution, FlowKey, FlowProtocol, UdpFlowManager, UdpTimeoutConfig};
 pub use packet::{checksum, IpParseError, ParsedIpPacket};
 pub use policy::{
     Cidr, PolicyConfig, PolicyConfigError, PolicyDecision, PolicyEngine, PolicyRequest, PolicyRule,

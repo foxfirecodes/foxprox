@@ -288,6 +288,14 @@ impl DnsObservation {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsResolution {
+    pub hostname: String,
+    pub address: IpAddr,
+    pub query_type: String,
+    pub ttl_remaining_ms: u64,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DnsCache {
     by_ip: BTreeMap<IpAddr, Vec<DnsObservation>>,
@@ -374,6 +382,23 @@ impl DnsCache {
                         AttributionConfidence::Medium,
                     )
                 })
+        })
+    }
+
+    pub fn resolve_hostname(&self, hostname: &str, now_ms: u64) -> Option<DnsResolution> {
+        let hostname = crate::types::normalize_hostname(hostname);
+        self.by_ip.iter().find_map(|(address, observations)| {
+            observations.iter().rev().find_map(|observation| {
+                let age_ms = now_ms.saturating_sub(observation.observed_at_ms);
+                (observation.hostname == hostname && age_ms <= observation.ttl_ms).then(|| {
+                    DnsResolution {
+                        hostname: observation.hostname.clone(),
+                        address: *address,
+                        query_type: observation.query_type.clone(),
+                        ttl_remaining_ms: observation.ttl_ms.saturating_sub(age_ms),
+                    }
+                })
+            })
         })
     }
 

@@ -113,9 +113,9 @@ impl ExplicitProxyEgress for BlockingExplicitProxyEgress {
         bytes: &[u8],
     ) -> Result<(), ProxyEgressError> {
         let ip = request
-            .host
-            .parse::<IpAddr>()
-            .map_err(|_| ProxyEgressError::SendFailed)?;
+            .resolved_destination_ip
+            .or_else(|| request.host.parse::<IpAddr>().ok())
+            .ok_or(ProxyEgressError::SendFailed)?;
         let mut stream = self.connect_ip_literal(ip, request.port)?;
         stream
             .write_all(bytes)
@@ -422,7 +422,7 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
         now_ms: u64,
     ) -> Result<HttpProxyListenerStepResult, ProxyEgressError> {
         let request_len = request.len();
-        let result = self.frontend.handle_http_proxy_bytes(request);
+        let result = self.frontend.handle_http_proxy_bytes_at(request, now_ms);
         let (decision, reason, forwarded, egress_failed) = match result {
             Ok(result) => (result.decision, result.reason, result.forwarded, false),
             Err(ProxyEgressError::SendFailed) => (
@@ -760,7 +760,9 @@ impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
         writer: &mut W,
         now_ms: u64,
     ) -> Result<Socks5ListenerStepResult, ProxyEgressError> {
-        let result = self.frontend.handle_socks5_connect_bytes(request);
+        let result = self
+            .frontend
+            .handle_socks5_connect_bytes_at(request, now_ms);
         let (decision, reason, forwarded) = match result {
             Ok(result) => (result.decision, result.reason, result.forwarded),
             Err(ProxyEgressError::SendFailed) => (
@@ -935,7 +937,7 @@ fn socket_addr(endpoint: NetworkEndpoint) -> Option<SocketAddr> {
 mod tests {
     use super::*;
     use foxprox_core::{
-        BrokerCore, Cidr, Decision, DnsBrokerHandler, ExplicitProxyFrontend, FlowKey,
+        BrokerCore, Cidr, Decision, DnsBrokerHandler, DnsCache, ExplicitProxyFrontend, FlowKey,
         InMemoryExplicitProxyEgress, PolicyConfig, PolicyEngine, PolicyRule, Protocol,
         TcpForwarder, UdpForwarder, UdpTimeoutConfig,
     };
@@ -1389,6 +1391,91 @@ mod tests {
             "socks5_method_selection_send_failed"
         );
         assert_eq!(records[0].details["send_status"], "send_failed");
+    }
+
+    #[test]
+    fn blocking_explicit_proxy_http_domain_uses_frontend_broker_dns_resolution() {
+        let host_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let host_addr = host_listener.local_addr().unwrap();
+        let host_server = thread::spawn(move || {
+            let (mut stream, _) = host_listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 64];
+            loop {
+                let len = stream.read(&mut chunk).unwrap();
+                if len == 0 {
+                    break;
+                }
+                request.extend_from_slice(&chunk[..len]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .unwrap();
+            request
+        });
+        let mut cache = DnsCache::default();
+        cache.observe(
+            "proxy-egress-sandbox",
+            "Broker.TEST",
+            "A",
+            vec![host_addr.ip()],
+            4_000,
+            1_000,
+        );
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-http-domain")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Http)
+                .origin("http", "broker.test", host_addr.port()),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let frontend = ExplicitProxyFrontend::new(
+            "proxy-egress-sandbox",
+            broker,
+            BlockingExplicitProxyEgress::new(Duration::from_secs(1), Duration::from_secs(1), 1024),
+        )
+        .with_dns_cache(cache);
+        let mut proxy_server = BlockingHttpProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            frontend,
+            Duration::from_secs(1),
+            4096,
+        )
+        .unwrap();
+        let mut client = TcpStream::connect(proxy_server.local_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let request = format!(
+            "GET http://broker.test:{}/via-dns HTTP/1.1\r\nHost: broker.test:{}\r\n\r\n",
+            host_addr.port(),
+            host_addr.port()
+        );
+        client.write_all(request.as_bytes()).unwrap();
+
+        let step = proxy_server.handle_one(4_100).unwrap();
+        assert_eq!(step.decision, Decision::Allow);
+        assert!(step.forwarded);
+        assert_eq!(step.send_status, "sent");
+        let host_request = host_server.join().unwrap();
+        assert!(std::str::from_utf8(&host_request)
+            .unwrap()
+            .contains("/via-dns"));
+        let records: Vec<_> = proxy_server.frontend().broker().audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::ProxyDestinationResolved);
+        assert_eq!(records[0].details["resolution_source"], "broker_dns");
+        assert_eq!(records[0].details["selected_ip"], "127.0.0.1");
+        assert_eq!(records[0].details["ttl_remaining_ms"], "900");
+        assert_eq!(records[1].kind, AuditKind::HttpRequestDecision);
+        assert_eq!(
+            records[1].destination.as_ref().unwrap().ip,
+            Some(host_addr.ip())
+        );
     }
 
     #[test]
