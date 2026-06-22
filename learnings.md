@@ -228,3 +228,7 @@ After `foxproxsetup` drops setup capabilities, `ping` may fail because the targe
 ## 2026-06-22 — fd handoff tests need read/write fd stand-ins
 
 SCM_RIGHTS can transfer a write-only descriptor successfully, but broker-side read evidence will fail with `Bad file descriptor`. Use read/write fd stand-ins when the test needs to verify the broker can consume received setup fds.
+
+## 2026-06-22 — keep privileged namespace smoke tests ignored but runnable
+
+For bwrap/TUN proofs that depend on host kernel features and `/dev/net/tun`, add ignored integration tests and run them explicitly during vertical-evidence work. Default workspace tests should compile them but not require privileged namespace support.

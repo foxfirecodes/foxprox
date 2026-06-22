@@ -1236,3 +1236,24 @@
 - What failed or surprised the agent: the fd stand-in must be opened read/write before handoff; a write-only file descriptor transfers successfully but fails broker-side readback.
 - What remains unproven: spawning bwrap from a Rust launcher while the listener is active, and directly connecting the accepted live TUN fd to the broker packet loop in-process.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — codify live bwrap setup smoke test slice
+
+- Slice attempted: turn the manual live bwrap/foxproxsetup proof into an ignored Rust smoke test that future developers can run explicitly.
+- Why next: live setup evidence is valuable but easy to lose if it only lives in `progress.md`; an ignored test preserves the exact proof shape without making default workspace tests depend on bwrap/user namespaces.
+- Verification plan: add an ignored Linux integration test that runs `foxproxsetup` inside bwrap, sends UDP from the target namespace, receives the TUN fd on the Rust broker control listener, and reads the target-generated packet; run the ignored test explicitly plus default workspace checks.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — codified live bwrap setup smoke test
+
+- Slice attempted: turn the manual live bwrap/foxproxsetup proof into an ignored Rust smoke test that future developers can run explicitly.
+- Why next: live setup evidence is valuable but easy to lose if it only lives in `progress.md`; an ignored test preserves the exact proof shape without making default workspace tests depend on bwrap/user namespaces.
+- What changed: added `crates/foxprox-cli/tests/live_bwrap_setup.rs`, an ignored Linux integration test that runs `foxproxsetup` inside bwrap with temporary `CAP_NET_ADMIN`, sends UDP from the target namespace, receives the setup fd on the Rust `BrokerControlListener`, and reads the target-generated IPv4 UDP packet from `TunPacketIo`.
+- Verification:
+  - Explicit live smoke passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed; the live smoke test compiled and was reported ignored by default.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; the prior manual proof translated cleanly once the Rust broker control listener existed.
+- What remains unproven: live write-back/reply into the bwrap namespace and TCP forwarding through a userspace stack.
+- Commit: this commit.
