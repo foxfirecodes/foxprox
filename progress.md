@@ -1041,3 +1041,16 @@
 - Recent structural commit hashes: HTTP reader extraction `a6ebbd0`; packet dispatcher `6cfa9b4`; packet device interface `9af9166`.
 - Next verification gap: commit this full verification record. Further work is now larger production broker lifecycle design/implementation rather than small harness-backed extraction.
 - Commit hash after commit: pending.
+
+## 2026-06-22T10:35:00Z — Reusable transparent broker orchestration crate
+
+- Command executed: `cargo fmt --all && cargo test -p foxprox-broker`; follow-up: `cargo fmt --all && cargo test --all`
+- Environment assumptions: broker orchestration tests are deterministic in-memory packet fixtures with mock egress; no Linux/TUN privileges or external network required.
+- Expected result: add a `foxprox-broker` crate that composes reusable core DNS/UDP/TCP/ICMP runtimes behind a one-packet-at-a-time transparent broker loop, using the core dispatcher and preserving audit records for bounded flushing.
+- Observed result: pass. New `foxprox-broker` crate has 2 tests. Full workspace tests passed (`foxprox-broker` 2, `foxprox-core` 64, `foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4).
+- Relevant output excerpt: `broker_dispatches_udp_to_egress_and_returns_device_packet ... ok`; `broker_dns_answer_attributes_later_udp_flow ... ok`.
+- Changed files: `Cargo.toml`, `crates/foxprox-broker/{Cargo.toml,src/lib.rs}`, `progress.md`.
+- Interpretation: production factoring now includes a broker orchestration crate that can drive reusable runtime boundaries from TUN packets without embedding the decision in the CLI harness. This is a synchronous foundation for future async device loops.
+- Recent verification record commit hash: `dbe5d86`.
+- Next verification gap: commit broker crate; then wire at least one environment smoke through `foxprox-broker::TransparentBroker` if it can be done without destabilizing the current harness.
+- Commit hash after commit: pending.
