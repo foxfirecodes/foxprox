@@ -839,3 +839,15 @@
 - Interpretation: explicit proxy allow and HTTP-deny paths now share the reusable runtime boundary. Remaining malformed CONNECT request-line parsing is still a CLI helper because it extracts the CONNECT target from raw HTTP headers before target policy evaluation.
 - Next verification gap: commit runtime factoring work and run a final post-factoring smoke subset.
 - Commit hash after commit: pending.
+
+## 2026-06-22T05:50:00Z — Post explicit-proxy-runtime verification sweep
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run http-proxy-smoke >/tmp/foxprox-http-proxy-runtime.jsonl && cargo run -p foxprox-cli --bin foxprox-lab -- run https-connect-smoke >/tmp/foxprox-connect-runtime.jsonl && cargo run -p foxprox-cli --bin foxprox-lab -- run socks5-smoke >/tmp/foxprox-socks-runtime.jsonl && cargo run -p foxprox-cli --bin foxprox-lab -- run proxy-deny-smoke >/tmp/foxprox-proxy-deny-runtime.jsonl && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run dns-attribution-smoke >/tmp/foxprox-dns-attr-runtime.jsonl && target/debug/foxprox-lab run tcp-bridge-smoke >/tmp/foxprox-tcp-bridge-runtime.jsonl && target/debug/foxprox-lab run tcp-bridge-deny-smoke >/tmp/foxprox-tcp-deny-runtime.jsonl`
+- Environment assumptions: local explicit proxy smokes use loopback fixtures; bwrap/TUN smokes use local fd handoff and sandbox Python; no external network services.
+- Expected result: explicit proxy runtime factoring and prior TCP/DNS runtime factoring do not regress core tests or key smoke behavior.
+- Observed result: pass. `foxprox-core` ran 56 tests; `foxprox-cli` ran 2 tests; `foxproxsetup` ran 7 tests. Explicit proxy allow/deny smokes, DNS attribution smoke, and TCP bridge allow/deny smokes all completed.
+- Relevant output excerpt: `OK`; proxy deny retained `"egress_calls":"0"`; TCP bridge retained `"decision":"allow"`, `"egress_calls":"1"`, and `"inspection_decision":"allow"`.
+- Changed files: `progress.md`.
+- Interpretation: core runtime factoring has preserved the harness-backed alpha behavior across transparent and explicit proxy paths.
+- Next verification gap: commit verification evidence; remaining next step is structural crate decomposition or production async/device integration beyond the current core/CLI split.
+- Commit hash after commit: pending.
