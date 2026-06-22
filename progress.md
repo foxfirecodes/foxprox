@@ -1042,5 +1042,5 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-runtime` — bounded bridge memory remains runtime-owned.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 9f8c4d2.
 - Remaining boundary risks: per-sandbox/global limits, async wakeups, and teardown policy for exceeded limits remain.
