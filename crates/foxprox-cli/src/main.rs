@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use std::os::unix::net::UnixListener;
 
 use foxprox_core::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
-use foxprox_core::dns::{parse_dns_query, synthesize_a_response};
 use foxprox_core::egress::{EgressBackend, EgressOutcome, EgressRequest};
 use foxprox_core::origin::{
     parse_connect_target, parse_http_request, parse_socks5_connect_request,
@@ -1154,6 +1153,7 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
     let answer_ip = "203.0.113.77"
         .parse()
         .map_err(|err| format!("invalid DNS attribution answer IP: {err}"))?;
+    let mut dns_runtime = TransparentDnsRuntime::new([("lab.example".to_string(), answer_ip)]);
     let policy = PolicyEngine::new(
         PolicyConfig::deny_by_default().with_rule(
             PolicyRule::new("allow-dns-attributed-example", RuleAction::Allow)
@@ -1187,18 +1187,14 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
                     Err(_) => continue,
                 };
                 if udp.destination_port == 53 {
-                    let query = parse_dns_query(udp.payload)?;
-                    let dns_response = synthesize_a_response(udp.payload, answer_ip, 60)?;
-                    let reply = foxprox_core::packet::synthesize_udp_reply(packet, &dns_response)?;
-                    fd_handoff::write_all_fd(fd, &reply)?;
-                    runtime.dns_cache.observe_response(
-                        &query.hostname,
-                        [std::net::IpAddr::V4(answer_ip)],
-                        1,
-                        60,
-                    )?;
-                    runtime.now_tick = 2;
-                    dns_answered = true;
+                    if let Some(reply) =
+                        dns_runtime.handle_ipv4_packet("dns-attribution-smoke", packet)?
+                    {
+                        fd_handoff::write_all_fd(fd, &reply)?;
+                        runtime.dns_cache = dns_runtime.dns_cache.clone();
+                        runtime.now_tick = 2;
+                        dns_answered = true;
+                    }
                 } else if let Some(reply) =
                     runtime.handle_ipv4_packet("dns-attribution-smoke", packet)?
                 {

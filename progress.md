@@ -779,3 +779,15 @@
 - Interpretation: DNS broker-local behavior is now factored out of CLI smoke code into the reusable runtime layer, leaving fd IO and process lifecycle in the harness.
 - Next verification gap: migrate DNS attribution smoke to the DNS runtime or begin dedicated crate decomposition.
 - Commit hash after commit: pending.
+
+## 2026-06-22T04:40:00Z — DNS attribution smoke uses DNS runtime
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run dns-attribution-smoke`
+- Environment assumptions: bwrap/TUN fd handoff works locally; sandbox Python performs a raw DNS A query followed by a UDP datagram to the returned IP; all egress is local fixture traffic.
+- Expected result: one-session DNS attribution smoke should use `TransparentDnsRuntime` for the DNS packet, transfer its cache into `TransparentUdpRuntime`, and still allow the subsequent domain-attributed UDP flow.
+- Observed result: pass. Workspace tests remained green (`foxprox-core` 54, `foxprox-cli` 2, `foxproxsetup` 7). `dns-attribution-smoke` emitted `decision":"allow"`, `dns_answered":"true"`, `forwarded":"true"`, and `attributed_hostname":"lab.example"`.
+- Relevant output excerpt: `"rule_id":"allow-dns-attributed-example"`; `"destination":"203.0.113.77:5354","hostname":"lab.example"`; `"status":"exit status: 0"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: both standalone DNS and DNS-attribution smokes now use the reusable DNS runtime boundary, further reducing CLI-only broker behavior.
+- Next verification gap: final review after runtime factoring; remaining work is likely crate decomposition and production async/resource hardening.
+- Commit hash after commit: pending.
