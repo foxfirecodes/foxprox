@@ -108,3 +108,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 
 - Setup execution reports must emit `tun_configured` before any target `exec`; an actual exec cannot return to produce audit evidence. Keep target command separate from setup steps and mark it ready only after setup/drop steps finish.
 - Blocking explicit proxy host egress must not call host name resolution for proxy domain destinations. Domain CONNECT/HTTP forwarding should fail closed or be resolved through an audited broker DNS path before host TCP connect.
+
+## 2026-06-22 — Proxy egress broker-DNS resolution boundary
+
+- Explicit proxy host egress can support domain destinations without libc DNS by resolving through `DnsCache::addresses_for_hostname` populated by delivered broker DNS observations. Without a live broker-DNS cache entry, domain proxy egress should fail closed rather than resolve on the host.

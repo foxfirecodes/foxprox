@@ -376,6 +376,21 @@ impl DnsCache {
                 })
         })
     }
+
+    pub fn addresses_for_hostname(&self, hostname: &str, now_ms: u64) -> Vec<IpAddr> {
+        let hostname = crate::types::normalize_hostname(hostname);
+        let mut addresses = Vec::new();
+        for (address, observations) in &self.by_ip {
+            if observations.iter().rev().any(|observation| {
+                observation.hostname == hostname
+                    && now_ms.saturating_sub(observation.observed_at_ms) <= observation.ttl_ms
+            }) && !addresses.contains(address)
+            {
+                addresses.push(*address);
+            }
+        }
+        addresses
+    }
 }
 
 #[cfg(test)]
@@ -410,6 +425,36 @@ mod tests {
         assert_eq!(expired[0].byte_counts.as_ref().unwrap().from_sandbox, 1200);
         assert_eq!(expired[0].byte_counts.as_ref().unwrap().to_sandbox, 900);
         assert!(manager.is_empty());
+    }
+
+    #[test]
+    fn dns_cache_resolves_hostname_to_unexpired_observed_addresses() {
+        let mut cache = DnsCache::default();
+        cache.commit_observation(DnsObservation::new(
+            "Example.COM",
+            "A",
+            vec!["93.184.216.34".parse().unwrap()],
+            1_000,
+            500,
+        ));
+        cache.commit_observation(DnsObservation::new(
+            "expired.example",
+            "A",
+            vec!["203.0.113.9".parse().unwrap()],
+            1_000,
+            10,
+        ));
+
+        assert_eq!(
+            cache.addresses_for_hostname("example.com", 1_100),
+            vec!["93.184.216.34".parse::<IpAddr>().unwrap()]
+        );
+        assert!(cache
+            .addresses_for_hostname("expired.example", 1_100)
+            .is_empty());
+        assert!(cache
+            .addresses_for_hostname("missing.example", 1_100)
+            .is_empty());
     }
 
     #[test]

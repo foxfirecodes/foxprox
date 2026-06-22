@@ -1529,3 +1529,30 @@ Round-17 high findings are fixed. `SetupHelperPlan` now keeps target execution o
 ### Remaining blind spots
 - Domain-based explicit proxy host egress needs an audited broker DNS resolution path before TCP connect.
 - Setup execution remains an injectable harness, not real Linux `/dev/net/tun` creation, fd passing, or target exec.
+
+## 2026-06-22 — Explicit proxy broker-DNS egress resolution
+
+### Commands run
+- `cargo fmt` — applied formatting for broker-DNS proxy egress resolution.
+- `cargo test -p foxprox-core --all-targets --all-features` — passed, 107 core tests.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 24 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 107 core tests, 3 device tests, 24 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_core::flow::tests::dns_cache_resolves_hostname_to_unexpired_observed_addresses ... ok`
+- `foxprox_egress::tests::blocking_explicit_proxy_socks_domain_uses_broker_dns_cache_after_policy ... ok`
+- `foxprox_egress::tests::blocking_explicit_proxy_socks_egress_rejects_domain_without_host_dns ... ok`
+
+### Interpretation
+Explicit proxy host egress now has a broker-DNS resolution proof without falling back to libc host DNS. `DnsCache` can return unexpired observed addresses for a hostname, and `BlockingExplicitProxyEgress` can be configured with that cache/time to resolve domain proxy destinations before host TCP connect. A SOCKS domain CONNECT regression proves an allowed hostname reaches a local TCP peer through the broker-DNS cache, while the no-cache regression continues to fail closed with structured `proxy_egress_send_failed` evidence instead of performing host DNS.
+
+### Changed files
+- `crates/foxprox-core/src/flow.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The proof uses a snapshot cache/time. Final async runtime must wire the live DNS broker cache into explicit proxy egress and handle cache expiry/retry/lifecycle continuously.

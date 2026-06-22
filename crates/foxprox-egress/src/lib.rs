@@ -9,7 +9,7 @@
 
 use foxprox_core::{
     malformed_proxy_request, AuditKind, AuditRecord, BrokerRuntimeConfig, Decision, DenialReason,
-    DnsBrokerHandler, DnsHandlerResult, DnsQueryMetadata, DnsUpstream, DnsUpstreamError,
+    DnsBrokerHandler, DnsCache, DnsHandlerResult, DnsQueryMetadata, DnsUpstream, DnsUpstreamError,
     ExplicitProxyEgress, ExplicitProxyFrontend, Frontend, HttpProxyRequestMetadata,
     NetworkEndpoint, PolicyRequest, Protocol, ProxyEgressError, ProxyParseError,
     SocksConnectMetadata, TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
@@ -75,6 +75,7 @@ pub struct BlockingExplicitProxyEgress {
     connect_timeout: Duration,
     io_timeout: Duration,
     max_response_bytes: usize,
+    broker_dns_cache: Option<(DnsCache, u64)>,
 }
 
 impl BlockingExplicitProxyEgress {
@@ -83,7 +84,28 @@ impl BlockingExplicitProxyEgress {
             connect_timeout,
             io_timeout,
             max_response_bytes,
+            broker_dns_cache: None,
         }
+    }
+
+    pub fn with_broker_dns_cache(mut self, cache: DnsCache, now_ms: u64) -> Self {
+        self.broker_dns_cache = Some((cache, now_ms));
+        self
+    }
+
+    fn resolve_host_ip(&self, host: &str) -> Result<IpAddr, ProxyEgressError> {
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return Ok(ip);
+        }
+        self.broker_dns_cache
+            .as_ref()
+            .and_then(|(cache, now_ms)| {
+                cache
+                    .addresses_for_hostname(host, *now_ms)
+                    .into_iter()
+                    .next()
+            })
+            .ok_or(ProxyEgressError::SendFailed)
     }
 
     fn connect_ip_literal(&self, ip: IpAddr, port: u16) -> Result<TcpStream, ProxyEgressError> {
@@ -112,10 +134,7 @@ impl ExplicitProxyEgress for BlockingExplicitProxyEgress {
         request: &HttpProxyRequestMetadata,
         bytes: &[u8],
     ) -> Result<(), ProxyEgressError> {
-        let ip = request
-            .host
-            .parse::<IpAddr>()
-            .map_err(|_| ProxyEgressError::SendFailed)?;
+        let ip = self.resolve_host_ip(&request.host)?;
         let mut stream = self.connect_ip_literal(ip, request.port)?;
         stream
             .write_all(bytes)
@@ -135,6 +154,9 @@ impl ExplicitProxyEgress for BlockingExplicitProxyEgress {
         _bytes: &[u8],
     ) -> Result<(), ProxyEgressError> {
         let stream = if let Some(ip) = request.destination_ip {
+            self.connect_ip_literal(ip, request.destination_port)?
+        } else if let Some(host) = request.destination_host.as_deref() {
+            let ip = self.resolve_host_ip(host)?;
             self.connect_ip_literal(ip, request.destination_port)?
         } else {
             return Err(ProxyEgressError::SendFailed);
@@ -1116,6 +1138,90 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, AuditKind::HttpRequestDecision);
         assert_eq!(records[0].decision, Some(Decision::Allow));
+    }
+
+    #[test]
+    fn blocking_explicit_proxy_socks_domain_uses_broker_dns_cache_after_policy() {
+        let host_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let host_addr = host_listener.local_addr().unwrap();
+        let host_server = thread::spawn(move || host_listener.accept().unwrap().1);
+
+        let mut dns_cache = DnsCache::default();
+        dns_cache.observe(
+            "proxy-egress-sandbox",
+            "Broker.TEST",
+            "A",
+            vec![host_addr.ip()],
+            4_000,
+            1_000,
+        );
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-socks-domain")
+                .frontend(Frontend::Socks5Proxy)
+                .protocol(Protocol::Socks)
+                .hostname("broker.test")
+                .destination_port(host_addr.port()),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let frontend = ExplicitProxyFrontend::new(
+            "proxy-egress-sandbox",
+            broker,
+            BlockingExplicitProxyEgress::new(Duration::from_secs(1), Duration::from_secs(1), 1024)
+                .with_broker_dns_cache(dns_cache, 4_100),
+        );
+        let mut proxy_server = BlockingSocks5ProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            frontend,
+            Duration::from_secs(1),
+            4096,
+        )
+        .unwrap();
+        let mut response = Vec::new();
+        let request = [
+            0x05,
+            0x01,
+            0x00,
+            0x03,
+            11,
+            b'b',
+            b'r',
+            b'o',
+            b'k',
+            b'e',
+            b'r',
+            b'.',
+            b't',
+            b'e',
+            b's',
+            b't',
+            (host_addr.port() >> 8) as u8,
+            host_addr.port() as u8,
+        ];
+
+        let step = proxy_server
+            .handle_socks5_connect_request(
+                "127.0.0.1:43210".parse().unwrap(),
+                3,
+                &request,
+                &mut response,
+                4_100,
+            )
+            .unwrap();
+        assert_eq!(step.decision, Decision::Allow);
+        assert!(step.forwarded);
+        assert_eq!(step.reply_code, 0x00);
+        assert_eq!(response, socks5_connect_response(0x00));
+        let accepted_peer = host_server.join().unwrap();
+        assert_eq!(
+            accepted_peer.ip(),
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap()
+        );
+        let records: Vec<_> = proxy_server.frontend().broker().audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::SocksConnectDecision);
+        assert_eq!(records[0].decision, Some(Decision::Allow));
+        assert_eq!(records[0].hostname.as_deref(), Some("broker.test"));
     }
 
     #[test]
