@@ -1,0 +1,21 @@
+[package]
+name = "foxprox-runtime"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+foxprox-audit = { path = "../foxprox-audit" }
+foxprox-core = { path = "../foxprox-core" }
+foxprox-device = { path = "../foxprox-device" }
+foxprox-egress = { path = "../foxprox-egress" }
+foxprox-net = { path = "../foxprox-net" }
+foxprox-policy = { path = "../foxprox-policy" }
+
+[dev-dependencies]
+foxprox-packet = { path = "../foxprox-packet" }

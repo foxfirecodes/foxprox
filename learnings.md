@@ -163,3 +163,8 @@
 
 - A generic `Read + Write` packet device can prove opaque TUN-style packet IO without unsafe code or kernel setup, leaving Linux TUN creation/fd handoff as a later device-backend expansion.
 - Device IO should reject empty and oversized packets at the device boundary so policy/audit never need raw packet buffer validation.
+
+## 2026-06-21 — One-step device packet runtime
+
+- A small runtime crate can own orchestration across device, packet, policy, audit, and egress contracts without pushing device or raw packet types down into policy/audit.
+- Writing outbound packets back through `DevicePacket` preserves opaque device IO even when `foxprox-net` returns synthesized packet bytes.

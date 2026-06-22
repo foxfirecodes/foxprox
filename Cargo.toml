@@ -12,6 +12,7 @@ members = [
     "crates/foxprox-net",
     "crates/foxprox-packet",
     "crates/foxprox-policy",
+    "crates/foxprox-runtime",
 ]
 resolver = "2"
 

@@ -694,3 +694,27 @@
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
 - Commit hash after commit: 757c2b6.
 - Remaining boundary risks: Linux TUN creation/ioctl, fd handoff, async readiness, and namespace setup remain.
+
+## 2026-06-21 — Boundary objective: one-step device packet runtime
+
+- Boundary under work: runtime orchestration that reads one opaque IPv4 packet from a device, applies normalized packet policy/audit/egress handling, and writes opaque outbound packets back to the device.
+- Allowed dependency direction: `foxprox-runtime` may depend on device, core, net, policy, audit, and egress; policy/audit/core must not depend on runtime or device types.
+- Dependency-risk assessment: device loops can become a dumping ground for raw packet and policy shortcuts. Keep the loop as orchestration over existing contracts and require outbound write-back to pass through opaque device packets.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency tree checks for runtime plus policy/audit.
+- Observed results: added `foxprox-runtime` with `process_one_ipv4_device_packet`, wiring `PacketDevice` reads into `foxprox-net` packet handling and writing opaque outbound packets back to the device. Mock test proves an allowed ICMP echo request is audited and written back through the device. All verification passed.
+- Changed files:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `crates/foxprox-runtime/Cargo.toml`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 78 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime depends on device/core/net/policy/audit/egress with packet as a dev-dependency only for checksum fixtures.
+  - `cargo tree -p foxprox-policy` — policy depends only on `foxprox-core`.
+  - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: continuous async event loop, real TUN fd readiness, smoltcp TCP stream integration, and Linux setup remain.

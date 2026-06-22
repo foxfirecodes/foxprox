@@ -84,3 +84,16 @@ version = "0.1.0"
 dependencies = [
  "foxprox-core",
 ]
+
+[[package]]
+name = "foxprox-runtime"
+version = "0.1.0"
+dependencies = [
+ "foxprox-audit",
+ "foxprox-core",
+ "foxprox-device",
+ "foxprox-egress",
+ "foxprox-net",
+ "foxprox-packet",
+ "foxprox-policy",
+]
