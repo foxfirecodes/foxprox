@@ -124,3 +124,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Runtime lifecycle ledger boundary
 
 - Runtime lifecycle supervision should emit `network_session_start` before components run and `network_session_exit` on clean or failed shutdown. If exit evidence is backpressured, preserve `audit_backpressure` and treat the lifecycle result as fail-closed.
+
+## 2026-06-22 — Delivery-gated shared DNS cache
+
+- Shared DNS cache publication must happen after the DNS listener successfully sends the response to the sandbox client. Handler-level query processing should return a pending observation and audit evidence, but must not publish it to shared proxy-visible cache before delivery.

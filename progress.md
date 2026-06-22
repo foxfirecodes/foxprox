@@ -1717,3 +1717,30 @@ The core now has a platform-independent runtime lifecycle ledger harness. Runtim
 
 ### Remaining blind spots
 - This is a lifecycle ledger harness, not an async process/task supervisor. Final runtime must attach real listener tasks, TUN fd loops, child process exit status, and cleanup actions to this lifecycle boundary.
+
+## 2026-06-22 — Round-23 delivery-gated shared DNS cache fix
+
+### Commands run
+- `cargo fmt` — applied formatting for delivery-gated shared DNS cache fix.
+- `cargo test -p foxprox-core --all-targets --all-features` — passed, 116 core tests.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 26 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 116 core tests, 3 device tests, 26 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_core::dns_handler::tests::shared_dns_cache_feeds_proxy_resolution_after_delivered_query ... ok`
+- `foxprox_egress::tests::blocking_dns_send_failure_does_not_publish_to_shared_proxy_cache ... ok`
+- `foxprox_egress::tests::blocking_dns_send_failure_rolls_back_only_latest_duplicate_observation ... ok`
+
+### Interpretation
+Round-23 blocker is fixed. DNS handler query processing now returns a pending observation without publishing it to the shared DNS cache. `BlockingDnsBrokerServer` commits the observation only after a successful client send, preserving delivery-gated attribution semantics for proxy frontends sharing that cache. A send-failure regression proves failed DNS delivery does not publish to shared cache and a proxy using that cache cannot resolve the domain; the duplicate failure regression still proves prior delivered attribution survives later failed duplicate responses.
+
+### Changed files
+- `crates/foxprox-core/src/dns_handler.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Delivery-gated shared-cache semantics are proven in the blocking DNS listener. Final async DNS runtime must preserve the same commit-after-send boundary under concurrent task scheduling.

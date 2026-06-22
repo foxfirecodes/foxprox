@@ -128,8 +128,6 @@ impl<U: DnsUpstream> DnsBrokerHandler<U> {
                 observation: None,
             };
         }
-        self.cache.commit_observation(observation.clone());
-
         DnsHandlerResult {
             response: Some(response),
             decision,
@@ -157,6 +155,10 @@ impl<U: DnsUpstream> DnsBrokerHandler<U> {
 
     pub fn cache(&self) -> DnsCache {
         self.cache.snapshot()
+    }
+
+    pub fn commit_observation(&mut self, observation: DnsObservation) {
+        self.cache.commit_observation(observation);
     }
 
     pub fn rollback_observation(&mut self, observation: &DnsObservation) {
@@ -482,10 +484,11 @@ mod tests {
             result.observed_addresses,
             vec!["93.184.216.34".parse::<IpAddr>().unwrap()]
         );
+        assert!(result.observation.is_some());
         assert!(handler
             .cache()
             .attribution_for("93.184.216.34".parse().unwrap(), 2_000)
-            .is_some());
+            .is_none());
         let records: Vec<_> = handler.broker().audit().records().collect();
         assert_eq!(records.len(), 2);
         assert_eq!(records[0].kind, AuditKind::DnsQueryDecision);
@@ -520,6 +523,10 @@ mod tests {
         .with_shared_cache(shared_cache.clone());
         let result = handler.handle_query("s1", &query, 1_000);
         assert!(result.observation.is_some());
+        assert!(shared_cache
+            .resolve_hostname("example.com", 1_100)
+            .is_none());
+        handler.commit_observation(result.observation.clone().unwrap());
 
         let mut proxy_config = PolicyConfig::default();
         proxy_config.rules.push(

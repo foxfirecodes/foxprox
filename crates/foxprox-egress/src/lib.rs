@@ -9,10 +9,10 @@
 
 use foxprox_core::{
     malformed_proxy_request, AuditKind, AuditRecord, BrokerRuntimeConfig, Decision, DenialReason,
-    DnsBrokerHandler, DnsHandlerResult, DnsQueryMetadata, DnsUpstream, DnsUpstreamError,
-    ExplicitProxyEgress, ExplicitProxyFrontend, Frontend, HttpProxyRequestMetadata,
-    NetworkEndpoint, PolicyRequest, Protocol, ProxyEgressError, ProxyParseError,
-    SocksConnectMetadata, TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
+    DnsBrokerHandler, DnsQueryMetadata, DnsUpstream, DnsUpstreamError, ExplicitProxyEgress,
+    ExplicitProxyFrontend, Frontend, HttpProxyRequestMetadata, NetworkEndpoint, PolicyRequest,
+    Protocol, ProxyEgressError, ProxyParseError, SocksConnectMetadata, TcpEgress, TcpEgressError,
+    UdpEgress, UdpEgressError,
 };
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -273,6 +273,9 @@ impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
         if let Some(response) = result.response.as_ref() {
             match self.socket.send_to(response, client) {
                 Ok(_) => {
+                    if let Some(observation) = result.observation.clone() {
+                        self.handler.commit_observation(observation);
+                    }
                     sent_response = true;
                     send_status = "sent".to_string();
                 }
@@ -282,7 +285,6 @@ impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
                         client,
                         query_len,
                         response_len,
-                        &result,
                         now_ms,
                     );
                     return Ok(DnsBrokerStepResult {
@@ -318,12 +320,8 @@ impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
         client: SocketAddr,
         query_len: usize,
         response_len: usize,
-        result: &DnsHandlerResult,
         now_ms: u64,
     ) {
-        if let Some(observation) = result.observation.as_ref() {
-            self.handler.rollback_observation(observation);
-        }
         let request = PolicyRequest::unsupported(
             sandbox_id.to_string(),
             Frontend::Tun,
@@ -939,7 +937,7 @@ mod tests {
     use foxprox_core::{
         BrokerCore, Cidr, Decision, DnsBrokerHandler, DnsCache, ExplicitProxyFrontend, FlowKey,
         InMemoryExplicitProxyEgress, PolicyConfig, PolicyEngine, PolicyRule, Protocol,
-        TcpForwarder, UdpForwarder, UdpTimeoutConfig,
+        SharedDnsCache, TcpForwarder, UdpForwarder, UdpTimeoutConfig,
     };
     use std::collections::VecDeque;
     use std::io::{ErrorKind, Read, Result as IoResult, Write};
@@ -2078,6 +2076,75 @@ mod tests {
         assert_eq!(records[2].kind, AuditKind::BrokerError);
         assert_eq!(records[2].details["send_status"], "send_failed");
         assert_eq!(records[2].details["error"], "dns_client_send_failed");
+    }
+
+    #[test]
+    fn blocking_dns_send_failure_does_not_publish_to_shared_proxy_cache() {
+        let query = dns_query(0x4a4a, "Broker.TEST", 1);
+        let mut huge_response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        huge_response.resize(70_000, 0);
+        let shared_cache = SharedDnsCache::default();
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-broker-dns")
+                .protocol(Protocol::Dns)
+                .hostname("broker.test"),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 16);
+        let handler = DnsBrokerHandler::new(
+            broker,
+            StaticDnsUpstream {
+                response: huge_response,
+            },
+            "10.0.2.3".parse().unwrap(),
+        )
+        .with_shared_cache(shared_cache.clone());
+        let mut server = BlockingDnsBrokerServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            handler,
+            Duration::from_secs(1),
+            512,
+        )
+        .unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .send_to(&query, server.local_addr().unwrap())
+            .unwrap();
+
+        let step = server.handle_one("s1", 1_000).unwrap();
+        assert_eq!(step.send_status, "send_failed");
+        assert!(shared_cache
+            .resolve_hostname("broker.test", 1_100)
+            .is_none());
+
+        let mut proxy_config = PolicyConfig::default();
+        proxy_config.rules.push(
+            PolicyRule::allow("allow-http-domain")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Http)
+                .origin("http", "broker.test", 80),
+        );
+        let proxy_broker = BrokerCore::new(PolicyEngine::new(proxy_config), 8);
+        let mut frontend = ExplicitProxyFrontend::new(
+            "s1",
+            proxy_broker,
+            BlockingExplicitProxyEgress::new(Duration::from_secs(1), Duration::from_secs(1), 1024),
+        )
+        .with_shared_dns_cache(shared_cache);
+        let error = frontend
+            .handle_http_proxy_bytes_at(
+                b"GET http://broker.test/ HTTP/1.1\r\nHost: broker.test\r\n\r\n",
+                1_100,
+            )
+            .unwrap_err();
+        assert_eq!(error, ProxyEgressError::SendFailed);
+        let records: Vec<_> = frontend.broker().audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::HttpRequestDecision);
+        assert_eq!(records[1].kind, AuditKind::BrokerError);
+        assert!(!records
+            .iter()
+            .any(|record| record.kind == AuditKind::ProxyDestinationResolved));
     }
 
     #[test]
