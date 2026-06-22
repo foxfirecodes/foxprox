@@ -1080,3 +1080,16 @@
 - Recent broker integration commit hash: `0a04eb2`.
 - Next verification gap: commit UDP broker migration; consider migrating ICMP writeback or denied UDP onto the broker, then run a final full sweep.
 - Commit hash after commit: pending.
+
+## 2026-06-22T11:25:00Z — UDP deny smoke uses broker orchestration crate
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run udp-deny-smoke`
+- Environment assumptions: bwrap/TUN fd handoff works locally; denied UDP path uses a loopback fixture only to prove zero host egress calls.
+- Expected result: migrate the negative UDP environment smoke onto `foxprox-broker::TransparentBroker`, preserving deny/drop audit and proving denied packets produce no device reply and no egress call.
+- Observed result: pass. Workspace tests passed (`foxprox-broker` 2, `foxprox-core` 64, `foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). `udp-deny-smoke` emitted `"denied":"true"` and `"egress_calls":"0"`.
+- Relevant output excerpt: UDP deny `"decision":"deny_drop"`, `"policy_reason":"default deny"`, `"runtime_audit":"{...\"event\":\"udp_flow_created\"...}"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: both positive and negative transparent UDP environment paths now exercise the reusable broker orchestration crate rather than CLI-local runtime dispatch.
+- Recent broker migration commit hash: `90cd648`.
+- Next verification gap: commit UDP deny broker migration; then run a final broad sweep over broker-backed transparent paths and explicit proxy paths.
+- Commit hash after commit: pending.

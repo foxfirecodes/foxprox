@@ -22,8 +22,7 @@ use foxprox_core::frontend::{
 use foxprox_core::origin::parse_socks5_connect_request;
 use foxprox_core::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule, RuleAction};
 use foxprox_core::runtime::{
-    ExplicitProxyRuntime, TransparentDnsRuntime, TransparentTcpBridgeRuntime,
-    TransparentTcpRuntime, TransparentUdpRuntime,
+    ExplicitProxyRuntime, TransparentDnsRuntime, TransparentTcpBridgeRuntime, TransparentTcpRuntime,
 };
 use foxprox_core::scenario::{run_scenario, ScenarioName};
 use foxprox_core::smoltcp_gate::feed_tcp_syn_to_smoltcp_listener;
@@ -2340,7 +2339,15 @@ fn run_udp_deny_smoke() -> Result<AuditRecord, String> {
     let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
     fd.set_nonblocking()?;
     let policy = PolicyEngine::new(PolicyConfig::deny_by_default());
-    let mut runtime = TransparentUdpRuntime::new(policy, LocalUdpEgress::new(echo_addr)?);
+    let mut broker = TransparentBroker::new(
+        "10.0.2.1:53".parse().expect("static broker DNS addr valid"),
+        [],
+        policy,
+        LocalUdpEgress::new(echo_addr)?,
+        PolicyEngine::new(PolicyConfig::deny_by_default()),
+        MockEgressBackend::new(),
+        PolicyEngine::new(PolicyConfig::deny_by_default()),
+    );
     let mut buf = [0_u8; 2048];
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut packets_read = 0_u64;
@@ -2351,13 +2358,11 @@ fn run_udp_deny_smoke() -> Result<AuditRecord, String> {
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
-                if runtime
-                    .handle_ipv4_packet("udp-deny-smoke", packet)?
-                    .is_some()
-                {
+                let step = broker.handle_ipv4_packet("udp-deny-smoke", packet)?;
+                if !step.packets_to_device.is_empty() {
                     return Err("denied UDP smoke unexpectedly produced a reply".to_string());
                 }
-                denied = runtime
+                denied = broker
                     .audit
                     .last()
                     .is_some_and(|audit| audit.decision == Decision::DenyDrop);
@@ -2392,8 +2397,13 @@ fn run_udp_deny_smoke() -> Result<AuditRecord, String> {
     fd.close();
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir(&socket_dir);
-    let runtime_audit = runtime.audit.last().cloned();
-    let egress_calls = runtime.egress.calls();
+    let runtime_audit = broker
+        .audit
+        .iter()
+        .rev()
+        .find(|audit| audit.kind == EventKind::UdpFlowCreated)
+        .cloned();
+    let egress_calls = broker.udp.egress.calls();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let success = output.status.success() && egress_calls == 0;
