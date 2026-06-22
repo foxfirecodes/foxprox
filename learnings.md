@@ -260,3 +260,7 @@ Transparent DNS packets from TUN should be parsed only enough to recover the UDP
 ## 2026-06-22 — live DNS-over-TUN smoke should craft DNS bytes directly
 
 For live DNS broker tests inside bwrap, have the target Python process send a hand-built DNS query to the broker-side TUN IP. This avoids host resolver variability while still proving the TUN fd, DNS broker handler, host UDP upstream, response synthesis, and target receive path.
+
+## 2026-06-22 — smoltcp raw-IP device starts with Medium::Ip and captured Tx packets
+
+For TUN-shaped smoltcp tests, implement a `Device` with `Medium::Ip`, feed raw IP packets through an RX queue, and capture TX token buffers into a vector. Use `Config::new(HardwareAddress::Ip)` and mutate `DeviceCapabilities::default()` because the struct is non-exhaustive.

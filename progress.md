@@ -1409,3 +1409,24 @@
 - What this proves: live bwrap/TUN DNS traffic can use the actual DNS broker policy/cache/forwarding path, not just raw UDP forwarding.
 - What remains unproven: live attribution of a later non-DNS flow using the DNS cache, and TCP forwarding through a userspace stack.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — smoltcp raw-IP device SYN/SYN-ACK slice
+
+- Slice attempted: introduce the first smoltcp integration proof by feeding one raw IPv4 TCP SYN packet into a raw-IP smoltcp device and capturing the emitted SYN-ACK packet for TUN write-back.
+- Why next: Milestones 0/1 and UDP/DNS live paths now have evidence; the next alpha gate is the smoltcp TCP forwarding path. The smallest useful slice is proving a TUN-shaped IP packet can enter smoltcp and produce outbound IP bytes.
+- Verification plan: add a `foxprox-tcp` crate with an in-memory smoltcp `Device` using `Medium::Ip`, test a listening TCP socket receives a crafted SYN and emits a SYN-ACK, then run focused tcp tests plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — smoltcp raw-IP device SYN/SYN-ACK
+
+- Slice attempted: introduce the first smoltcp integration proof by feeding one raw IPv4 TCP SYN packet into a raw-IP smoltcp device and capturing the emitted SYN-ACK packet for TUN write-back.
+- Why next: Milestones 0/1 and UDP/DNS live paths now have evidence; the next alpha gate is the smoltcp TCP forwarding path. The smallest useful slice is proving a TUN-shaped IP packet can enter smoltcp and produce outbound IP bytes.
+- What changed: added `crates/foxprox-tcp` with an in-memory smoltcp `Device` using `Medium::Ip`. The device queues inbound raw IP packets and captures outbound raw IP packets, giving a deterministic adapter shape for future `TunPacketIo` integration.
+- Verification:
+  - Focused check passed: `cargo test -p foxprox-tcp -- --nocapture`. The test fed a crafted IPv4 TCP SYN from 10.0.0.2:49152 to 10.0.0.1:8080 into a listening smoltcp TCP socket and asserted smoltcp emitted an IPv4 SYN-ACK from 10.0.0.1:8080 back to 10.0.0.2:49152.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including the new `foxprox-tcp` crate test and doc test.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: `DeviceCapabilities` is non-exhaustive in smoltcp, so the implementation must mutate `DeviceCapabilities::default()` rather than constructing it with a struct literal.
+- What remains unproven: smoltcp stream accept/read/write bridging to host TCP sockets, live TUN fd device integration, and full sandbox `curl` forwarding.
+- Commit: this commit.

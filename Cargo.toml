@@ -13,6 +13,7 @@ members = [
     "crates/foxprox-dns",
     "crates/foxprox-integrations",
     "crates/foxprox-device",
+    "crates/foxprox-tcp",
 ]
 resolver = "2"
 
