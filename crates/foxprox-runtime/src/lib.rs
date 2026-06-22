@@ -1192,12 +1192,14 @@ pub struct BrokerRuntimeConfig {
     pub policy: foxprox_core::PolicyConfig,
     pub static_dns_ttl_secs: u32,
     pub static_dns_records: Vec<StaticDnsRecord>,
+    pub tcp_max_open_flows: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeConfigError {
     InvalidPolicy(ConfigError),
     ZeroDnsTtl,
+    ZeroTcpOpenFlowLimit,
 }
 
 pub struct BrokerRuntimeComponents {
@@ -1206,6 +1208,7 @@ pub struct BrokerRuntimeComponents {
     pub resolver: StaticDnsResolver,
     pub cache: DnsCache,
     pub broker_dns: Vec<IpAddr>,
+    pub tcp_max_open_flows: usize,
 }
 
 pub fn build_runtime_components(
@@ -1214,6 +1217,9 @@ pub fn build_runtime_components(
     validate_policy_config(&config.policy).map_err(RuntimeConfigError::InvalidPolicy)?;
     if config.static_dns_ttl_secs == 0 {
         return Err(RuntimeConfigError::ZeroDnsTtl);
+    }
+    if config.tcp_max_open_flows == 0 {
+        return Err(RuntimeConfigError::ZeroTcpOpenFlowLimit);
     }
     let broker_dns = config.policy.broker_dns.clone();
     let mut resolver = StaticDnsResolver::new(config.static_dns_ttl_secs);
@@ -1226,6 +1232,7 @@ pub fn build_runtime_components(
         resolver,
         cache: DnsCache::new(),
         broker_dns,
+        tcp_max_open_flows: config.tcp_max_open_flows,
     })
 }
 
@@ -2550,6 +2557,7 @@ mod tests {
                 hostname: Hostname::normalize("example.com").unwrap(),
                 addresses: vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
             }],
+            tcp_max_open_flows: 64,
         };
 
         let components = build_runtime_components(config).unwrap();
@@ -2559,6 +2567,7 @@ mod tests {
             components.broker_dns,
             vec![IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))]
         );
+        assert_eq!(components.tcp_max_open_flows, 64);
         let response = components
             .resolver
             .resolve_query_packet(&dns_query_payload(), 100)
@@ -2595,6 +2604,7 @@ mod tests {
             },
             static_dns_ttl_secs: 30,
             static_dns_records: Vec::new(),
+            tcp_max_open_flows: 64,
         };
         assert!(matches!(
             build_runtime_components(invalid_policy),
@@ -2606,10 +2616,23 @@ mod tests {
             policy: PolicyConfig::default(),
             static_dns_ttl_secs: 0,
             static_dns_records: Vec::new(),
+            tcp_max_open_flows: 64,
         };
         assert!(matches!(
             build_runtime_components(zero_ttl),
             Err(RuntimeConfigError::ZeroDnsTtl)
+        ));
+
+        let zero_tcp_limit = BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("zero-tcp-limit").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 0,
+        };
+        assert!(matches!(
+            build_runtime_components(zero_tcp_limit),
+            Err(RuntimeConfigError::ZeroTcpOpenFlowLimit)
         ));
     }
 
@@ -2631,6 +2654,7 @@ mod tests {
                 hostname: Hostname::normalize("example.com").unwrap(),
                 addresses: vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
             }],
+            tcp_max_open_flows: 64,
         })
         .unwrap();
         let fake = FakeTunIo {
@@ -2663,6 +2687,7 @@ mod tests {
             },
             static_dns_ttl_secs: 30,
             static_dns_records: Vec::new(),
+            tcp_max_open_flows: 64,
         })
         .unwrap();
         let fake = FakeTunIo {

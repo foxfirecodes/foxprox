@@ -141,6 +141,7 @@ mod tests {
                 hostname: foxprox_core::Hostname::normalize("example.com").unwrap(),
                 addresses: vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
             }],
+            tcp_max_open_flows: 64,
         }
     }
 
@@ -158,6 +159,7 @@ mod tests {
             prepared.runtime.broker_dns,
             vec![IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))]
         );
+        assert_eq!(prepared.runtime.tcp_max_open_flows, 64);
     }
 
     #[test]

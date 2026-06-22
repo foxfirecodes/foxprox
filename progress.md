@@ -1031,3 +1031,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: only open-flow map cardinality is bounded; per-flow buffers, socket fd counts, and total byte buffering limits still need runtime-level enforcement.
 - Exact next step: commit TCP bridge open-flow limits, then add runtime configuration for TCP bridge limits so limits are not hardcoded by callers.
+
+## 2026-06-22T21:39:20Z
+- Current objective: continue after TCP bridge open-flow limits toward configuration-backed resource limits.
+- Git status summary: clean worktree after commit `3d26f00`.
+- Intended slice: add a validated TCP max-open-flow limit to `BrokerRuntimeConfig` and carry it into runtime components so bridge capacity is configured centrally.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this only configures open-flow count; byte-buffer, audit, and fd limits still need separate settings.
+- Exact next step: extend runtime config/components and update validation tests for zero/nonzero TCP flow limits.
+
+## 2026-06-22T21:40:43Z
+- Current objective: add configuration-backed TCP open-flow limits.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `crates/foxprox-launcher/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 80 runtime tests, and 7 setup tests passed. Runtime config now validates nonzero `tcp_max_open_flows`, carries it into runtime components, and launcher session tests assert the configured limit is preserved.
+- Commit hash when committed: pending.
+- Remaining risks: no config file parser exists, and the limit is not yet automatically applied to a constructed TCP bridge runtime by session assembly.
+- Exact next step: commit runtime TCP limit config, then add a helper that constructs `TcpStreamBridgeRuntime` from `BrokerRuntimeComponents` so configured limits are applied consistently.
