@@ -707,3 +707,15 @@
 - Interpretation: the harness now covers the documented alpha behavior with local evidence: setup/fd handoff, packet write-back, TCP bridge through smoltcp, UDP/DNS/attribution, transparent HTTP/TLS/QUIC decisions, explicit HTTP/CONNECT/SOCKS proxy allow and deny, ICMP policy/write-back, fail-closed malformed/unsupported paths, and audit backpressure modeling.
 - Next verification gap: outside this harness-lab alpha, production hardening remains: factor CLI smoke orchestration into long-lived broker runtime crates, wire bounded audit buffers into all forwarding paths, support real upstream DNS forwarding, and define a safe ping capability strategy if real system `ping` smoke is required.
 - Commit hash after commit: pending.
+
+## 2026-06-22T03:08:00Z — final verification commit recorded
+
+- Command executed: `git add progress.md && git commit -m "Record final alpha harness verification"`
+- Environment assumptions: final verification sweep above passed before commit.
+- Expected result: commit preserves final alpha harness verification evidence and ICMP runtime commit ledger note.
+- Observed result: commit `7afd6a8` created with 1 file changed.
+- Relevant output excerpt: `[harness-lab 7afd6a8] Record final alpha harness verification`.
+- Changed files: `progress.md` appended with this commit record.
+- Interpretation: final verification evidence is preserved in git history.
+- Next verification gap: production hardening outside the current harness-lab alpha: long-lived broker runtime factoring, bounded audit sink wiring in hot paths, real upstream DNS forwarding, and optional real `ping` capability strategy.
+- Commit hash after commit: 7afd6a8.
