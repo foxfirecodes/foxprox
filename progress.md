@@ -1346,3 +1346,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: payloads are not yet handed to `TcpFlowRuntime` or a host bridge automatically.
 - Exact next step: commit smoltcp payload flow export, then add a runtime integration test that feeds a smoltcp payload event into `TcpFlowRuntime` with a fake bridge.
+
+## 2026-06-22T22:09:35Z
+- Current objective: continue after smoltcp payload flow export toward bridge integration.
+- Git status summary: clean worktree after commit `1a34d4d`.
+- Intended slice: add a `TcpFlowRuntime` forwarding method and verify a smoltcp-exported payload flow can be handed to a fake runtime bridge with byte accounting.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: fake bridge only; no real host socket bridge or TUN packet source is joined yet.
+- Exact next step: expose a safe TCP flow runtime send method and add cross-crate smoltcp payload handoff coverage.
+
+## 2026-06-22T22:10:06Z
+- Current objective: hand smoltcp payload flows to `TcpFlowRuntime`.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on fake bridge method formatting; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 13 smoltcp adapter tests passed. `TcpFlowRuntime` now exposes a safe sandbox-payload-to-host method, and smoltcp tests prove a loopback payload with normalized flow key can be marked open and forwarded into a fake host bridge with byte accounting.
+- Commit hash when committed: pending.
+- Remaining risks: bridge integration remains fake-host; real `StdTcpStreamBridge` and TUN/smoltcp packet IO are not joined.
+- Exact next step: commit smoltcp payload-to-runtime handoff, then add a real `StdTcpStreamBridge` loopback handoff using a smoltcp-exported payload flow.

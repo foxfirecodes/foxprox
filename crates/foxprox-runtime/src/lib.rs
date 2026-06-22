@@ -1319,6 +1319,16 @@ impl<B> TcpFlowRuntime<B> {
     }
 }
 
+impl<B: TcpStreamBridge> TcpFlowRuntime<B> {
+    pub fn send_sandbox_payload_to_host(
+        &mut self,
+        flow: &FlowKey,
+        bytes: &[u8],
+    ) -> Result<(), TcpBridgeError> {
+        self.bridge.send_sandbox_bytes_to_host(flow, bytes)
+    }
+}
+
 pub struct BrokerDnsRuntime<'a, S> {
     pub sandbox_id: SandboxId,
     pub resolver: &'a StaticDnsResolver,

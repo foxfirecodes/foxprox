@@ -298,13 +298,34 @@ mod tests {
         VecAuditSink, VerificationKernel,
     };
     use foxprox_runtime::{
-        EgressError, HostEgress, TcpConnectRequest, TcpStackOutcome, TcpStackRuntime,
+        build_runtime_components, BrokerRuntimeConfig, EgressError, HostEgress, TcpBridgeError,
+        TcpConnectRequest, TcpFlowRuntime, TcpStackOutcome, TcpStackRuntime, TcpStreamBridge,
         UdpDatagramRequest,
     };
 
     #[derive(Default)]
     struct FakeEgress {
         tcp_attempts: usize,
+    }
+
+    #[derive(Default)]
+    struct FakeBridge {
+        host_writes: Vec<Vec<u8>>,
+    }
+
+    impl TcpStreamBridge for FakeBridge {
+        fn write_to_host(&mut self, _flow: &FlowKey, bytes: &[u8]) -> Result<(), TcpBridgeError> {
+            self.host_writes.push(bytes.to_vec());
+            Ok(())
+        }
+
+        fn write_to_sandbox(
+            &mut self,
+            _flow: &FlowKey,
+            _bytes: &[u8],
+        ) -> Result<(), TcpBridgeError> {
+            Ok(())
+        }
     }
 
     impl HostEgress for FakeEgress {
@@ -468,6 +489,51 @@ mod tests {
         assert_eq!(received.bytes, b"hello-smoltcp".to_vec());
         assert_eq!(received.flow.source, attempt.source);
         assert_eq!(received.flow.destination, attempt.destination);
+    }
+
+    #[test]
+    fn smoltcp_payload_flow_can_be_handed_to_tcp_flow_runtime() {
+        let mut adapter = connected_adapter();
+        let attempt = adapter.next_connect_attempt().unwrap();
+        for millis in 20..60 {
+            match adapter.send_on_connect_attempt(&attempt, b"bridge-me") {
+                Ok(_) => break,
+                Err(SmoltcpAdapterError::TcpSendRejected) => adapter.poll_once(millis),
+                Err(error) => panic!("unexpected send error: {error:?}"),
+            }
+        }
+        let mut payload = None;
+        for millis in 60..100 {
+            adapter.poll_once(millis);
+            match adapter.recv_on_listener_port_with_flow(8080, 64) {
+                Ok(received) if !received.bytes.is_empty() => {
+                    payload = Some(received);
+                    break;
+                }
+                Ok(_) | Err(SmoltcpAdapterError::TcpRecvRejected) => {}
+                Err(error) => panic!("unexpected recv error: {error:?}"),
+            }
+        }
+        let payload = payload.unwrap();
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("smoltcp-flow-runtime").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let mut flow_runtime = TcpFlowRuntime::new(&components, FakeBridge::default());
+        flow_runtime.mark_opened(payload.flow.clone()).unwrap();
+
+        flow_runtime
+            .send_sandbox_payload_to_host(&payload.flow, &payload.bytes)
+            .unwrap();
+        let (bridge, _) = flow_runtime.into_parts();
+        let (fake, _) = bridge.into_parts();
+
+        assert_eq!(fake.host_writes, vec![b"bridge-me".to_vec()]);
     }
 
     #[test]
