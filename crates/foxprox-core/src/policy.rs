@@ -402,9 +402,10 @@ fn is_direct_dns_bypass(config: &PolicyConfig, request: &PolicyRequest) -> bool 
     match (request.protocol, destination.port) {
         (Protocol::Dns, Some(53)) => !config.broker_dns_servers.contains(&destination.ip),
         (Protocol::Dns, _) => true,
-        (Protocol::Tcp | Protocol::Udp, Some(53 | 853)) => {
+        (Protocol::Tcp | Protocol::Udp, Some(53)) => {
             !config.broker_dns_servers.contains(&destination.ip)
         }
+        (Protocol::Tcp | Protocol::Udp, Some(853)) => true,
         _ => false,
     }
 }
@@ -539,6 +540,7 @@ mod tests {
             (Protocol::Udp, Endpoint::udp(ip([8, 8, 8, 8]), 53)),
             (Protocol::Tcp, Endpoint::tcp(ip([8, 8, 8, 8]), 53)),
             (Protocol::Tcp, Endpoint::tcp(ip([1, 1, 1, 1]), 853)),
+            (Protocol::Tcp, Endpoint::tcp(ip([10, 0, 2, 3]), 853)),
         ] {
             let bypass = PolicyRequest::new(protocol).with_destination(destination);
             assert_eq!(
@@ -550,6 +552,9 @@ mod tests {
         let broker = PolicyRequest::new(Protocol::Dns)
             .with_destination(Endpoint::udp(ip([10, 0, 2, 3]), 53));
         assert!(PolicyEngine::decide(&config, &broker).is_allow());
+        let broker_udp = PolicyRequest::new(Protocol::Udp)
+            .with_destination(Endpoint::udp(ip([10, 0, 2, 3]), 53));
+        assert!(PolicyEngine::decide(&config, &broker_udp).is_allow());
     }
 
     #[test]

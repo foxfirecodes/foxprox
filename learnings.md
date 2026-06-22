@@ -225,3 +225,7 @@ UDP pseudo-flows are bidirectional once a host socket is opened. Expiration audi
 ## 2026-06-21 - bwrap setup argv needs explicit helper-target separation
 
 The setup backend should construct `foxproxsetup -- target...` explicitly and validate empty/NUL argv before launch. This avoids ambiguous command lines where the target could run without the network setup helper or where malformed env/argv reaches process spawning.
+
+## 2026-06-21 - Broker DNS IP exemptions should not include DoT port 853
+
+The broker DNS server allowlist is for broker-controlled DNS service on port 53. Treating TCP/UDP 853 as exempt when aimed at that IP weakens DoT bypass prevention and can bypass DNS query/response correlation under broad TCP rules.

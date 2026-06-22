@@ -1215,3 +1215,22 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * invalid setup argv/env inputs fail before launch, preserving the requirement that setup runs before target application execution.
 * Audit evidence: no runtime audit event in this pure builder; lifecycle events for broker/session/TUN/proxy setup already exist in core and remain the expected runtime emission points.
 * Residual risk: actual `foxproxsetup` implementation, fd handoff, privilege drop, route/DNS configuration, and broker launch synchronization remain future integration work.
+
+## 2026-06-21 - DoT bypass denial precedence
+
+* Invariant under work: identifiable DNS-over-TLS traffic on port 853 must remain denied by default even if its destination IP equals the broker DNS address, unless direct DNS is explicitly enabled.
+* Threat or failure mode addressed: treating broker DNS server IPs as a blanket exemption for both port 53 and 853 could allow direct DoT attempts through broad TCP allow rules, bypassing the broker-controlled plaintext DNS query/response correlation path.
+* Planned verification: tighten direct-DNS bypass classification for TCP/UDP 853, add tests for broker-IP DoT denial and broker-IP port-53 DNS exemption, then run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - DoT bypass denial precedence results
+
+* Tests added/updated:
+  * direct DNS bypass tests now include TCP/853 to a configured broker DNS IP and assert denial.
+  * broker DNS UDP/53 to configured broker IP remains exempt from bypass classification when normal policy allows it.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: core 161 tests, integrations 3 tests, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * TCP/UDP port 853 is always treated as identifiable direct DNS bypass while `allow_direct_dns` is false, regardless of destination IP.
+  * the narrower broker DNS exemption remains limited to port 53 broker resolver traffic.
+* Audit evidence: existing policy/packet handler audit paths record `DirectDnsBypass`; this cycle tightened the decision invariant and covered it at policy level.
+* Residual risk: DoH over TCP/443 remains generally indistinguishable without hostname/SNI/domain policy and is not solved by port-based bypass checks.
