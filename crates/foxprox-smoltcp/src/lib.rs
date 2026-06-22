@@ -670,6 +670,58 @@ mod tests {
         adapter
     }
 
+    fn packet_pumped_listener_payload(bytes: &[u8]) -> SmoltcpTcpPayload {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.set_packet_loopback(false);
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        let source = Ipv4Addr::new(10, 66, 0, 2);
+        let destination = Ipv4Addr::new(10, 66, 0, 1);
+        let mut writer = Vec::new();
+        let mut buffer = vec![0; 1500];
+        let syn = ipv4_tcp_syn_packet(source, destination, 50001, 8080, 7);
+        pump_one_tun_packet(
+            &mut adapter,
+            &mut Cursor::new(syn),
+            &mut writer,
+            &mut buffer,
+            1,
+        )
+        .unwrap();
+        let syn_ack = match parse_ip_packet(&writer).unwrap() {
+            ParsedIpPacket::Tcpv4Segment(segment) => segment,
+            other => panic!("expected SYN/ACK, got {other:?}"),
+        };
+        let server_ack = syn_ack.sequence + 1;
+        writer.clear();
+        let ack = ipv4_tcp_packet(source, destination, 50001, 8080, 8, server_ack, 0x10, &[]);
+        pump_one_tun_packet(
+            &mut adapter,
+            &mut Cursor::new(ack),
+            &mut writer,
+            &mut buffer,
+            2,
+        )
+        .unwrap();
+        writer.clear();
+        let data = ipv4_tcp_packet(source, destination, 50001, 8080, 8, server_ack, 0x18, bytes);
+        pump_one_tun_packet(
+            &mut adapter,
+            &mut Cursor::new(data),
+            &mut writer,
+            &mut buffer,
+            3,
+        )
+        .unwrap();
+        adapter.recv_on_listener_port_with_flow(8080, 64).unwrap()
+    }
+
     #[test]
     fn ip_loopback_interface_accepts_configured_ipv4_address() {
         let mut adapter = SmoltcpIpLoopback::new(
@@ -862,6 +914,39 @@ mod tests {
         assert_eq!(payload.flow.source.port, 50001);
         assert_eq!(payload.flow.destination.ip, IpAddr::V4(destination));
         assert_eq!(payload.flow.destination.port, 8080);
+    }
+
+    #[test]
+    fn packet_pumped_payload_reaches_real_loopback_host_bridge() {
+        let payload = packet_pumped_listener_payload(b"tun-host");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = vec![0; b"tun-host".len()];
+            stream.read_exact(&mut received).unwrap();
+            received
+        });
+        let host_stream = TcpStream::connect(listen_addr).unwrap();
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("packet-pumped-host-bridge").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let bridge =
+            StdTcpStreamBridge::new(payload.flow.clone(), host_stream, Vec::new()).unwrap();
+        let mut flow_runtime = TcpFlowRuntime::new(&components, bridge);
+        flow_runtime.mark_opened(payload.flow.clone()).unwrap();
+
+        flow_runtime
+            .send_sandbox_payload_to_host(&payload.flow, &payload.bytes)
+            .unwrap();
+
+        assert_eq!(server.join().unwrap(), b"tun-host".to_vec());
     }
 
     #[test]

@@ -1493,3 +1493,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: payload handoff from this exact packet-pumped accepted socket to `TcpFlowRuntime<StdTcpStreamBridge<_>>` remains unjoined; outbound host-to-sandbox bytes are still not packetized back through smoltcp.
 - Exact next step: commit packet-pumped TCP payload proof, then hand that packet-pumped payload flow to a real host bridge in the same test path.
+
+## 2026-06-22T22:29:25Z
+- Current objective: continue after packet-pumped TCP payload proof toward host bridge handoff on the same TUN-style path.
+- Git status summary: clean worktree after commit `4f5ced9`.
+- Intended slice: feed raw TCP handshake/data packets through smoltcp, export the accepted listener payload, open the normalized flow in `TcpFlowRuntime<StdTcpStreamBridge<_>>`, and verify bytes reach a real localhost TCP listener.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: host-to-sandbox reverse bytes and continuous polling remain outside this slice.
+- Exact next step: add a packet-pumped smoltcp-to-host bridge regression.
+
+## 2026-06-22T22:30:10Z
+- Current objective: hand packet-pumped smoltcp payloads to a real host TCP bridge.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on helper call wrapping; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 23 smoltcp adapter tests passed. New regression feeds raw TCP handshake/data packets through the smoltcp TUN pump, exports the accepted listener payload flow, opens that flow in `TcpFlowRuntime<StdTcpStreamBridge<_>>`, and verifies the bytes reach a real localhost TCP listener.
+- Commit hash when committed: pending.
+- Remaining risks: reverse host-to-sandbox bytes are still not packetized through smoltcp; no continuous live TUN fd loop exists.
+- Exact next step: commit packet-pumped host bridge handoff, then add an adapter helper that writes host bytes into the accepted smoltcp socket and emits outbound IP packets for sandbox delivery.
