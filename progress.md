@@ -756,5 +756,5 @@
   - `cargo test --workspace` — passed, 80 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-runtime` — runtime consumes device/net/policy/audit/egress contracts; policy/audit remain independent.
-- Commit hash after commit: pending.
+- Commit hash after commit: 491a086.
 - Remaining boundary risks: actual pre-opened `File` integration in a launcher, raw fd handoff, async readiness, and Linux setup remain.
