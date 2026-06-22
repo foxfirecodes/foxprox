@@ -823,3 +823,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: buffering is not yet attached to a real smoltcp stream adapter, has no per-flow lifecycle, and does not bridge bytes.
 - Exact next step: commit TCP metadata buffering, then add per-flow TCP metadata buffer management keyed by flow so future stream adapters can feed ordered bytes safely.
+
+## 2026-06-22T02:34:00Z
+- Current objective: continue after bounded TCP metadata buffering toward per-flow metadata state for future stream adapters.
+- Git status summary: clean worktree after commit `f8d51ec`.
+- Intended slice: add a small per-flow TCP metadata buffer table keyed by normalized `FlowKey`, so future TCP stack adapters can feed ordered bytes without sharing metadata state across flows.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this remains deterministic in-memory state only; no TCP sequence reordering, retransmission handling, or smoltcp byte bridge is implemented.
+- Exact next step: implement per-flow buffer storage and tests for flow isolation/removal.
+
+## 2026-06-22T02:39:10Z
+- Current objective: add per-flow TCP metadata buffer storage for future stream adapters.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 54 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 64 runtime tests, and 7 setup tests passed. New runtime test proves `TcpMetadataBufferTable` isolates metadata state by `FlowKey` and supports explicit removal on flow cleanup.
+- Commit hash when committed: pending.
+- Remaining risks: no TCP sequence/retransmit handling, stream lifecycle hook, or smoltcp byte bridge feeds these per-flow buffers yet.
+- Exact next step: commit per-flow metadata buffers, then add TCP flow lifecycle audit outcomes for opened/closed/error events from the stack adapter boundary.

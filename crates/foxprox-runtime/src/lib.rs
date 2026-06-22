@@ -17,6 +17,7 @@ use foxprox_core::{
     SniStatus, SocksDestination, StaticDnsRecord, StaticDnsResolver, Tcpv4Segment, UdpFlow,
     Udpv4Packet, UnsupportedIpv4Protocol, VerificationKernel,
 };
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
 use std::time::Duration;
@@ -1460,6 +1461,35 @@ impl TcpMetadataBuffer {
         }
         self.bytes.extend_from_slice(payload);
         None
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TcpMetadataBufferTable {
+    buffers: HashMap<FlowKey, TcpMetadataBuffer>,
+}
+
+impl TcpMetadataBufferTable {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn buffer_for(&mut self, flow: FlowKey, max_len: usize) -> &mut TcpMetadataBuffer {
+        self.buffers
+            .entry(flow)
+            .or_insert_with(|| TcpMetadataBuffer::new(max_len))
+    }
+
+    pub fn remove(&mut self, flow: &FlowKey) -> Option<TcpMetadataBuffer> {
+        self.buffers.remove(flow)
+    }
+
+    pub fn len(&self) -> usize {
+        self.buffers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffers.is_empty()
     }
 }
 
@@ -2932,6 +2962,39 @@ mod tests {
             TcpMetadataBufferOutcome::LimitExceeded { limit: 4 }
         );
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn tcp_metadata_buffer_table_isolates_and_removes_flow_state() {
+        let flow_a = FlowKey::new(
+            Protocol::Tcp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 80),
+        );
+        let flow_b = FlowKey::new(
+            Protocol::Tcp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 3)), 53001),
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 80),
+        );
+        let packet = build_tcp_ipv4_packet(53000, 80, 0x18, b"GET / HTTP/1.1\r\n");
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        let mut table = TcpMetadataBufferTable::new();
+
+        assert_eq!(
+            table
+                .buffer_for(flow_a.clone(), 1024)
+                .push_http(SandboxId::new("flow-a").unwrap(), &tcp),
+            TcpMetadataBufferOutcome::NeedMoreData
+        );
+        assert_eq!(table.buffer_for(flow_b.clone(), 1024).len(), 0);
+        assert_eq!(table.len(), 2);
+
+        let removed = table.remove(&flow_a).unwrap();
+        assert!(!removed.is_empty());
+        assert_eq!(table.len(), 1);
+        assert!(table.remove(&flow_a).is_none());
     }
 
     #[test]
