@@ -823,3 +823,24 @@
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
 - Commit hash after commit: 2dbb247.
 - Remaining boundary risks: TCP stream event extraction, host socket bridging, async polling, and real TUN integration remain.
+
+## 2026-06-22 — Boundary objective: smoltcp TCP connect event extraction
+
+- Boundary under work: TCP connection intent extraction from smoltcp sockets into normalized `TcpConnectAttempt` events.
+- Allowed dependency direction: `foxprox-smoltcp` may use private smoltcp socket handles and emit `foxprox-core` normalized events through `foxprox-net::StackAdapter`; policy/audit/frontends/device must not import smoltcp types.
+- Dependency-risk assessment: TCP forwarding alpha depends on turning sandbox SYN traffic into policy-visible connect attempts. The event must include only normalized socket metadata and avoid leaking smoltcp socket state or packet headers across the adapter boundary.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency tree checks.
+- Observed results: extended `foxprox-smoltcp` config with normalized sandbox/frontend labels and TCP listener ports, enabled smoltcp `any_ip`, tracked private listener socket handles, and emitted normalized `TcpConnectAttempt` events when a listened socket receives a SYN. Test proves a TCP SYN produces a normalized connect attempt and an opaque SYN-ACK packet without exposing smoltcp types. All verification passed.
+- Changed files:
+  - `crates/foxprox-smoltcp/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 88 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated in the adapter crate.
+  - `cargo tree -p foxprox-policy` — policy depends only on `foxprox-core`.
+  - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: accepting bridged stream bytes, host socket bridging, TCP close/error lifecycle, and real TUN polling remain.

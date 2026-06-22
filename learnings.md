@@ -193,3 +193,8 @@
 - `smoltcp` 0.12.0 is the newest version compatible with the workspace Rust 1.80 contract; 0.13.1 requires Rust 1.91.
 - For TUN/L3 integration, smoltcp must be configured with `medium-ip` and `HardwareAddress::Ip`; adapter tests can prove ICMP write-back while keeping smoltcp interface/device/socket types private.
 - The stack adapter can initially return no normalized flow events while still proving bounded packet ingress and opaque outbound packet emission; TCP stream extraction remains a separate boundary expansion.
+
+## 2026-06-22 — smoltcp TCP connect extraction
+
+- smoltcp `any_ip` plus an IP-medium TCP listener can convert a sandbox SYN into a normalized `TcpConnectAttempt` without exposing smoltcp socket handles outside the adapter crate.
+- The adapter config now needs normalized sandbox/frontend labels because `StackAdapter::ingest_ip_packet` has no separate context parameter but emitted policy events require that metadata.
