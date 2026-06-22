@@ -760,3 +760,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: DNS attribution is IP-based and medium-confidence only; HTTP Host and TLS SNI stream reassembly/mismatch handling still need integration with full TCP forwarding.
 - Exact next step: commit DNS-cache flow attribution, then add policy/audit coverage for expired DNS attribution failing closed instead of allowing stale domain decisions.
+
+## 2026-06-22T02:12:25Z
+- Current objective: continue after DNS-cache flow attribution by proving stale DNS attribution cannot allow domain policy.
+- Git status summary: clean worktree after commit `dd6437c`.
+- Intended slice: add deterministic regression coverage that expired DNS observations are ignored for TUN domain decisions and therefore stale hostnames cannot open flows.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this is verification coverage only; it does not add DNS cache eviction scheduling or richer attribution conflict handling.
+- Exact next step: add expired-cache TUN TCP/UDP domain-policy tests.
+
+## 2026-06-22T02:17:55Z
+- Current objective: prove stale DNS attribution cannot allow TUN domain policy.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 54 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 58 runtime tests, and 7 setup tests passed. New runtime regression test proves expired DNS cache observations are ignored and do not satisfy domain policy for TUN TCP flows.
+- Commit hash when committed: pending.
+- Remaining risks: cache expiry is checked during lookup but there is no background cache pruning in the owning session; DNS/SNI mismatch integration still depends on future TCP stream metadata plumbing.
+- Exact next step: commit expired-attribution coverage, then add TCP metadata precedence tests that SNI mismatch overrides cached DNS allow decisions in the TUN path.

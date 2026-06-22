@@ -1859,6 +1859,58 @@ mod tests {
     }
 
     #[test]
+    fn expired_dns_cache_attribution_does_not_allow_tun_domain_policy() {
+        let mut rule = PolicyRule::allow("allow-stale-domain");
+        rule.protocol = Some(Protocol::Tcp);
+        rule.domain_suffix = Some(Hostname::normalize("example.com").unwrap());
+        rule.minimum_confidence = Some(AttributionConfidence::Medium);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let mut cache = DnsCache::new();
+        cache.record(DnsObservation::new(
+            Hostname::normalize("www.example.com").unwrap(),
+            vec![IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+            0,
+            10,
+        ));
+        let resolver = StaticDnsResolver::new(30);
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = BrokerDnsRuntime {
+            sandbox_id: SandboxId::new("expired-cache").unwrap(),
+            resolver: &resolver,
+            cache: &mut cache,
+            broker_dns: &[],
+            kernel: &mut kernel,
+        };
+        let request = build_tcp_ipv4_packet(53000, 80, 0x02, &[]);
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+
+        let outcome = handle_one_tun_packet_with_policy(
+            &mut reader,
+            &mut writer,
+            &mut buffer,
+            &mut runtime,
+            100,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            TunPacketOutcome::TcpConnectObserved { decision, .. }
+                if decision.action != DecisionAction::Allow
+                    && decision.reason == DecisionReason::DefaultDeny
+        ));
+    }
+
+    #[test]
     fn http_proxy_runtime_denies_plain_http_before_host_egress_by_default() {
         let kernel = VerificationKernel::new(
             PolicyEngine::new(PolicyConfig::default()),
