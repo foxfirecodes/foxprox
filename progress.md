@@ -1181,3 +1181,24 @@
 - What failed or surprised the agent: the `libc` crate does not expose the Linux capability structs/constants used here, so the helper defines the small `repr(C)` `capget/capset` layouts and `CAP_NET_ADMIN = 12` directly.
 - What remains unproven: a privileged live run proving `capget/capset` succeeds inside the bwrap setup context, and live target process evidence that `CAP_NET_ADMIN` is absent after exec.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — bwrap plan passes foxproxsetup args slice
+
+- Slice attempted: update the bwrap launch plan so the executable `foxproxsetup` command receives the broker socket and network setup arguments it now requires.
+- Why next: `foxproxsetup` has a real parser, but the existing bwrap plan still only inserted `foxproxsetup -- target...`, which would fail in a real launch.
+- Verification plan: add a reusable setup-helper argument planner to `foxprox-integrations`, thread it into `BwrapSetupConfig`, prove arguments appear before the target `--` separator, then run focused integration tests plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — bwrap plan passes foxproxsetup args
+
+- Slice attempted: update the bwrap launch plan so the executable `foxproxsetup` command receives the broker socket and network setup arguments it now requires.
+- Why next: `foxproxsetup` has a real parser, but the existing bwrap plan still only inserted `foxproxsetup -- target...`, which would fail in a real launch.
+- What changed: `foxprox-integrations` now has `SetupHelperArgs` for the broker socket, TUN name/device, address, MTU, resolver path, broker DNS, and `ip` program. `BwrapSetupConfig` can carry those args and `plan_bwrap_setup` inserts them after the setup helper path and before the target `--` separator.
+- Verification:
+  - Focused check passed: `cargo test -p foxprox-integrations bwrap_plan -- --nocapture` verified legacy planning still works and the configured setup-helper args appear before the target separator.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 13 `foxprox-integrations` tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: the executable setup command made an existing integration gap visible immediately: bwrap planning and setup parser had drifted apart.
+- What remains unproven: a host launcher that binds the broker socket, starts bwrap, receives the TUN fd, and feeds it into the broker packet loop is still absent; live bwrap/TUN execution remains unproven.
+- Commit: this commit.

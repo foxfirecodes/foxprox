@@ -216,3 +216,7 @@ Keep the production `foxproxsetup` path responsible for creating the real TUN fd
 ## 2026-06-22 — Linux capability syscalls need local FFI layouts
 
 The Rust `libc` crate may not expose `CAP_NET_ADMIN` or `__user_cap_*` structs on this target. For narrow `capget`/`capset` usage, define the Linux v3 capability header/data as small `repr(C)` structs and keep tests on pure bitset mutation so the test process does not drop its own capabilities.
+
+## 2026-06-22 — keep launcher plans in sync with executable helper parsers
+
+Once a setup helper has a real CLI parser, the bwrap plan must construct that exact argument vector, including placing setup-helper args before the target `--` separator. Otherwise library setup tests can pass while the actual launch command cannot start.

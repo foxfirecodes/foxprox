@@ -61,6 +61,72 @@ impl ProxyEnvironment {
     }
 }
 
+/// Arguments passed to the `foxproxsetup` command inside the sandbox namespace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetupHelperArgs {
+    pub broker_socket: PathBuf,
+    pub tun_name: String,
+    pub tun_device: PathBuf,
+    pub address_cidr: String,
+    pub mtu: u16,
+    pub resolv_conf: PathBuf,
+    pub broker_dns: IpAddr,
+    pub ip_program: PathBuf,
+}
+
+impl SetupHelperArgs {
+    pub fn new(
+        broker_socket: impl Into<PathBuf>,
+        tun_name: impl Into<String>,
+        address_cidr: impl Into<String>,
+        mtu: u16,
+        resolv_conf: impl Into<PathBuf>,
+        broker_dns: IpAddr,
+    ) -> Self {
+        Self {
+            broker_socket: broker_socket.into(),
+            tun_name: tun_name.into(),
+            tun_device: PathBuf::from("/dev/net/tun"),
+            address_cidr: address_cidr.into(),
+            mtu,
+            resolv_conf: resolv_conf.into(),
+            broker_dns,
+            ip_program: PathBuf::from("ip"),
+        }
+    }
+
+    pub fn with_tun_device(mut self, tun_device: impl Into<PathBuf>) -> Self {
+        self.tun_device = tun_device.into();
+        self
+    }
+
+    pub fn with_ip_program(mut self, ip_program: impl Into<PathBuf>) -> Self {
+        self.ip_program = ip_program.into();
+        self
+    }
+
+    fn append_argv(&self, args: &mut Vec<String>) {
+        args.extend([
+            "--broker-socket".to_owned(),
+            self.broker_socket.display().to_string(),
+            "--tun-name".to_owned(),
+            self.tun_name.clone(),
+            "--tun-device".to_owned(),
+            self.tun_device.display().to_string(),
+            "--address-cidr".to_owned(),
+            self.address_cidr.clone(),
+            "--mtu".to_owned(),
+            self.mtu.to_string(),
+            "--resolv-conf".to_owned(),
+            self.resolv_conf.display().to_string(),
+            "--broker-dns".to_owned(),
+            self.broker_dns.to_string(),
+            "--ip-program".to_owned(),
+            self.ip_program.display().to_string(),
+        ]);
+    }
+}
+
 /// Inputs for a bwrap-compatible foxprox network setup launch.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BwrapSetupConfig {
@@ -68,6 +134,7 @@ pub struct BwrapSetupConfig {
     pub setup_program: PathBuf,
     pub target_argv: Vec<String>,
     pub proxy_environment: ProxyEnvironment,
+    pub setup_helper_args: Option<SetupHelperArgs>,
 }
 
 impl BwrapSetupConfig {
@@ -81,7 +148,13 @@ impl BwrapSetupConfig {
             setup_program: setup_program.into(),
             target_argv,
             proxy_environment: ProxyEnvironment::none(),
+            setup_helper_args: None,
         }
+    }
+
+    pub fn with_setup_helper_args(mut self, setup_helper_args: SetupHelperArgs) -> Self {
+        self.setup_helper_args = Some(setup_helper_args);
+        self
     }
 
     pub fn with_proxy_environment(mut self, proxy_environment: ProxyEnvironment) -> Self {
@@ -143,6 +216,9 @@ pub fn plan_bwrap_setup(config: &BwrapSetupConfig) -> Result<CommandPlan, Integr
     ];
     config.proxy_environment.append_bwrap_env_args(&mut args);
     args.push(config.setup_program.display().to_string());
+    if let Some(setup_helper_args) = &config.setup_helper_args {
+        setup_helper_args.append_argv(&mut args);
+    }
     args.push("--".to_owned());
     args.extend(config.target_argv.clone());
 
@@ -1104,6 +1180,60 @@ mod tests {
                 "curl",
                 "http://example.com"
             ]));
+    }
+
+    #[test]
+    fn bwrap_plan_passes_setup_helper_arguments_before_target_separator() {
+        use std::net::Ipv4Addr;
+
+        let config = BwrapSetupConfig::new(
+            "bwrap",
+            "/usr/libexec/foxproxsetup",
+            vec!["curl".to_owned(), "http://example.com".to_owned()],
+        )
+        .with_setup_helper_args(
+            SetupHelperArgs::new(
+                "/run/foxprox/broker.sock",
+                "foxprox0",
+                "10.0.0.2/24",
+                1400,
+                "/etc/resolv.conf",
+                IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            )
+            .with_tun_device("/dev/net/tun")
+            .with_ip_program("/sbin/ip"),
+        );
+
+        let argv = plan_bwrap_setup(&config).unwrap().argv();
+        let setup_index = argv
+            .iter()
+            .position(|arg| arg == "/usr/libexec/foxproxsetup")
+            .unwrap();
+        let separator_index = argv.iter().position(|arg| arg == "--").unwrap();
+        let setup_args = &argv[setup_index + 1..separator_index];
+
+        assert_eq!(
+            setup_args,
+            [
+                "--broker-socket",
+                "/run/foxprox/broker.sock",
+                "--tun-name",
+                "foxprox0",
+                "--tun-device",
+                "/dev/net/tun",
+                "--address-cidr",
+                "10.0.0.2/24",
+                "--mtu",
+                "1400",
+                "--resolv-conf",
+                "/etc/resolv.conf",
+                "--broker-dns",
+                "10.0.0.1",
+                "--ip-program",
+                "/sbin/ip",
+            ]
+        );
+        assert_eq!(&argv[separator_index + 1..], ["curl", "http://example.com"]);
     }
 
     #[test]
