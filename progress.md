@@ -550,3 +550,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: no TCP stream reassembly exists, so split HTTP requests cannot be classified yet; this helper must remain metadata-only until the stack adapter can buffer stream bytes safely.
 - Exact next step: commit TCP HTTP metadata wiring, then add TLS ClientHello SNI wiring from TCP payloads into TCP connect policy metadata.
+
+## 2026-06-22T00:45:00Z
+- Current objective: continue transparent TCP metadata wiring with TLS ClientHello SNI attribution.
+- Git status summary: clean worktree after commit `9fc408f`.
+- Intended slice: convert visible TLS ClientHello SNI in validated TCP payloads into a normalized TCP connect policy event with high-confidence TLS attribution, without decrypting TLS or guessing when SNI is absent.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: ECH/hidden-SNI detection remains parser/policy metadata only; no TLS stream buffering exists yet.
+- Exact next step: add TLS SNI conversion helper and deterministic tests for visible SNI and missing-SNI behavior.
+
+## 2026-06-22T00:49:25Z
+- Current objective: wire visible TLS ClientHello SNI from TCP payloads into normalized TCP connect policy metadata.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed due import formatting; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 52 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 41 runtime tests, and 7 setup tests passed. New tests prove a visible TLS ClientHello SNI becomes a high-confidence `TlsSni` hostname attribution on a `TcpConnectAttempt`, while a TLS ClientHello without SNI returns `MissingSni` instead of inventing hostname metadata.
+- Commit hash when committed: pending.
+- Remaining risks: ECH/hidden-SNI policy is represented but not specifically detected beyond missing visible SNI; stream buffering/reassembly is still absent.
+- Exact next step: commit TLS SNI wiring, then add explicit policy tests for SNI/DNS mismatch and hidden-SNI denial using the TCP metadata conversion path.

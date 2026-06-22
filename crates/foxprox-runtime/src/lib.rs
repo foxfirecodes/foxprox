@@ -7,12 +7,13 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    classify_udp, parse_dns_query, parse_http_request, parse_ip_packet,
-    synthesize_icmpv4_echo_reply, synthesize_udpv4_response, AuditSink, Decision, DecisionAction,
-    DecisionReason, DnsCache, DnsParseError, Endpoint, FlowKey, FlowTable, FrontendKind,
-    HostnameAttribution, InspectError, NormalizedEvent, PacketError, ParsedIpPacket, Protocol,
-    QuicStatus, SandboxId, SniStatus, StaticDnsResolver, Tcpv4Segment, UdpFlow, Udpv4Packet,
-    UnsupportedIpv4Protocol, VerificationKernel,
+    classify_udp, parse_dns_query, parse_http_request, parse_ip_packet, parse_tls_client_hello_sni,
+    synthesize_icmpv4_echo_reply, synthesize_udpv4_response, AttributionConfidence,
+    AttributionSource, AuditSink, Decision, DecisionAction, DecisionReason, DnsCache,
+    DnsParseError, Endpoint, FlowKey, FlowTable, FrontendKind, HostnameAttribution, InspectError,
+    NormalizedEvent, PacketError, ParsedIpPacket, Protocol, QuicStatus, SandboxId, SniStatus,
+    StaticDnsResolver, Tcpv4Segment, UdpFlow, Udpv4Packet, UnsupportedIpv4Protocol,
+    VerificationKernel,
 };
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
@@ -943,6 +944,29 @@ pub fn tcpv4_segment_to_event(
     }
 }
 
+pub fn tcpv4_tls_client_hello_to_event(
+    sandbox_id: SandboxId,
+    segment: &Tcpv4Segment<'_>,
+) -> Result<NormalizedEvent, InspectError> {
+    let hello = parse_tls_client_hello_sni(segment.payload)?;
+    Ok(NormalizedEvent::TcpConnectAttempt {
+        sandbox_id,
+        frontend: FrontendKind::Tun,
+        source: Some(Endpoint::new(
+            IpAddr::V4(segment.source),
+            segment.source_port,
+        )),
+        destination: Endpoint::new(IpAddr::V4(segment.destination), segment.destination_port),
+        hostname: Some(HostnameAttribution::new(
+            hello.sni,
+            AttributionSource::TlsSni,
+            AttributionConfidence::High,
+        )),
+        sni_status: SniStatus::Present,
+        sni_dns_mismatch: false,
+    })
+}
+
 pub fn tcpv4_http_request_to_event(
     sandbox_id: SandboxId,
     segment: &Tcpv4Segment<'_>,
@@ -1801,6 +1825,48 @@ mod tests {
     }
 
     #[test]
+    fn tcp_tls_client_hello_sni_becomes_hostname_attributed_connect_event() {
+        let hello = build_tls_client_hello("Example.com");
+        let packet = build_tcp_ipv4_packet(53000, 443, 0x18, &hello);
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+
+        let event =
+            tcpv4_tls_client_hello_to_event(SandboxId::new("tls-tun").unwrap(), &tcp).unwrap();
+
+        let NormalizedEvent::TcpConnectAttempt {
+            hostname,
+            sni_status,
+            destination,
+            ..
+        } = event
+        else {
+            panic!("expected TCP connect event");
+        };
+        let hostname = hostname.unwrap();
+        assert_eq!(hostname.hostname.as_str(), "example.com");
+        assert_eq!(hostname.source, AttributionSource::TlsSni);
+        assert_eq!(hostname.confidence, AttributionConfidence::High);
+        assert_eq!(sni_status, SniStatus::Present);
+        assert_eq!(destination.port, 443);
+    }
+
+    #[test]
+    fn tcp_tls_without_sni_is_reported_instead_of_guessed() {
+        let hello = build_tls_client_hello_without_extensions();
+        let packet = build_tcp_ipv4_packet(53000, 443, 0x18, &hello);
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+
+        assert_eq!(
+            tcpv4_tls_client_hello_to_event(SandboxId::new("tls-tun").unwrap(), &tcp),
+            Err(InspectError::MissingSni)
+        );
+    }
+
+    #[test]
     fn unified_tun_policy_handler_audits_tcp_connect_attempts() {
         let request = build_tcp_ipv4_packet(53000, 80, 0x02, &[]);
         let mut reader = std::io::Cursor::new(request);
@@ -1996,6 +2062,61 @@ mod tests {
         );
         tcp_payload[16..18].copy_from_slice(&tcp_checksum.to_be_bytes());
         build_ipv4_packet(6, &tcp_payload)
+    }
+
+    fn build_tls_client_hello(hostname: &str) -> Vec<u8> {
+        let host = hostname.as_bytes();
+        let mut sni_data = Vec::new();
+        sni_data.extend_from_slice(&((host.len() + 3) as u16).to_be_bytes());
+        sni_data.push(0);
+        sni_data.extend_from_slice(&(host.len() as u16).to_be_bytes());
+        sni_data.extend_from_slice(host);
+
+        let mut extensions = Vec::new();
+        extensions.extend_from_slice(&0u16.to_be_bytes());
+        extensions.extend_from_slice(&(sni_data.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(&sni_data);
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]);
+        body.extend_from_slice(&[0u8; 32]);
+        body.push(0);
+        body.extend_from_slice(&2u16.to_be_bytes());
+        body.extend_from_slice(&[0x13, 0x01]);
+        body.push(1);
+        body.push(0);
+        body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        body.extend_from_slice(&extensions);
+        wrap_tls_client_hello_body(&body)
+    }
+
+    fn build_tls_client_hello_without_extensions() -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&[0x03, 0x03]);
+        body.extend_from_slice(&[0u8; 32]);
+        body.push(0);
+        body.extend_from_slice(&2u16.to_be_bytes());
+        body.extend_from_slice(&[0x13, 0x01]);
+        body.push(1);
+        body.push(0);
+        wrap_tls_client_hello_body(&body)
+    }
+
+    fn wrap_tls_client_hello_body(body: &[u8]) -> Vec<u8> {
+        let mut handshake = vec![
+            1,
+            ((body.len() >> 16) & 0xff) as u8,
+            ((body.len() >> 8) & 0xff) as u8,
+            (body.len() & 0xff) as u8,
+        ];
+        handshake.extend_from_slice(body);
+
+        let mut record = Vec::new();
+        record.push(22);
+        record.extend_from_slice(&[0x03, 0x03]);
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
     }
 
     fn dns_query_payload() -> Vec<u8> {
