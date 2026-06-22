@@ -66,6 +66,7 @@ name = "foxprox-cli"
 version = "0.1.0"
 dependencies = [
  "foxprox-core",
+ "foxprox-device",
 ]
 
 [[package]]
@@ -74,6 +75,10 @@ version = "0.1.0"
 dependencies = [
  "smoltcp",
 ]
+
+[[package]]
+name = "foxprox-device"
+version = "0.1.0"
 
 [[package]]
 name = "foxprox-setup"

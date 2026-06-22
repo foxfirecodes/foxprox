@@ -12,3 +12,4 @@ path = "src/main.rs"
 
 [dependencies]
 foxprox-core = { path = "../foxprox-core" }
+foxprox-device = { path = "../foxprox-device" }

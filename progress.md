@@ -863,3 +863,15 @@
 - Interpretation: audit backpressure plumbing is now consistently available across reusable runtime boundaries, not only the TCP bridge.
 - Next verification gap: commit this audit flush improvement; remaining larger work is crate decomposition and production async/device integration.
 - Commit hash after commit: pending.
+
+## 2026-06-22T06:25:00Z — Device fd helper crate extraction
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run handoff-smoke && target/debug/foxprox-lab run tcp-bridge-smoke`
+- Environment assumptions: local bwrap/TUN fd handoff works; new `foxprox-device` crate is Unix-only for fd helper APIs and is used by the CLI harness.
+- Expected result: move host-side fd receive/read/write/nonblocking/close helpers out of the CLI smoke file into a reusable device crate without regressing handoff or TCP bridge smokes.
+- Observed result: pass. Workspace tests now include `foxprox-device` (2 tests), plus `foxprox-core` 58 tests, `foxprox-cli` 2 tests, and `foxproxsetup` 7 tests. `handoff-smoke` and `tcp-bridge-smoke` both emitted `decision":"allow"`.
+- Relevant output excerpt: `fd::tests::cmsg_space_includes_aligned_header_and_payload ... ok`; `fd::tests::invalid_fd_is_not_valid ... ok`; handoff `"fd_valid_after_helper_exit":"true"`; TCP bridge `"status":"exit status: 0"`.
+- Changed files: `Cargo.toml`, `crates/foxprox-device/{Cargo.toml,src/lib.rs}`, `crates/foxprox-cli/{Cargo.toml,src/main.rs}`, `progress.md`.
+- Interpretation: Linux fd/device mechanics are now represented by a reusable crate boundary instead of being embedded in the harness CLI, aligning with the documented broker-device/module split.
+- Next verification gap: commit device crate extraction; remaining larger work is integrating setup-side fd send helpers into the same device crate or creating production async broker-device APIs.
+- Commit hash after commit: pending.
