@@ -208,3 +208,8 @@
 
 - A dev-only smoltcp integration test can prove the adapter/runtime boundary without adding smoltcp as a runtime dependency of `foxprox-runtime`.
 - The smoltcp SYN path now exercises device read, stack ingress, normalized TCP policy, audit, shared egress, and opaque SYN-ACK write-back in one bounded test.
+
+## 2026-06-22 — Stack flow-close audit contract
+
+- Stack flow-close events need to carry normalized frontend, key, byte counts, and duration so runtime can record lifecycle audit without reconstructing stack-specific flow state.
+- `StackEvent::FlowClosed` should remain a normalized adapter event; audit records are created in runtime, not inside smoltcp or other stack-specific crates.

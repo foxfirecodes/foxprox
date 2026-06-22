@@ -889,3 +889,25 @@
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
 - Commit hash after commit: c704e38.
 - Remaining boundary risks: TCP byte-stream bridging, continuous polling, flow-close lifecycle, and real TUN readiness remain.
+
+## 2026-06-22 — Boundary objective: stack flow-close audit contract
+
+- Boundary under work: normalized stack-adapter flow close events and runtime audit handling.
+- Allowed dependency direction: stack adapters emit normalized flow lifecycle fields through `foxprox-net::StackEvent`; `foxprox-runtime` records them through `foxprox-audit`; audit must not depend on adapter internals or smoltcp socket state.
+- Dependency-risk assessment: the stack runtime loop previously counted flow-close events without audit because the event was too narrow. Lifecycle events need enough normalized data for stable audit records without passing stack-specific flow objects.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: widened `StackEvent::FlowClosed` to carry `StackFlowClosed` normalized lifecycle fields and updated the runtime stack loop to convert those fields into `AuditRecord::flow_closed`. Added a mock stack-adapter test proving flow-close audit recording without adapter-specific state. All verification passed.
+- Changed files:
+  - `crates/foxprox-net/src/lib.rs`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 91 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-net` — net exposes normalized stack lifecycle contract.
+  - `cargo tree -p foxprox-runtime` — runtime records lifecycle audit through audit contract.
+  - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: actual smoltcp close detection, TCP byte counts, stream bridging, and continuous polling remain.

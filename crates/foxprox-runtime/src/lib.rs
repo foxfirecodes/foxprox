@@ -7,12 +7,12 @@
 
 use std::fmt;
 
-use foxprox_audit::AuditSink;
-use foxprox_core::{FrontendKind, SandboxId};
+use foxprox_audit::{AuditRecord, AuditSink, FlowClosedAudit};
+use foxprox_core::{FrontendKind, Protocol, SandboxId};
 use foxprox_device::{DeviceError, DevicePacket, PacketDevice};
 use foxprox_egress::HostEgress;
 use foxprox_net::{
-    handle_ipv4_packet, handle_normalized_event, BrokerError, BrokerEventOutcome,
+    handle_ipv4_packet, handle_normalized_event, BrokerError, BrokerEventOutcome, FlowProtocol,
     InboundIpv4Packet, OutboundIpPacket, PacketBrokerOutcome, StackAdapter, StackEvent,
 };
 use foxprox_policy::PolicyEngine;
@@ -113,7 +113,25 @@ where
                 .map_err(RuntimeError::Broker)?;
                 broker_outcomes.push(outcome);
             }
-            StackEvent::FlowClosed { .. } => {
+            StackEvent::FlowClosed(closed) => {
+                let protocol = match closed.key.protocol {
+                    FlowProtocol::Tcp => Protocol::Tcp,
+                    FlowProtocol::Udp => Protocol::Udp,
+                };
+                ctx.audit
+                    .record(AuditRecord::flow_closed(FlowClosedAudit {
+                        sequence: ctx.sequence_start + offset as u64,
+                        timestamp_millis: ctx.timestamp_millis,
+                        sandbox_id: closed.sandbox_id,
+                        frontend: closed.frontend,
+                        protocol,
+                        source: closed.key.source,
+                        destination: closed.key.destination,
+                        byte_counts: closed.byte_counts,
+                        duration: closed.duration,
+                    }))
+                    .map_err(BrokerError::Audit)
+                    .map_err(RuntimeError::Broker)?;
                 flow_closed_events += 1;
             }
         }
@@ -215,6 +233,36 @@ mod tests {
     }
 
     #[test]
+    fn one_step_runtime_records_stack_flow_close_audit() {
+        let inbound = vec![0x45, 0, 0, 20];
+        let cursor = Cursor::new(inbound);
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let mut adapter = FlowClosedStackAdapter;
+        let policy = PolicyEngine::new(RuntimeConfig::deny_by_default());
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(4);
+
+        let outcome = process_one_stack_device_packet(
+            &mut device,
+            StackDevicePacketStep {
+                adapter: &mut adapter,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                sequence_start: 20,
+                timestamp_millis: 3000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.flow_closed_events, 1);
+        assert_eq!(audit.records().len(), 1);
+        let record = audit.records().front().unwrap();
+        assert_eq!(record.kind, foxprox_audit::AuditKind::FlowClosed);
+        assert_eq!(record.flow_duration_millis, Some(250));
+    }
+
+    #[test]
     fn one_step_runtime_feeds_stack_adapter_events_through_policy_and_writes_output() {
         let inbound = vec![0x45, 0, 0, 20];
         let cursor = Cursor::new(inbound.clone());
@@ -250,6 +298,28 @@ mod tests {
         let bytes = device.into_inner().into_inner();
         assert_eq!(&bytes[..inbound.len()], inbound.as_slice());
         assert_eq!(&bytes[inbound.len()..], &[0x45, 0, 0, 20]);
+    }
+
+    struct FlowClosedStackAdapter;
+
+    impl StackAdapter for FlowClosedStackAdapter {
+        fn ingest_ip_packet(&mut self, _packet: &[u8]) -> Result<Vec<StackEvent>, StackError> {
+            Ok(vec![StackEvent::FlowClosed(foxprox_net::StackFlowClosed {
+                sandbox_id: SandboxId::new("s1").unwrap(),
+                frontend: FrontendKind::Tun,
+                key: foxprox_net::FlowKey {
+                    source: "10.0.0.2:49152".parse().unwrap(),
+                    destination: "203.0.113.10:80".parse().unwrap(),
+                    protocol: FlowProtocol::Tcp,
+                },
+                byte_counts: foxprox_core::ByteCounts::new(10, 20),
+                duration: std::time::Duration::from_millis(250),
+            })])
+        }
+
+        fn poll_outbound_packets(&mut self) -> Result<Vec<OutboundIpPacket>, StackError> {
+            Ok(Vec::new())
+        }
     }
 
     struct MockStackAdapter {

@@ -33,11 +33,18 @@ pub trait StackAdapter {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StackEvent {
     PolicyEvent(NormalizedEvent),
-    FlowClosed {
-        sandbox_id: SandboxId,
-        key: FlowKey,
-        byte_counts: foxprox_core::ByteCounts,
-    },
+    FlowClosed(StackFlowClosed),
+}
+
+/// Normalized flow lifecycle event emitted by a stack adapter without exposing
+/// stack-specific socket or flow objects.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StackFlowClosed {
+    pub sandbox_id: SandboxId,
+    pub frontend: FrontendKind,
+    pub key: FlowKey,
+    pub byte_counts: foxprox_core::ByteCounts,
+    pub duration: Duration,
 }
 
 /// Opaque outbound IP packet to write back to TUN.
