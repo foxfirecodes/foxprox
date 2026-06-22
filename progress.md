@@ -1196,3 +1196,23 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 8a68a00.
 - Remaining boundary risks: per-sandbox/global UDP limits, ICMP error handling, IPv6, and rate limiting remain.
+
+## 2026-06-22 — Boundary objective: bounded UDP bridge count
+
+- Boundary under work: explicit runtime resource limit for retained UDP pseudo-flow handles.
+- Allowed dependency direction: runtime enforces bridge-count limits over normalized flow keys; egress handles remain opaque; policy/audit remain independent of resource accounting internals.
+- Dependency-risk assessment: UDP idle expiry bounds time but not burst cardinality. Before a continuous loop, the retained UDP bridge table needs a hard max-flow cap to prevent unbounded host socket retention.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/audit.
+- Observed results: added `UdpBridgeLimits` with a default max-flow cap, `UdpBridgeTable::with_limits`, and checked insertion that rejects new flows when the table is full while allowing replacement of existing keys. Runtime UDP bridge retention now uses the checked insertion path. Added a test proving a one-flow table rejects a second distinct UDP flow without changing the retained count. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 107 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — UDP flow limits are runtime-owned.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: per-sandbox flow limits, rate limiting, ICMP error handling, and IPv6 remain.

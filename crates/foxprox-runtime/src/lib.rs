@@ -92,9 +92,24 @@ impl UdpFlowKey {
 /// Runtime-owned UDP flow table. It stores only egress-owned UDP handles behind
 /// the shared `HostUdpFlow` contract.
 pub const DEFAULT_UDP_BRIDGE_IDLE_TIMEOUT_MILLIS: u64 = 60_000;
+pub const DEFAULT_MAX_UDP_BRIDGES: usize = 4096;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UdpBridgeLimits {
+    pub max_flows: usize,
+}
+
+impl Default for UdpBridgeLimits {
+    fn default() -> Self {
+        Self {
+            max_flows: DEFAULT_MAX_UDP_BRIDGES,
+        }
+    }
+}
 
 pub struct UdpBridgeTable<U> {
     flows: HashMap<UdpFlowKey, UdpBridge<U>>,
+    limits: UdpBridgeLimits,
 }
 
 struct UdpBridge<U> {
@@ -107,11 +122,23 @@ impl<U> Default for UdpBridgeTable<U> {
     fn default() -> Self {
         Self {
             flows: HashMap::new(),
+            limits: UdpBridgeLimits::default(),
         }
     }
 }
 
 impl<U> UdpBridgeTable<U> {
+    pub fn with_limits(limits: UdpBridgeLimits) -> Self {
+        Self {
+            flows: HashMap::new(),
+            limits,
+        }
+    }
+
+    pub fn limits(&self) -> UdpBridgeLimits {
+        self.limits
+    }
+
     pub fn len(&self) -> usize {
         self.flows.len()
     }
@@ -135,7 +162,24 @@ impl<U> UdpBridgeTable<U> {
         now_millis: u64,
         idle_timeout_millis: u64,
     ) -> Option<U> {
-        self.flows
+        self.try_insert_with_timeout(key, flow, now_millis, idle_timeout_millis)
+            .expect("default UDP bridge limits exceeded")
+    }
+
+    pub fn try_insert_with_timeout(
+        &mut self,
+        key: UdpFlowKey,
+        flow: U,
+        now_millis: u64,
+        idle_timeout_millis: u64,
+    ) -> Result<Option<U>, EgressError> {
+        if !self.flows.contains_key(&key) && self.flows.len() >= self.limits.max_flows {
+            return Err(EgressError::StreamIo(
+                "UDP bridge flow limit exceeded".into(),
+            ));
+        }
+        Ok(self
+            .flows
             .insert(
                 key,
                 UdpBridge {
@@ -144,7 +188,7 @@ impl<U> UdpBridgeTable<U> {
                     idle_timeout_millis,
                 },
             )
-            .map(|bridge| bridge.flow)
+            .map(|bridge| bridge.flow))
     }
 
     pub fn remove(&mut self, key: &UdpFlowKey) -> Option<U> {
@@ -260,12 +304,15 @@ where
     if let (NormalizedEvent::UdpFlowAttempt(event), Some(EgressOutcome::UdpOpened(flow))) =
         (&result.event, result.egress_outcome.take())
     {
-        ctx.udp_bridges.insert_with_timeout(
-            UdpFlowKey::from_attempt(event),
-            flow,
-            ctx.timestamp_millis,
-            udp_timeout(event.classification, &ctx.udp_timeouts).as_millis() as u64,
-        );
+        ctx.udp_bridges
+            .try_insert_with_timeout(
+                UdpFlowKey::from_attempt(event),
+                flow,
+                ctx.timestamp_millis,
+                udp_timeout(event.classification, &ctx.udp_timeouts).as_millis() as u64,
+            )
+            .map_err(BrokerError::Egress)
+            .map_err(RuntimeError::Broker)?;
     }
 
     write_outbound_packets(device, &result.outbound_packets)?;
@@ -821,6 +868,39 @@ mod tests {
         }));
         assert_eq!(writes.borrow().as_slice(), &[b"ping".to_vec()]);
         assert_eq!(audit.records().len(), 1);
+    }
+
+    #[test]
+    fn udp_bridge_table_enforces_max_flow_limit() {
+        let first = UdpFlowKey {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:53000".parse().unwrap(),
+            destination: "203.0.113.10:12345".parse().unwrap(),
+        };
+        let second = UdpFlowKey {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:53001".parse().unwrap(),
+            destination: "203.0.113.11:12345".parse().unwrap(),
+        };
+        let mut bridges = UdpBridgeTable::with_limits(UdpBridgeLimits { max_flows: 1 });
+
+        bridges
+            .try_insert_with_timeout(first, ReadableUdpFlow::new(VecDeque::new()), 0, 30)
+            .unwrap();
+        let error = match bridges.try_insert_with_timeout(
+            second,
+            ReadableUdpFlow::new(VecDeque::new()),
+            0,
+            30,
+        ) {
+            Ok(_) => panic!("expected UDP bridge flow limit error"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("UDP bridge flow limit"));
+        assert_eq!(bridges.len(), 1);
     }
 
     #[test]

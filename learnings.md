@@ -278,3 +278,8 @@
 
 - UDP bridges need runtime-owned idle timestamps and typed timeout durations when retained; otherwise host UDP sockets can leak after one-shot flows.
 - Use normalized UDP classification plus configured `UdpTimeouts` at insertion time so expiry policy does not depend on parser internals or socket types.
+
+## 2026-06-22 — bounded UDP bridges
+
+- UDP bridge expiry bounds lifetime but not burst cardinality; keep a separate max-flow limit in runtime to bound retained host UDP handles.
+- Limit failures should surface through the existing egress-error path so policy/audit contracts do not grow resource-accounting details.
