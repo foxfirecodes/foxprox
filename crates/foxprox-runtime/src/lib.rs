@@ -1269,6 +1269,56 @@ pub fn close_tcp_bridge_flow_and_prune_metadata<B>(
     Ok(lifecycle)
 }
 
+#[derive(Debug)]
+pub struct TcpFlowRuntime<B> {
+    bridge: TcpStreamBridgeRuntime<B>,
+    metadata: TcpMetadataBufferTable,
+    metadata_buffer_bytes: usize,
+}
+
+impl<B> TcpFlowRuntime<B> {
+    pub fn new(components: &BrokerRuntimeComponents, bridge: B) -> Self {
+        Self {
+            bridge: build_tcp_stream_bridge_runtime(components, bridge),
+            metadata: TcpMetadataBufferTable::new(),
+            metadata_buffer_bytes: components.tcp_metadata_buffer_bytes,
+        }
+    }
+
+    pub fn bridge(&self) -> &TcpStreamBridgeRuntime<B> {
+        &self.bridge
+    }
+
+    pub fn metadata(&self) -> &TcpMetadataBufferTable {
+        &self.metadata
+    }
+
+    pub fn mark_opened(&mut self, flow: FlowKey) -> Result<(), TcpBridgeError> {
+        self.bridge.mark_opened(flow)
+    }
+
+    pub fn metadata_buffer_for(&mut self, flow: FlowKey) -> &mut TcpMetadataBuffer {
+        self.metadata.buffer_for(flow, self.metadata_buffer_bytes)
+    }
+
+    pub fn close_flow(
+        &mut self,
+        flow: &FlowKey,
+        duration: Duration,
+    ) -> Result<TcpStackLifecycleEvent, TcpBridgeError> {
+        close_tcp_bridge_flow_and_prune_metadata(
+            &mut self.bridge,
+            &mut self.metadata,
+            flow,
+            duration,
+        )
+    }
+
+    pub fn into_parts(self) -> (TcpStreamBridgeRuntime<B>, TcpMetadataBufferTable) {
+        (self.bridge, self.metadata)
+    }
+}
+
 pub struct BrokerDnsRuntime<'a, S> {
     pub sandbox_id: SandboxId,
     pub resolver: &'a StaticDnsResolver,
@@ -2778,6 +2828,67 @@ mod tests {
         ));
         assert!(metadata.is_empty());
         assert!(bridge.open_flows().is_empty());
+    }
+
+    #[test]
+    fn tcp_flow_runtime_owns_bridge_and_metadata_cleanup() {
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("tcp-flow-runtime").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 1,
+            tcp_metadata_buffer_bytes: 64,
+        })
+        .unwrap();
+        let flow = tcp_flow_key();
+        let packet = build_tcp_ipv4_packet(53000, 80, 0x18, b"GET /partial");
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        let mut runtime = TcpFlowRuntime::new(&components, FakeTcpBridge::default());
+        runtime.mark_opened(flow.clone()).unwrap();
+        assert_eq!(
+            runtime
+                .metadata_buffer_for(flow.clone())
+                .push_http(SandboxId::new("tcp-flow-runtime").unwrap(), &tcp),
+            TcpMetadataBufferOutcome::NeedMoreData
+        );
+
+        let lifecycle = runtime
+            .close_flow(&flow, Duration::from_millis(25))
+            .unwrap();
+
+        assert!(matches!(
+            lifecycle,
+            TcpStackLifecycleEvent::FlowClosed { .. }
+        ));
+        assert!(runtime.bridge().open_flows().is_empty());
+        assert!(runtime.metadata().is_empty());
+    }
+
+    #[test]
+    fn tcp_flow_runtime_applies_configured_open_flow_limit() {
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("tcp-flow-runtime-limit").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 1,
+            tcp_metadata_buffer_bytes: 64,
+        })
+        .unwrap();
+        let mut runtime = TcpFlowRuntime::new(&components, FakeTcpBridge::default());
+        runtime.mark_opened(tcp_flow_key()).unwrap();
+        let second = FlowKey::new(
+            Protocol::Tcp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 3)), 53001),
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 35)), 443),
+        );
+
+        let error = runtime.mark_opened(second).unwrap_err();
+
+        assert_eq!(error, TcpBridgeError::OpenFlowLimitReached { limit: 1 });
     }
 
     #[test]

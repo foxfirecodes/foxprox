@@ -1136,3 +1136,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: cleanup is helper-driven and must be called by the future live TCP lifecycle manager.
 - Exact next step: commit TCP metadata close pruning, then add an integrated TCP flow state object that owns bridge runtime plus metadata table so close cleanup is harder to forget.
+
+## 2026-06-22T21:46:42Z
+- Current objective: continue after TCP metadata close pruning toward integrated TCP flow state ownership.
+- Git status summary: clean worktree after commit `8edf294`.
+- Intended slice: add a small `TcpFlowRuntime` that owns both TCP bridge runtime and metadata table so open/metadata/close cleanup use one state object.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this state object will still be driven by tests/fake bridge rather than a real smoltcp adapter.
+- Exact next step: implement `TcpFlowRuntime` with configured limits and close-prune behavior.
+
+## 2026-06-22T21:47:30Z
+- Current objective: add integrated TCP flow runtime state for bridge and metadata cleanup.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, and 7 setup tests passed. New `TcpFlowRuntime` owns the bridge runtime and metadata table, applies configured open-flow limits, and closes flows while pruning partial metadata state.
+- Commit hash when committed: pending.
+- Remaining risks: integrated state is still not driven by smoltcp or a live TUN event loop.
+- Exact next step: commit integrated TCP flow runtime, then add initial smoltcp adapter crate boundary or dependency-gated adapter scaffold for future TUN TCP forwarding.
