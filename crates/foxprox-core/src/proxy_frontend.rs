@@ -137,6 +137,10 @@ impl<E: ExplicitProxyEgress> ExplicitProxyFrontend<E> {
         &mut self.broker
     }
 
+    pub fn sandbox_id(&self) -> &str {
+        &self.sandbox_id
+    }
+
     pub fn egress(&self) -> &E {
         &self.egress
     }

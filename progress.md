@@ -1366,3 +1366,27 @@ The egress crate now includes a concrete single-step blocking HTTP proxy listene
 
 ### Remaining blind spots
 - The listener proof writes synthetic proxy status responses and handles one accepted connection; final async proxy runtime still needs streaming HTTP response/CONNECT tunneling, SOCKS listener sockets, and process lifecycle supervision.
+
+## 2026-06-22 — Round-15 HTTP proxy listener failure-path fix
+
+### Commands run
+- `cargo fmt` — applied formatting for round-15 proxy listener fixes.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 14 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 103 core tests, 3 device tests, 14 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_http_proxy_server_audits_client_send_failure_with_sandbox_id ... ok`
+- `foxprox_egress::tests::blocking_http_proxy_server_maps_egress_failure_to_client_status ... ok`
+
+### Interpretation
+Round-15 high findings are fixed. HTTP proxy listener client-response write failures now audit `http_proxy_client_send_failed` under the real `ExplicitProxyFrontend` sandbox id instead of a hard-coded listener label, and deterministic regression coverage asserts `send_status=send_failed` plus sandbox attribution. Allowed proxy egress failures no longer escape the listener before client-visible evidence: the frontend still records `proxy_egress_send_failed`, while the listener returns a structured fail-closed step and attempts a 502 response to the client.
+
+### Changed files
+- `crates/foxprox-core/src/proxy_frontend.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `progress.md`
+
+### Remaining blind spots
+- Explicit proxy runtime still lacks SOCKS5 TCP listener/tunnel proof, streaming HTTP response/CONNECT tunneling, and async lifecycle supervision.

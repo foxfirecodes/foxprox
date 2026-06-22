@@ -330,10 +330,33 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
             .set_write_timeout(Some(self.io_timeout))
             .map_err(|_| ProxyEgressError::SendFailed)?;
         let request = read_http_proxy_request(&mut stream, self.max_request_bytes)?;
+        self.handle_http_proxy_request(client, &request, &mut stream, now_ms)
+    }
+
+    pub fn frontend(&self) -> &ExplicitProxyFrontend<E> {
+        &self.frontend
+    }
+
+    fn handle_http_proxy_request<W: Write>(
+        &mut self,
+        client: SocketAddr,
+        request: &[u8],
+        writer: &mut W,
+        now_ms: u64,
+    ) -> Result<HttpProxyListenerStepResult, ProxyEgressError> {
         let request_len = request.len();
-        let result = self.frontend.handle_http_proxy_bytes(&request)?;
-        let (status_code, response) = http_proxy_response_for(&request, result.decision);
-        match stream.write_all(response.as_bytes()) {
+        let result = self.frontend.handle_http_proxy_bytes(request);
+        let (decision, reason, forwarded, egress_failed) = match result {
+            Ok(result) => (result.decision, result.reason, result.forwarded, false),
+            Err(ProxyEgressError::SendFailed) => (
+                Decision::FailClosed,
+                Some(DenialReason::ResourceLimit),
+                false,
+                true,
+            ),
+        };
+        let (status_code, response) = http_proxy_response_for(request, decision, egress_failed);
+        match writer.write_all(response.as_bytes()) {
             Ok(()) => Ok(HttpProxyListenerStepResult {
                 client,
                 request_len,
@@ -341,13 +364,14 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
                 sent_response: true,
                 send_status: "sent".to_string(),
                 status_code,
-                decision: result.decision,
-                reason: result.reason,
-                forwarded: result.forwarded,
+                decision,
+                reason,
+                forwarded,
             }),
             Err(_) => {
+                let sandbox_id = self.frontend.sandbox_id().to_string();
                 let audit =
-                    AuditRecord::new_at(AuditKind::BrokerError, "proxy-listener", now_ms as u128)
+                    AuditRecord::new_at(AuditKind::BrokerError, sandbox_id.clone(), now_ms as u128)
                         .with_frontend(Frontend::HttpProxy)
                         .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
                         .with_detail("client", client.to_string())
@@ -356,7 +380,7 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
                         .with_detail("send_status", "send_failed")
                         .with_detail("error", "http_proxy_client_send_failed");
                 let request = PolicyRequest::unsupported(
-                    "proxy-listener".to_string(),
+                    sandbox_id,
                     Frontend::HttpProxy,
                     DenialReason::ResourceLimit,
                 );
@@ -370,14 +394,10 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
                     status_code,
                     decision: Decision::FailClosed,
                     reason: Some(DenialReason::ResourceLimit),
-                    forwarded: result.forwarded,
+                    forwarded,
                 })
             }
         }
-    }
-
-    pub fn frontend(&self) -> &ExplicitProxyFrontend<E> {
-        &self.frontend
     }
 }
 
@@ -404,7 +424,14 @@ fn read_http_proxy_request(
     Ok(request)
 }
 
-fn http_proxy_response_for(request: &[u8], decision: Decision) -> (u16, &'static str) {
+fn http_proxy_response_for(
+    request: &[u8],
+    decision: Decision,
+    egress_failed: bool,
+) -> (u16, &'static str) {
+    if egress_failed {
+        return (502, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n");
+    }
     if decision.is_allow() {
         if request.starts_with(b"CONNECT ") {
             (200, "HTTP/1.1 200 Connection Established\r\n\r\n")
@@ -459,13 +486,49 @@ mod tests {
     use super::*;
     use foxprox_core::{
         BrokerCore, Cidr, Decision, DnsBrokerHandler, ExplicitProxyFrontend, FlowKey,
-        InMemoryExplicitProxyEgress, PolicyConfig, PolicyEngine, PolicyRule, Protocol,
-        TcpForwarder, UdpForwarder, UdpTimeoutConfig,
+        HttpProxyRequestMetadata, InMemoryExplicitProxyEgress, PolicyConfig, PolicyEngine,
+        PolicyRule, Protocol, SocksConnectMetadata, TcpForwarder, UdpForwarder, UdpTimeoutConfig,
     };
     use std::collections::VecDeque;
-    use std::io::{Read, Write};
+    use std::io::{ErrorKind, Read, Result as IoResult, Write};
     use std::net::{TcpListener, UdpSocket};
     use std::thread;
+
+    #[derive(Clone, Debug, Default)]
+    struct FailingProxyEgress;
+
+    impl ExplicitProxyEgress for FailingProxyEgress {
+        fn forward_http(
+            &mut self,
+            _request: &HttpProxyRequestMetadata,
+            _bytes: &[u8],
+        ) -> Result<(), ProxyEgressError> {
+            Err(ProxyEgressError::SendFailed)
+        }
+
+        fn connect_socks(
+            &mut self,
+            _request: &SocksConnectMetadata,
+            _bytes: &[u8],
+        ) -> Result<(), ProxyEgressError> {
+            Err(ProxyEgressError::SendFailed)
+        }
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> IoResult<usize> {
+            Err(std::io::Error::new(
+                ErrorKind::BrokenPipe,
+                "deterministic test write failure",
+            ))
+        }
+
+        fn flush(&mut self) -> IoResult<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn blocking_tcp_egress_connects_and_exchanges_bytes_through_forwarder() {
@@ -605,6 +668,102 @@ mod tests {
         let records: Vec<_> = server.frontend().broker().audit().records().collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].decision, Some(Decision::DenyDrop));
+    }
+
+    #[test]
+    fn blocking_http_proxy_server_audits_client_send_failure_with_sandbox_id() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-http-proxy")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Http)
+                .origin("http", "example.com", 80),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let frontend = ExplicitProxyFrontend::new(
+            "sandbox-http",
+            broker,
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut server = BlockingHttpProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            frontend,
+            Duration::from_secs(1),
+            4096,
+        )
+        .unwrap();
+        let mut writer = FailingWriter;
+
+        let step = server
+            .handle_http_proxy_request(
+                "127.0.0.1:43210".parse().unwrap(),
+                b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n",
+                &mut writer,
+                2_000,
+            )
+            .unwrap();
+        assert_eq!(step.decision, Decision::FailClosed);
+        assert_eq!(step.reason, Some(DenialReason::ResourceLimit));
+        assert!(step.forwarded);
+        assert!(!step.sent_response);
+        assert_eq!(step.send_status, "send_failed");
+
+        let records: Vec<_> = server.frontend().broker().audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::HttpRequestDecision);
+        assert_eq!(records[0].decision, Some(Decision::Allow));
+        assert_eq!(records[1].kind, AuditKind::BrokerError);
+        assert_eq!(records[1].sandbox_id, "sandbox-http");
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].details["error"], "http_proxy_client_send_failed");
+        assert_eq!(records[1].details["send_status"], "send_failed");
+    }
+
+    #[test]
+    fn blocking_http_proxy_server_maps_egress_failure_to_client_status() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-http-proxy")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Http)
+                .origin("http", "example.com", 80),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let frontend = ExplicitProxyFrontend::new("sandbox-http", broker, FailingProxyEgress);
+        let mut server = BlockingHttpProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            frontend,
+            Duration::from_secs(1),
+            4096,
+        )
+        .unwrap();
+        let mut response = Vec::new();
+
+        let step = server
+            .handle_http_proxy_request(
+                "127.0.0.1:43210".parse().unwrap(),
+                b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n",
+                &mut response,
+                2_000,
+            )
+            .unwrap();
+        assert_eq!(step.decision, Decision::FailClosed);
+        assert_eq!(step.reason, Some(DenialReason::ResourceLimit));
+        assert!(!step.forwarded);
+        assert!(step.sent_response);
+        assert_eq!(step.status_code, 502);
+        assert_eq!(step.send_status, "sent");
+        assert!(std::str::from_utf8(&response)
+            .unwrap()
+            .starts_with("HTTP/1.1 502 Bad Gateway"));
+
+        let records: Vec<_> = server.frontend().broker().audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::HttpRequestDecision);
+        assert_eq!(records[0].decision, Some(Decision::Allow));
+        assert_eq!(records[1].kind, AuditKind::BrokerError);
+        assert_eq!(records[1].sandbox_id, "sandbox-http");
+        assert_eq!(records[1].details["error"], "proxy_egress_send_failed");
     }
 
     #[test]
