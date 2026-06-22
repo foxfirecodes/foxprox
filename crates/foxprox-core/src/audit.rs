@@ -20,7 +20,9 @@ pub enum AuditEventKind {
     SocksConnect,
     DnsQuery,
     TcpConnect,
+    TcpFlowOpened,
     TcpFlowClosed,
+    TcpFlowError,
     UdpFlowCreated,
     UdpPacketDenied,
     UdpFlowExpired,
@@ -108,6 +110,11 @@ impl AuditEvent {
     pub fn with_byte_counts(mut self, bytes_in: u64, bytes_out: u64) -> Self {
         self.bytes_in = bytes_in;
         self.bytes_out = bytes_out;
+        self
+    }
+
+    pub fn with_flow_duration(mut self, duration: Duration) -> Self {
+        self.flow_duration = Some(duration);
         self
     }
 }
@@ -215,6 +222,9 @@ pub fn format_audit_line(event: &AuditEvent) -> String {
     }
     if let Some(reason) = &event.reason {
         fields.push(("reason", reason.clone()));
+    }
+    if let Some(duration) = event.flow_duration {
+        fields.push(("flow_duration_ms", duration.as_millis().to_string()));
     }
     fields
         .into_iter()

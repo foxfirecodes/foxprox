@@ -863,3 +863,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: none for this documentation clarification.
 - Exact next step: commit this documentation clarification and wait for further instruction as requested.
+
+## 2026-06-22T01:30:55Z
+- Current objective: continue autonomous verification-kernel cycles from the checkpoint protocol clarification.
+- Git status summary: clean worktree at session start.
+- Intended slice: add TCP flow lifecycle audit outcomes for opened/closed/error events from the stack adapter boundary, as recorded before the documentation-only checkpoint.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-core/src/audit.rs`, `crates/foxprox-core/src/kernel.rs`, `crates/foxprox-runtime/src/lib.rs`, and `progress.md`.
+- Remaining risks: this will not implement smoltcp byte bridging; it only makes lifecycle audit emission explicit and bounded by audit sink behavior.
+- Exact next step: add an audit emission method and runtime TCP lifecycle event handling tests.
+
+## 2026-06-22T01:34:45Z
+- Current objective: add TCP flow lifecycle audit outcomes from the stack adapter boundary.
+- Files changed: `crates/foxprox-core/src/audit.rs`, `crates/foxprox-core/src/kernel.rs`, `crates/foxprox-core/src/lib.rs`, `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on formatting in kernel/runtime; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo fmt --check && cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 67 runtime tests, and 7 setup tests passed. New tests prove TCP lifecycle close/error events are emitted through the audit sink, audit backpressure becomes fail-closed, and non-TCP lifecycle events from a TCP adapter are rejected.
+- Commit hash when committed: pending.
+- Remaining risks: lifecycle events are still fake-stack driven; no smoltcp byte bridge, live stream close/error capture, or socket backpressure handling exists.
+- Exact next step: commit TCP lifecycle audit outcomes, then add a minimal stream-bridge trait boundary that can transfer bytes only after a verified opened TCP flow.

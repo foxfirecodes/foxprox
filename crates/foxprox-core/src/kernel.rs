@@ -1,4 +1,4 @@
-use crate::audit::{AuditError, AuditSink};
+use crate::audit::{AuditError, AuditEvent, AuditSink};
 use crate::event::NormalizedEvent;
 use crate::policy::PolicyEngine;
 use crate::types::{Decision, DecisionAction, DecisionReason};
@@ -37,20 +37,28 @@ impl<S: AuditSink> VerificationKernel<S> {
         let audit_event = event
             .to_audit_event(timestamp_millis)
             .with_decision(decision.clone());
-        match self.audit_sink.emit(audit_event) {
+        match self.emit_audit_event(audit_event) {
             Ok(()) => decision,
-            Err(AuditError::Backpressure { .. } | AuditError::WriteFailed) => Decision::denied(
-                DecisionAction::FailClosed,
-                DecisionReason::AuditBackpressure,
-            ),
+            Err(_) => audit_backpressure_decision(),
         }
     }
+
+    pub fn emit_audit_event(&mut self, event: AuditEvent) -> Result<(), AuditError> {
+        self.audit_sink.emit(event)
+    }
+}
+
+pub fn audit_backpressure_decision() -> Decision {
+    Decision::denied(
+        DecisionAction::FailClosed,
+        DecisionReason::AuditBackpressure,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::audit::VecAuditSink;
+    use crate::audit::{AuditEvent, AuditEventKind, VecAuditSink};
     use crate::event::NormalizedEvent;
     use crate::policy::{PolicyConfig, PolicyRule, RuleSet};
     use crate::types::{DecisionAction, Endpoint, FrontendKind, Protocol, SandboxId};
@@ -102,5 +110,25 @@ mod tests {
         let decision = kernel.decide_and_audit(&tcp_event(), 10);
         assert_eq!(decision.action, DecisionAction::FailClosed);
         assert_eq!(decision.reason, DecisionReason::AuditBackpressure);
+    }
+
+    #[test]
+    fn lifecycle_audit_events_can_be_emitted_without_policy_evaluation() {
+        let sandbox = SandboxId::new("kernel-lifecycle").unwrap();
+        let policy = PolicyEngine::new(PolicyConfig::default());
+        let mut kernel = VerificationKernel::new(policy, VecAuditSink::bounded(1));
+        kernel
+            .emit_audit_event(AuditEvent::new(
+                12,
+                AuditEventKind::TcpFlowClosed,
+                sandbox,
+                FrontendKind::Tun,
+            ))
+            .unwrap();
+        assert_eq!(kernel.audit_sink().events().len(), 1);
+        assert_eq!(
+            kernel.audit_sink().events()[0].kind,
+            AuditEventKind::TcpFlowClosed
+        );
     }
 }

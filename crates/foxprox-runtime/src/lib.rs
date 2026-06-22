@@ -7,15 +7,16 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    classify_udp, parse_dns_query, parse_http_proxy_request_line, parse_http_request,
-    parse_ip_packet, parse_socks5_connect, parse_tls_client_hello_sni,
+    audit_backpressure_decision, classify_udp, parse_dns_query, parse_http_proxy_request_line,
+    parse_http_request, parse_ip_packet, parse_socks5_connect, parse_tls_client_hello_sni,
     synthesize_icmpv4_echo_reply, synthesize_udpv4_response, validate_policy_config,
-    AttributionConfidence, AttributionSource, AuditSink, ConfigError, Decision, DecisionAction,
-    DecisionReason, DnsCache, DnsParseError, Endpoint, FlowKey, FlowTable, FrontendKind,
-    HostnameAttribution, HttpProxyRequestLine, HttpRequestMetadata, InspectError, NormalizedEvent,
-    PacketError, ParsedIpPacket, PolicyEngine, Protocol, ProxyParseError, QuicStatus, SandboxId,
-    SniStatus, SocksDestination, StaticDnsRecord, StaticDnsResolver, Tcpv4Segment, UdpFlow,
-    Udpv4Packet, UnsupportedIpv4Protocol, VerificationKernel,
+    AttributionConfidence, AttributionSource, AuditEvent, AuditEventKind, AuditSink, ConfigError,
+    Decision, DecisionAction, DecisionReason, DnsCache, DnsParseError, Endpoint, FlowKey,
+    FlowTable, FrontendKind, HostnameAttribution, HttpProxyRequestLine, HttpRequestMetadata,
+    InspectError, NormalizedEvent, PacketError, ParsedIpPacket, PolicyEngine, Protocol,
+    ProxyParseError, QuicStatus, SandboxId, SniStatus, SocksDestination, StaticDnsRecord,
+    StaticDnsResolver, Tcpv4Segment, UdpFlow, Udpv4Packet, UnsupportedIpv4Protocol,
+    VerificationKernel,
 };
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -114,6 +115,37 @@ pub trait TcpStackAdapter {
     fn next_connect_attempt(&mut self) -> Option<TcpStackConnectAttempt>;
     fn reset_connect(&mut self, attempt: &TcpStackConnectAttempt);
     fn mark_connect_opened(&mut self, attempt: &TcpStackConnectAttempt);
+
+    fn next_lifecycle_event(&mut self) -> Option<TcpStackLifecycleEvent> {
+        None
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TcpStackLifecycleEvent {
+    FlowOpened {
+        flow: FlowKey,
+    },
+    FlowClosed {
+        flow: FlowKey,
+        bytes_from_sandbox: u64,
+        bytes_from_host: u64,
+        duration: Duration,
+    },
+    FlowError {
+        flow: FlowKey,
+        reason: String,
+    },
+}
+
+impl TcpStackLifecycleEvent {
+    fn flow(&self) -> &FlowKey {
+        match self {
+            Self::FlowOpened { flow }
+            | Self::FlowClosed { flow, .. }
+            | Self::FlowError { flow, .. } => flow,
+        }
+    }
 }
 
 pub struct TcpStackRuntime<A, E, S> {
@@ -181,6 +213,36 @@ impl<A: TcpStackAdapter, E: HostEgress, S: AuditSink> TcpStackRuntime<A, E, S> {
             }
         }
     }
+
+    pub fn handle_next_lifecycle_event(
+        &mut self,
+        timestamp_millis: u128,
+    ) -> Option<TcpStackLifecycleOutcome> {
+        let lifecycle = self.stack.next_lifecycle_event()?;
+        let audit_event = match tcp_lifecycle_audit_event(
+            self.sandbox_id.clone(),
+            timestamp_millis,
+            &lifecycle,
+        ) {
+            Ok(event) => event,
+            Err(decision) => {
+                return Some(TcpStackLifecycleOutcome::InvalidLifecycle {
+                    decision,
+                    lifecycle,
+                });
+            }
+        };
+        match self.kernel.emit_audit_event(audit_event.clone()) {
+            Ok(()) => Some(TcpStackLifecycleOutcome::Audited {
+                lifecycle,
+                audit_event,
+            }),
+            Err(_) => Some(TcpStackLifecycleOutcome::AuditFailed {
+                decision: audit_backpressure_decision(),
+                lifecycle,
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -198,6 +260,71 @@ pub enum TcpStackOutcome {
         attempt: TcpStackConnectAttempt,
         error: EgressError,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TcpStackLifecycleOutcome {
+    Audited {
+        lifecycle: TcpStackLifecycleEvent,
+        audit_event: AuditEvent,
+    },
+    AuditFailed {
+        decision: Decision,
+        lifecycle: TcpStackLifecycleEvent,
+    },
+    InvalidLifecycle {
+        decision: Decision,
+        lifecycle: TcpStackLifecycleEvent,
+    },
+}
+
+fn tcp_lifecycle_audit_event(
+    sandbox_id: SandboxId,
+    timestamp_millis: u128,
+    lifecycle: &TcpStackLifecycleEvent,
+) -> Result<AuditEvent, Decision> {
+    let flow = lifecycle.flow();
+    if flow.protocol != Protocol::Tcp {
+        return Err(Decision::denied(
+            DecisionAction::FailClosed,
+            DecisionReason::UnsupportedProtocol,
+        ));
+    }
+    let event = match lifecycle {
+        TcpStackLifecycleEvent::FlowOpened { flow } => AuditEvent::new(
+            timestamp_millis,
+            AuditEventKind::TcpFlowOpened,
+            sandbox_id,
+            FrontendKind::Tun,
+        )
+        .with_protocol(Protocol::Tcp)
+        .with_endpoints(flow.source.clone(), flow.destination.clone()),
+        TcpStackLifecycleEvent::FlowClosed {
+            flow,
+            bytes_from_sandbox,
+            bytes_from_host,
+            duration,
+        } => AuditEvent::new(
+            timestamp_millis,
+            AuditEventKind::TcpFlowClosed,
+            sandbox_id,
+            FrontendKind::Tun,
+        )
+        .with_protocol(Protocol::Tcp)
+        .with_endpoints(flow.source.clone(), flow.destination.clone())
+        .with_byte_counts(*bytes_from_sandbox, *bytes_from_host)
+        .with_flow_duration(*duration),
+        TcpStackLifecycleEvent::FlowError { flow, reason } => AuditEvent::new(
+            timestamp_millis,
+            AuditEventKind::TcpFlowError,
+            sandbox_id,
+            FrontendKind::Tun,
+        )
+        .with_protocol(Protocol::Tcp)
+        .with_endpoints(flow.source.clone(), flow.destination.clone())
+        .with_reason(reason.clone()),
+    };
+    Ok(event)
 }
 
 pub struct HttpProxyRuntime<E, S> {
@@ -1595,6 +1722,7 @@ mod tests {
         DecisionAction, DecisionReason, DnsObservation, Hostname, PolicyConfig, PolicyEngine,
         PolicyRule, RuleSet, SniStatus, UdpClass, UdpTimeouts, VecAuditSink,
     };
+    use std::collections::VecDeque;
     use std::net::{IpAddr, Ipv4Addr};
 
     #[derive(Default)]
@@ -1627,6 +1755,7 @@ mod tests {
     #[derive(Default)]
     struct FakeTcpStack {
         next: Option<TcpStackConnectAttempt>,
+        lifecycle: VecDeque<TcpStackLifecycleEvent>,
         resets: usize,
         opened: usize,
     }
@@ -1642,6 +1771,10 @@ mod tests {
 
         fn mark_connect_opened(&mut self, _attempt: &TcpStackConnectAttempt) {
             self.opened += 1;
+        }
+
+        fn next_lifecycle_event(&mut self) -> Option<TcpStackLifecycleEvent> {
+            self.lifecycle.pop_front()
         }
     }
 
@@ -1690,6 +1823,11 @@ mod tests {
             source: Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
             destination: Endpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 80),
         }
+    }
+
+    fn tcp_flow_key() -> FlowKey {
+        let attempt = tcp_stack_attempt();
+        FlowKey::new(Protocol::Tcp, attempt.source, attempt.destination)
     }
 
     #[test]
@@ -1747,6 +1885,100 @@ mod tests {
         assert_eq!(runtime.stack().resets, 0);
         assert_eq!(runtime.stack().opened, 1);
         assert_eq!(runtime.egress().tcp_attempts, 1);
+    }
+
+    #[test]
+    fn tcp_stack_runtime_audits_flow_close_lifecycle() {
+        let stack = FakeTcpStack {
+            lifecycle: VecDeque::from([TcpStackLifecycleEvent::FlowClosed {
+                flow: tcp_flow_key(),
+                bytes_from_sandbox: 12,
+                bytes_from_host: 34,
+                duration: Duration::from_millis(56),
+            }]),
+            ..FakeTcpStack::default()
+        };
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = TcpStackRuntime::new(
+            stack,
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("tcp-lifecycle").unwrap(),
+        );
+
+        let outcome = runtime.handle_next_lifecycle_event(200).unwrap();
+
+        let TcpStackLifecycleOutcome::Audited { audit_event, .. } = outcome else {
+            panic!("expected audited lifecycle event");
+        };
+        assert_eq!(audit_event.kind, AuditEventKind::TcpFlowClosed);
+        assert_eq!(audit_event.bytes_in, 12);
+        assert_eq!(audit_event.bytes_out, 34);
+        assert_eq!(audit_event.flow_duration, Some(Duration::from_millis(56)));
+    }
+
+    #[test]
+    fn tcp_stack_runtime_fails_lifecycle_closed_on_audit_backpressure() {
+        let stack = FakeTcpStack {
+            lifecycle: VecDeque::from([TcpStackLifecycleEvent::FlowError {
+                flow: tcp_flow_key(),
+                reason: "stack error".to_string(),
+            }]),
+            ..FakeTcpStack::default()
+        };
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(0),
+        );
+        let mut runtime = TcpStackRuntime::new(
+            stack,
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("tcp-lifecycle-backpressure").unwrap(),
+        );
+
+        let outcome = runtime.handle_next_lifecycle_event(200).unwrap();
+
+        let TcpStackLifecycleOutcome::AuditFailed { decision, .. } = outcome else {
+            panic!("expected audit failure outcome");
+        };
+        assert_eq!(decision.action, DecisionAction::FailClosed);
+        assert_eq!(decision.reason, DecisionReason::AuditBackpressure);
+    }
+
+    #[test]
+    fn tcp_stack_runtime_rejects_non_tcp_lifecycle_events() {
+        let stack = FakeTcpStack {
+            lifecycle: VecDeque::from([TcpStackLifecycleEvent::FlowOpened {
+                flow: FlowKey::new(
+                    Protocol::Udp,
+                    Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+                    Endpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 80),
+                ),
+            }]),
+            ..FakeTcpStack::default()
+        };
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = TcpStackRuntime::new(
+            stack,
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("tcp-invalid-lifecycle").unwrap(),
+        );
+
+        let outcome = runtime.handle_next_lifecycle_event(200).unwrap();
+
+        let TcpStackLifecycleOutcome::InvalidLifecycle { decision, .. } = outcome else {
+            panic!("expected invalid lifecycle outcome");
+        };
+        assert_eq!(decision.action, DecisionAction::FailClosed);
+        assert_eq!(decision.reason, DecisionReason::UnsupportedProtocol);
     }
 
     #[test]
