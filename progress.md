@@ -1115,3 +1115,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: per-flow metadata buffers are still not automatically pruned by a live TCP lifecycle manager.
 - Exact next step: commit configured metadata buffer helper, then prune TCP metadata buffers when TCP bridge flows close to prevent stale inspection state.
+
+## 2026-06-22T21:45:37Z
+- Current objective: continue after configured metadata buffer helper toward TCP metadata lifecycle cleanup.
+- Git status summary: clean worktree after commit `c545eb1`.
+- Intended slice: prune per-flow TCP metadata buffers when the corresponding TCP bridge flow closes so stale inspection state cannot be reused.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: cleanup remains helper-driven; a live stack adapter must call it from real close events later.
+- Exact next step: add a close-and-prune helper plus regression coverage.
+
+## 2026-06-22T21:46:24Z
+- Current objective: prune TCP metadata buffers when bridge flows close.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on match formatting; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 83 runtime tests, and 7 setup tests passed. New helper closes a TCP bridge flow and removes its matching metadata buffer; regression test proves partial HTTP inspection state is pruned at close.
+- Commit hash when committed: pending.
+- Remaining risks: cleanup is helper-driven and must be called by the future live TCP lifecycle manager.
+- Exact next step: commit TCP metadata close pruning, then add an integrated TCP flow state object that owns bridge runtime plus metadata table so close cleanup is harder to forget.

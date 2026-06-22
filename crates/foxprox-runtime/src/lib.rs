@@ -1258,6 +1258,17 @@ pub fn configured_tcp_metadata_buffer<'a>(
     table.buffer_for(flow, components.tcp_metadata_buffer_bytes)
 }
 
+pub fn close_tcp_bridge_flow_and_prune_metadata<B>(
+    bridge: &mut TcpStreamBridgeRuntime<B>,
+    metadata: &mut TcpMetadataBufferTable,
+    flow: &FlowKey,
+    duration: Duration,
+) -> Result<TcpStackLifecycleEvent, TcpBridgeError> {
+    let lifecycle = bridge.close_as_lifecycle_event(flow, duration)?;
+    metadata.remove(flow);
+    Ok(lifecycle)
+}
+
 pub struct BrokerDnsRuntime<'a, S> {
     pub sandbox_id: SandboxId,
     pub resolver: &'a StaticDnsResolver,
@@ -2726,6 +2737,47 @@ mod tests {
             outcome,
             TcpMetadataBufferOutcome::LimitExceeded { limit: 4 }
         );
+    }
+
+    #[test]
+    fn tcp_bridge_close_prunes_matching_metadata_buffer() {
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("metadata-prune").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 64,
+            tcp_metadata_buffer_bytes: 64,
+        })
+        .unwrap();
+        let flow = tcp_flow_key();
+        let packet = build_tcp_ipv4_packet(53000, 80, 0x18, b"GET /partial");
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        let mut metadata = TcpMetadataBufferTable::new();
+        let buffer = configured_tcp_metadata_buffer(&components, &mut metadata, flow.clone());
+        assert_eq!(
+            buffer.push_http(SandboxId::new("metadata-prune").unwrap(), &tcp),
+            TcpMetadataBufferOutcome::NeedMoreData
+        );
+        let mut bridge = build_tcp_stream_bridge_runtime(&components, FakeTcpBridge::default());
+        bridge.mark_opened(flow.clone()).unwrap();
+
+        let lifecycle = close_tcp_bridge_flow_and_prune_metadata(
+            &mut bridge,
+            &mut metadata,
+            &flow,
+            Duration::from_millis(10),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            lifecycle,
+            TcpStackLifecycleEvent::FlowClosed { .. }
+        ));
+        assert!(metadata.is_empty());
+        assert!(bridge.open_flows().is_empty());
     }
 
     #[test]
