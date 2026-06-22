@@ -1285,6 +1285,16 @@ pub fn tcpv4_tls_client_hello_to_event(
     tcpv4_tls_client_hello_to_event_with_dns_attribution(sandbox_id, segment, None)
 }
 
+pub fn tcpv4_tls_client_hello_to_event_with_dns_cache(
+    sandbox_id: SandboxId,
+    segment: &Tcpv4Segment<'_>,
+    cache: &DnsCache,
+    now_millis: u128,
+) -> Result<NormalizedEvent, InspectError> {
+    let dns_attribution = cache.lookup_ip(IpAddr::V4(segment.destination), now_millis);
+    tcpv4_tls_client_hello_to_event_with_dns_attribution(sandbox_id, segment, dns_attribution)
+}
+
 pub fn tcpv4_tls_client_hello_to_event_with_dns_attribution(
     sandbox_id: SandboxId,
     segment: &Tcpv4Segment<'_>,
@@ -2811,6 +2821,77 @@ mod tests {
         .evaluate(&event.to_policy_input());
         assert_eq!(decision.action, DecisionAction::FailClosed);
         assert_eq!(decision.reason, DecisionReason::SniDnsMismatch);
+    }
+
+    #[test]
+    fn tcp_tls_sni_dns_cache_mismatch_fails_before_cached_domain_allows() {
+        let hello = build_tls_client_hello("api.evil.example");
+        let packet = build_tcp_ipv4_packet(53000, 443, 0x18, &hello);
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        let mut cache = DnsCache::new();
+        cache.record(DnsObservation::new(
+            Hostname::normalize("api.example.com").unwrap(),
+            vec![IpAddr::V4(tcp.destination)],
+            100,
+            1_000,
+        ));
+        let event = tcpv4_tls_client_hello_to_event_with_dns_cache(
+            SandboxId::new("tls-cache-mismatch").unwrap(),
+            &tcp,
+            &cache,
+            100,
+        )
+        .unwrap();
+
+        let mut rules = RuleSet::default();
+        rules.push(PolicyRule::allow("broad-allow-after-cache-mismatch"));
+        let decision = PolicyEngine::new(PolicyConfig {
+            rules,
+            ..PolicyConfig::default()
+        })
+        .evaluate(&event.to_policy_input());
+        assert_eq!(decision.action, DecisionAction::FailClosed);
+        assert_eq!(decision.reason, DecisionReason::SniDnsMismatch);
+    }
+
+    #[test]
+    fn tcp_tls_sni_dns_cache_match_can_use_sni_domain_policy() {
+        let hello = build_tls_client_hello("api.example.com");
+        let packet = build_tcp_ipv4_packet(53000, 443, 0x18, &hello);
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        let mut cache = DnsCache::new();
+        cache.record(DnsObservation::new(
+            Hostname::normalize("api.example.com").unwrap(),
+            vec![IpAddr::V4(tcp.destination)],
+            100,
+            1_000,
+        ));
+        let event = tcpv4_tls_client_hello_to_event_with_dns_cache(
+            SandboxId::new("tls-cache-match").unwrap(),
+            &tcp,
+            &cache,
+            100,
+        )
+        .unwrap();
+        let mut rule = PolicyRule::allow("allow-sni-domain");
+        rule.protocol = Some(Protocol::Tcp);
+        rule.domain_suffix = Some(Hostname::normalize("example.com").unwrap());
+        rule.minimum_confidence = Some(AttributionConfidence::High);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+
+        let decision = PolicyEngine::new(PolicyConfig {
+            rules,
+            ..PolicyConfig::default()
+        })
+        .evaluate(&event.to_policy_input());
+
+        assert_eq!(decision.action, DecisionAction::Allow);
+        assert_eq!(decision.rule_id.as_deref(), Some("allow-sni-domain"));
     }
 
     #[test]

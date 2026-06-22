@@ -781,3 +781,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: cache expiry is checked during lookup but there is no background cache pruning in the owning session; DNS/SNI mismatch integration still depends on future TCP stream metadata plumbing.
 - Exact next step: commit expired-attribution coverage, then add TCP metadata precedence tests that SNI mismatch overrides cached DNS allow decisions in the TUN path.
+
+## 2026-06-22T02:18:35Z
+- Current objective: continue after expired DNS attribution coverage toward TCP metadata precedence for DNS/SNI conflicts.
+- Git status summary: clean worktree after commit `cb1ca3f`.
+- Intended slice: add a TCP TLS metadata helper that compares visible SNI against live DNS-cache attribution and marks mismatches so policy fails closed before cached-domain allow rules.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this still operates on complete TLS ClientHello payloads supplied by tests; stream buffering/reassembly remains future work.
+- Exact next step: implement DNS-cache-aware TLS ClientHello event conversion and tests for match/mismatch precedence.
+
+## 2026-06-22T02:24:10Z
+- Current objective: add DNS-cache-aware TLS ClientHello event conversion for SNI/DNS precedence checks.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 54 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 60 runtime tests, and 7 setup tests passed. New runtime tests prove visible TLS SNI compared against live DNS-cache attribution fails closed on mismatch before broad allows, and matching SNI/DNS cache attribution can use high-confidence SNI domain policy.
+- Commit hash when committed: pending.
+- Remaining risks: TLS metadata conversion still requires complete ClientHello bytes from future stream buffering; no smoltcp byte bridge feeds this helper yet.
+- Exact next step: commit TLS DNS-cache precedence, then add minimal HTTP/TLS stream metadata buffering state that waits for complete headers/ClientHello instead of evaluating partial TCP payloads.
