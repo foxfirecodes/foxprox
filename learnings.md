@@ -138,3 +138,8 @@
 
 - HTTP request-head limits belong in the normalized runtime config so production listeners and tests can share one typed robustness contract instead of relying on a frontend-local constant.
 - Frontend parsers should enforce size limits before UTF-8 conversion and request-line parsing, then emit `ParserLimitExceeded` as a normalized unsupported event for policy/audit.
+
+## 2026-06-21 — SOCKS parser limit boundary
+
+- SOCKS greeting and CONNECT request size limits can share the normalized `ParserLimits` contract with HTTP while keeping SOCKS wire negotiation in the frontend crate.
+- Oversized SOCKS CONNECT attempts should normalize to `ParserLimitExceeded`; malformed-but-in-limit SOCKS bytes remain `MalformedProxyRequest`.

@@ -165,6 +165,7 @@ impl ResourceLimitsConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParserLimitsConfig {
     pub max_http_request_head_bytes: usize,
+    pub max_socks5_message_bytes: usize,
 }
 
 impl Default for ParserLimitsConfig {
@@ -172,6 +173,7 @@ impl Default for ParserLimitsConfig {
         let defaults = ParserLimits::default();
         Self {
             max_http_request_head_bytes: defaults.max_http_request_head_bytes,
+            max_socks5_message_bytes: defaults.max_socks5_message_bytes,
         }
     }
 }
@@ -183,8 +185,14 @@ impl ParserLimitsConfig {
                 field: "parser_limits.max_http_request_head_bytes",
             });
         }
+        if self.max_socks5_message_bytes == 0 {
+            return Err(ConfigError::InvalidParserLimit {
+                field: "parser_limits.max_socks5_message_bytes",
+            });
+        }
         Ok(ParserLimits {
             max_http_request_head_bytes: self.max_http_request_head_bytes,
+            max_socks5_message_bytes: self.max_socks5_message_bytes,
         })
     }
 }
@@ -416,6 +424,7 @@ mod tests {
             resource_limits: Some(ResourceLimitsConfig { max_flows: 128 }),
             parser_limits: Some(ParserLimitsConfig {
                 max_http_request_head_bytes: 4096,
+                max_socks5_message_bytes: 256,
             }),
             rules: vec![RuleConfig {
                 id: "allow-api".to_string(),
@@ -439,6 +448,7 @@ mod tests {
         );
         assert_eq!(runtime.resource_limits.max_flows, 128);
         assert_eq!(runtime.parser_limits.max_http_request_head_bytes, 4096);
+        assert_eq!(runtime.parser_limits.max_socks5_message_bytes, 256);
         assert_eq!(runtime.rules.len(), 1);
         assert_eq!(
             runtime.rules[0].protocol,
@@ -519,6 +529,7 @@ mod tests {
         let bad_parser_limit = ConfigDocument {
             parser_limits: Some(ParserLimitsConfig {
                 max_http_request_head_bytes: 0,
+                ..ParserLimitsConfig::default()
             }),
             ..ConfigDocument::default()
         };
@@ -526,6 +537,20 @@ mod tests {
             bad_parser_limit.validate(),
             Err(ConfigError::InvalidParserLimit {
                 field: "parser_limits.max_http_request_head_bytes"
+            })
+        ));
+
+        let bad_socks_parser_limit = ConfigDocument {
+            parser_limits: Some(ParserLimitsConfig {
+                max_socks5_message_bytes: 0,
+                ..ParserLimitsConfig::default()
+            }),
+            ..ConfigDocument::default()
+        };
+        assert!(matches!(
+            bad_socks_parser_limit.validate(),
+            Err(ConfigError::InvalidParserLimit {
+                field: "parser_limits.max_socks5_message_bytes"
             })
         ));
     }

@@ -789,12 +789,14 @@ impl Default for ResourceLimits {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct ParserLimits {
     pub max_http_request_head_bytes: usize,
+    pub max_socks5_message_bytes: usize,
 }
 
 impl Default for ParserLimits {
     fn default() -> Self {
         Self {
             max_http_request_head_bytes: 8192,
+            max_socks5_message_bytes: 512,
         }
     }
 }

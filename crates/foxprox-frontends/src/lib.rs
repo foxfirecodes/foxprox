@@ -17,6 +17,9 @@ use foxprox_core::{
 /// Maximum request head bytes accepted by the alpha HTTP proxy parser.
 pub const MAX_HTTP_REQUEST_HEAD_BYTES: usize = 8192;
 
+/// Maximum SOCKS5 greeting or request bytes accepted by alpha SOCKS helpers.
+pub const MAX_SOCKS5_MESSAGE_BYTES: usize = 512;
+
 /// Generic frontend event producer contract.
 pub trait EventProducer {
     fn frontend_kind(&self) -> FrontendKind;
@@ -301,6 +304,17 @@ impl Socks5ReplyCode {
 /// This helper returns the two-byte method-selection response and keeps SOCKS
 /// wire negotiation out of core policy contracts.
 pub fn select_socks5_no_auth_method(bytes: &[u8]) -> Result<[u8; 2], FrontendError> {
+    select_socks5_no_auth_method_with_limits(bytes, ParserLimits::default())
+}
+
+/// Select SOCKS5 no-authentication while enforcing normalized parser limits.
+pub fn select_socks5_no_auth_method_with_limits(
+    bytes: &[u8],
+    limits: ParserLimits,
+) -> Result<[u8; 2], FrontendError> {
+    if bytes.len() > limits.max_socks5_message_bytes {
+        return Err(FrontendError::RequestTooLarge);
+    }
     if bytes.len() < 2 || bytes[0] != 0x05 {
         return Err(FrontendError::MalformedSocks("bad greeting"));
     }
@@ -323,21 +337,41 @@ pub fn build_socks5_connect_reply(code: Socks5ReplyCode) -> [u8; 10] {
 
 /// Parse one SOCKS5 TCP CONNECT request after method negotiation.
 pub fn parse_socks5_connect(sandbox_id: SandboxId, bytes: &[u8]) -> NormalizedEvent {
-    match parse_socks5_connect_inner(sandbox_id.clone(), bytes) {
+    parse_socks5_connect_with_limits(sandbox_id, bytes, ParserLimits::default())
+}
+
+/// Parse one SOCKS5 TCP CONNECT request while enforcing normalized parser
+/// limits before address-specific parsing.
+pub fn parse_socks5_connect_with_limits(
+    sandbox_id: SandboxId,
+    bytes: &[u8],
+    limits: ParserLimits,
+) -> NormalizedEvent {
+    match parse_socks5_connect_inner(sandbox_id.clone(), bytes, limits) {
         Ok(event) => NormalizedEvent::SocksConnect(event),
-        Err(error) => NormalizedEvent::UnsupportedNetworkEvent(UnsupportedNetworkEvent {
-            sandbox_id,
-            frontend: FrontendKind::Socks5,
-            reason: UnsupportedReason::MalformedProxyRequest,
-            safe_metadata: Some(error.to_string()),
-        }),
+        Err(error) => {
+            let reason = match error {
+                FrontendError::RequestTooLarge => UnsupportedReason::ParserLimitExceeded,
+                _ => UnsupportedReason::MalformedProxyRequest,
+            };
+            NormalizedEvent::UnsupportedNetworkEvent(UnsupportedNetworkEvent {
+                sandbox_id,
+                frontend: FrontendKind::Socks5,
+                reason,
+                safe_metadata: Some(error.to_string()),
+            })
+        }
     }
 }
 
 fn parse_socks5_connect_inner(
     sandbox_id: SandboxId,
     bytes: &[u8],
+    limits: ParserLimits,
 ) -> Result<SocksConnect, FrontendError> {
+    if bytes.len() > limits.max_socks5_message_bytes {
+        return Err(FrontendError::RequestTooLarge);
+    }
     if bytes.len() < 7 {
         return Err(FrontendError::MalformedSocks("too short"));
     }
@@ -497,6 +531,7 @@ mod tests {
             request,
             ParserLimits {
                 max_http_request_head_bytes: request.len() - 1,
+                ..ParserLimits::default()
             },
         );
         let NormalizedEvent::UnsupportedNetworkEvent(unsupported) = event else {
@@ -510,6 +545,7 @@ mod tests {
             request,
             ParserLimits {
                 max_http_request_head_bytes: request.len(),
+                ..ParserLimits::default()
             },
         );
         assert!(matches!(event, NormalizedEvent::HttpRequest(_)));
@@ -542,6 +578,35 @@ mod tests {
             build_socks5_connect_reply(Socks5ReplyCode::ConnectionNotAllowed),
             [0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0]
         );
+    }
+
+    #[test]
+    fn socks5_helpers_enforce_normalized_runtime_limit() {
+        let greeting = [0x05, 0x02, 0x02, 0x00];
+        assert!(matches!(
+            select_socks5_no_auth_method_with_limits(
+                &greeting,
+                ParserLimits {
+                    max_socks5_message_bytes: greeting.len() - 1,
+                    ..ParserLimits::default()
+                }
+            ),
+            Err(FrontendError::RequestTooLarge)
+        ));
+
+        let request = [0x05, 0x01, 0x00, 0x01, 127, 0, 0, 1, 0x01, 0xbb];
+        let event = parse_socks5_connect_with_limits(
+            sandbox(),
+            &request,
+            ParserLimits {
+                max_socks5_message_bytes: request.len() - 1,
+                ..ParserLimits::default()
+            },
+        );
+        let NormalizedEvent::UnsupportedNetworkEvent(unsupported) = event else {
+            panic!("expected unsupported event");
+        };
+        assert_eq!(unsupported.reason, UnsupportedReason::ParserLimitExceeded);
     }
 
     #[test]

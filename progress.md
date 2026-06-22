@@ -594,3 +594,23 @@
   - `cargo tree -p foxprox-frontends` — frontends depend only on `foxprox-core`.
 - Commit hash after commit: 4db40c8.
 - Remaining boundary risks: streaming listener read limits, SOCKS handshake limits/timeouts, and fuzzing proxy parser inputs remain.
+
+## 2026-06-21 — Boundary objective: configurable SOCKS parser limit contract
+
+- Boundary under work: normalized runtime/config contract for SOCKS5 greeting and CONNECT request size limits plus frontend fail-closed enforcement.
+- Allowed dependency direction: `foxprox-core` owns typed parser limits, `foxprox-config` validates them, and `foxprox-frontends` enforces them before SOCKS wire parsing; policy/audit still consume only normalized `SocksConnect` or unsupported events.
+- Dependency-risk assessment: SOCKS listener robustness should not rely on unbounded byte slices or frontend-local magic numbers. Size failures need a distinct normalized parser-limit reason without leaking SOCKS wire details to policy.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: extended `ParserLimits` and config validation with a SOCKS5 message byte limit; SOCKS greeting and CONNECT helpers enforce the typed limit before wire parsing and normalize oversized CONNECT requests as parser-limit unsupported events. All verification passed.
+- Changed files:
+  - `crates/foxprox-core/src/lib.rs`
+  - `crates/foxprox-config/src/lib.rs`
+  - `crates/foxprox-frontends/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 71 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: production SOCKS listener read timeouts, CONNECT stream bridging, and policy-to-reply-code mapping remain.
