@@ -56,3 +56,6 @@
 
 ## 2026-06-22T22:27:04Z
 - `TcpStackRuntime` can perform an adapter reset callback even when the policy decision action is the default `DenyDrop`; tests should distinguish the audited policy decision from the runtime's TCP cleanup behavior.
+
+## 2026-06-22T22:29:05Z
+- Packet-pumped TUN-style smoltcp tests must disable device self-loopback; internal loopback is useful for adapter-only proofs, but TUN ingress should only re-enter packets explicitly supplied by the sandbox side.

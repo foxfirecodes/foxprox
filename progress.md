@@ -1472,3 +1472,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: reset is still adapter-local and not asserted as a specific outbound TCP RST packet to the sandbox; full ACK/data bridge from a TUN peer remains unimplemented.
 - Exact next step: commit denied packet-pumped SYN reset proof, then add a helper/test for completing the packet-pumped TCP handshake so sandbox-to-host payload can flow through the same accepted listener socket path.
+
+## 2026-06-22T22:27:30Z
+- Current objective: continue after denied packet-pumped SYN reset proof toward packet-pumped TCP payload flow.
+- Git status summary: clean worktree after commit `8e2fc33`.
+- Intended slice: complete a deterministic raw-packet TCP handshake against smoltcp and prove payload bytes from a TUN-like peer are received as a normalized `SmoltcpTcpPayload` on the accepted listener path.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`, and `learnings.md` if TUN-mode device behavior needs an explicit invariant.
+- Remaining risks: payload will still stop at the smoltcp accepted socket; host bridge handoff from this exact packet-pumped session remains next.
+- Exact next step: add non-loopback packet-device mode for TUN-style tests and craft ACK/data packets from the emitted SYN/ACK.
+
+## 2026-06-22T22:29:05Z
+- Current objective: complete a packet-pumped TCP handshake and receive listener payload bytes.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 22 smoltcp adapter tests passed. New test disables packet self-loopback, feeds raw SYN/ACK/data packets through the TUN pump, derives the client ACK from the emitted SYN/ACK, and proves listener-side bytes are exported as `SmoltcpTcpPayload` with the expected flow key.
+- Commit hash when committed: pending.
+- Remaining risks: payload handoff from this exact packet-pumped accepted socket to `TcpFlowRuntime<StdTcpStreamBridge<_>>` remains unjoined; outbound host-to-sandbox bytes are still not packetized back through smoltcp.
+- Exact next step: commit packet-pumped TCP payload proof, then hand that packet-pumped payload flow to a real host bridge in the same test path.

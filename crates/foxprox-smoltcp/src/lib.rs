@@ -105,6 +105,10 @@ impl SmoltcpIpLoopback {
         self.connect_report_mode = mode;
     }
 
+    pub fn set_packet_loopback(&mut self, enabled: bool) {
+        self.device.set_loopback_transmit(enabled);
+    }
+
     pub fn listen_tcp(
         &mut self,
         port: u16,
@@ -350,6 +354,10 @@ impl QueuedIpDevice {
     fn pop_outbound(&mut self) -> Option<Vec<u8>> {
         self.outbound.pop_front()
     }
+
+    fn set_loopback_transmit(&mut self, enabled: bool) {
+        self.loopback_transmit = enabled;
+    }
 }
 
 impl Device for QueuedIpDevice {
@@ -565,9 +573,33 @@ mod tests {
         destination_port: u16,
         sequence: u32,
     ) -> Vec<u8> {
-        let mut packet = vec![0u8; 40];
+        ipv4_tcp_packet(
+            source,
+            destination,
+            source_port,
+            destination_port,
+            sequence,
+            0,
+            0x02,
+            &[],
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn ipv4_tcp_packet(
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+        source_port: u16,
+        destination_port: u16,
+        sequence: u32,
+        acknowledgement: u32,
+        flags: u8,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let total_len = 40 + payload.len();
+        let mut packet = vec![0u8; total_len];
         packet[0] = 0x45;
-        packet[2..4].copy_from_slice(&(40u16).to_be_bytes());
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
         packet[8] = 64;
         packet[9] = 6;
         packet[12..16].copy_from_slice(&source.octets());
@@ -579,9 +611,11 @@ mod tests {
         tcp[0..2].copy_from_slice(&source_port.to_be_bytes());
         tcp[2..4].copy_from_slice(&destination_port.to_be_bytes());
         tcp[4..8].copy_from_slice(&sequence.to_be_bytes());
+        tcp[8..12].copy_from_slice(&acknowledgement.to_be_bytes());
         tcp[12] = 5 << 4;
-        tcp[13] = 0x02;
+        tcp[13] = flags;
         tcp[14..16].copy_from_slice(&64240u16.to_be_bytes());
+        tcp[20..].copy_from_slice(payload);
         let tcp_checksum = tcp_ipv4_checksum(source, destination, tcp);
         tcp[16..18].copy_from_slice(&tcp_checksum.to_be_bytes());
         packet
@@ -754,6 +788,80 @@ mod tests {
             }
             other => panic!("expected TCP response packet, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn packet_pumped_tcp_handshake_exports_listener_payload() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.set_packet_loopback(false);
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        let source = Ipv4Addr::new(10, 66, 0, 2);
+        let destination = Ipv4Addr::new(10, 66, 0, 1);
+        let mut writer = Vec::new();
+        let mut buffer = vec![0; 1500];
+
+        let syn = ipv4_tcp_syn_packet(source, destination, 50001, 8080, 7);
+        pump_one_tun_packet(
+            &mut adapter,
+            &mut Cursor::new(syn),
+            &mut writer,
+            &mut buffer,
+            1,
+        )
+        .unwrap();
+        let syn_ack = match parse_ip_packet(&writer).unwrap() {
+            ParsedIpPacket::Tcpv4Segment(segment) => segment,
+            other => panic!("expected SYN/ACK, got {other:?}"),
+        };
+        assert!(syn_ack.syn);
+        assert!(syn_ack.ack);
+        assert_eq!(syn_ack.acknowledgement, 8);
+        let server_ack = syn_ack.sequence + 1;
+        writer.clear();
+
+        let ack = ipv4_tcp_packet(source, destination, 50001, 8080, 8, server_ack, 0x10, &[]);
+        pump_one_tun_packet(
+            &mut adapter,
+            &mut Cursor::new(ack),
+            &mut writer,
+            &mut buffer,
+            2,
+        )
+        .unwrap();
+        writer.clear();
+
+        let data = ipv4_tcp_packet(
+            source,
+            destination,
+            50001,
+            8080,
+            8,
+            server_ack,
+            0x18,
+            b"tun-data",
+        );
+        pump_one_tun_packet(
+            &mut adapter,
+            &mut Cursor::new(data),
+            &mut writer,
+            &mut buffer,
+            3,
+        )
+        .unwrap();
+        let payload = adapter.recv_on_listener_port_with_flow(8080, 64).unwrap();
+
+        assert_eq!(payload.bytes, b"tun-data".to_vec());
+        assert_eq!(payload.flow.source.ip, IpAddr::V4(source));
+        assert_eq!(payload.flow.source.port, 50001);
+        assert_eq!(payload.flow.destination.ip, IpAddr::V4(destination));
+        assert_eq!(payload.flow.destination.port, 8080);
     }
 
     #[test]
