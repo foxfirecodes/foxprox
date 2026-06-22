@@ -1472,3 +1472,24 @@
 - What failed or surprised the agent: no behavior failures; clearing ACK-only TX packets before writing response bytes made the payload-carrying packet assertion deterministic.
 - What remains unproven: host TCP socket bridging and live TUN fd integration for smoltcp.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — smoltcp payload → host TCP relay slice
+
+- Slice attempted: bridge one received smoltcp TCP payload to a host TCP stream and send the host response back through smoltcp.
+- Why next: smoltcp can receive and emit payload bytes; the alpha TCP gate next requires opening host TCP sockets and moving bytes between smoltcp streams and host sockets.
+- Verification plan: add a one-shot relay helper that drains available smoltcp socket bytes to a `Read+Write` host stream, reads one host response, sends it into the smoltcp socket, and prove it with a loopback TCP server plus raw-packet smoltcp handshake. Run focused tcp tests plus workspace checks.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — smoltcp payload → host TCP relay
+
+- Slice attempted: bridge one received smoltcp TCP payload to a host TCP stream and send the host response back through smoltcp.
+- Why next: smoltcp can receive and emit payload bytes; the alpha TCP gate next requires opening host TCP sockets and moving bytes between smoltcp streams and host sockets.
+- What changed: `foxprox-tcp` now exposes `relay_tcp_socket_once`, which drains one available smoltcp TCP payload into any `Read + Write` host stream, reads one host response, sends that response back through the smoltcp socket, and returns directional byte counts.
+- Verification:
+  - Focused check passed: `cargo test -p foxprox-tcp -- --nocapture`. The smoltcp handshake test now relays `hello` to a loopback host TCP server, reads `world`, sends `world` back through smoltcp, polls, and asserts the outbound raw IP packet contains `world` for the sandbox tuple.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 2 `foxprox-tcp` tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; a `Read + Write` host abstraction keeps the first relay helper independent of concrete egress configuration while still proving host socket bridging.
+- What remains unproven: live TUN fd integration for smoltcp and a long-running TCP bridge loop.
+- Commit: this commit.

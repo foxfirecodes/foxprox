@@ -7,9 +7,11 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::io::{Read, Write};
 use std::rc::Rc;
 
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
 
 /// In-memory raw-IP device for smoltcp/TUN integration tests.
@@ -104,12 +106,74 @@ impl TxToken for InMemoryTxToken {
     }
 }
 
+/// Byte counts for one smoltcp socket ↔ host stream relay step.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TcpRelayOnceStats {
+    pub sandbox_to_host_bytes: usize,
+    pub host_to_sandbox_bytes: usize,
+}
+
+/// Errors from one smoltcp socket ↔ host stream relay step.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TcpRelayError {
+    SmoltcpRecv(String),
+    HostWrite(String),
+    HostRead(String),
+    SmoltcpSend(String),
+}
+
+impl std::fmt::Display for TcpRelayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SmoltcpRecv(error) => write!(f, "tcp-relay-smoltcp-recv-error: {error}"),
+            Self::HostWrite(error) => write!(f, "tcp-relay-host-write-error: {error}"),
+            Self::HostRead(error) => write!(f, "tcp-relay-host-read-error: {error}"),
+            Self::SmoltcpSend(error) => write!(f, "tcp-relay-smoltcp-send-error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for TcpRelayError {}
+
+/// Relay one available smoltcp TCP payload to a host stream and one host
+/// response back into the smoltcp socket.
+pub fn relay_tcp_socket_once<H: Read + Write>(
+    socket: &mut tcp::Socket<'_>,
+    host: &mut H,
+    sandbox_buffer_len: usize,
+    host_buffer_len: usize,
+) -> Result<TcpRelayOnceStats, TcpRelayError> {
+    let mut sandbox_payload = vec![0_u8; sandbox_buffer_len];
+    let sandbox_to_host_bytes = socket
+        .recv_slice(&mut sandbox_payload)
+        .map_err(|error| TcpRelayError::SmoltcpRecv(format!("{error:?}")))?;
+    sandbox_payload.truncate(sandbox_to_host_bytes);
+    host.write_all(&sandbox_payload)
+        .map_err(|error| TcpRelayError::HostWrite(error.to_string()))?;
+
+    let mut host_payload = vec![0_u8; host_buffer_len];
+    let host_to_sandbox_bytes = host
+        .read(&mut host_payload)
+        .map_err(|error| TcpRelayError::HostRead(error.to_string()))?;
+    host_payload.truncate(host_to_sandbox_bytes);
+    socket
+        .send_slice(&host_payload)
+        .map_err(|error| TcpRelayError::SmoltcpSend(format!("{error:?}")))?;
+
+    Ok(TcpRelayOnceStats {
+        sandbox_to_host_bytes,
+        host_to_sandbox_bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use smoltcp::iface::{Config, Interface, SocketSet};
     use smoltcp::socket::tcp;
     use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, TcpListener, TcpStream};
 
     #[test]
     fn smoltcp_socket_receives_and_sends_payload_after_handshake() {
@@ -141,18 +205,29 @@ mod tests {
         device.push_rx(ipv4_tcp_packet(2, server_seq + 1, 0x18, b"hello"));
 
         iface.poll(Instant::from_millis(1), &mut device, &mut sockets);
-        {
-            let socket = sockets.get_mut::<tcp::Socket>(handle);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let host_addr = listener.local_addr().unwrap();
+        let host_thread = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
             let mut received = [0_u8; 16];
-            let length = socket.recv_slice(&mut received).unwrap();
+            let length = stream.read(&mut received).unwrap();
             assert_eq!(&received[..length], b"hello");
-        }
-        let _ack_only = device.take_tx();
-        sockets
-            .get_mut::<tcp::Socket>(handle)
-            .send_slice(b"world")
-            .unwrap();
+            stream.write_all(b"world").unwrap();
+        });
+        let mut host = TcpStream::connect(host_addr).unwrap();
+        let stats =
+            relay_tcp_socket_once(sockets.get_mut::<tcp::Socket>(handle), &mut host, 16, 16)
+                .unwrap();
+        host_thread.join().unwrap();
+        assert_eq!(
+            stats,
+            TcpRelayOnceStats {
+                sandbox_to_host_bytes: 5,
+                host_to_sandbox_bytes: 5,
+            }
+        );
 
+        let _ack_only = device.take_tx();
         iface.poll(Instant::from_millis(2), &mut device, &mut sockets);
         let outbound = device.take_tx();
         let data_packet = outbound

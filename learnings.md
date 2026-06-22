@@ -272,3 +272,7 @@ To drive smoltcp from raw packets in tests, feed a SYN, poll, read the server se
 ## 2026-06-22 — clear ACK-only smoltcp TX before asserting payload packets
 
 When testing smoltcp stream send after receiving client payload, poll may emit ACK-only packets first. Drain captured TX packets before calling `send_slice`, then poll and assert on the payload-carrying packet for deterministic evidence.
+
+## 2026-06-22 — first TCP relay helper can be stream-agnostic
+
+For the initial smoltcp-to-host bridge proof, use a helper over `Read + Write` rather than tying it directly to `TcpEgressConnection`. This proves byte movement and keeps the helper reusable for loopback tests and later egress-backed runtime wiring.
