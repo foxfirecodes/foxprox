@@ -192,3 +192,7 @@ When a UDP flow table is at capacity, reject new flow creation but keep allowing
 ## 2026-06-21 — resource limits need config-level validation
 
 Resource limit primitives are not enough; runtime config should reject nonsensical values like zero before constructing stateful components. Keep policy-only loading compatible while extending the combined runtime config.
+
+## 2026-06-21 — test temp paths need more than process id
+
+Rust tests in one process can run in parallel, so temp paths based only on process id can collide and cause odd executable-file races like `Text file busy`. Include a per-test unique suffix such as timestamp nanos for fake scripts and files.

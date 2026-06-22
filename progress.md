@@ -1050,3 +1050,27 @@
 - What failed or surprised the agent: the first workspace verification output was interrupted before doc tests, but rerunning `cargo test --workspace && cargo fmt --check` completed successfully.
 - What remains unproven: runtime action/audit when UDP limits are hit, TCP/proxy connection limits, CLI consumption of combined runtime limits beyond tests, and async audit backpressure in live forwarding are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — UDP flow resource limit → audit slice
+
+- Slice attempted: turn UDP flow resource-limit rejections into structured audit records so limit drops are externally visible.
+- Why next: configurable UDP flow limits can reject new flows, but alpha audit/robustness requires denied traffic and resource-limit behavior to be audited rather than silently ignored.
+- Verification plan: enrich `UdpFlowObservation::LimitReached` with event metadata, add an audit-record helper with denied/drop reason and byte count, verify JSON output includes `udp_flow`, denied decision, `udp-flow-limit-reached`, attempted endpoints, and limit metadata; run formatting, clippy, focused flow/audit tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — UDP flow resource limit → audit
+
+- Slice attempted: turn UDP flow resource-limit rejections into structured audit records.
+- Why next: configurable UDP flow limits could reject new flows but did not provide external evidence; alpha robustness requires denied/dropped traffic to be audited.
+- What changed: `UdpFlowObservation::LimitReached` now carries `UdpFlowLimitRejection` metadata with sandbox/frontend/endpoints/classification/attribution/limit/bytes/time, and `UdpFlowLimitRejection::audit_record` emits a denied/drop `udp_flow` record with reason `udp-flow-limit-reached`. Integration tests now use unique temp paths to avoid parallel fake-executable collisions discovered during workspace verification.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in `foxprox-flow`; `cargo fmt` was run.
+  - Focused checks passed: `cargo test -p foxprox-flow udp_flow_limit -- --nocapture` verified both limit behavior and JSON denial audit output; `cargo test -p foxprox-config udp_max_flows -- --nocapture` verified TOML-loaded limits still construct limited flow tables.
+  - First workspace test run exposed a parallel-test temp path collision/Text-file-busy in integration fake `ip` scripts; tests were updated to use unique temp paths.
+  - `cargo test -p foxprox-integrations -- --nocapture` passed after the temp-path fix.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 audit, 7 broker, 4 cli, 9 config, 16 core, 3 device, 6 dns, 5 egress, 8 flow, 20 inspect, 11 integrations, 15 packet, 23 proxy tests, and doc tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: fake executable paths based only on process id can collide under parallel tests; include a time-based unique suffix for temp paths.
+- What remains unproven: runtime sink emission when a live UDP packet hits the limit, TCP/proxy connection limits, configurable audit/backpressure behavior under load, and live UDP forwarding are still absent.
+- Commit: this commit.

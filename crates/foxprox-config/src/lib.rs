@@ -600,10 +600,11 @@ mod tests {
             table.observe_event(&first, now, 40),
             UdpFlowObservation::Created(_)
         ));
-        assert!(matches!(
-            table.observe_event(&second, now, 40),
-            UdpFlowObservation::LimitReached { max_flows: 1, .. }
-        ));
+        let UdpFlowObservation::LimitReached(rejection) = table.observe_event(&second, now, 40)
+        else {
+            panic!("expected limit rejection");
+        };
+        assert_eq!(rejection.max_flows, 1);
     }
 
     #[test]

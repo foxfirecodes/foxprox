@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 use foxprox_core::{
-    AuditDecision, AuditKind, AuditRecord, Endpoint, FrontendKind, HostnameAttribution,
-    NormalizedEvent, Protocol, SandboxId, UdpClassification,
+    AuditDecision, AuditKind, AuditRecord, DenialBehavior, Endpoint, FrontendKind,
+    HostnameAttribution, NormalizedEvent, Protocol, SandboxId, UdpClassification,
 };
 
 /// Configurable UDP idle timeouts by protocol class.
@@ -68,10 +68,7 @@ pub struct UdpFlowState {
 pub enum UdpFlowObservation {
     Created(UdpFlowState),
     Updated(UdpFlowState),
-    LimitReached {
-        max_flows: usize,
-        attempted_key: UdpFlowKey,
-    },
+    LimitReached(UdpFlowLimitRejection),
     IgnoredNonUdpEvent,
     IgnoredMissingEndpoint,
 }
@@ -81,6 +78,51 @@ pub enum UdpFlowObservation {
 pub struct ExpiredUdpFlow {
     pub state: UdpFlowState,
     pub expired_at: SystemTime,
+}
+
+/// Evidence emitted when a UDP flow is rejected by resource limits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UdpFlowLimitRejection {
+    pub sandbox_id: SandboxId,
+    pub frontend: FrontendKind,
+    pub key: UdpFlowKey,
+    pub classification: UdpClassification,
+    pub attribution: Option<HostnameAttribution>,
+    pub max_flows: usize,
+    pub byte_count: u64,
+    pub rejected_at: SystemTime,
+}
+
+impl UdpFlowLimitRejection {
+    pub fn audit_record(&self) -> AuditRecord {
+        AuditRecord {
+            timestamp: self.rejected_at,
+            kind: AuditKind::UdpFlow,
+            sandbox_id: self.sandbox_id.clone(),
+            frontend: self.frontend,
+            protocol: protocol_for_classification(self.classification),
+            source: Some(self.key.source),
+            destination: Some(self.key.destination),
+            hostname: self
+                .attribution
+                .as_ref()
+                .map(|attribution| attribution.hostname.clone()),
+            hostname_confidence: self.attribution.as_ref().map(|attr| attr.confidence),
+            http_method: None,
+            http_scheme: None,
+            http_path_query: None,
+            decision: AuditDecision::Denied,
+            denial_behavior: Some(DenialBehavior::Drop),
+            rule_id: None,
+            reason: Some(format!(
+                "udp-flow-limit-reached: max_flows={}",
+                self.max_flows
+            )),
+            byte_count: Some(self.byte_count),
+            client_to_target_bytes: None,
+            target_to_client_bytes: None,
+        }
+    }
 }
 
 impl ExpiredUdpFlow {
@@ -217,10 +259,16 @@ impl UdpFlowTable {
 
         if let Some(max_flows) = self.max_flows {
             if self.flows.len() >= max_flows {
-                return UdpFlowObservation::LimitReached {
+                return UdpFlowObservation::LimitReached(UdpFlowLimitRejection {
+                    sandbox_id: input.sandbox_id,
+                    frontend: input.frontend,
+                    key,
+                    classification: input.classification,
+                    attribution: input.attribution,
                     max_flows,
-                    attempted_key: key,
-                };
+                    byte_count,
+                    rejected_at: now,
+                });
             }
         }
 
@@ -483,10 +531,12 @@ mod tests {
             UdpFlowObservation::Updated(_)
         ));
         let limited = table.observe_event(&second, now + Duration::from_secs(2), 20);
-        assert!(matches!(
-            limited,
-            UdpFlowObservation::LimitReached { max_flows: 1, .. }
-        ));
+        let UdpFlowObservation::LimitReached(rejection) = limited else {
+            panic!("expected limit rejection");
+        };
+        assert_eq!(rejection.max_flows, 1);
+        assert_eq!(rejection.byte_count, 20);
+        assert_eq!(rejection.rejected_at, now + Duration::from_secs(2));
         assert_eq!(table.len(), 1);
 
         let expired = table.expire(now + Duration::from_secs(11));
@@ -495,6 +545,52 @@ mod tests {
             table.observe_event(&second, now + Duration::from_secs(12), 20),
             UdpFlowObservation::Created(_)
         ));
+    }
+
+    #[test]
+    fn udp_flow_limit_rejection_emits_structured_denial_audit() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_700);
+        let mut table = UdpFlowTable::with_max_flows(UdpFlowTimeouts::default(), 1);
+        let first = udp_event(12345);
+        let second_packet = ipv4_packet(
+            17,
+            [10, 0, 0, 2],
+            [203, 0, 113, 11],
+            &udp_payload(53001, 443, 8),
+        );
+        let mut second = parse_ipv4_packet(&context(), &second_packet).unwrap();
+        match &mut second {
+            NormalizedEvent::UdpFlowAttempt(udp) => {
+                udp.attribution = Some(HostnameAttribution::new(
+                    "limited.example.com",
+                    AttributionSource::DnsCache,
+                    AttributionConfidence::Medium,
+                ));
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+        table.observe_event(&first, now, 20);
+
+        let UdpFlowObservation::LimitReached(rejection) =
+            table.observe_event(&second, now + Duration::from_secs(1), 88)
+        else {
+            panic!("expected limit rejection");
+        };
+        let audit = rejection.audit_record();
+        let line = audit_record_to_json_line(&audit).unwrap();
+        let value: Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(audit.kind, AuditKind::UdpFlow);
+        assert_eq!(audit.decision, AuditDecision::Denied);
+        assert_eq!(audit.protocol, Protocol::QuicCandidate);
+        assert_eq!(audit.hostname.as_deref(), Some("limited.example.com"));
+        assert_eq!(audit.byte_count, Some(88));
+        assert_eq!(value["kind"], "udp_flow");
+        assert_eq!(value["decision"], "denied");
+        assert_eq!(value["denial_behavior"], "drop");
+        assert_eq!(value["hostname"], "limited.example.com");
+        assert_eq!(value["byte_count"], 88);
+        assert_eq!(value["reason"], "udp-flow-limit-reached: max_flows=1");
     }
 
     #[test]

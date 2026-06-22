@@ -564,13 +564,21 @@ pub mod fd_handoff {
 mod tests {
     use super::*;
 
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("foxprox-{prefix}-{}-{nanos}", std::process::id()))
+    }
+
     #[cfg(unix)]
     #[test]
     fn configure_tun_interface_runs_link_address_and_route_commands() {
         use std::fs::{create_dir_all, read_to_string, remove_dir_all, write};
         use std::os::unix::fs::PermissionsExt;
 
-        let dir = std::env::temp_dir().join(format!("foxprox-ip-script-{}-ok", std::process::id()));
+        let dir = unique_test_dir("ip-script-ok");
         create_dir_all(&dir).unwrap();
         let script = dir.join("ip");
         let log = dir.join("ip.log");
@@ -619,8 +627,7 @@ mod tests {
         use std::fs::{create_dir_all, remove_dir_all, write};
         use std::os::unix::fs::PermissionsExt;
 
-        let dir =
-            std::env::temp_dir().join(format!("foxprox-ip-script-{}-fail", std::process::id()));
+        let dir = unique_test_dir("ip-script-fail");
         create_dir_all(&dir).unwrap();
         let script = dir.join("ip");
         write(&script, "#!/bin/sh\necho boom >&2\nexit 7\n").unwrap();
@@ -645,7 +652,7 @@ mod tests {
         use std::fs::{read_to_string, remove_file, write};
         use std::net::Ipv4Addr;
 
-        let path = std::env::temp_dir().join(format!("foxprox-resolv-conf-{}", std::process::id()));
+        let path = unique_test_dir("resolv-conf");
         write(&path, "nameserver 8.8.8.8\n").unwrap();
         let config = ResolverConfig::new(&path, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)));
 
@@ -684,8 +691,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         use std::os::unix::net::UnixStream;
 
-        let dir =
-            std::env::temp_dir().join(format!("foxprox-setup-sequence-{}-ok", std::process::id()));
+        let dir = unique_test_dir("setup-sequence-ok");
         create_dir_all(&dir).unwrap();
         let script = dir.join("ip");
         let ip_log = dir.join("ip.log");
@@ -748,10 +754,7 @@ mod tests {
         use std::os::unix::net::UnixStream;
         use std::time::Duration;
 
-        let dir = std::env::temp_dir().join(format!(
-            "foxprox-linux-tun-setup-{}-fail",
-            std::process::id()
-        ));
+        let dir = unique_test_dir("linux-tun-setup-fail");
         create_dir_all(&dir).unwrap();
         let script = dir.join("ip");
         let ip_log = dir.join("ip.log");
@@ -805,10 +808,7 @@ mod tests {
         use std::os::unix::net::UnixStream;
         use std::time::Duration;
 
-        let dir = std::env::temp_dir().join(format!(
-            "foxprox-setup-sequence-{}-fail",
-            std::process::id()
-        ));
+        let dir = unique_test_dir("setup-sequence-fail");
         create_dir_all(&dir).unwrap();
         let script = dir.join("ip");
         std::fs::write(&script, "#!/bin/sh\necho setup failed >&2\nexit 9\n").unwrap();
@@ -855,11 +855,7 @@ mod tests {
         use std::os::fd::AsRawFd;
         use std::os::unix::net::UnixStream;
 
-        let path = std::env::temp_dir().join(format!(
-            "foxprox-fd-handoff-{}-{}",
-            std::process::id(),
-            "proof"
-        ));
+        let path = unique_test_dir("fd-handoff-proof");
         let mut file = OpenOptions::new()
             .create(true)
             .truncate(true)
