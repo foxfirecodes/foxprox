@@ -152,3 +152,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Runtime proofs need aggregate audit access
 
 - Even when components keep bounded per-broker ledgers in harnesses, runtime-level proofs should expose an aggregate audit view that includes lifecycle, listener configuration, DNS, and proxy decision records so validation can inspect one session's evidence end-to-end.
+
+## 2026-06-22 — Cleanup evidence must retire callable resources
+
+- A runtime harness must not claim listener cleanup complete while still owning active listener objects. On exit, archive component audit evidence, drop/retire listener handles, and ensure post-exit listener operations fail instead of accepting more work. Aggregate audit views should place session exit after component activity.

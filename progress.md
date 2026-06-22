@@ -1903,3 +1903,30 @@ Added aggregate audit accessors to the blocking runtime harnesses so validation 
 
 ### Remaining blind spots
 - This is an aggregate snapshot over component ledgers, not yet a single shared async audit sink. Final runtime still needs one concrete supervised audit output path with global backpressure behavior across all concurrently running tasks.
+
+## 2026-06-22 — Retire blocking runtime listeners on cleanup
+
+### Commands run
+- `cargo fmt` — applied formatting for runtime listener retirement and aggregate ordering fix.
+- `cargo test -p foxprox-egress blocking_dns_http_runtime --all-targets --all-features` — passed, DNS/HTTP runtime cleanup regression.
+- `cargo test -p foxprox-egress blocking_proxy_runtime --all-targets --all-features` — passed, DNS/HTTP/SOCKS runtime cleanup regression.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 122 core tests, 3 device tests, 28 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners ... ok`
+- `foxprox_egress::tests::blocking_proxy_runtime_shares_delivered_dns_cache_with_socks_listener ... ok`
+- Post-exit assertions prove `handle_dns_once`, `handle_http_proxy_once`, and `handle_socks5_proxy_once` fail after cleanup instead of accepting more listener work.
+- Aggregate assertions prove `network_session_start` is first and `network_session_exit` is last in the returned session evidence set.
+
+### Interpretation
+Addressed round-29/round-30 high findings. Blocking runtime `exit` now archives component audit records and retires listener handles before emitting cleanup-complete evidence, so cleanup claims correspond to resources no longer callable through the runtime. Aggregate audit access now returns lifecycle startup/configuration, component records, and session exit in session order rather than placing exit before earlier DNS/proxy decisions.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The blocking harness now retires owned listener handles, but final runtime still needs real async task cancellation/joining, OS fd/socket cleanup, global audit backpressure, TUN/smoltcp task cleanup, and child-process supervision.
