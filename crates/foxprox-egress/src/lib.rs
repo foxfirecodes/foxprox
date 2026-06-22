@@ -900,6 +900,7 @@ fn socks5_connect_response(reply_code: u8) -> [u8; 10] {
 pub enum BlockingProxyRuntimeError {
     Dns(DnsUpstreamError),
     HttpProxy(ProxyEgressError),
+    Socks5Proxy(ProxyEgressError),
     Lifecycle(RuntimeLifecycleError),
 }
 
@@ -1009,6 +1010,144 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
 
     pub fn http_proxy_server(&self) -> &BlockingHttpProxyServer<E> {
         &self.http_proxy_server
+    }
+}
+
+#[derive(Debug)]
+pub struct BlockingProxyRuntime<U, H, S> {
+    sandbox_id: String,
+    shared_dns_cache: SharedDnsCache,
+    lifecycle: RuntimeLifecycleHarness,
+    dns_server: BlockingDnsBrokerServer<U>,
+    http_proxy_server: BlockingHttpProxyServer<H>,
+    socks5_proxy_server: BlockingSocks5ProxyServer<S>,
+}
+
+impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingProxyRuntime<U, H, S> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind(
+        sandbox_id: impl Into<String>,
+        lifecycle_audit_capacity: usize,
+        shared_dns_cache: SharedDnsCache,
+        dns_bind_addr: SocketAddr,
+        dns_handler: DnsBrokerHandler<U>,
+        http_proxy_bind_addr: SocketAddr,
+        http_proxy_frontend: ExplicitProxyFrontend<H>,
+        socks5_proxy_bind_addr: SocketAddr,
+        socks5_proxy_frontend: ExplicitProxyFrontend<S>,
+        io_timeout: Duration,
+        max_dns_query_bytes: usize,
+        max_proxy_request_bytes: usize,
+        now_ms: u64,
+    ) -> Result<Self, BlockingProxyRuntimeError> {
+        let sandbox_id = sandbox_id.into();
+        let dns_handler = dns_handler.with_shared_cache(shared_dns_cache.clone());
+        let http_proxy_frontend =
+            http_proxy_frontend.with_shared_dns_cache(shared_dns_cache.clone());
+        let socks5_proxy_frontend =
+            socks5_proxy_frontend.with_shared_dns_cache(shared_dns_cache.clone());
+        let dns_server = BlockingDnsBrokerServer::bind(
+            dns_bind_addr,
+            dns_handler,
+            io_timeout,
+            max_dns_query_bytes,
+        )
+        .map_err(BlockingProxyRuntimeError::Dns)?;
+        let http_proxy_server = BlockingHttpProxyServer::bind(
+            http_proxy_bind_addr,
+            http_proxy_frontend,
+            io_timeout,
+            max_proxy_request_bytes,
+        )
+        .map_err(BlockingProxyRuntimeError::HttpProxy)?;
+        let socks5_proxy_server = BlockingSocks5ProxyServer::bind(
+            socks5_proxy_bind_addr,
+            socks5_proxy_frontend,
+            io_timeout,
+            max_proxy_request_bytes,
+        )
+        .map_err(BlockingProxyRuntimeError::Socks5Proxy)?;
+        let mut lifecycle =
+            RuntimeLifecycleHarness::new(sandbox_id.clone(), lifecycle_audit_capacity);
+        lifecycle
+            .start(
+                vec![
+                    RuntimeComponent::DnsListener,
+                    RuntimeComponent::HttpProxyListener,
+                    RuntimeComponent::Socks5Listener,
+                ],
+                now_ms,
+            )
+            .map_err(BlockingProxyRuntimeError::Lifecycle)?;
+        Ok(Self {
+            sandbox_id,
+            shared_dns_cache,
+            lifecycle,
+            dns_server,
+            http_proxy_server,
+            socks5_proxy_server,
+        })
+    }
+
+    pub fn dns_addr(&self) -> Result<SocketAddr, DnsUpstreamError> {
+        self.dns_server.local_addr()
+    }
+
+    pub fn http_proxy_addr(&self) -> Result<SocketAddr, ProxyEgressError> {
+        self.http_proxy_server.local_addr()
+    }
+
+    pub fn socks5_proxy_addr(&self) -> Result<SocketAddr, ProxyEgressError> {
+        self.socks5_proxy_server.local_addr()
+    }
+
+    pub fn handle_dns_once(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<DnsBrokerStepResult, DnsUpstreamError> {
+        self.dns_server.handle_one(self.sandbox_id.clone(), now_ms)
+    }
+
+    pub fn handle_http_proxy_once(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<HttpProxyListenerStepResult, ProxyEgressError> {
+        self.http_proxy_server.handle_one(now_ms)
+    }
+
+    pub fn handle_socks5_proxy_once(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<Socks5ListenerStepResult, ProxyEgressError> {
+        self.socks5_proxy_server.handle_one(now_ms)
+    }
+
+    pub fn exit(
+        &mut self,
+        status: RuntimeExitStatus,
+        now_ms: u64,
+    ) -> Result<(), RuntimeLifecycleError> {
+        self.lifecycle.exit(status, now_ms)
+    }
+
+    pub fn shared_dns_cache(&self) -> SharedDnsCache {
+        self.shared_dns_cache.clone()
+    }
+
+    pub fn lifecycle(&self) -> &RuntimeLifecycleHarness {
+        &self.lifecycle
+    }
+
+    pub fn dns_server(&self) -> &BlockingDnsBrokerServer<U> {
+        &self.dns_server
+    }
+
+    pub fn http_proxy_server(&self) -> &BlockingHttpProxyServer<H> {
+        &self.http_proxy_server
+    }
+
+    pub fn socks5_proxy_server(&self) -> &BlockingSocks5ProxyServer<S> {
+        &self.socks5_proxy_server
     }
 }
 
@@ -2455,6 +2594,149 @@ mod tests {
         );
 
         runtime.exit(RuntimeExitStatus::Clean, 1_100).unwrap();
+        let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
+        assert_eq!(lifecycle_records.len(), 2);
+        assert_eq!(lifecycle_records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(lifecycle_records[1].duration_ms, Some(100));
+    }
+
+    #[test]
+    fn blocking_proxy_runtime_shares_delivered_dns_cache_with_socks_listener() {
+        let query = dns_query(0x7c7c, "Broker.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let shared_cache = SharedDnsCache::default();
+
+        let mut dns_config = PolicyConfig::default();
+        dns_config.rules.push(
+            PolicyRule::allow("allow-broker-dns")
+                .protocol(Protocol::Dns)
+                .hostname("broker.test"),
+        );
+        let dns_broker = BrokerCore::new(PolicyEngine::new(dns_config), 16);
+        let dns_handler = DnsBrokerHandler::new(
+            dns_broker,
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+
+        let mut http_config = PolicyConfig::default();
+        http_config.rules.push(
+            PolicyRule::allow("allow-http-domain")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Http)
+                .origin("http", "broker.test", 80),
+        );
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(http_config), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+
+        let mut socks_config = PolicyConfig::default();
+        socks_config.rules.push(
+            PolicyRule::allow("allow-socks-domain")
+                .frontend(Frontend::Socks5Proxy)
+                .protocol(Protocol::Socks)
+                .hostname("broker.test")
+                .destination_port(443),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(socks_config), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+
+        let mut runtime = BlockingProxyRuntime::bind(
+            "s1",
+            4,
+            shared_cache.clone(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            2_000,
+        )
+        .unwrap();
+
+        let dns_client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        dns_client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        dns_client
+            .send_to(&query, runtime.dns_addr().unwrap())
+            .unwrap();
+        let dns_step = runtime.handle_dns_once(2_010).unwrap();
+        assert_eq!(dns_step.decision, Decision::Allow);
+        assert_eq!(dns_step.send_status, "sent");
+        let mut dns_reply = [0u8; 512];
+        let (dns_reply_len, _) = dns_client.recv_from(&mut dns_reply).unwrap();
+        assert!(dns_reply_len > query.len());
+        assert!(runtime
+            .shared_dns_cache()
+            .resolve_hostname("broker.test", 2_020)
+            .is_some());
+
+        let mut socks_client = TcpStream::connect(runtime.socks5_proxy_addr().unwrap()).unwrap();
+        socks_client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        socks_client
+            .write_all(&[
+                0x05, 0x01, 0x00, // greeting: no authentication
+                0x05, 0x01, 0x00, 0x03, 11, b'b', b'r', b'o', b'k', b'e', b'r', b'.', b't', b'e',
+                b's', b't', 0x01, 0xbb, // domain broker.test:443
+            ])
+            .unwrap();
+        let socks_step = runtime.handle_socks5_proxy_once(2_020).unwrap();
+        assert_eq!(socks_step.decision, Decision::Allow);
+        assert!(socks_step.forwarded);
+        assert_eq!(socks_step.reply_code, 0x00);
+        let mut socks_response = Vec::new();
+        socks_client.read_to_end(&mut socks_response).unwrap();
+        assert_eq!(
+            socks_response,
+            [0x05, 0x00, 0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]
+        );
+
+        let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
+        assert_eq!(lifecycle_records.len(), 1);
+        assert_eq!(lifecycle_records[0].kind, AuditKind::NetworkSessionStart);
+        assert_eq!(
+            lifecycle_records[0].details["runtime_components"],
+            "dns_listener,http_proxy_listener,socks5_listener"
+        );
+
+        let socks_records: Vec<_> = runtime
+            .socks5_proxy_server()
+            .frontend()
+            .broker()
+            .audit()
+            .records()
+            .collect();
+        assert_eq!(socks_records[0].kind, AuditKind::ProxyDestinationResolved);
+        assert_eq!(socks_records[0].details["resolution_source"], "broker_dns");
+        assert_eq!(socks_records[0].details["selected_ip"], "127.0.0.1");
+        assert_eq!(socks_records[1].kind, AuditKind::SocksConnectDecision);
+        assert_eq!(
+            socks_records[1].destination.as_ref().unwrap().port,
+            Some(443)
+        );
+        assert_eq!(
+            runtime
+                .socks5_proxy_server()
+                .frontend()
+                .egress()
+                .connected_socks()
+                .len(),
+            1
+        );
+
+        runtime.exit(RuntimeExitStatus::Clean, 2_100).unwrap();
         let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
         assert_eq!(lifecycle_records.len(), 2);
         assert_eq!(lifecycle_records[1].kind, AuditKind::NetworkSessionExit);

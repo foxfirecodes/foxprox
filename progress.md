@@ -1796,3 +1796,28 @@ Added `BlockingDnsHttpRuntime` in `foxprox-egress` to bind DNS and HTTP proxy li
 
 ### Remaining blind spots
 - The harness is still blocking/single-step and covers DNS + HTTP proxy only. The final runtime still needs concurrent async task scheduling, SOCKS listener inclusion, TUN fd loops, child process supervision, and cleanup actions while preserving shared-cache and lifecycle boundaries.
+
+## 2026-06-22 — Blocking DNS/HTTP/SOCKS runtime wiring proof
+
+### Commands run
+- `cargo fmt` — applied formatting for SOCKS-inclusive blocking runtime harness.
+- `cargo test -p foxprox-egress blocking_proxy_runtime --all-targets --all-features` — passed, targeted DNS-to-SOCKS runtime wiring proof.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 118 core tests, 3 device tests, 28 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_proxy_runtime_shares_delivered_dns_cache_with_socks_listener ... ok`
+- `foxprox_egress::tests::blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners ... ok`
+- `foxprox_egress::tests::blocking_dns_send_failure_does_not_publish_to_shared_proxy_cache ... ok`
+
+### Interpretation
+Added `BlockingProxyRuntime` to bind DNS, HTTP proxy, and SOCKS5 proxy listeners through a single `SharedDnsCache` and lifecycle harness. The new regression drives real UDP DNS delivery, then real TCP SOCKS5 greeting/connect listener I/O, and proves a SOCKS domain destination resolves from delivered broker DNS with structured `proxy_destination_resolved` evidence before `socks_connect_decision` and forwarding. Lifecycle start evidence includes all three listener components.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The runtime proof is still blocking/single-step. Final alpha runtime still needs concurrent async task scheduling, TUN fd loops, smoltcp integration under the runtime supervisor, child process exit status, and cleanup actions.

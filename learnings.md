@@ -136,3 +136,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Listener wiring proofs must share the actual cache handle
 
 - Runtime listener wiring regressions should construct DNS and proxy listeners through the same runtime harness and `SharedDnsCache` handle, then drive real listener I/O. Manually seeding proxy cache is useful for unit tests but does not prove runtime wiring preserves delivery-gated DNS attribution.
+
+## 2026-06-22 — Include SOCKS in shared listener wiring proofs
+
+- A DNS-to-proxy runtime proof is incomplete if it only covers HTTP. SOCKS domain destinations need the same delivered-DNS shared-cache path and structured `proxy_destination_resolved` evidence before `socks_connect_decision`.
