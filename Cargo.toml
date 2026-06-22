@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/foxprox-core", "crates/foxprox-cli", "crates/foxprox-egress", "crates/foxprox-device"]
+members = ["crates/foxprox-core", "crates/foxprox-cli", "crates/foxprox-egress", "crates/foxprox-device", "crates/foxprox-stack"]
 resolver = "2"
 
 [workspace.package]

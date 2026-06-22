@@ -51,3 +51,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-21 — MSRV-sensitive helpers in validation code
 
 - `Option::is_none_or` is convenient for validation predicates but violates this workspace's Rust 1.80 MSRV; use an explicit `match` for helper predicates that must pass `cargo clippy --all-targets --all-features -- -D warnings` with `clippy::incompatible_msrv` enabled.
+
+## 2026-06-21 — smoltcp IP-medium adapter boundary
+
+- `smoltcp` can be kept out of `foxprox-core` by wrapping it in a separate adapter crate with an IP-medium `Device`; `Interface::poll` can consume TUN-style raw IP packets and emit outbound IP packets through token-backed queues, which is enough to prove the TUN-to-userspace-stack boundary before real fd wiring.

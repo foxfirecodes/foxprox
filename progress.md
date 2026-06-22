@@ -891,3 +891,38 @@ Round-6 high findings are fixed. Validated DNS responses now reject address RR t
 ### Remaining blind spots
 - DNS still validates only the alpha-relevant address attribution subset; full CNAME/SVCB/HTTPS chain handling remains future resolver work.
 - TUN write success is represented by the absence of a device error after an audited write attempt; adding a post-write success record would require a separate non-gating telemetry path to avoid unobserved writes on audit backpressure.
+
+## 2026-06-21 — smoltcp IP stack adapter proof cycle
+
+### Behavior under work
+Add an alpha userspace stack adapter crate using `smoltcp` with an in-memory IP-medium device, proving that raw IP packets can enter the selected stack and bounded outbound packets can be emitted without leaking smoltcp types into policy/core modules.
+
+### Expected evidence
+- A valid IPv4 ICMP echo request injected as a TUN-style IP packet is consumed by `smoltcp` and emits an IPv4 echo reply packet.
+- The adapter reports bounded poll evidence (`packets_emitted`, `outbound_bytes`, `poll_result`) and exposes MTU/queue behavior for later TUN fd wiring.
+
+### Commands run
+- `cargo fmt` — applied formatting for the new stack adapter crate.
+- `cargo test -p foxprox-stack --all-targets --all-features` — initially failed because `smoltcp::iface::Interface` does not implement `Debug`; removed the derive and reran successfully with 2 stack tests passed.
+- `cargo test --all-targets --all-features` — passed, 6 CLI tests, 101 core tests, 3 device tests, 3 egress tests, and 2 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_stack::tests::smoltcp_stack_consumes_ip_packet_and_emits_icmp_reply ... ok`
+- `foxprox_stack::tests::in_memory_ip_device_exposes_bounded_mtu_capabilities ... ok`
+
+### Interpretation
+The workspace now includes a `foxprox-stack` adapter crate that uses `smoltcp` behind a narrow boundary. An in-memory IP-medium device accepts raw TUN-style IP packets, `Interface::poll` processes them, and outbound IP packets are captured with bounded poll evidence. The first proof shows an IPv4 ICMP echo request entering smoltcp and an echo reply leaving the stack.
+
+### Changed files
+- `Cargo.toml`
+- `Cargo.lock`
+- `crates/foxprox-stack/Cargo.toml`
+- `crates/foxprox-stack/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This proves the smoltcp/IP-packet boundary and outbound packet emission, not full TCP host-socket bridging yet.
+- The adapter still uses an in-memory device; wiring `foxprox-device` TUN IO and host egress loops into the stack remains future runtime work.
