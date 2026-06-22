@@ -1556,3 +1556,31 @@ Explicit proxy host egress now has a broker-DNS resolution proof without falling
 
 ### Remaining blind spots
 - The proof uses a snapshot cache/time. Final async runtime must wire the live DNS broker cache into explicit proxy egress and handle cache expiry/retry/lifecycle continuously.
+
+## 2026-06-22 — Round-18 proxy domain egress rollback
+
+### Commands run
+- `cargo fmt` — applied formatting for round-18 proxy domain rollback.
+- `cargo test -p foxprox-core --all-targets --all-features` — passed, 107 core tests.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 23 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 107 core tests, 3 device tests, 23 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_explicit_proxy_socks_egress_rejects_domain_without_host_dns ... ok`
+- `foxprox_egress::tests::blocking_explicit_proxy_http_egress_reaches_host_socket_after_policy ... ok`
+- `foxprox_egress::tests::blocking_explicit_proxy_socks_egress_opens_host_socket_after_policy ... ok`
+
+### Interpretation
+Round-18 blocker is fixed by rolling back the snapshot-cache proxy domain egress path. `BlockingExplicitProxyEgress` no longer resolves proxy hostnames inside egress and only connects to IP-literal HTTP/SOCKS destinations. Domain SOCKS requests may still be policy-allowed by hostname, but concrete host egress fails closed with existing `proxy_egress_send_failed` evidence until resolution can happen in a per-request, audit-gated frontend path that records selected IP/source/TTL before opening a socket.
+
+### Correction to prior entry
+The prior “Explicit proxy broker-DNS egress resolution” entry overclaimed support for domain proxy destinations. The durable invariant after this fix is: domain proxy egress remains fail-closed in the concrete blocking egress proof unless/until an audited per-request resolver path is added.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `progress.md`
+
+### Remaining blind spots
+- Domain-based explicit proxy host egress still needs a per-request audited broker DNS resolution path with selected-IP/source/TTL evidence and audit-backpressure gating before TCP connect.
