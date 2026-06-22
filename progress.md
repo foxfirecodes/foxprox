@@ -1128,5 +1128,5 @@
   - `cargo tree -p foxprox-net` — orchestration owns packet-to-egress forwarding.
   - `cargo tree -p foxprox-egress` — UDP IO remains behind egress.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 0f23f9b.
 - Remaining boundary risks: UDP response packet synthesis, UDP flow table handle retention, ICMP errors, and backpressure/rate limits remain.
