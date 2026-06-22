@@ -281,6 +281,20 @@ pub fn forward_ipv4_udp_packet_once<E: UdpEgress>(
         .map_err(|error| CliError::Core(error.to_string()))
 }
 
+/// Forward one UDP packet from a TUN-like fd through host UDP egress and write
+/// the synthesized response packet back to the same fd.
+pub fn forward_tun_udp_packet_once<E: UdpEgress>(
+    tun: &mut TunPacketIo,
+    egress: &E,
+    target: &UdpTarget,
+    response_buffer_len: usize,
+) -> Result<Vec<u8>, CliError> {
+    let packet = tun.read_packet()?;
+    let response = forward_ipv4_udp_packet_once(&packet, egress, target, response_buffer_len)?;
+    tun.write_packet(&response)?;
+    Ok(response)
+}
+
 /// Run setup command work with an already-created TUN-like fd.
 #[cfg(unix)]
 pub fn run_setup_command_with_existing_fd(
@@ -619,6 +633,42 @@ mod tests {
         assert_eq!(u16::from_be_bytes([response[20], response[21]]), 5353);
         assert_eq!(u16::from_be_bytes([response[22], response[23]]), 49152);
         assert_eq!(&response[28..], b"world");
+    }
+
+    #[test]
+    fn tun_udp_forwarding_reads_from_fd_and_writes_response_to_fd() {
+        use foxprox_egress::HostUdpEgress;
+        use std::net::{Ipv4Addr, UdpSocket};
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixDatagram;
+        use std::time::Duration;
+
+        let upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut buffer = [0_u8; 64];
+            let (length, peer) = upstream.recv_from(&mut buffer).unwrap();
+            assert_eq!(&buffer[..length], b"from-tun");
+            upstream.send_to(b"to-tun", peer).unwrap();
+        });
+        let (peer, broker_side) = UnixDatagram::pair().unwrap();
+        let owned: OwnedFd = broker_side.into();
+        let mut tun = TunPacketIo::from_owned_fd(owned, 4096).unwrap();
+        let packet = udp_packet(49153, 5353, b"from-tun");
+        peer.send(&packet).unwrap();
+        let egress = HostUdpEgress::new(Duration::from_secs(1)).unwrap();
+        let target = UdpTarget::new_ip(upstream_addr.ip(), upstream_addr.port()).unwrap();
+
+        let response = forward_tun_udp_packet_once(&mut tun, &egress, &target, 64).unwrap();
+        server.join().unwrap();
+        let mut received = vec![0_u8; 64];
+        let length = peer.recv(&mut received).unwrap();
+        received.truncate(length);
+
+        assert_eq!(received, response);
+        assert_eq!(u16::from_be_bytes([response[20], response[21]]), 5353);
+        assert_eq!(u16::from_be_bytes([response[22], response[23]]), 49153);
+        assert_eq!(&response[28..], b"to-tun");
     }
 
     #[test]

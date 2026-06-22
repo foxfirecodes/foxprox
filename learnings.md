@@ -244,3 +244,7 @@ If an ignored live smoke test needs to synthesize a valid packet, promote that c
 ## 2026-06-22 — unfiltered UDP forwarding composes from packet parse, egress, and response synthesis
 
 A narrow transparent UDP forwarding proof only needs to parse the TUN IPv4 UDP datagram, send its payload through `UdpEgress`, receive one host datagram, and synthesize an IPv4 UDP response using the original sandbox IP/port tuple.
+
+## 2026-06-22 — fd-backed UDP forwarding can be proven without namespaces first
+
+Before moving UDP forwarding into a live namespace smoke test, prove the runtime composition over a TUN-like fd stand-in: read raw IPv4 UDP bytes from `TunPacketIo`, forward payload through loopback `UdpEgress`, synthesize the response, and verify the fd peer receives the packet.

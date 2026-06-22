@@ -1323,3 +1323,24 @@
 - What failed or surprised the agent: no behavior failures; the existing `HostUdpEgress` backend was enough once packet parsing/response building were available as primitives.
 - What remains unproven: wiring this forwarding helper to `TunPacketIo` and proving it live through the bwrap-created TUN fd.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — TUN fd UDP forwarding helper slice
+
+- Slice attempted: wire the one-packet UDP egress helper directly to `TunPacketIo`, reading one packet from a TUN-like fd and writing the synthesized UDP response back.
+- Why next: UDP forwarding through host egress is proven for in-memory packets, but runtime code needs the fd-backed read/write boundary to use it.
+- Verification plan: add `forward_tun_udp_packet_once`, test it over a Unix datagram fd stand-in with a loopback UDP server, then run focused CLI tests plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — TUN fd UDP forwarding helper
+
+- Slice attempted: wire the one-packet UDP egress helper directly to `TunPacketIo`, reading one packet from a TUN-like fd and writing the synthesized UDP response back.
+- Why next: UDP forwarding through host egress was proven for in-memory packets, but runtime code needs the fd-backed read/write boundary to use it.
+- What changed: `foxprox-cli` now exposes `forward_tun_udp_packet_once`, which reads one packet from `TunPacketIo`, forwards its UDP payload through `UdpEgress`, builds a response packet, writes it back to the same fd, and returns the response bytes for evidence/logging.
+- Verification:
+  - Focused check passed: `cargo test -p foxprox-cli tun_udp_forwarding -- --nocapture`, using a Unix datagram fd stand-in plus loopback UDP upstream; payload `from-tun` reached host UDP egress and response `to-tun` was written back to the fd peer as a reversed IPv4 UDP packet.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 10 `foxprox-cli` tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; datagram fd stand-ins continue to be the simplest way to prove packet boundaries around TUN-like IO.
+- What remains unproven: the same helper running against the live bwrap-created TUN fd with a real target socket and host UDP upstream.
+- Commit: this commit.
