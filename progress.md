@@ -547,5 +547,5 @@
   - `cargo check --workspace` — passed.
   - `cargo test --workspace` — passed, 67 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
-- Commit hash after commit: pending.
+- Commit hash after commit: f5e11b6.
 - Remaining boundary risks: async egress, stream backpressure, HTTP response parsing/streaming, connection timeouts, DNS upstream selection, and integration with TUN/proxy listener event loops remain.
