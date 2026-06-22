@@ -1051,6 +1051,58 @@
 - Current git status summary: CLI/progress modified; review artifact pending.
 - Next exact action: read setup socket cleanup review, fix blockers if any, then commit.
 
+## 2026-06-22T00:09:36Z — ICMP audit and identity-safe socket cleanup pending review
+
+- Current objective: commit cleanup-safe setup socket binding plus ICMP proof audit coverage.
+- Additional findings accepted from alpha gap assessment:
+  - Setup socket cleanup should be identity-safe against replacement sockets. Fixed by storing bound socket device/inode and unlinking on drop only if the path still points to that same socket.
+  - ICMP proof should use structured audit for allowed echo replies and unsupported/drop paths. Added bounded `AuditBuffer` to `proof-icmp`, `--audit-queue-capacity` with non-zero validation, structured `IcmpMessage`/`UnsupportedDenied` audit events, and backpressure behavior that skips echo replies or unsupported handling when audit enqueue fails.
+- Changes implemented since previous entry:
+  - `BoundSetupListener` now stores `FileIdentity { device, inode }` and preserves replaced socket paths as well as replaced non-socket paths.
+  - `proof-icmp` emits `AuditEventKind::IcmpMessage` before writing synthetic replies and `AuditEventKind::UnsupportedDenied` for drop paths.
+  - Tests now cover ICMP audit metadata, ICMP audit backpressure, zero audit capacity rejection, normal setup socket cleanup, existing non-socket preservation, replaced non-socket preservation, and replaced socket preservation.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-cli -- --nocapture` passed: 7 CLI tests.
+  - `cargo test --workspace` passed: 51 core tests, 9 device tests, 18 net tests, 22 proxy tests, 7 CLI tests, setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Subagents/reviews requested: `icmp-audit-cleanup-final` is running; current changes include extra identity-safe cleanup fix after original review start, so a rereview may be needed if the first review predates this diff.
+- Files changed: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: CLI/progress modified; review artifacts pending.
+- Next exact action: read ICMP audit/cleanup review, request rereview if stale or fix blockers, then commit.
+
+## 2026-06-22T00:10:37Z — ICMP audit/cleanup stale review superseded by fix
+
+- Current objective: commit cleanup-safe setup socket binding plus ICMP proof audit coverage after rereview.
+- Review result: `icmp-audit-cleanup-final` reported a blocker that `BoundSetupListener::drop` could unlink a replacement Unix socket.
+- Status of finding: stale but valid; it was fixed after the review started and before the review result arrived.
+- Current fix evidence:
+  - `BoundSetupListener` stores `FileIdentity { device, inode }` from `symlink_metadata` immediately after bind.
+  - `Drop` removes the path only when the current path is a Unix socket and its identity matches the original bound socket.
+  - Added `bound_setup_listener_does_not_remove_replaced_socket`, which replaces the original socket path with a new `UnixListener`, drops the original wrapper, and asserts the replacement socket remains.
+- Verification evidence after the fix remains valid: full workspace fmt/check/test/clippy/doc passed; CLI tests now cover 7 cases.
+- Subagents/reviews requested: `icmp-audit-cleanup-rereview` is running against the current diff.
+- Files changed: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: CLI/progress modified; review artifacts pending rereview/removal.
+- Next exact action: read ICMP audit/cleanup rereview, fix blockers if any, remove `reviews/`, and commit.
+
+## 2026-06-22T00:12:18Z — ICMP audit/cleanup rereview passed
+
+- Current objective: commit cleanup-safe setup socket binding plus ICMP proof audit coverage.
+- Rereview result: `icmp-audit-cleanup-rereview` found no blockers.
+- Confirmed behavior:
+  - `BoundSetupListener` stores the bound socket dev/inode identity and `Drop` only removes a matching socket.
+  - Replacement-by-socket coverage is present.
+  - `proof-icmp` structured audit/backpressure and setup cleanup paths are sane.
+  - Focused `cargo test -p foxprox-cli` passed: 7 tests.
+- Verification evidence remains valid from prior entries: full workspace fmt/check/test/clippy/doc passed.
+- Files changed: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: CLI/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit ICMP audit/cleanup, then address next alpha gap: runtime resource-limit enforcement.
+
 ## 2026-06-22T00:04:24Z — setup socket cleanup review passed
 
 - Current objective: commit cleanup-safe setup socket binding for proof CLI commands.

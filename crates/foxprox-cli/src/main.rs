@@ -1,8 +1,10 @@
 use foxprox_core::{
-    classify_udp_candidate, PolicyRule, PortRange, Protocol, RuleEffect, SandboxId,
+    classify_udp_candidate, AuditBackpressure, AuditBuffer, AuditEvent, AuditEventKind, Decision,
+    DecisionAction, Frontend, NetworkEvent, PolicyRule, PortRange, Protocol, RuleEffect, SandboxId,
+    TransportEndpoint,
 };
 use foxprox_device::{
-    parse_icmpv4_metadata, parse_ipv4_metadata, synthesize_icmpv4_echo_reply,
+    icmp_event, parse_icmpv4_metadata, parse_ipv4_metadata, synthesize_icmpv4_echo_reply,
     unsupported_event_for_drop,
 };
 use foxprox_net::{
@@ -17,7 +19,7 @@ use std::fs::{self, File};
 use std::io::{self, IoSliceMut, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -45,7 +47,7 @@ fn run() -> io::Result<()> {
 }
 
 fn usage() -> &'static str {
-    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--audit-queue-capacity N]\n       foxprox proof-udp-dns --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N]\n       foxprox proof-http-proxy [--listen 10.255.0.1:8080] [--allow-port PORT]... [--request-head-limit BYTES] [--request-head-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N]\n       foxprox proof-socks5-proxy [--listen 10.255.0.1:1080] [--allow-port PORT]... [--request-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N]"
+    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1] [--audit-queue-capacity N]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--audit-queue-capacity N]\n       foxprox proof-udp-dns --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N]\n       foxprox proof-http-proxy [--listen 10.255.0.1:8080] [--allow-port PORT]... [--request-head-limit BYTES] [--request-head-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N]\n       foxprox proof-socks5-proxy [--listen 10.255.0.1:1080] [--allow-port PORT]... [--request-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N]"
 }
 
 fn proof_icmp<I>(mut args: I) -> io::Result<()>
@@ -54,11 +56,24 @@ where
 {
     let mut setup_socket = env::var("FOXPROX_SETUP_SOCKET").ok();
     let mut local_ip = Ipv4Addr::new(10, 255, 0, 1);
+    let mut audit = audit_buffer(8192)?;
+    let sandbox_id = SandboxId::new("proof-icmp").map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid sandbox id: {error}"),
+        )
+    })?;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--setup-socket" => setup_socket = Some(required_value(&mut args, "--setup-socket")?),
             "--local-ip" => local_ip = parse_value(&required_value(&mut args, "--local-ip")?)?,
+            "--audit-queue-capacity" => {
+                audit = audit_buffer(parse_nonzero_usize(&required_value(
+                    &mut args,
+                    "--audit-queue-capacity",
+                )?)?)?
+            }
             "--help" | "-h" => return Err(io::Error::new(io::ErrorKind::InvalidInput, usage())),
             other => {
                 return Err(io::Error::new(
@@ -98,31 +113,45 @@ where
             ));
         }
         let packet = &buffer[..len];
-        match parse_ipv4_metadata(packet) {
-            Ok(ipv4) => {
-                eprintln!(
-                    "foxprox: packet len={} src={} dst={} proto={}",
-                    ipv4.total_len, ipv4.source, ipv4.destination, ipv4.protocol
-                );
-                if let Ok(icmp) = parse_icmpv4_metadata(packet, ipv4) {
-                    eprintln!("foxprox: icmp type={} code={}", icmp.ty, icmp.code);
-                }
-            }
-            Err(reason) => {
-                eprintln!(
-                    "foxprox: drop malformed/unsupported packet: {:?}",
-                    unsupported_event_for_drop(None, reason.clone())
-                );
+        let parsed_ipv4 = parse_ipv4_metadata(packet);
+        if let Ok(ipv4) = parsed_ipv4 {
+            eprintln!(
+                "foxprox: packet len={} src={} dst={} proto={}",
+                ipv4.total_len, ipv4.source, ipv4.destination, ipv4.protocol
+            );
+            if let Ok(icmp) = parse_icmpv4_metadata(packet, ipv4) {
+                eprintln!("foxprox: icmp type={} code={}", icmp.ty, icmp.code);
             }
         }
 
         match synthesize_icmpv4_echo_reply(packet, local_ip) {
             Ok(reply) => {
+                if let Ok(ipv4) = parsed_ipv4 {
+                    if let Ok(icmp) = parse_icmpv4_metadata(packet, ipv4) {
+                        if let Err(error) = emit_icmp_audit(
+                            &mut audit,
+                            &icmp_event(sandbox_id.clone(), ipv4, icmp),
+                            Decision::allow("proof-icmp-echo"),
+                        ) {
+                            eprintln!("foxprox: ICMP audit backpressure: {error}");
+                            continue;
+                        }
+                    }
+                }
                 tun.write_all(&reply)?;
                 eprintln!("foxprox: wrote ICMP echo reply len={}", reply.len());
             }
             Err(reason) => {
-                eprintln!("foxprox: no reply: {reason:?}");
+                let event = unsupported_event_for_drop(Some(sandbox_id.clone()), reason.clone());
+                if let Err(error) = emit_icmp_audit(
+                    &mut audit,
+                    &event,
+                    Decision::default_deny(DecisionAction::FailClosed),
+                ) {
+                    eprintln!("foxprox: unsupported packet audit backpressure: {error}");
+                    continue;
+                }
+                eprintln!("foxprox: no reply: {reason:?} event={event:?}");
             }
         }
     }
@@ -482,9 +511,71 @@ fn parse_nonzero_usize(value: &str) -> io::Result<usize> {
     Ok(parsed)
 }
 
+fn audit_buffer(capacity: usize) -> io::Result<AuditBuffer> {
+    if capacity == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "audit queue capacity must be non-zero",
+        ));
+    }
+    Ok(AuditBuffer::new(capacity))
+}
+
+fn emit_icmp_audit(
+    audit: &mut AuditBuffer,
+    event: &NetworkEvent,
+    decision: Decision,
+) -> io::Result<()> {
+    let audit_event = icmp_audit_event(event, decision);
+    audit
+        .try_push(audit_event.clone())
+        .map_err(audit_backpressure_error)?;
+    eprintln!("foxprox: ICMP audit event={audit_event:?}");
+    Ok(())
+}
+
+fn audit_backpressure_error(error: AuditBackpressure) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!("audit queue backpressure: {error:?}"),
+    )
+}
+
+fn icmp_audit_event(event: &NetworkEvent, decision: Decision) -> AuditEvent {
+    let kind = match event {
+        NetworkEvent::IcmpMessage { .. } => AuditEventKind::IcmpMessage,
+        NetworkEvent::Unsupported { .. } => AuditEventKind::UnsupportedDenied,
+        _ => AuditEventKind::BrokerError,
+    };
+    let mut audit = AuditEvent::new(Frontend::Tun, kind).with_decision(decision);
+    if let Some(sandbox_id) = event.sandbox_id() {
+        audit = audit.with_sandbox_id(sandbox_id.clone());
+    }
+    audit.protocol = Some(event.protocol());
+    match event {
+        NetworkEvent::IcmpMessage {
+            source,
+            destination,
+            ty,
+            code,
+            ..
+        } => {
+            audit.source = Some(TransportEndpoint::new(*source, 0));
+            audit.destination = Some(TransportEndpoint::new(*destination, 0));
+            audit.detail = Some(format!("icmp type={ty} code={code}"));
+        }
+        NetworkEvent::Unsupported { reason, .. } => {
+            audit.detail = Some(format!("{reason:?}"));
+        }
+        _ => {}
+    }
+    audit
+}
+
 struct BoundSetupListener {
     listener: UnixListener,
     path: PathBuf,
+    identity: FileIdentity,
 }
 
 impl BoundSetupListener {
@@ -492,7 +583,13 @@ impl BoundSetupListener {
         let path = path.as_ref().to_path_buf();
         let listener = UnixListener::bind(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-        Ok(Self { listener, path })
+        let metadata = fs::symlink_metadata(&path)?;
+        let identity = FileIdentity::from_metadata(&metadata);
+        Ok(Self {
+            listener,
+            path,
+            identity,
+        })
     }
 
     fn accept(&self) -> io::Result<(UnixStream, std::os::unix::net::SocketAddr)> {
@@ -503,10 +600,28 @@ impl BoundSetupListener {
 impl Drop for BoundSetupListener {
     fn drop(&mut self) {
         match fs::symlink_metadata(&self.path) {
-            Ok(metadata) if metadata.file_type().is_socket() => {
+            Ok(metadata)
+                if metadata.file_type().is_socket()
+                    && FileIdentity::from_metadata(&metadata) == self.identity =>
+            {
                 let _ = fs::remove_file(&self.path);
             }
             _ => {}
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FileIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl FileIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
         }
     }
 }
@@ -593,6 +708,57 @@ mod tests {
     }
 
     #[test]
+    fn icmp_audit_event_records_message_metadata() {
+        let event = NetworkEvent::IcmpMessage {
+            sandbox_id: SandboxId::new("test").unwrap(),
+            source: "10.255.0.2".parse().unwrap(),
+            destination: "10.255.0.1".parse().unwrap(),
+            ty: 8,
+            code: 0,
+        };
+        let audit = icmp_audit_event(&event, Decision::allow("allow-icmp"));
+
+        assert_eq!(audit.kind, AuditEventKind::IcmpMessage);
+        assert_eq!(audit.protocol, Some(Protocol::Icmp));
+        assert_eq!(audit.source.unwrap().ip.to_string(), "10.255.0.2");
+        assert_eq!(audit.destination.unwrap().ip.to_string(), "10.255.0.1");
+        assert!(audit.detail.unwrap().contains("type=8"));
+        assert!(audit.decision.unwrap().is_allowed());
+    }
+
+    #[test]
+    fn icmp_audit_enqueue_reports_backpressure() {
+        let event = NetworkEvent::Unsupported {
+            sandbox_id: Some(SandboxId::new("test").unwrap()),
+            frontend: Frontend::Tun,
+            reason: foxprox_core::UnsupportedReason::Malformed("bad packet".to_string()),
+        };
+        let mut audit = audit_buffer(1).unwrap();
+
+        emit_icmp_audit(
+            &mut audit,
+            &event,
+            Decision::default_deny(DecisionAction::FailClosed),
+        )
+        .unwrap();
+        let error = emit_icmp_audit(
+            &mut audit,
+            &event,
+            Decision::default_deny(DecisionAction::FailClosed),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[test]
+    fn icmp_audit_rejects_zero_capacity() {
+        assert_eq!(
+            audit_buffer(0).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
     fn bound_setup_listener_removes_socket_on_drop() {
         let path = unique_socket_path("cleanup");
         {
@@ -622,6 +788,19 @@ mod tests {
         fs::write(&path, b"replacement").unwrap();
         drop(listener);
         assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn bound_setup_listener_does_not_remove_replaced_socket() {
+        let path = unique_socket_path("replaced-socket");
+        let listener = BoundSetupListener::bind(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        let replacement = UnixListener::bind(&path).unwrap();
+        drop(listener);
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        assert!(metadata.file_type().is_socket());
+        drop(replacement);
         let _ = fs::remove_file(path);
     }
 }
