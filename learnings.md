@@ -92,3 +92,7 @@ The broker-facing packet boundary should inspect only the first version nibble, 
 ## 2026-06-21 — proxy frontend preflight should fail closed before egress
 
 Explicit proxy handlers can safely prove request parsing, policy, audit, and response generation before TCP tunneling exists. Malformed proxy requests should be converted to unsupported normalized events so they produce fail-closed audit records and denial responses instead of parser-only errors.
+
+## 2026-06-21 — SOCKS5 denial responses should preserve denial class
+
+For SOCKS5 CONNECT preflight, policy denials should return reply code 0x02 (connection not allowed by ruleset), while malformed or unsupported requests should fail closed in audit and return general failure 0x01. This keeps client-visible behavior aligned with audit semantics.

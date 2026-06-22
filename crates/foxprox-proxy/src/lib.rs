@@ -11,7 +11,7 @@ use foxprox_core::{
     AuditDecision, Endpoint, FrontendKind, NormalizedEvent, PolicyEngine, PolicyEvaluation,
     SandboxId, UnsupportedNetworkEvent,
 };
-use foxprox_inspect::parse_https_connect_request;
+use foxprox_inspect::{parse_https_connect_request, parse_socks5_connect_request};
 
 /// Result of one HTTP CONNECT preflight evaluation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -32,6 +32,31 @@ impl HttpProxyResponse {
         match self {
             Self::ConnectionEstablished => b"HTTP/1.1 200 Connection Established\r\n\r\n",
             Self::Forbidden => b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n",
+        }
+    }
+}
+
+/// Result of one SOCKS5 CONNECT preflight evaluation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Socks5ConnectPreflight {
+    pub evaluation: PolicyEvaluation,
+    pub response: Socks5Response,
+}
+
+/// Client-visible SOCKS5 response bytes for the preflight decision.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Socks5Response {
+    Succeeded,
+    ConnectionNotAllowedByRuleset,
+    GeneralFailure,
+}
+
+impl Socks5Response {
+    pub fn as_bytes(self) -> &'static [u8] {
+        match self {
+            Self::Succeeded => b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00",
+            Self::ConnectionNotAllowedByRuleset => b"\x05\x02\x00\x01\x00\x00\x00\x00\x00\x00",
+            Self::GeneralFailure => b"\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00",
         }
     }
 }
@@ -80,6 +105,44 @@ impl HttpProxyPreflight {
     }
 }
 
+/// Minimal SOCKS5 frontend preflight handler for CONNECT requests after method
+/// negotiation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Socks5Preflight {
+    policy: PolicyEngine,
+}
+
+impl Socks5Preflight {
+    pub fn new(policy: PolicyEngine) -> Self {
+        Self { policy }
+    }
+
+    /// Parse and evaluate one SOCKS5 CONNECT request message.
+    ///
+    /// Allowed decisions produce a SOCKS5 success reply for a future TCP bridge.
+    /// Policy denials produce reply code 0x02, while malformed or unsupported
+    /// request messages fail closed and produce general failure code 0x01.
+    pub fn handle_connect_request(
+        &self,
+        sandbox_id: SandboxId,
+        request: &[u8],
+    ) -> Socks5ConnectPreflight {
+        let event = parse_socks5_connect_request(sandbox_id.clone(), FrontendKind::Socks5, request)
+            .unwrap_or_else(|error| malformed_socks5_event(sandbox_id, error.to_string()));
+        let evaluation = self.policy.evaluate(&event);
+        let response = match evaluation.audit.decision {
+            AuditDecision::Allowed => Socks5Response::Succeeded,
+            AuditDecision::Denied => Socks5Response::ConnectionNotAllowedByRuleset,
+            AuditDecision::FailClosed | AuditDecision::Observed => Socks5Response::GeneralFailure,
+        };
+
+        Socks5ConnectPreflight {
+            evaluation,
+            response,
+        }
+    }
+}
+
 fn malformed_connect_event(
     sandbox_id: SandboxId,
     source: Option<Endpoint>,
@@ -91,6 +154,16 @@ fn malformed_connect_event(
         source,
         destination: None,
         reason: format!("malformed-https-connect: {reason}"),
+    })
+}
+
+fn malformed_socks5_event(sandbox_id: SandboxId, reason: String) -> NormalizedEvent {
+    NormalizedEvent::Unsupported(UnsupportedNetworkEvent {
+        sandbox_id,
+        frontend: FrontendKind::Socks5,
+        source: None,
+        destination: None,
+        reason: format!("malformed-socks5-connect: {reason}"),
     })
 }
 
@@ -124,6 +197,32 @@ mod tests {
             rules: vec![rule],
             ..PolicyConfig::default()
         })
+    }
+
+    fn allow_example_socks_policy() -> PolicyEngine {
+        let rule = PolicyRule::new("allow-example-socks", RuleAction::Allow)
+            .unwrap()
+            .with_protocol(Protocol::Socks)
+            .with_hostname(HostnamePattern::new(".example.com").unwrap())
+            .with_minimum_hostname_confidence(AttributionConfidence::High)
+            .with_destination_port(443);
+        PolicyEngine::new(PolicyConfig {
+            rules: vec![rule],
+            ..PolicyConfig::default()
+        })
+    }
+
+    fn socks5_domain_connect(hostname: &str, port: u16) -> Vec<u8> {
+        let mut request = vec![5, 1, 0, 3, hostname.len() as u8];
+        request.extend_from_slice(hostname.as_bytes());
+        request.extend_from_slice(&port.to_be_bytes());
+        request
+    }
+
+    fn socks5_udp_associate() -> Vec<u8> {
+        let mut request = socks5_domain_connect("api.example.com", 443);
+        request[1] = 3;
+        request
     }
 
     #[test]
@@ -203,5 +302,81 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("malformed-https-connect"));
+    }
+
+    #[test]
+    fn allowed_socks5_connect_preflight_emits_audit_and_success_response() {
+        let handler = Socks5Preflight::new(allow_example_socks_policy());
+
+        let result = handler
+            .handle_connect_request(sandbox_id(), &socks5_domain_connect("api.example.com", 443));
+
+        assert_eq!(
+            result.evaluation.decision,
+            PolicyDecision::Allow {
+                rule_id: Some("allow-example-socks".to_owned())
+            }
+        );
+        assert_eq!(result.response, Socks5Response::Succeeded);
+        assert_eq!(
+            result.response.as_bytes(),
+            b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+        );
+
+        let audit: Value =
+            serde_json::from_str(&audit_record_to_json_line(&result.evaluation.audit).unwrap())
+                .unwrap();
+        assert_eq!(audit["kind"], "socks_connect");
+        assert_eq!(audit["frontend"], "socks5");
+        assert_eq!(audit["hostname"], "api.example.com");
+        assert_eq!(audit["decision"], "allowed");
+        assert_eq!(audit["rule_id"], "allow-example-socks");
+    }
+
+    #[test]
+    fn denied_socks5_connect_preflight_returns_ruleset_denied_response() {
+        let handler = Socks5Preflight::new(allow_example_socks_policy());
+
+        let result = handler
+            .handle_connect_request(sandbox_id(), &socks5_domain_connect("blocked.invalid", 443));
+
+        assert!(matches!(
+            result.evaluation.decision,
+            PolicyDecision::Deny { .. }
+        ));
+        assert_eq!(
+            result.response,
+            Socks5Response::ConnectionNotAllowedByRuleset
+        );
+        assert_eq!(
+            result.response.as_bytes(),
+            b"\x05\x02\x00\x01\x00\x00\x00\x00\x00\x00"
+        );
+    }
+
+    #[test]
+    fn malformed_socks5_connect_preflight_fails_closed_with_general_failure() {
+        let handler = Socks5Preflight::new(allow_example_socks_policy());
+
+        let result = handler.handle_connect_request(sandbox_id(), &socks5_udp_associate());
+
+        assert!(matches!(
+            result.evaluation.decision,
+            PolicyDecision::FailClosed { .. }
+        ));
+        assert_eq!(result.evaluation.audit.decision, AuditDecision::FailClosed);
+        assert_eq!(result.evaluation.audit.protocol, Protocol::Unsupported);
+        assert_eq!(result.response, Socks5Response::GeneralFailure);
+        assert_eq!(
+            result.response.as_bytes(),
+            b"\x05\x01\x00\x01\x00\x00\x00\x00\x00\x00"
+        );
+        assert!(result
+            .evaluation
+            .audit
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("malformed-socks5-connect"));
     }
 }

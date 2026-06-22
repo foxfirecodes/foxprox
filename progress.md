@@ -505,3 +505,25 @@
 - What failed or surprised the agent: the policy helper names are `HostnamePattern::new(".example.com")` and `with_minimum_hostname_confidence`; the initial test used non-existent shortcut names and failed to compile.
 - What remains unproven: CONNECT tunnel establishment, host TCP egress, plaintext HTTP proxy absolute-form handling, SOCKS5 frontend response negotiation, proxy listener sockets, and backpressure in a live proxy runtime are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — SOCKS5 CONNECT frontend preflight → policy/audit/response slice
+
+- Slice attempted: turn SOCKS5 CONNECT request bytes into shared policy/audit evaluation and deterministic SOCKS5 response bytes.
+- Why next: HTTP CONNECT preflight now proves one explicit proxy frontend path; alpha also requires SOCKS5 TCP CONNECT support through the same policy/audit backend and fail-closed malformed handling.
+- Verification plan: extend `foxprox-proxy` with a SOCKS5 CONNECT preflight handler after method negotiation, return success only for allowed policy decisions, return rule-denied and general-failure replies for denied/fail-closed outcomes, serialize audit in tests, then run formatting, clippy, focused proxy tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — SOCKS5 CONNECT frontend preflight → policy/audit/response
+
+- Slice attempted: SOCKS5 CONNECT request preflight from request bytes to shared policy/audit and client-visible SOCKS5 replies.
+- Why next: HTTP CONNECT preflight covered one explicit proxy path; SOCKS5 TCP CONNECT needed equivalent policy/audit integration and malformed-request fail-closed behavior.
+- What changed: extended `foxprox-proxy` with `Socks5Preflight`, `Socks5ConnectPreflight`, and `Socks5Response`; CONNECT requests after method negotiation are parsed as `FrontendKind::Socks5`, allowed decisions return SOCKS5 success (`0x00`), policy denials return connection-not-allowed (`0x02`), and malformed/unsupported requests become fail-closed unsupported audit events with general failure (`0x01`).
+- Verification:
+  - `cargo fmt --check` initially failed on formatting; `cargo fmt` was run.
+  - Focused checks passed: `cargo test -p foxprox-proxy socks5` ran 3 SOCKS5 tests covering allowed audit/success response, denied ruleset response, and malformed UDP ASSOCIATE fail-closed/general-failure response.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 5 `foxprox-flow` tests, 18 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 6 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed after formatting.
+- What failed or surprised the agent: no behavior failures; SOCKS5 has useful distinct reply codes for policy denial versus malformed/unsupported requests, so the preflight exposes that difference.
+- What remains unproven: SOCKS5 greeting negotiation, TCP egress/tunnel bridging, listener runtime, proxy authentication rejection, and flow byte-count/close audit for proxied streams are still absent.
+- Commit: this commit.
