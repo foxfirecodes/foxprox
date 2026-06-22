@@ -2407,3 +2407,31 @@ Completed smoltcp bridge-loop terminal-branch coverage: idle completion reports 
 
 ### Remaining blind spots
 - The smoltcp and TUN loop proofs remain synchronous. Final runtime must drive them from real async readiness/timers and derive task outcomes from actual task handles.
+
+## 2026-06-22 — Add runtime task supervisor registry contract
+
+### Commands run
+- `cargo fmt` — applied formatting for task supervisor registry changes.
+- `cargo test -p foxprox-core runtime::tests::runtime_task_supervisor --all-targets --all-features` — passed, 2 task supervisor tests.
+- `cargo test -p foxprox-core runtime::tests --all-targets --all-features` — passed, 26 runtime tests.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed during targeted validation.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 144 core tests, 3 device tests, 38 egress tests, and 12 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed after full tests.
+
+### Evidence excerpts
+- `runtime::tests::runtime_task_supervisor_derives_expectations_and_join_report ... ok`
+- `runtime::tests::runtime_task_supervisor_rejects_unknown_and_duplicate_outcomes ... ok`
+- `runtime::tests::runtime_lifecycle_expected_tasks_without_report_fail_closed ... ok`
+
+### Interpretation
+Added a platform-independent `RuntimeTaskSupervisor` registry contract. Runtime code can register task handles with component/name metadata, derive `RuntimeTaskExpectation`s for lifecycle start, record one terminal outcome per handle, and build a `RuntimeTaskJoinReport` for exit. The registry rejects unknown handles and duplicate outcomes, preventing untracked or double-counted task results from feeding lifecycle evidence. A regression proves that omitting one registered task outcome produces a named `missing_runtime_tasks` fail-closed exit when the supervisor-derived report is consumed.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The supervisor is still synchronous and handle-like, not an async executor integration. Final runtime must bind registered handles to actual spawned tasks/futures and feed real join/cancel outcomes into the registry.

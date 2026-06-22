@@ -269,6 +269,86 @@ impl RuntimeTaskJoinReport {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeTaskHandle {
+    pub id: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeTaskSupervisorError {
+    UnknownTask { task_id: u64 },
+    DuplicateOutcome { task_id: u64 },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RuntimeTaskSupervisor {
+    next_task_id: u64,
+    tasks: Vec<(RuntimeTaskHandle, RuntimeTaskExpectation)>,
+    outcomes: Vec<(RuntimeTaskHandle, RuntimeTaskOutcome)>,
+}
+
+impl RuntimeTaskSupervisor {
+    pub fn new() -> Self {
+        Self {
+            next_task_id: 1,
+            tasks: Vec::new(),
+            outcomes: Vec::new(),
+        }
+    }
+
+    pub fn register_task(
+        &mut self,
+        component: RuntimeComponent,
+        task_name: impl Into<String>,
+    ) -> RuntimeTaskHandle {
+        let handle = RuntimeTaskHandle {
+            id: self.next_task_id,
+        };
+        self.next_task_id += 1;
+        self.tasks
+            .push((handle, RuntimeTaskExpectation::new(component, task_name)));
+        handle
+    }
+
+    pub fn record_outcome(
+        &mut self,
+        handle: RuntimeTaskHandle,
+        status: RuntimeTaskStatus,
+    ) -> Result<(), RuntimeTaskSupervisorError> {
+        let Some((_, expected)) = self.tasks.iter().find(|(task, _)| *task == handle) else {
+            return Err(RuntimeTaskSupervisorError::UnknownTask { task_id: handle.id });
+        };
+        if self.outcomes.iter().any(|(task, _)| *task == handle) {
+            return Err(RuntimeTaskSupervisorError::DuplicateOutcome { task_id: handle.id });
+        }
+        self.outcomes.push((
+            handle,
+            RuntimeTaskOutcome::new(expected.component, expected.task_name.clone(), status),
+        ));
+        Ok(())
+    }
+
+    pub fn expectations(&self) -> Vec<RuntimeTaskExpectation> {
+        self.tasks
+            .iter()
+            .map(|(_, expectation)| expectation.clone())
+            .collect()
+    }
+
+    pub fn join_report(&self) -> RuntimeTaskJoinReport {
+        RuntimeTaskJoinReport::new(
+            self.outcomes
+                .iter()
+                .map(|(_, outcome)| outcome.clone())
+                .collect(),
+        )
+    }
+
+    pub fn task_count(&self) -> usize {
+        self.tasks.len()
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeChildExit {
     pub process_id: Option<u32>,
@@ -1251,6 +1331,71 @@ mod tests {
             "http_proxy_listener"
         );
         assert_eq!(records[1].details["missing_runtime_task_count"], "1");
+    }
+
+    #[test]
+    fn runtime_task_supervisor_derives_expectations_and_join_report() {
+        let mut supervisor = RuntimeTaskSupervisor::new();
+        let dns = supervisor.register_task(RuntimeComponent::DnsListener, "dns_accept_loop");
+        let http =
+            supervisor.register_task(RuntimeComponent::HttpProxyListener, "http_accept_loop");
+        supervisor
+            .record_outcome(dns, RuntimeTaskStatus::Completed)
+            .unwrap();
+
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start_with_task_expectations(
+                vec![
+                    RuntimeComponent::DnsListener,
+                    RuntimeComponent::HttpProxyListener,
+                ],
+                supervisor.expectations(),
+                1_000,
+            )
+            .unwrap();
+        runtime
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![
+                    RuntimeCleanupAction::DnsListener,
+                    RuntimeCleanupAction::HttpProxyListener,
+                ]),
+                None,
+                Some(supervisor.join_report()),
+                1_100,
+            )
+            .unwrap();
+
+        assert_eq!(supervisor.task_count(), 2);
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].details["expected_runtime_task_count"], "2");
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["task_join_status"], "incomplete");
+        assert_eq!(
+            records[1].details["missing_runtime_tasks"],
+            "http_proxy_listener:http_accept_loop"
+        );
+        assert_eq!(http.id, 2);
+    }
+
+    #[test]
+    fn runtime_task_supervisor_rejects_unknown_and_duplicate_outcomes() {
+        let mut supervisor = RuntimeTaskSupervisor::new();
+        let dns = supervisor.register_task(RuntimeComponent::DnsListener, "dns_accept_loop");
+        supervisor
+            .record_outcome(dns, RuntimeTaskStatus::Completed)
+            .unwrap();
+        assert_eq!(
+            supervisor.record_outcome(dns, RuntimeTaskStatus::Failed),
+            Err(RuntimeTaskSupervisorError::DuplicateOutcome { task_id: dns.id })
+        );
+        assert_eq!(
+            supervisor.record_outcome(RuntimeTaskHandle { id: 999 }, RuntimeTaskStatus::Failed),
+            Err(RuntimeTaskSupervisorError::UnknownTask { task_id: 999 })
+        );
     }
 
     #[test]

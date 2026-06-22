@@ -58,7 +58,8 @@ pub use runtime::{
     RuntimeAuditFanIn, RuntimeAuditFanInError, RuntimeAuditIngestReport, RuntimeChildExit,
     RuntimeCleanupAction, RuntimeCleanupReport, RuntimeComponent, RuntimeExitStatus,
     RuntimeLifecycleError, RuntimeLifecycleHarness, RuntimeListenerConfig, RuntimeTaskExpectation,
-    RuntimeTaskJoinReport, RuntimeTaskOutcome, RuntimeTaskStatus,
+    RuntimeTaskHandle, RuntimeTaskJoinReport, RuntimeTaskOutcome, RuntimeTaskStatus,
+    RuntimeTaskSupervisor, RuntimeTaskSupervisorError,
 };
 pub use setup::{
     BwrapSetupPlan, NetworkSetupConfig, ProxyEnvironment, SetupExecutionReport, SetupHelperPlan,

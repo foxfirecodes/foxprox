@@ -227,3 +227,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — smoltcp loop outcomes need all terminal branches tested
 
 - Like the TUN loop, the smoltcp bridge loop should directly prove idle completion, bounded cancellation, read failure, and write failure. Otherwise progress can overclaim that loop outcomes map to lifecycle task evidence.
+
+## 2026-06-22 — Task expectations should come from a supervisor registry
+
+- Harness-declared task names are a useful contract, but a runtime needs a registry-like supervisor that records handles, derives expectations from registered tasks, and rejects unknown or duplicate task outcomes before lifecycle exit consumes the join report.
