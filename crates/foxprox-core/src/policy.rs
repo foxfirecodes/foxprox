@@ -769,7 +769,9 @@ impl PolicyEngine {
         self.config.rules.iter().find(|rule| {
             rule.action == RuleAction::Allow
                 && rule.matches(request)
-                && (rule.destination_cidr.is_some() || rule.destination_port.is_some())
+                && rule.protocol == Some(Protocol::Tcp)
+                && rule.destination_cidr.is_some()
+                && rule.destination_port.is_some()
                 && rule.hostname.is_none()
                 && rule.domain_suffix.is_none()
                 && rule.origin_scheme.is_none()

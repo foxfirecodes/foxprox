@@ -1,6 +1,7 @@
 use crate::audit::AuditRecord;
 use crate::broker::BrokerCore;
-use crate::flow::{DnsCache, FlowKey, UdpFlowManager, UdpTimeoutConfig};
+use crate::flow::{DnsCache, FlowKey, UdpClassification, UdpFlowManager, UdpTimeoutConfig};
+use crate::inspect::is_quic_candidate;
 use crate::policy::{PolicyDecision, PolicyRequest};
 use crate::types::{AuditKind, Decision, DenialReason, Frontend, NetworkEndpoint, Protocol};
 use serde::{Deserialize, Serialize};
@@ -82,7 +83,9 @@ impl<E: UdpEgress> UdpForwarder<E> {
         now_ms: u64,
         dns_cache: Option<&DnsCache>,
     ) -> Result<UdpForwardResult, UdpEgressError> {
-        let request = self.request_for_key(&key, dns_cache, now_ms);
+        let quic_candidate =
+            key.destination_port != 53 && is_quic_candidate(key.destination_port, payload);
+        let request = self.request_for_key(&key, dns_cache, now_ms, quic_candidate);
         let decision = self.broker.evaluate(&request);
         if decision.decision.is_deny() {
             return Ok(result_from_decision(decision, false));
@@ -116,9 +119,18 @@ impl<E: UdpEgress> UdpForwarder<E> {
         }
 
         let previous_flows = self.flows.clone();
-        let flow_records =
-            self.flows
-                .observe_outbound_datagram(key.clone(), payload.len() as u64, now_ms);
+        let classification = match key.destination_port {
+            53 => UdpClassification::Dns,
+            _ if quic_candidate => UdpClassification::QuicCandidate,
+            123 => UdpClassification::OneShot,
+            _ => UdpClassification::Generic,
+        };
+        let flow_records = self.flows.observe_outbound_datagram_as(
+            key.clone(),
+            payload.len() as u64,
+            now_ms,
+            classification,
+        );
         for record in flow_records {
             if let Err(decision) = self.broker.append_audit_for(&request, record) {
                 self.flows = previous_flows;
@@ -190,10 +202,11 @@ impl<E: UdpEgress> UdpForwarder<E> {
         key: &FlowKey,
         dns_cache: Option<&DnsCache>,
         now_ms: u64,
+        quic_candidate: bool,
     ) -> PolicyRequest {
         let protocol = match key.destination_port {
             53 => Protocol::Dns,
-            443 => Protocol::Quic,
+            _ if quic_candidate => Protocol::Quic,
             _ => Protocol::Udp,
         };
         let mut request = PolicyRequest::new(self.sandbox_id.clone(), Frontend::Tun, protocol)
@@ -541,6 +554,91 @@ mod tests {
         assert_eq!(records[0].rule_id.as_deref(), Some("allow-quic-host"));
         assert_eq!(records[0].hostname.as_deref(), Some("example.com"));
         assert_eq!(records[0].details["udp_classification"], "quic_candidate");
+    }
+
+    #[test]
+    fn non_443_long_header_quic_uses_dns_attribution_and_quic_timeout() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-quic-alt")
+                .protocol(Protocol::Quic)
+                .hostname("alt.example.com")
+                .destination_port(4443),
+        );
+        let key = FlowKey::udp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.44".parse().unwrap(),
+            4443,
+        );
+        let mut dns_cache = DnsCache::default();
+        dns_cache.observe(
+            "s1",
+            "alt.example.com",
+            "A",
+            vec!["203.0.113.44".parse().unwrap()],
+            1_000,
+            60_000,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 5);
+        let mut forwarder = UdpForwarder::new(
+            "s1",
+            broker,
+            InMemoryUdpEgress::default(),
+            UdpTimeoutConfig::default(),
+        );
+
+        let result = forwarder
+            .handle_outbound_datagram_with_dns_cache(
+                key.clone(),
+                &[0xc0, 0, 0, 1],
+                2_000,
+                &dns_cache,
+            )
+            .unwrap();
+        assert_eq!(result.decision, Decision::Allow);
+        assert!(result.sent);
+        assert_eq!(
+            forwarder.flows().get(&key).unwrap().classification,
+            UdpClassification::QuicCandidate
+        );
+        assert_eq!(forwarder.flows().get(&key).unwrap().timeout_ms, 180_000);
+        let records: Vec<_> = forwarder.broker().audit().records().collect();
+        assert_eq!(records[0].kind, AuditKind::UdpPacketDecision);
+        assert_eq!(records[0].rule_id.as_deref(), Some("allow-quic-alt"));
+        assert_eq!(records[1].details["classification"], "quiccandidate");
+    }
+
+    #[test]
+    fn non_443_long_header_quic_respects_quic_disabled_policy() {
+        let config = PolicyConfig {
+            allow_quic: false,
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let key = FlowKey::udp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.44".parse().unwrap(),
+            4443,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut forwarder = UdpForwarder::new(
+            "s1",
+            broker,
+            InMemoryUdpEgress::default(),
+            UdpTimeoutConfig::default(),
+        );
+
+        let result = forwarder
+            .handle_outbound_datagram(key, &[0xc0, 0, 0, 1], 2_000)
+            .unwrap();
+        assert_eq!(result.decision, Decision::DenyDrop);
+        assert_eq!(result.reason, Some(DenialReason::QuicDisabled));
+        assert!(forwarder.egress().sent().is_empty());
+        let record = forwarder.broker().audit().records().next().unwrap();
+        assert_eq!(record.kind, AuditKind::UdpPacketDecision);
+        assert_eq!(record.details["udp_classification"], "quic_candidate");
     }
 
     #[test]

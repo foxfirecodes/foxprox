@@ -152,6 +152,10 @@ impl ParsedIpPacket {
                 if payload.len() < 20 {
                     return Err(IpParseError::MalformedPacket("short_tcp_header"));
                 }
+                let data_offset = ((payload[12] >> 4) as usize) * 4;
+                if data_offset < 20 || data_offset > payload.len() {
+                    return Err(IpParseError::MalformedPacket("invalid_tcp_data_offset"));
+                }
                 (
                     Protocol::Tcp,
                     Some(u16::from_be_bytes([payload[0], payload[1]])),
@@ -163,6 +167,10 @@ impl ParsedIpPacket {
             17 => {
                 if payload.len() < 8 {
                     return Err(IpParseError::MalformedPacket("short_udp_header"));
+                }
+                let udp_len = u16::from_be_bytes([payload[4], payload[5]]) as usize;
+                if udp_len < 8 || udp_len > payload.len() {
+                    return Err(IpParseError::MalformedPacket("invalid_udp_length"));
                 }
                 (
                     Protocol::Udp,
@@ -338,6 +346,23 @@ mod tests {
         assert_eq!(parsed.protocol, Protocol::Icmp);
         assert_eq!(parsed.icmp_type, Some(128));
         assert_eq!(parsed.icmp_code, Some(0));
+    }
+
+    #[test]
+    fn malformed_ipv6_transport_lengths_fail_closed() {
+        let bad_udp_len = ipv6_packet(17, &[0x12, 0x34, 0x00, 0x35, 0, 7, 0, 0]);
+        assert_eq!(
+            ParsedIpPacket::parse(&bad_udp_len).unwrap_err(),
+            IpParseError::MalformedPacket("invalid_udp_length")
+        );
+
+        let mut tcp = vec![0u8; 20];
+        tcp[12] = 0x10;
+        let bad_tcp_offset = ipv6_packet(6, &tcp);
+        assert_eq!(
+            ParsedIpPacket::parse(&bad_tcp_offset).unwrap_err(),
+            IpParseError::MalformedPacket("invalid_tcp_data_offset")
+        );
     }
 
     #[test]

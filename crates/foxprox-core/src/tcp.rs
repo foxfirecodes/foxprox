@@ -494,6 +494,40 @@ mod tests {
     }
 
     #[test]
+    fn hidden_sni_port_only_or_cidr_only_rules_do_not_open_egress() {
+        for rule in [
+            PolicyRule::allow("allow-port-only")
+                .protocol(Protocol::Tcp)
+                .destination_port(443),
+            PolicyRule::allow("allow-cidr-only")
+                .protocol(Protocol::Tcp)
+                .destination_cidr(Cidr::new("203.0.113.0".parse().unwrap(), 24)),
+        ] {
+            let mut config = PolicyConfig::default();
+            config.rules.push(rule);
+            let key = FlowKey::tcp(
+                "10.0.2.15".parse().unwrap(),
+                40000,
+                "203.0.113.42".parse().unwrap(),
+                443,
+            );
+            let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+            let mut forwarder = TcpForwarder::new(
+                "s1",
+                broker,
+                InMemoryTcpEgress::with_scripted_reply(b"ok".to_vec()),
+            );
+
+            let result = forwarder
+                .connect_and_bridge(key, &test_client_hello_without_sni(), 2_000, 2_010)
+                .unwrap();
+            assert_eq!(result.decision, Decision::DenyReset);
+            assert_eq!(result.reason, Some(DenialReason::HiddenSni));
+            assert!(forwarder.egress().opened().is_empty());
+        }
+    }
+
+    #[test]
     fn malformed_tls_client_hello_is_hidden_sni_denied_with_detail() {
         let config = PolicyConfig {
             default_decision: Decision::Allow,

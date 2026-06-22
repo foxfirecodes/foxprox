@@ -139,8 +139,22 @@ impl UdpFlowManager {
         byte_len: u64,
         now_ms: u64,
     ) -> Vec<AuditRecord> {
+        self.observe_outbound_datagram_as(
+            key.clone(),
+            byte_len,
+            now_ms,
+            classify_udp(key.destination_port),
+        )
+    }
+
+    pub fn observe_outbound_datagram_as(
+        &mut self,
+        key: FlowKey,
+        byte_len: u64,
+        now_ms: u64,
+        classification: UdpClassification,
+    ) -> Vec<AuditRecord> {
         let mut records = Vec::new();
-        let classification = classify_udp(key.destination_port);
         let timeout_ms = self.timeout_for(classification);
         let flow = self.flows.entry(key.clone()).or_insert_with(|| {
             records.push(

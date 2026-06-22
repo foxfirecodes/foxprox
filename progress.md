@@ -692,3 +692,40 @@ Audit output now has a replaceable append-only JSON-lines sink contract in addit
 
 ### Remaining blind spots
 - The sink is a generic `Write` abstraction; CLI/runtime file path wiring and sink backpressure policy remain future runtime integration work.
+
+## 2026-06-21 — Reviewer round 4 protocol edge fix cycle
+
+### Behavior under work
+Address round-4 high findings: tighten hidden-SNI explicit exceptions, wire payload-detected QUIC candidates through UDP policy/lifecycle paths, and extend malformed IPv6 transport validation.
+
+### Expected evidence
+- Hidden-SNI is allowed only by explicit TCP CIDR+port rules; port-only or CIDR-only rules still deny.
+- UDP long-header QUIC candidates on non-443 ports use QUIC policy, DNS attribution, audit classification, and QUIC timeout.
+- IPv6 UDP invalid length and TCP invalid data offset fail closed with structured parse errors.
+
+### Commands run
+- `cargo fmt` — applied formatting for round-4 protocol edge fixes.
+- `cargo test --all-targets --all-features` — passed, 4 CLI tests and 98 core tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tcp::tests::hidden_sni_explicit_ip_port_allow_opens_egress ... ok`
+- `tcp::tests::hidden_sni_port_only_or_cidr_only_rules_do_not_open_egress ... ok`
+- `udp::tests::non_443_long_header_quic_uses_dns_attribution_and_quic_timeout ... ok`
+- `udp::tests::non_443_long_header_quic_respects_quic_disabled_policy ... ok`
+- `packet::tests::malformed_ipv6_transport_lengths_fail_closed ... ok`
+
+### Interpretation
+Round-4 findings were fixed. Hidden-SNI explicit exceptions now require an explicit TCP CIDR+port rule, preventing broad port-only opaque TLS allows. Payload-detected QUIC candidates on non-443 ports now use QUIC policy, DNS attribution, QUIC timeout, and QUIC lifecycle audit. IPv6 TCP/UDP malformed transport length checks now match IPv4 fail-closed validation behavior.
+
+### Changed files
+- `crates/foxprox-core/src/flow.rs`
+- `crates/foxprox-core/src/packet.rs`
+- `crates/foxprox-core/src/policy.rs`
+- `crates/foxprox-core/src/tcp.rs`
+- `crates/foxprox-core/src/udp.rs`
+- `progress.md`
+
+### Remaining blind spots
+- Full QUIC/TLS metadata parsing is still not implemented; long-header classification is a candidate signal only.
