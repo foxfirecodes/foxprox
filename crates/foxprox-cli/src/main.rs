@@ -2080,6 +2080,7 @@ fn run_tcp_bridge_deny_smoke() -> Result<AuditRecord, String> {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut packets_read = 0_u64;
     let mut denied_record = None;
+    let mut rst_written = false;
     while Instant::now() < deadline {
         match fd_handoff::read_fd(fd, &mut buf) {
             Ok(0) => {}
@@ -2123,6 +2124,11 @@ fn run_tcp_bridge_deny_smoke() -> Result<AuditRecord, String> {
                     .with_addresses(Some(source), Some(destination))
                     .with_rule(outcome.rule_id),
                 );
+                if !outcome.decision.is_allow() {
+                    let rst = foxprox_core::packet::synthesize_tcp_rst(packet)?;
+                    fd_handoff::write_all_fd(fd, &rst)?;
+                    rst_written = true;
+                }
                 break;
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -2155,7 +2161,7 @@ fn run_tcp_bridge_deny_smoke() -> Result<AuditRecord, String> {
     fd_handoff::close_fd(fd);
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir(&socket_dir);
-    let success = output.status.success();
+    let success = output.status.success() && rst_written;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let mut record = AuditRecord::new(
@@ -2167,7 +2173,7 @@ fn run_tcp_bridge_deny_smoke() -> Result<AuditRecord, String> {
             Decision::FailClosed
         },
         if success {
-            "sandbox TCP SYN was denied before smoltcp or host egress and the target timed out"
+            "sandbox TCP SYN was denied before smoltcp or host egress and reset"
         } else {
             "TCP deny was audited but the sandbox target did not observe a closed path"
         },
@@ -2177,6 +2183,7 @@ fn run_tcp_bridge_deny_smoke() -> Result<AuditRecord, String> {
     .with_metadata("status", output.status.to_string())
     .with_metadata("packets_read", packets_read.to_string())
     .with_metadata("egress_calls", "0")
+    .with_metadata("rst_written", rst_written.to_string())
     .with_metadata("policy_decision", audit.decision.as_str())
     .with_metadata("policy_reason", audit.reason.clone())
     .with_metadata("runtime_audit", audit.to_json_line());

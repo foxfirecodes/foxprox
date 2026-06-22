@@ -443,3 +443,27 @@
 - Interpretation: TCP forwarding has a positive and negative environment proof. The denial path is policy/audit gated and prevents smoltcp/host egress, but reset synthesis remains a correctness gap because the target observes timeout, not an active TCP RST.
 - Next verification gap: synthesize TCP RST for denied TCP connects or factor TCP bridge smoke into a reusable broker runtime with policy-before-egress built into the positive path.
 - Commit hash after commit: pending.
+
+## 2026-06-22T01:40:00Z — denied TCP bridge smoke commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs learnings.md progress.md && git commit -m "Add denied TCP bridge smoke"`
+- Environment assumptions: denied TCP bridge smoke and existing allow bridge smoke above were verified before commit.
+- Expected result: commit captures policy/audit-gated negative TCP bridge proof.
+- Observed result: commit `feec414` created with 4 files changed.
+- Relevant output excerpt: `[harness-lab feec414] Add denied TCP bridge smoke`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: denied TCP bridge checkpoint is preserved.
+- Next verification gap: synthesize TCP RST for denied TCP connects.
+- Commit hash after commit: feec414.
+
+## 2026-06-22T01:55:00Z — TCP deny reset synthesis
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run tcp-bridge-deny-smoke`
+- Environment assumptions: denied TCP connect should receive a broker-synthesized TCP RST+ACK over the handed-off TUN fd; no smoltcp socket or host egress fixture should be used for denied traffic.
+- Expected result: packet helper tests validate TCP RST shape/checksum; denied environment smoke audits default deny, writes RST, performs zero egress, and sandbox target exits successfully.
+- Observed result: pass. `foxprox-core` increased to 41 tests; `tcp-bridge-deny-smoke` emitted `decision":"deny_reset"`, `rst_written":"true"`, `egress_calls":"0"`, and `status":"exit status: 0"`.
+- Relevant output excerpt: `packet::tests::synthesizes_tcp_rst_for_denied_syn ... ok`; `"reason":"sandbox TCP SYN was denied before smoltcp or host egress and reset"`.
+- Changed files: `crates/foxprox-core/src/packet.rs`, `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: denied TCP connects now match the architecture's reset-denial behavior instead of relying on timeout-only fail-closed behavior. This improves the TCP negative path while keeping host egress blocked.
+- Next verification gap: factor the positive TCP bridge path into a reusable broker runtime boundary with policy-before-egress built in, instead of keeping bridge orchestration inside the CLI harness.
+- Commit hash after commit: pending.

@@ -72,6 +72,8 @@ pub fn parse_ipv4(packet: &[u8]) -> Result<Ipv4Packet<'_>, String> {
 pub struct TcpSegment<'a> {
     pub source_port: u16,
     pub destination_port: u16,
+    pub sequence_number: u32,
+    pub acknowledgment_number: u32,
     pub syn: bool,
     pub ack: bool,
     pub fin: bool,
@@ -91,6 +93,13 @@ pub fn parse_tcp(payload: &[u8]) -> Result<TcpSegment<'_>, String> {
     Ok(TcpSegment {
         source_port: u16::from_be_bytes([payload[0], payload[1]]),
         destination_port: u16::from_be_bytes([payload[2], payload[3]]),
+        sequence_number: u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]),
+        acknowledgment_number: u32::from_be_bytes([
+            payload[8],
+            payload[9],
+            payload[10],
+            payload[11],
+        ]),
         syn: flags & 0x02 != 0,
         ack: flags & 0x10 != 0,
         fin: flags & 0x01 != 0,
@@ -226,6 +235,62 @@ pub fn synthesize_icmp_echo_reply(request_packet: &[u8]) -> Result<Vec<u8>, Stri
     Ok(out)
 }
 
+/// Synthesize an IPv4 TCP RST+ACK for a denied TCP segment.
+///
+/// This is used by fail-closed TCP policy paths that should actively reset a sandbox connect rather
+/// than silently timing out. It supports the alpha no-options IPv4/TCP packets parsed by this module.
+pub fn synthesize_tcp_rst(request_packet: &[u8]) -> Result<Vec<u8>, String> {
+    let parsed = parse_ipv4(request_packet)?;
+    if parsed.protocol_number != 6 {
+        return Err("not TCP".to_string());
+    }
+    let tcp = parse_tcp(parsed.payload)?;
+    let tcp_len = 20;
+    let total_len = 20 + tcp_len;
+    let mut out = vec![0_u8; total_len];
+    out[0] = 0x45;
+    out[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+    out[4..6].copy_from_slice(&request_packet[4..6]);
+    out[8] = 64;
+    out[9] = 6;
+    out[12..16].copy_from_slice(&parsed.destination.octets());
+    out[16..20].copy_from_slice(&parsed.source.octets());
+    let ip_sum = checksum(&out[..20]);
+    out[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+
+    let tcp_out = &mut out[20..];
+    tcp_out[0..2].copy_from_slice(&tcp.destination_port.to_be_bytes());
+    tcp_out[2..4].copy_from_slice(&tcp.source_port.to_be_bytes());
+    let seq = if tcp.ack {
+        tcp.acknowledgment_number
+    } else {
+        0
+    };
+    let ack_increment = tcp.payload.len() as u32 + u32::from(tcp.syn) + u32::from(tcp.fin);
+    let ack = tcp.sequence_number.wrapping_add(ack_increment);
+    tcp_out[4..8].copy_from_slice(&seq.to_be_bytes());
+    tcp_out[8..12].copy_from_slice(&ack.to_be_bytes());
+    tcp_out[12] = 5 << 4;
+    tcp_out[13] = 0x14; // RST + ACK
+    let tcp_sum = tcp_checksum_ipv4(parsed.destination, parsed.source, tcp_out);
+    tcp_out[16..18].copy_from_slice(&tcp_sum.to_be_bytes());
+    Ok(out)
+}
+
+fn tcp_checksum_ipv4(source: Ipv4Addr, destination: Ipv4Addr, tcp_segment: &[u8]) -> u16 {
+    let mut pseudo = Vec::with_capacity(12 + tcp_segment.len() + 1);
+    pseudo.extend_from_slice(&source.octets());
+    pseudo.extend_from_slice(&destination.octets());
+    pseudo.push(0);
+    pseudo.push(6);
+    pseudo.extend_from_slice(&(tcp_segment.len() as u16).to_be_bytes());
+    pseudo.extend_from_slice(tcp_segment);
+    if pseudo.len() % 2 != 0 {
+        pseudo.push(0);
+    }
+    checksum(&pseudo)
+}
+
 pub fn flow_key_from_tcp(packet: &Ipv4Packet<'_>, tcp: &TcpSegment<'_>) -> FlowKey {
     FlowKey::new(
         IpAddr::V4(packet.source),
@@ -306,6 +371,29 @@ mod tests {
     }
 
     #[test]
+    fn synthesizes_tcp_rst_for_denied_syn() {
+        let request = tcp_syn_request_packet();
+        let reply = synthesize_tcp_rst(&request).unwrap();
+        let ipv4 = parse_ipv4(&reply).unwrap();
+        let tcp = parse_tcp(ipv4.payload).unwrap();
+        assert_eq!(ipv4.source, Ipv4Addr::new(10, 0, 2, 1));
+        assert_eq!(ipv4.destination, Ipv4Addr::new(10, 0, 2, 2));
+        assert_eq!(tcp.source_port, 8080);
+        assert_eq!(tcp.destination_port, 49152);
+        assert!(tcp.rst);
+        assert!(tcp.ack);
+        assert_eq!(tcp.acknowledgment_number, 2);
+        assert_eq!(
+            checksum(&tcp_checksum_fixture(
+                ipv4.source,
+                ipv4.destination,
+                ipv4.payload
+            )),
+            0
+        );
+    }
+
+    #[test]
     fn synthesizes_valid_icmp_echo_reply() {
         let request = icmp_echo_request_packet();
         let reply = synthesize_icmp_echo_reply(&request).unwrap();
@@ -329,6 +417,34 @@ mod tests {
         let sum = checksum(&packet[..20]);
         packet[10..12].copy_from_slice(&sum.to_be_bytes());
         packet
+    }
+
+    fn tcp_syn_request_packet() -> Vec<u8> {
+        let mut tcp = vec![0_u8; 20];
+        tcp[0..2].copy_from_slice(&49152_u16.to_be_bytes());
+        tcp[2..4].copy_from_slice(&8080_u16.to_be_bytes());
+        tcp[4..8].copy_from_slice(&1_u32.to_be_bytes());
+        tcp[12] = 5 << 4;
+        tcp[13] = 0x02;
+        ipv4_packet(6, &tcp)
+    }
+
+    fn tcp_checksum_fixture(
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+        tcp_segment: &[u8],
+    ) -> Vec<u8> {
+        let mut pseudo = Vec::new();
+        pseudo.extend_from_slice(&source.octets());
+        pseudo.extend_from_slice(&destination.octets());
+        pseudo.push(0);
+        pseudo.push(6);
+        pseudo.extend_from_slice(&(tcp_segment.len() as u16).to_be_bytes());
+        pseudo.extend_from_slice(tcp_segment);
+        if pseudo.len() % 2 != 0 {
+            pseudo.push(0);
+        }
+        pseudo
     }
 
     fn icmp_echo_request_packet() -> Vec<u8> {

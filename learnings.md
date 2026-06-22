@@ -51,3 +51,7 @@
 ## 2026-06-22 — TCP deny smoke behavior
 
 - The current denied TCP environment smoke proves policy-before-smoltcp/egress by withholding SYN-ACK and host egress, causing the sandbox connect to time out. This is fail-closed but does not yet satisfy the desired deny/reset behavior; TCP RST synthesis is the next improvement for denied TCP connects.
+
+## 2026-06-22 — TCP RST denial pattern
+
+- For denied TCP SYNs read from TUN, reversing IPs/ports and sending RST+ACK with acknowledgment `client_seq + 1` gives the sandbox an immediate closed-path signal. This supersedes the earlier timeout-only deny smoke for TCP connect denial.
