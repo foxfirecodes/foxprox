@@ -768,6 +768,31 @@ impl Default for UdpTimeouts {
     }
 }
 
+/// Classify UDP destinations using only normalized socket metadata.
+///
+/// Packet, flow, and policy-adjacent code share this helper so QUIC/DNS/NTP and
+/// multicast semantics do not drift across parser and network-adapter crates.
+pub fn classify_udp_destination(destination: SocketAddr) -> UdpClassification {
+    if is_multicast_or_broadcast(destination.ip()) {
+        UdpClassification::MulticastOrBroadcast
+    } else if destination.port() == 53 {
+        UdpClassification::Dns
+    } else if destination.port() == 443 {
+        UdpClassification::QuicCandidate
+    } else if destination.port() == 123 {
+        UdpClassification::NtpLike
+    } else {
+        UdpClassification::Generic
+    }
+}
+
+fn is_multicast_or_broadcast(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_multicast() || ip.octets() == [255, 255, 255, 255],
+        IpAddr::V6(ip) => ip.is_multicast(),
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PolicyRule {
     pub id: RuleId,
@@ -935,5 +960,21 @@ mod tests {
 
         assert_eq!(event.protocol(), Protocol::QuicCandidate);
         assert_eq!(event.frontend(), FrontendKind::Tun);
+    }
+
+    #[test]
+    fn shared_udp_destination_classification_covers_alpha_defaults() {
+        assert_eq!(
+            classify_udp_destination("203.0.113.10:53".parse().unwrap()),
+            UdpClassification::Dns
+        );
+        assert_eq!(
+            classify_udp_destination("203.0.113.10:443".parse().unwrap()),
+            UdpClassification::QuicCandidate
+        );
+        assert_eq!(
+            classify_udp_destination("224.0.0.1:9999".parse().unwrap()),
+            UdpClassification::MulticastOrBroadcast
+        );
     }
 }

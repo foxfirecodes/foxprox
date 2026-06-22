@@ -76,3 +76,9 @@
 ## 2026-06-21 — HTTP audit metadata
 
 - Audit schema must expose method/scheme/path as structured normalized fields for HTTP decisions; otherwise path-aware policy would be enforced but not reviewable from audit output.
+
+## 2026-06-21 — IPv4 TCP/UDP packet normalization
+
+- UDP destination classification is a shared core contract rather than a packet-local or flow-local helper; otherwise QUIC/DNS/multicast behavior could drift between raw packet parsing and stack-adapter flow paths.
+- TCP packet normalization should only emit connect attempts for initial SYN packets; later TCP segment handling belongs behind the userspace stack adapter and remains fail-closed in the packet proof parser.
+- ICMP denial packet synthesis can remain an opaque packet-boundary helper so policy chooses `Deny(IcmpUnreachable)` without learning raw IPv4/ICMP header shapes.

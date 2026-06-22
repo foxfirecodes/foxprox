@@ -12,9 +12,10 @@ use std::time::{Duration, Instant};
 
 use foxprox_audit::{AuditRecord, AuditSink, FlowClosedAudit};
 use foxprox_core::{
-    DenialAction, DestinationHost, DnsQuery, FrontendKind, Hostname, HostnameAttribution,
-    HostnameAttributionSource, HostnameConfidence, NormalizedEvent, PolicyDecision, Protocol,
-    SandboxId, UdpClassification, UdpTimeouts,
+    classify_udp_destination as core_classify_udp_destination, DenialAction, DestinationHost,
+    DnsQuery, FrontendKind, Hostname, HostnameAttribution, HostnameAttributionSource,
+    HostnameConfidence, NormalizedEvent, PolicyDecision, Protocol, SandboxId, UdpClassification,
+    UdpTimeouts,
 };
 use foxprox_egress::{dispatch_allowed_event, EgressError, HostEgress};
 use foxprox_policy::PolicyEngine;
@@ -199,17 +200,7 @@ struct DnsAttribution {
 }
 
 pub fn classify_udp_destination(destination: SocketAddr) -> UdpClassification {
-    if is_multicast_or_broadcast(destination.ip()) {
-        UdpClassification::MulticastOrBroadcast
-    } else if destination.port() == 53 {
-        UdpClassification::Dns
-    } else if destination.port() == 443 {
-        UdpClassification::QuicCandidate
-    } else if destination.port() == 123 {
-        UdpClassification::NtpLike
-    } else {
-        UdpClassification::Generic
-    }
+    core_classify_udp_destination(destination)
 }
 
 pub fn udp_timeout(classification: UdpClassification, timeouts: &UdpTimeouts) -> Duration {
@@ -227,13 +218,6 @@ pub fn flow_idle_timeout(decision: &PolicyDecision, fallback: Duration) -> Durat
         PolicyDecision::Deny(_)
         | PolicyDecision::RequireBrokerDns { .. }
         | PolicyDecision::FailClosed { .. } => fallback,
-    }
-}
-
-fn is_multicast_or_broadcast(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => ip.is_multicast() || ip.octets() == [255, 255, 255, 255],
-        IpAddr::V6(ip) => ip.is_multicast(),
     }
 }
 

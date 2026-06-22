@@ -381,3 +381,24 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: 7790475.
 - Remaining boundary risks: selected header audit policy, production request/response byte counts, and sensitive header redaction remain.
+
+## 2026-06-21 — Boundary objective: IPv4 TCP/UDP packet normalization
+
+- Boundary under work: IPv4 packet boundary normalization for TCP connect attempts, UDP flow attempts, and denied-flow ICMP unreachable synthesis.
+- Allowed dependency direction: `foxprox-packet` may depend only on `foxprox-core`; policy/audit must continue to consume normalized events, never raw packet headers or parser structs.
+- Dependency-risk assessment: broadening packet parsing could leak TCP/UDP header details into policy or duplicate UDP classification semantics. The parser should emit only existing normalized contracts, and shared UDP classification should live in core to avoid drift between packet and network-adapter paths.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo tree -p foxprox-packet`.
+- Observed results: all verification passed. A first `cargo check --workspace` produced an unused-import warning while moving UDP classification; the follow-up check after adding the compatibility wrapper passed cleanly.
+- Changed files:
+  - `crates/foxprox-core/src/lib.rs`
+  - `crates/foxprox-net/src/lib.rs`
+  - `crates/foxprox-packet/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 58 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-packet` — packet crate depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: IPv6 TCP/UDP normalization, production stack-adapter TCP segment handling, real TUN fd IO, UDP forwarding sockets, and policy-driven ICMP-unreachable write-back integration remain.
