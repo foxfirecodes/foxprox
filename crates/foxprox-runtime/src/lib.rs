@@ -85,14 +85,14 @@ mod tests {
 
     use foxprox_audit::BoundedAuditSink;
     use foxprox_core::RuntimeConfig;
-    use foxprox_device::BlockingPacketDevice;
+    use foxprox_device::PreopenedTunDevice;
     use foxprox_egress::MockEgress;
 
     #[test]
     fn one_step_runtime_reads_a_packet_and_writes_policy_allowed_reply() {
         let inbound = echo_request_packet();
         let cursor = Cursor::new(inbound.clone());
-        let mut device = BlockingPacketDevice::new(cursor, 1500).unwrap();
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
         let mut config = RuntimeConfig::deny_by_default();
         config.allow_ping = true;
         let policy = PolicyEngine::new(config);

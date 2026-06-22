@@ -739,3 +739,22 @@
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
 - Commit hash after commit: fa6cee9.
 - Remaining boundary risks: raw fd ownership conventions, Linux TUN ioctl creation/configuration, bwrap fd handoff, async readiness, and namespace setup remain.
+
+## 2026-06-22 — Boundary objective: runtime uses pre-opened TUN contract
+
+- Boundary under work: runtime/device orchestration proof using the semantic pre-opened TUN wrapper rather than the lower-level generic blocking device directly.
+- Allowed dependency direction: `foxprox-runtime` may consume `foxprox-device::PreopenedTunDevice` through the `PacketDevice` trait; policy/audit/core remain independent of runtime/device types.
+- Dependency-risk assessment: adding a wrapper is insufficient unless runtime tests prove the TUN-facing type can pass through the existing packet policy and write-back path. Keep this as verification-only wiring without Linux fd or ioctl behavior.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo tree -p foxprox-runtime`.
+- Observed results: updated the one-step runtime test to use `PreopenedTunDevice` as the `PacketDevice`, proving the semantic pre-opened TUN wrapper can drive normalized packet handling, audit, and write-back. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 80 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime consumes device/net/policy/audit/egress contracts; policy/audit remain independent.
+- Commit hash after commit: pending.
+- Remaining boundary risks: actual pre-opened `File` integration in a launcher, raw fd handoff, async readiness, and Linux setup remain.

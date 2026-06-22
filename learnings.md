@@ -173,3 +173,7 @@
 
 - The first Linux-adjacent TUN runtime step can safely accept an already-opened file-like endpoint instead of raw file descriptors; this preserves unsafe/fd ownership decisions for a later setup contract.
 - A semantic `PreopenedTunDevice` wrapper is useful even over the existing blocking IO implementation because it gives runtime/integration code a narrow TUN-facing type without exposing policy-visible device metadata.
+
+## 2026-06-22 — Runtime pre-opened TUN verification
+
+- Runtime tests should exercise the semantic `PreopenedTunDevice` wrapper rather than only the generic blocking device, proving the accepted TUN endpoint type works with packet policy and write-back orchestration.
