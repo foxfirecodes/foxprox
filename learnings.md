@@ -168,3 +168,7 @@ SCM_RIGHTS delivers raw file descriptors owned by the receiving process. Wrap ea
 ## 2026-06-21 — TUN creation tests should prove fail-early on unprivileged hosts
 
 Opening `/dev/net/tun` may be possible without effective `CAP_NET_ADMIN`, while `TUNSETIFF` can still fail. Keep the Linux device primitive explicit about open versus ioctl failures and let live tests accept either a transient successful fd or a clear permission/setup error.
+
+## 2026-06-21 — setup network command tests should use fake executables
+
+For namespace setup behavior, fake `ip` executables provide concrete process-boundary evidence of exact arguments and failure handling without mutating the host network namespace or requiring root. Reserve live privileged verification for a smaller end-to-end bwrap/TUN slice.

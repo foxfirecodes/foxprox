@@ -8,6 +8,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Proxy listener addresses that callers can inject into the sandbox process.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -149,6 +150,165 @@ pub fn plan_bwrap_setup(config: &BwrapSetupConfig) -> Result<CommandPlan, Integr
     })
 }
 
+/// Sandbox-side TUN interface configuration performed by `foxproxsetup`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TunInterfaceSetupConfig {
+    pub ip_program: PathBuf,
+    pub interface_name: String,
+    pub address_cidr: String,
+    pub mtu: u16,
+}
+
+impl TunInterfaceSetupConfig {
+    pub fn new(
+        interface_name: impl Into<String>,
+        address_cidr: impl Into<String>,
+        mtu: u16,
+    ) -> Self {
+        Self {
+            ip_program: PathBuf::from("ip"),
+            interface_name: interface_name.into(),
+            address_cidr: address_cidr.into(),
+            mtu,
+        }
+    }
+
+    pub fn with_ip_program(mut self, ip_program: impl Into<PathBuf>) -> Self {
+        self.ip_program = ip_program.into();
+        self
+    }
+}
+
+/// Setup-helper interface configuration errors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TunInterfaceSetupError {
+    InvalidInterfaceName(String),
+    InvalidAddress(String),
+    InvalidMtu,
+    EmptyIpProgram,
+    CommandFailed {
+        command: Vec<String>,
+        status: Option<i32>,
+        stderr: String,
+    },
+    Io {
+        command: Vec<String>,
+        error: String,
+    },
+}
+
+impl fmt::Display for TunInterfaceSetupError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidInterfaceName(reason) => {
+                write!(f, "tun-setup-invalid-interface: {reason}")
+            }
+            Self::InvalidAddress(reason) => write!(f, "tun-setup-invalid-address: {reason}"),
+            Self::InvalidMtu => f.write_str("tun-setup-invalid-mtu"),
+            Self::EmptyIpProgram => f.write_str("tun-setup-empty-ip-program"),
+            Self::CommandFailed {
+                command,
+                status,
+                stderr,
+            } => write!(
+                f,
+                "tun-setup-command-failed: {:?}: status={status:?}: {stderr}",
+                command
+            ),
+            Self::Io { command, error } => {
+                write!(f, "tun-setup-command-io-error: {:?}: {error}", command)
+            }
+        }
+    }
+}
+
+impl std::error::Error for TunInterfaceSetupError {}
+
+/// Configure a TUN interface inside the current network namespace using `ip`.
+pub fn configure_tun_interface(
+    config: &TunInterfaceSetupConfig,
+) -> Result<(), TunInterfaceSetupError> {
+    validate_tun_interface_setup(config)?;
+    run_ip_command(
+        config,
+        &[
+            "link",
+            "set",
+            "dev",
+            &config.interface_name,
+            "mtu",
+            &config.mtu.to_string(),
+            "up",
+        ],
+    )?;
+    run_ip_command(
+        config,
+        &[
+            "addr",
+            "add",
+            &config.address_cidr,
+            "dev",
+            &config.interface_name,
+        ],
+    )?;
+    run_ip_command(
+        config,
+        &["route", "add", "default", "dev", &config.interface_name],
+    )?;
+    Ok(())
+}
+
+fn validate_tun_interface_setup(
+    config: &TunInterfaceSetupConfig,
+) -> Result<(), TunInterfaceSetupError> {
+    if config.ip_program.as_os_str().is_empty() {
+        return Err(TunInterfaceSetupError::EmptyIpProgram);
+    }
+    if config.interface_name.trim().is_empty() {
+        return Err(TunInterfaceSetupError::InvalidInterfaceName(
+            "interface name must not be empty".to_owned(),
+        ));
+    }
+    if config.interface_name.contains('/') || config.interface_name.contains('\0') {
+        return Err(TunInterfaceSetupError::InvalidInterfaceName(
+            "interface name must not contain path separators or NUL".to_owned(),
+        ));
+    }
+    if config.address_cidr.trim().is_empty() || !config.address_cidr.contains('/') {
+        return Err(TunInterfaceSetupError::InvalidAddress(
+            "address must be CIDR notation".to_owned(),
+        ));
+    }
+    if config.mtu == 0 {
+        return Err(TunInterfaceSetupError::InvalidMtu);
+    }
+    Ok(())
+}
+
+fn run_ip_command(
+    config: &TunInterfaceSetupConfig,
+    args: &[&str],
+) -> Result<(), TunInterfaceSetupError> {
+    let mut command_vec = Vec::with_capacity(args.len() + 1);
+    command_vec.push(config.ip_program.display().to_string());
+    command_vec.extend(args.iter().map(|arg| (*arg).to_owned()));
+    let output = Command::new(&config.ip_program)
+        .args(args)
+        .output()
+        .map_err(|error| TunInterfaceSetupError::Io {
+            command: command_vec.clone(),
+            error: error.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(TunInterfaceSetupError::CommandFailed {
+            command: command_vec,
+            status: output.status.code(),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    Ok(())
+}
+
 fn validate_program(field: &'static str, path: &Path) -> Result<(), IntegrationPlanError> {
     if path.as_os_str().is_empty() {
         return Err(IntegrationPlanError::EmptyProgram { field });
@@ -279,6 +439,82 @@ pub mod fd_handoff {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn configure_tun_interface_runs_link_address_and_route_commands() {
+        use std::fs::{create_dir_all, read_to_string, remove_dir_all, write};
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("foxprox-ip-script-{}-ok", std::process::id()));
+        create_dir_all(&dir).unwrap();
+        let script = dir.join("ip");
+        let log = dir.join("ip.log");
+        write(
+            &script,
+            format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", log.display()),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let config =
+            TunInterfaceSetupConfig::new("fpx0", "10.0.0.2/24", 1500).with_ip_program(&script);
+
+        configure_tun_interface(&config).unwrap();
+
+        let calls = read_to_string(&log).unwrap();
+        assert_eq!(
+            calls,
+            "link set dev fpx0 mtu 1500 up\naddr add 10.0.0.2/24 dev fpx0\nroute add default dev fpx0\n"
+        );
+        remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn configure_tun_interface_validates_inputs_before_running_commands() {
+        assert!(matches!(
+            configure_tun_interface(&TunInterfaceSetupConfig::new("", "10.0.0.2/24", 1500)),
+            Err(TunInterfaceSetupError::InvalidInterfaceName(_))
+        ));
+        assert!(matches!(
+            configure_tun_interface(&TunInterfaceSetupConfig::new("fpx0", "10.0.0.2", 1500)),
+            Err(TunInterfaceSetupError::InvalidAddress(_))
+        ));
+        assert_eq!(
+            configure_tun_interface(&TunInterfaceSetupConfig::new("fpx0", "10.0.0.2/24", 0))
+                .unwrap_err(),
+            TunInterfaceSetupError::InvalidMtu
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configure_tun_interface_reports_command_failure() {
+        use std::fs::{create_dir_all, remove_dir_all, write};
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("foxprox-ip-script-{}-fail", std::process::id()));
+        create_dir_all(&dir).unwrap();
+        let script = dir.join("ip");
+        write(&script, "#!/bin/sh\necho boom >&2\nexit 7\n").unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+        let config =
+            TunInterfaceSetupConfig::new("fpx0", "10.0.0.2/24", 1500).with_ip_program(&script);
+
+        let error = configure_tun_interface(&config).unwrap_err();
+
+        assert!(matches!(
+            error,
+            TunInterfaceSetupError::CommandFailed { .. }
+        ));
+        assert!(error.to_string().contains("boom"));
+        remove_dir_all(dir).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]

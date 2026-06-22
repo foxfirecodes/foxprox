@@ -919,3 +919,25 @@
 - What failed or surprised the agent: the host exposes `/dev/net/tun`, but the test is written to accept either a successful transient TUN fd or an explicit permission/ioctl failure because effective `CAP_NET_ADMIN` is environment-dependent.
 - What remains unproven: assigning IP/MTU, bringing the interface up, configuring routes/DNS, executing inside bwrap, capability drop, fd handoff of an actual TUN fd, and sandbox packet logs are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — setup helper TUN interface configuration commands slice
+
+- Slice attempted: execute the setup helper's Linux `ip` command sequence for TUN MTU/link/address/default-route configuration with validation and failure diagnostics.
+- Why next: TUN fd creation now exists, but alpha setup also requires assigning address/MTU, bringing the interface up, and configuring a route before traffic can reach the broker.
+- Verification plan: add setup network configuration helpers in `foxprox-integrations`, run them against a fake `ip` executable that records invocations, verify exact link/address/route commands and fail-early validation/errors, then run formatting, clippy, focused integration tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — setup helper TUN interface configuration commands
+
+- Slice attempted: execute the sandbox-side `ip` command sequence needed to configure a created TUN interface.
+- Why next: TUN fd creation exists, but alpha setup also requires setting MTU, bringing the interface up, assigning sandbox IP/CIDR, and adding a default route.
+- What changed: `foxprox-integrations` now includes `TunInterfaceSetupConfig`, `TunInterfaceSetupError`, and `configure_tun_interface`; it validates setup inputs and runs `ip link set dev <iface> mtu <mtu> up`, `ip addr add <cidr> dev <iface>`, and `ip route add default dev <iface>` with explicit command failure/IO diagnostics.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in the new setup helpers/tests; `cargo fmt` was run.
+  - Focused checks passed: `cargo test -p foxprox-integrations configure_tun_interface -- --nocapture` ran 3 tests using a fake `ip` executable to verify exact link/address/route command invocations, input validation before execution, and command failure diagnostics.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 6 `foxprox-integrations` tests and all existing workspace tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; fake executable tests provide command-boundary evidence without requiring root or mutating the host network namespace.
+- What remains unproven: running these commands inside bwrap, DNS resolver file configuration, actual route effects, cleanup on partial setup failure, capability drop after setup, and live sandbox packet logs are still absent.
+- Commit: this commit.
