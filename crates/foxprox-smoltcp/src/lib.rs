@@ -353,6 +353,59 @@ mod tests {
     }
 
     #[test]
+    fn smoltcp_adapter_plugs_into_runtime_stack_loop() {
+        use std::io::Cursor;
+
+        use foxprox_audit::BoundedAuditSink;
+        use foxprox_core::{PolicyRule, PortMatcher, Protocol, ProtocolMatcher, RuntimeConfig};
+        use foxprox_device::PreopenedTunDevice;
+        use foxprox_egress::MockEgress;
+        use foxprox_runtime::{process_one_stack_device_packet, StackDevicePacketStep};
+
+        let syn = tcp_syn_packet();
+        let cursor = Cursor::new(syn.clone());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let config = SmoltcpAdapterConfig::new(
+            SandboxId::new("s1").unwrap(),
+            FrontendKind::Tun,
+            "10.0.0.1".parse().unwrap(),
+            24,
+            1500,
+        )
+        .unwrap()
+        .with_tcp_listener(80);
+        let mut adapter = SmoltcpStackAdapter::new(config).unwrap();
+        let mut runtime_config = RuntimeConfig::deny_by_default();
+        let mut rule = PolicyRule::allow(foxprox_core::RuleId::new("tcp-80").unwrap());
+        rule.protocol = ProtocolMatcher::Exact(Protocol::Tcp);
+        rule.port = PortMatcher::Exact(80);
+        runtime_config.rules.push(rule);
+        let policy = foxprox_policy::PolicyEngine::new(runtime_config);
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(8);
+
+        let outcome = process_one_stack_device_packet(
+            &mut device,
+            StackDevicePacketStep {
+                adapter: &mut adapter,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                sequence_start: 1,
+                timestamp_millis: 1000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.outbound_packets_written, 1);
+        assert_eq!(egress.tcp_connects.len(), 1);
+        assert_eq!(audit.records().len(), 1);
+        let bytes = device.into_inner().into_inner();
+        assert_eq!(&bytes[..syn.len()], syn.as_slice());
+        assert_eq!(bytes[syn.len() + 9], 6);
+    }
+
+    #[test]
     fn tcp_syn_to_listened_port_emits_normalized_connect_attempt() {
         let config = SmoltcpAdapterConfig::new(
             SandboxId::new("s1").unwrap(),

@@ -203,3 +203,8 @@
 
 - Runtime stack processing should be generic over `StackAdapter`; this keeps smoltcp-specific code from owning policy, audit, egress, or device write-back.
 - Flow-closed adapter events need a separate lifecycle boundary because the current stack event does not carry enough normalized flow state for `record_flow_closed`.
+
+## 2026-06-22 — smoltcp runtime integration proof
+
+- A dev-only smoltcp integration test can prove the adapter/runtime boundary without adding smoltcp as a runtime dependency of `foxprox-runtime`.
+- The smoltcp SYN path now exercises device read, stack ingress, normalized TCP policy, audit, shared egress, and opaque SYN-ACK write-back in one bounded test.

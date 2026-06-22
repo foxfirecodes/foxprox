@@ -866,3 +866,26 @@
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
 - Commit hash after commit: 5786b24.
 - Remaining boundary risks: flow-close lifecycle handling from adapters, continuous polling, host stream bridging, and real TUN readiness remain.
+
+## 2026-06-22 — Boundary objective: smoltcp adapter runtime integration proof
+
+- Boundary under work: end-to-end proof that the smoltcp adapter plugs into the generic runtime stack loop without runtime depending on smoltcp.
+- Allowed dependency direction: `foxprox-smoltcp` may use runtime/device/audit/egress/policy crates in tests to prove integration; production runtime must not import smoltcp, and policy/audit must remain smoltcp-independent.
+- Dependency-risk assessment: separate adapter and runtime proofs can still miss wiring drift. A dev-only integration test should prove smoltcp TCP connect events travel through runtime policy/audit/egress and outbound SYN-ACK packets return to the device.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency tree checks.
+- Observed results: added a dev-only integration test in `foxprox-smoltcp` that plugs `SmoltcpStackAdapter` into `foxprox-runtime::process_one_stack_device_packet` with a pre-opened device, policy rule, mock egress, and audit sink. The test proves a SYN is read from the device, converted to a normalized TCP connect attempt, allowed/audited/egressed, and produces an opaque SYN-ACK write-back. All verification passed.
+- Changed files:
+  - `crates/foxprox-smoltcp/Cargo.toml`
+  - `crates/foxprox-smoltcp/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 90 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime has no smoltcp dependency.
+  - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated in the adapter crate; runtime/device/audit/egress/policy are dev-dependencies for integration proof.
+  - `cargo tree -p foxprox-policy` — policy depends only on `foxprox-core`.
+  - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: TCP byte-stream bridging, continuous polling, flow-close lifecycle, and real TUN readiness remain.

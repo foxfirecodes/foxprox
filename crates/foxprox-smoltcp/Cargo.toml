@@ -15,4 +15,9 @@ foxprox-net = { path = "../foxprox-net" }
 smoltcp = { version = "0.12.0", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-icmp", "socket-tcp", "socket-udp"] }
 
 [dev-dependencies]
+foxprox-audit = { path = "../foxprox-audit" }
+foxprox-device = { path = "../foxprox-device" }
+foxprox-egress = { path = "../foxprox-egress" }
 foxprox-packet = { path = "../foxprox-packet" }
+foxprox-policy = { path = "../foxprox-policy" }
+foxprox-runtime = { path = "../foxprox-runtime" }
