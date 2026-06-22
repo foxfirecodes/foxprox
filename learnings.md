@@ -198,3 +198,8 @@
 
 - smoltcp `any_ip` plus an IP-medium TCP listener can convert a sandbox SYN into a normalized `TcpConnectAttempt` without exposing smoltcp socket handles outside the adapter crate.
 - The adapter config now needs normalized sandbox/frontend labels because `StackAdapter::ingest_ip_packet` has no separate context parameter but emitted policy events require that metadata.
+
+## 2026-06-22 — Stack adapter runtime loop
+
+- Runtime stack processing should be generic over `StackAdapter`; this keeps smoltcp-specific code from owning policy, audit, egress, or device write-back.
+- Flow-closed adapter events need a separate lifecycle boundary because the current stack event does not carry enough normalized flow state for `record_flow_closed`.

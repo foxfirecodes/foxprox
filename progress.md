@@ -844,3 +844,25 @@
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
 - Commit hash after commit: b00cd15.
 - Remaining boundary risks: accepting bridged stream bytes, host socket bridging, TCP close/error lifecycle, and real TUN polling remain.
+
+## 2026-06-22 — Boundary objective: stack adapter runtime loop
+
+- Boundary under work: runtime orchestration from opaque device packets into a `StackAdapter`, normalized policy/audit/egress handling for emitted events, and opaque outbound packet write-back.
+- Allowed dependency direction: `foxprox-runtime` may depend on device/net/policy/audit/egress traits and contracts; it must not depend on smoltcp or packet parser internals. Stack-specific crates plug in through `StackAdapter`.
+- Dependency-risk assessment: after proving smoltcp can emit normalized TCP events, runtime needs a generic adapter loop so stack-specific code does not start owning policy or device writes. Flow-close handling remains a separate lifecycle boundary.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency tree checks for runtime/smoltcp/policy/audit.
+- Observed results: added `process_one_stack_device_packet` in `foxprox-runtime`, which reads an opaque device packet, feeds it to any `StackAdapter`, routes emitted normalized policy events through shared policy/audit/egress handling, and writes opaque adapter outbound packets back to the device. Added a mock stack-adapter runtime test proving event policy/eager egress/audit plus write-back. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 89 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime depends on generic stack/device/policy/audit/egress contracts and not smoltcp.
+  - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated in its adapter crate.
+  - `cargo tree -p foxprox-policy` — policy depends only on `foxprox-core`.
+  - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: flow-close lifecycle handling from adapters, continuous polling, host stream bridging, and real TUN readiness remain.

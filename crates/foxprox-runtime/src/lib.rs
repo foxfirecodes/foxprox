@@ -11,7 +11,10 @@ use foxprox_audit::AuditSink;
 use foxprox_core::{FrontendKind, SandboxId};
 use foxprox_device::{DeviceError, DevicePacket, PacketDevice};
 use foxprox_egress::HostEgress;
-use foxprox_net::{handle_ipv4_packet, BrokerError, InboundIpv4Packet, PacketBrokerOutcome};
+use foxprox_net::{
+    handle_ipv4_packet, handle_normalized_event, BrokerError, BrokerEventOutcome,
+    InboundIpv4Packet, OutboundIpPacket, PacketBrokerOutcome, StackAdapter, StackEvent,
+};
 use foxprox_policy::PolicyEngine;
 
 /// Context needed to process one packet from a device without widening function
@@ -53,18 +56,102 @@ where
     )
     .map_err(RuntimeError::Broker)?;
 
-    for outbound in &outcome.outbound_packets {
+    write_outbound_packets(device, &outcome.outbound_packets)?;
+
+    Ok(outcome)
+}
+
+/// Context for processing one packet through a stack adapter.
+pub struct StackDevicePacketStep<'a, S, E, A> {
+    pub adapter: &'a mut S,
+    pub policy: &'a PolicyEngine,
+    pub egress: &'a mut E,
+    pub audit: &'a mut A,
+    pub sequence_start: u64,
+    pub timestamp_millis: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StackDevicePacketOutcome {
+    pub broker_outcomes: Vec<BrokerEventOutcome>,
+    pub flow_closed_events: usize,
+    pub outbound_packets_written: usize,
+}
+
+/// Read one opaque packet from a device, feed it to a stack adapter, apply
+/// policy/audit/egress to emitted normalized events, and write opaque adapter
+/// output back to the device.
+pub fn process_one_stack_device_packet<D, S, E, A>(
+    device: &mut D,
+    ctx: StackDevicePacketStep<'_, S, E, A>,
+) -> Result<StackDevicePacketOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    S: StackAdapter,
+    E: HostEgress,
+    A: AuditSink,
+{
+    let packet = device.read_packet().map_err(RuntimeError::Device)?;
+    let events = ctx
+        .adapter
+        .ingest_ip_packet(packet.bytes())
+        .map_err(RuntimeError::Stack)?;
+    let mut broker_outcomes = Vec::new();
+    let mut flow_closed_events = 0;
+
+    for (offset, event) in events.into_iter().enumerate() {
+        match event {
+            StackEvent::PolicyEvent(event) => {
+                let outcome = handle_normalized_event(
+                    &event,
+                    ctx.policy,
+                    ctx.egress,
+                    ctx.audit,
+                    ctx.sequence_start + offset as u64,
+                    ctx.timestamp_millis,
+                )
+                .map_err(RuntimeError::Broker)?;
+                broker_outcomes.push(outcome);
+            }
+            StackEvent::FlowClosed { .. } => {
+                flow_closed_events += 1;
+            }
+        }
+    }
+
+    let outbound_packets = ctx
+        .adapter
+        .poll_outbound_packets()
+        .map_err(RuntimeError::Stack)?;
+    let outbound_packets_written = outbound_packets.len();
+    write_outbound_packets(device, &outbound_packets)?;
+
+    Ok(StackDevicePacketOutcome {
+        broker_outcomes,
+        flow_closed_events,
+        outbound_packets_written,
+    })
+}
+
+fn write_outbound_packets<D>(
+    device: &mut D,
+    outbound_packets: &[OutboundIpPacket],
+) -> Result<(), RuntimeError>
+where
+    D: PacketDevice,
+{
+    for outbound in outbound_packets {
         let packet = DevicePacket::new(outbound.bytes().to_vec()).map_err(RuntimeError::Device)?;
         device.write_packet(&packet).map_err(RuntimeError::Device)?;
     }
-
-    Ok(outcome)
+    Ok(())
 }
 
 #[derive(Debug)]
 pub enum RuntimeError {
     Device(DeviceError),
     Broker(BrokerError),
+    Stack(foxprox_net::StackError),
 }
 
 impl fmt::Display for RuntimeError {
@@ -72,6 +159,7 @@ impl fmt::Display for RuntimeError {
         match self {
             Self::Device(error) => write!(f, "device runtime error: {error}"),
             Self::Broker(error) => write!(f, "broker runtime error: {error}"),
+            Self::Stack(error) => write!(f, "stack runtime error: {error}"),
         }
     }
 }
@@ -84,9 +172,13 @@ mod tests {
     use std::io::Cursor;
 
     use foxprox_audit::BoundedAuditSink;
-    use foxprox_core::RuntimeConfig;
+    use foxprox_core::{
+        NormalizedEvent, PolicyRule, PortMatcher, Protocol, ProtocolMatcher, RuntimeConfig,
+        TcpConnectAttempt,
+    };
     use foxprox_device::PreopenedTunDevice;
     use foxprox_egress::MockEgress;
+    use foxprox_net::StackError;
 
     #[test]
     fn one_step_runtime_reads_a_packet_and_writes_policy_allowed_reply() {
@@ -120,6 +212,77 @@ mod tests {
         let bytes = device.into_inner().into_inner();
         assert_eq!(&bytes[..inbound.len()], inbound.as_slice());
         assert_eq!(bytes[inbound.len() + 20], 0);
+    }
+
+    #[test]
+    fn one_step_runtime_feeds_stack_adapter_events_through_policy_and_writes_output() {
+        let inbound = vec![0x45, 0, 0, 20];
+        let cursor = Cursor::new(inbound.clone());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let mut adapter = MockStackAdapter::new();
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut rule = PolicyRule::allow(foxprox_core::RuleId::new("tcp-80").unwrap());
+        rule.protocol = ProtocolMatcher::Exact(Protocol::Tcp);
+        rule.port = PortMatcher::Exact(80);
+        config.rules.push(rule);
+        let policy = PolicyEngine::new(config);
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(4);
+
+        let outcome = process_one_stack_device_packet(
+            &mut device,
+            StackDevicePacketStep {
+                adapter: &mut adapter,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                sequence_start: 10,
+                timestamp_millis: 2000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.broker_outcomes, vec![BrokerEventOutcome::Forwarded]);
+        assert_eq!(outcome.outbound_packets_written, 1);
+        assert_eq!(egress.tcp_connects.len(), 1);
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(adapter.ingested, vec![inbound.clone()]);
+        let bytes = device.into_inner().into_inner();
+        assert_eq!(&bytes[..inbound.len()], inbound.as_slice());
+        assert_eq!(&bytes[inbound.len()..], &[0x45, 0, 0, 20]);
+    }
+
+    struct MockStackAdapter {
+        ingested: Vec<Vec<u8>>,
+        outbound: Vec<OutboundIpPacket>,
+        event: NormalizedEvent,
+    }
+
+    impl MockStackAdapter {
+        fn new() -> Self {
+            Self {
+                ingested: Vec::new(),
+                outbound: vec![OutboundIpPacket::new(vec![0x45, 0, 0, 20]).unwrap()],
+                event: NormalizedEvent::TcpConnectAttempt(TcpConnectAttempt {
+                    sandbox_id: SandboxId::new("s1").unwrap(),
+                    frontend: FrontendKind::Tun,
+                    source: "10.0.0.2:49152".parse().unwrap(),
+                    destination: "203.0.113.10:80".parse().unwrap(),
+                    hostname: None,
+                }),
+            }
+        }
+    }
+
+    impl StackAdapter for MockStackAdapter {
+        fn ingest_ip_packet(&mut self, packet: &[u8]) -> Result<Vec<StackEvent>, StackError> {
+            self.ingested.push(packet.to_vec());
+            Ok(vec![StackEvent::PolicyEvent(self.event.clone())])
+        }
+
+        fn poll_outbound_packets(&mut self) -> Result<Vec<OutboundIpPacket>, StackError> {
+            Ok(std::mem::take(&mut self.outbound))
+        }
     }
 
     fn echo_request_packet() -> Vec<u8> {
