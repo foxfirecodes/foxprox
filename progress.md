@@ -911,3 +911,16 @@
 - Interpretation: explicit proxy CONNECT parsing/policy/audit is now entirely in reusable core runtime/origin code, leaving the CLI with only socket IO and fixture orchestration for that path.
 - Next verification gap: commit CONNECT parsing move; remaining work is larger production integration or further extraction of proxy socket accept/tunnel loops into a frontend crate.
 - Commit hash after commit: pending.
+
+## 2026-06-22T07:35:00Z — Explicit proxy forwarding uses shared egress adapter
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run http-proxy-smoke && cargo run -p foxprox-cli --bin foxprox-lab -- run https-connect-smoke && cargo run -p foxprox-cli --bin foxprox-lab -- run socks5-smoke`
+- Environment assumptions: explicit proxy smokes use loopback client/origin fixtures only; `LocalTcpStreamEgress` is the reusable synchronous host adapter.
+- Expected result: HTTP proxy, HTTPS CONNECT, and SOCKS5 allow smokes should route origin/tunnel bytes through `foxprox-egress` instead of direct CLI-owned `TcpStream::connect_timeout` origin IO.
+- Observed result: pass. Workspace tests remained green (`foxprox-core` 59, `foxprox-device` 2, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 6). All three explicit proxy allow smokes emitted `"egress_calls":"1"`.
+- Relevant output excerpt: HTTP proxy `"bytes_out":45,"metadata":{"egress_calls":"1"`; HTTPS CONNECT `"event":"https_connect","decision":"allow"`; SOCKS5 `"event":"socks_connect","decision":"allow"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: explicit proxy allow-path forwarding now uses the same host egress adapter boundary as transparent UDP/TCP bridge smokes; CLI direct origin sockets are reduced to fixture/client lifecycle.
+- Recent structural commit hashes: egress crate extraction `cb9e664`; core CONNECT parsing `579fb4a`.
+- Next verification gap: commit explicit proxy forwarding migration; remaining meaningful production work is moving Linux TUN setup helpers into the device crate or designing async long-lived broker loops.
+- Commit hash after commit: pending.

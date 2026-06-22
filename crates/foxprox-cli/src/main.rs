@@ -2538,21 +2538,17 @@ fn run_http_proxy_smoke() -> Result<AuditRecord, String> {
         .cloned()
         .ok_or_else(|| "HTTP proxy runtime did not emit audit".to_string())?;
 
-    let mut origin_stream = TcpStream::connect_timeout(&origin_addr, Duration::from_secs(5))
-        .map_err(|err| format!("HTTP proxy smoke origin connect failed: {err}"))?;
     let origin_request = format!(
         "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
         parsed.method, parsed.path, parsed.host
     );
-    origin_stream
-        .write_all(origin_request.as_bytes())
-        .map_err(|err| format!("HTTP proxy smoke origin write failed: {err}"))?;
-    let mut origin_response = Vec::new();
-    origin_stream
-        .read_to_end(&mut origin_response)
-        .map_err(|err| format!("HTTP proxy smoke origin read failed: {err}"))?;
+    let mut origin_egress = LocalTcpStreamEgress::new(origin_addr);
+    let origin_outcome = origin_egress.execute(&EgressRequest::TcpStreamData {
+        destination: origin_addr,
+        bytes: origin_request.into_bytes(),
+    })?;
     client
-        .write_all(&origin_response)
+        .write_all(&origin_outcome.response_payload)
         .map_err(|err| format!("HTTP proxy smoke client response write failed: {err}"))?;
     drop(client);
 
@@ -2584,7 +2580,8 @@ fn run_http_proxy_smoke() -> Result<AuditRecord, String> {
     .with_metadata("policy_reason", proxy_audit.reason.clone())
     .with_metadata("runtime_audit", proxy_audit.to_json_line())
     .with_metadata("origin_fixture", origin_addr.to_string())
-    .with_bytes(n as u64, origin_response.len() as u64))
+    .with_metadata("egress_calls", origin_egress.calls().to_string())
+    .with_bytes(n as u64, origin_outcome.bytes_received))
 }
 
 fn proxy_deny_smoke_records() -> Vec<AuditRecord> {
@@ -2848,8 +2845,6 @@ fn run_https_connect_smoke() -> Result<AuditRecord, String> {
         .cloned()
         .ok_or_else(|| "HTTPS CONNECT runtime did not emit audit".to_string())?;
 
-    let mut origin_stream = TcpStream::connect_timeout(&origin_addr, Duration::from_secs(5))
-        .map_err(|err| format!("HTTPS CONNECT origin connect failed: {err}"))?;
     client
         .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
         .map_err(|err| format!("HTTPS CONNECT response write failed: {err}"))?;
@@ -2857,17 +2852,15 @@ fn run_https_connect_smoke() -> Result<AuditRecord, String> {
     let n = client
         .read(&mut tunnel_buf)
         .map_err(|err| format!("HTTPS CONNECT tunnel client read failed: {err}"))?;
-    origin_stream
-        .write_all(&tunnel_buf[..n])
-        .map_err(|err| format!("HTTPS CONNECT tunnel origin write failed: {err}"))?;
-    let reply_n = origin_stream
-        .read(&mut tunnel_buf)
-        .map_err(|err| format!("HTTPS CONNECT tunnel origin read failed: {err}"))?;
+    let mut tunnel_egress = LocalTcpStreamEgress::new(origin_addr);
+    let tunnel_outcome = tunnel_egress.execute(&EgressRequest::TcpStreamData {
+        destination: origin_addr,
+        bytes: tunnel_buf[..n].to_vec(),
+    })?;
     client
-        .write_all(&tunnel_buf[..reply_n])
+        .write_all(&tunnel_outcome.response_payload)
         .map_err(|err| format!("HTTPS CONNECT tunnel client write failed: {err}"))?;
     drop(client);
-    drop(origin_stream);
 
     origin_thread
         .join()
@@ -2896,7 +2889,8 @@ fn run_https_connect_smoke() -> Result<AuditRecord, String> {
     .with_metadata("policy_reason", proxy_audit.reason.clone())
     .with_metadata("runtime_audit", proxy_audit.to_json_line())
     .with_metadata("origin_fixture", origin_addr.to_string())
-    .with_bytes(n as u64, reply_n as u64))
+    .with_metadata("egress_calls", tunnel_egress.calls().to_string())
+    .with_bytes(n as u64, tunnel_outcome.bytes_received))
 }
 
 fn run_socks5_smoke() -> Result<AuditRecord, String> {
@@ -3020,8 +3014,6 @@ fn run_socks5_smoke() -> Result<AuditRecord, String> {
         .cloned()
         .ok_or_else(|| "SOCKS5 runtime did not emit audit".to_string())?;
 
-    let mut origin_stream = TcpStream::connect_timeout(&origin_addr, Duration::from_secs(5))
-        .map_err(|err| format!("SOCKS5 origin connect failed: {err}"))?;
     client
         .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
         .map_err(|err| format!("SOCKS5 proxy CONNECT response write failed: {err}"))?;
@@ -3029,17 +3021,15 @@ fn run_socks5_smoke() -> Result<AuditRecord, String> {
     let read_n = client
         .read(&mut tunnel_buf)
         .map_err(|err| format!("SOCKS5 tunnel client read failed: {err}"))?;
-    origin_stream
-        .write_all(&tunnel_buf[..read_n])
-        .map_err(|err| format!("SOCKS5 tunnel origin write failed: {err}"))?;
-    let reply_n = origin_stream
-        .read(&mut tunnel_buf)
-        .map_err(|err| format!("SOCKS5 tunnel origin read failed: {err}"))?;
+    let mut tunnel_egress = LocalTcpStreamEgress::new(origin_addr);
+    let tunnel_outcome = tunnel_egress.execute(&EgressRequest::TcpStreamData {
+        destination: origin_addr,
+        bytes: tunnel_buf[..read_n].to_vec(),
+    })?;
     client
-        .write_all(&tunnel_buf[..reply_n])
+        .write_all(&tunnel_outcome.response_payload)
         .map_err(|err| format!("SOCKS5 tunnel client write failed: {err}"))?;
     drop(client);
-    drop(origin_stream);
 
     origin_thread
         .join()
@@ -3068,7 +3058,8 @@ fn run_socks5_smoke() -> Result<AuditRecord, String> {
     .with_metadata("policy_reason", proxy_audit.reason.clone())
     .with_metadata("runtime_audit", proxy_audit.to_json_line())
     .with_metadata("origin_fixture", origin_addr.to_string())
-    .with_bytes(read_n as u64, reply_n as u64))
+    .with_metadata("egress_calls", tunnel_egress.calls().to_string())
+    .with_bytes(read_n as u64, tunnel_outcome.bytes_received))
 }
 
 fn read_http_headers(stream: &mut TcpStream, context: &str) -> Result<String, String> {
