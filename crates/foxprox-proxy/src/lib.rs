@@ -11,6 +11,7 @@ use foxprox_core::{
     AuditDecision, Endpoint, FrontendKind, NormalizedEvent, PolicyEngine, PolicyEvaluation,
     SandboxId, UnsupportedNetworkEvent,
 };
+use foxprox_egress::{EgressError, TcpEgress, TcpEgressConnection, TcpTarget};
 use foxprox_inspect::{
     parse_http_proxy_request, parse_https_connect_request, parse_socks5_connect_request,
 };
@@ -29,6 +30,14 @@ pub struct HttpConnectPreflight {
     pub response: HttpProxyResponse,
 }
 
+/// Result of attempting to establish an allowed HTTP CONNECT tunnel via host egress.
+#[derive(Debug)]
+pub struct HttpConnectTunnel {
+    pub preflight: HttpConnectPreflight,
+    pub connection: Option<TcpEgressConnection>,
+    pub egress_error: Option<EgressError>,
+}
+
 /// Next frontend action after HTTP proxy preflight.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HttpProxyAction {
@@ -41,6 +50,7 @@ pub enum HttpProxyAction {
 pub enum HttpProxyResponse {
     ConnectionEstablished,
     Forbidden,
+    BadGateway,
 }
 
 impl HttpProxyResponse {
@@ -48,6 +58,7 @@ impl HttpProxyResponse {
         match self {
             Self::ConnectionEstablished => b"HTTP/1.1 200 Connection Established\r\n\r\n",
             Self::Forbidden => b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n",
+            Self::BadGateway => b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n",
         }
     }
 }
@@ -129,13 +140,75 @@ impl HttpProxyPreflight {
         source: Option<Endpoint>,
         request_head: &[u8],
     ) -> HttpConnectPreflight {
-        let event = parse_https_connect_request(
+        let (preflight, _) = self.evaluate_connect_request(sandbox_id, source, request_head);
+        preflight
+    }
+
+    /// Parse, authorize, and open host TCP egress for one HTTPS CONNECT request.
+    ///
+    /// Policy denial or malformed input does not call egress. If policy allows
+    /// but the host connect fails, the returned preflight response is changed to
+    /// `502 Bad Gateway` and the egress error is retained for diagnostics.
+    pub fn establish_connect_tunnel<E: TcpEgress>(
+        &self,
+        sandbox_id: SandboxId,
+        source: Option<Endpoint>,
+        request_head: &[u8],
+        egress: &E,
+    ) -> HttpConnectTunnel {
+        let (mut preflight, target) =
+            self.evaluate_connect_request(sandbox_id, source, request_head);
+        if preflight.evaluation.audit.decision != AuditDecision::Allowed {
+            return HttpConnectTunnel {
+                preflight,
+                connection: None,
+                egress_error: None,
+            };
+        }
+
+        let Some(target) = target else {
+            preflight.response = HttpProxyResponse::BadGateway;
+            return HttpConnectTunnel {
+                preflight,
+                connection: None,
+                egress_error: Some(EgressError::InvalidTarget(
+                    "missing CONNECT target after allow".to_owned(),
+                )),
+            };
+        };
+
+        match egress.connect(&target) {
+            Ok(connection) => HttpConnectTunnel {
+                preflight,
+                connection: Some(connection),
+                egress_error: None,
+            },
+            Err(error) => {
+                preflight.response = HttpProxyResponse::BadGateway;
+                HttpConnectTunnel {
+                    preflight,
+                    connection: None,
+                    egress_error: Some(error),
+                }
+            }
+        }
+    }
+
+    fn evaluate_connect_request(
+        &self,
+        sandbox_id: SandboxId,
+        source: Option<Endpoint>,
+        request_head: &[u8],
+    ) -> (HttpConnectPreflight, Option<TcpTarget>) {
+        let parsed = parse_https_connect_request(
             sandbox_id.clone(),
             FrontendKind::HttpProxy,
             source,
             request_head,
-        )
-        .unwrap_or_else(|error| malformed_connect_event(sandbox_id, source, error.to_string()));
+        );
+        let target = parsed.as_ref().ok().and_then(connect_target_from_event);
+        let event = parsed
+            .unwrap_or_else(|error| malformed_connect_event(sandbox_id, source, error.to_string()));
         let evaluation = self.policy.evaluate(&event);
         let response = if evaluation.audit.decision == AuditDecision::Allowed {
             HttpProxyResponse::ConnectionEstablished
@@ -143,10 +216,13 @@ impl HttpProxyPreflight {
             HttpProxyResponse::Forbidden
         };
 
-        HttpConnectPreflight {
-            evaluation,
-            response,
-        }
+        (
+            HttpConnectPreflight {
+                evaluation,
+                response,
+            },
+            target,
+        )
     }
 }
 
@@ -185,6 +261,15 @@ impl Socks5Preflight {
             evaluation,
             response,
         }
+    }
+}
+
+fn connect_target_from_event(event: &NormalizedEvent) -> Option<TcpTarget> {
+    match event {
+        NormalizedEvent::HttpsConnect(connect) => {
+            TcpTarget::new_host(&connect.host, connect.port).ok()
+        }
+        _ => None,
     }
 }
 
@@ -231,11 +316,15 @@ mod tests {
     use super::*;
     use foxprox_audit::audit_record_to_json_line;
     use foxprox_core::{
-        AttributionConfidence, HostnamePattern, PolicyConfig, PolicyDecision, PolicyRule, Protocol,
-        RuleAction,
+        AttributionConfidence, DefaultPolicy, HostnamePattern, PolicyConfig, PolicyDecision,
+        PolicyRule, Protocol, RuleAction,
     };
+    use foxprox_egress::HostTcpEgress;
     use serde_json::Value;
-    use std::net::Ipv4Addr;
+    use std::io::{Read, Write};
+    use std::net::{Ipv4Addr, TcpListener};
+    use std::thread;
+    use std::time::Duration;
 
     fn sandbox_id() -> SandboxId {
         SandboxId::new("proxy-test").unwrap()
@@ -454,6 +543,101 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("malformed-https-connect"));
+    }
+
+    #[test]
+    fn allowed_connect_tunnel_opens_host_egress_and_bridges_bytes() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4];
+            stream.read_exact(&mut request).unwrap();
+            stream.write_all(b"pong").unwrap();
+            request
+        });
+        let handler = HttpProxyPreflight::new(PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        }));
+        let egress = HostTcpEgress::new(Duration::from_secs(1)).unwrap();
+        let request = format!("CONNECT 127.0.0.1:{} HTTP/1.1\r\n\r\n", addr.port());
+
+        let mut tunnel = handler.establish_connect_tunnel(
+            sandbox_id(),
+            Some(source()),
+            request.as_bytes(),
+            &egress,
+        );
+
+        assert_eq!(
+            tunnel.preflight.response,
+            HttpProxyResponse::ConnectionEstablished
+        );
+        assert_eq!(tunnel.egress_error, None);
+        let connection = tunnel
+            .connection
+            .as_mut()
+            .expect("egress connection exists");
+        connection.stream_mut().write_all(b"ping").unwrap();
+        let mut response = [0_u8; 4];
+        connection.stream_mut().read_exact(&mut response).unwrap();
+        let server_request = server.join().unwrap();
+        assert_eq!(&server_request, b"ping");
+        assert_eq!(&response, b"pong");
+    }
+
+    #[test]
+    fn denied_connect_tunnel_does_not_call_egress() {
+        struct PanicEgress;
+        impl TcpEgress for PanicEgress {
+            fn connect(&self, _target: &TcpTarget) -> Result<TcpEgressConnection, EgressError> {
+                panic!("egress must not be called for denied preflight")
+            }
+        }
+
+        let handler = HttpProxyPreflight::new(allow_example_connect_policy());
+        let tunnel = handler.establish_connect_tunnel(
+            sandbox_id(),
+            Some(source()),
+            b"CONNECT blocked.invalid:443 HTTP/1.1\r\n\r\n",
+            &PanicEgress,
+        );
+
+        assert_eq!(tunnel.preflight.response, HttpProxyResponse::Forbidden);
+        assert!(tunnel.connection.is_none());
+        assert_eq!(tunnel.egress_error, None);
+    }
+
+    #[test]
+    fn allowed_connect_tunnel_returns_bad_gateway_when_egress_connect_fails() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let handler = HttpProxyPreflight::new(PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        }));
+        let egress = HostTcpEgress::new(Duration::from_millis(100)).unwrap();
+        let request = format!("CONNECT 127.0.0.1:{} HTTP/1.1\r\n\r\n", addr.port());
+
+        let tunnel = handler.establish_connect_tunnel(
+            sandbox_id(),
+            Some(source()),
+            request.as_bytes(),
+            &egress,
+        );
+
+        assert_eq!(tunnel.preflight.response, HttpProxyResponse::BadGateway);
+        assert_eq!(
+            tunnel.preflight.response.as_bytes(),
+            b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
+        );
+        assert!(tunnel.connection.is_none());
+        assert!(matches!(
+            tunnel.egress_error,
+            Some(EgressError::Connect { .. })
+        ));
     }
 
     #[test]

@@ -104,3 +104,7 @@ Transparent HTTP inspection can consume origin-form paths plus Host headers, but
 ## 2026-06-21 — use loopback servers for host egress evidence
 
 Host egress can be verified without external network dependencies by binding a loopback listener in the test, connecting through the egress backend, and exchanging bytes. This proves the socket boundary while keeping tests deterministic and offline.
+
+## 2026-06-21 — keep CONNECT target available outside audit records
+
+Audit records are not a replacement for frontend control state. HTTP CONNECT egress establishment needs the parsed host/port target alongside the policy evaluation because host-only CONNECT events do not produce an IP endpoint in audit output.

@@ -571,3 +571,24 @@
 - What failed or surprised the agent: no failures; a local loopback listener gives concrete egress evidence without depending on external network access.
 - What remains unproven: UDP egress sockets, DNS upstream forwarding, proxy-to-egress stream bridging, TUN TCP forwarding/smoltcp integration, resource limits, and async backpressure are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — HTTPS CONNECT preflight → host TCP egress slice
+
+- Slice attempted: connect an allowed HTTPS CONNECT proxy preflight to the shared host TCP egress backend and prove bytes reach a loopback target only after policy allows.
+- Why next: CONNECT policy/response and host TCP egress are individually proven, but no frontend path yet uses the shared egress backend for an allowed connect intent.
+- Verification plan: add proxy-to-egress tunnel establishment for CONNECT requests, return 200 with an egress connection on success, 403 without egress for policy denial, 502 for egress connect failure, verify loopback byte exchange through the returned egress connection, then run focused proxy tests plus formatting, clippy, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — HTTPS CONNECT preflight → host TCP egress
+
+- Slice attempted: establish host TCP egress after an allowed HTTPS CONNECT proxy preflight.
+- Why next: CONNECT policy/response handling and host TCP egress were proven independently, but no frontend path consumed the shared egress backend for allowed proxy traffic.
+- What changed: `foxprox-proxy` now depends on `foxprox-egress`, adds `HttpConnectTunnel`, `HttpProxyResponse::BadGateway`, and `HttpProxyPreflight::establish_connect_tunnel`; policy-denied/malformed requests do not call egress, allowed requests open a host TCP connection via `TcpEgress`, and egress connect failures return a 502 response with retained diagnostics.
+- Verification:
+  - Focused checks passed: `cargo test -p foxprox-proxy connect_tunnel` ran 3 tests proving allowed CONNECT opens a loopback egress connection and exchanges bytes, denied CONNECT does not call egress, and allowed preflight plus failed egress returns `502 Bad Gateway`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 3 `foxprox-egress` tests, 5 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 12 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed.
+- What failed or surprised the agent: no failures; the preflight had to retain the parsed CONNECT target separately because audit records intentionally do not include host-only destination ports as endpoints.
+- What remains unproven: full bidirectional tunnel pumping after sending the 200 response, plaintext HTTP proxy forwarding, SOCKS5 egress integration, TCP flow close/byte-count audit, async resource limits, and TUN TCP forwarding are still absent.
+- Commit: this commit.
