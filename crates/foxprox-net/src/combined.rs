@@ -5,8 +5,14 @@ use crate::udp::{
     handle_worker_results, udp_socket, validate_max_udp_flows, UdpForwardDatagram,
     UdpForwardSocket, WorkerLimiter,
 };
-use crate::{audit_buffer, set_nonblocking, smoltcp_ipv4, TcpProofConfig, TransparentTcpState};
-use foxprox_core::{DnsCache, PolicyRuleSet, SandboxId, UdpFlowTable};
+use crate::{
+    audit_buffer, emit_raw_audit, set_nonblocking, smoltcp_ipv4, TcpProofConfig,
+    TransparentTcpState,
+};
+use foxprox_core::{
+    AuditBuffer, AuditEvent, AuditEventKind, DnsCache, Frontend, PolicyRuleSet, Protocol,
+    SandboxId, TransportEndpoint, UdpFlowTable,
+};
 use smoltcp::iface::{Config, SocketSet};
 use smoltcp::phy::{Medium, TunTapInterface};
 use smoltcp::socket::{tcp, udp};
@@ -260,6 +266,25 @@ where
     if let (Some(bridge), Some(handle)) = (config.socks5_proxy_bridge, socks_tcp_handle) {
         install_tcp_listener(sockets.get_mut::<tcp::Socket>(handle), bridge.sandbox_port)?;
     }
+    emit_combined_lifecycle_audit(&mut audit, &config, AuditEventKind::SessionStarted, None)?;
+    emit_combined_lifecycle_audit(&mut audit, &config, AuditEventKind::BrokerStarted, None)?;
+    emit_combined_lifecycle_audit(&mut audit, &config, AuditEventKind::TunConfigured, None)?;
+    if let Some(bridge) = config.http_proxy_bridge {
+        emit_combined_lifecycle_audit(
+            &mut audit,
+            &config,
+            AuditEventKind::ProxyListenerConfigured,
+            Some(("http", bridge)),
+        )?;
+    }
+    if let Some(bridge) = config.socks5_proxy_bridge {
+        emit_combined_lifecycle_audit(
+            &mut audit,
+            &config,
+            AuditEventKind::ProxyListenerConfigured,
+            Some(("socks5", bridge)),
+        )?;
+    }
     eprintln!(
         "foxprox-net: combined transparent proof listening tcp_ports={:?} dns={}:{} upstream={} udp_forward_ports={:?} http_proxy_bridge={:?} socks5_proxy_bridge={:?}",
         tcp_ports,
@@ -411,6 +436,39 @@ where
 
         std::thread::sleep(Duration::from_millis(2));
     }
+}
+
+fn emit_combined_lifecycle_audit(
+    audit: &mut AuditBuffer,
+    config: &CombinedTransparentProofConfig,
+    kind: AuditEventKind,
+    proxy: Option<(&str, ExplicitProxyBridgeConfig)>,
+) -> io::Result<()> {
+    let mut event = AuditEvent::new(Frontend::Tun, kind).with_sandbox_id(config.sandbox_id.clone());
+    event.protocol = Some(Protocol::Tcp);
+    event.destination = Some(TransportEndpoint::new(
+        std::net::IpAddr::V4(config.broker_ip),
+        config.tcp_port,
+    ));
+    event.detail = Some(format!(
+        "tcp_ports={:?} dns={}:{} mtu={} prefix_len={}",
+        config.tcp_ports(),
+        config.broker_ip,
+        config.dns_port,
+        config.mtu,
+        config.prefix_len
+    ));
+    if let Some((kind, bridge)) = proxy {
+        event.destination = Some(TransportEndpoint::from(SocketAddr::new(
+            std::net::IpAddr::V4(config.broker_ip),
+            bridge.sandbox_port,
+        )));
+        event.detail = Some(format!(
+            "{kind} proxy listener {}:{} backend={}",
+            config.broker_ip, bridge.sandbox_port, bridge.backend_addr
+        ));
+    }
+    emit_raw_audit(audit, event)
 }
 
 fn tcp_socket() -> tcp::Socket<'static> {
@@ -588,6 +646,34 @@ mod tests {
             validate_http_proxy_bridge(&config).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
+    }
+
+    #[test]
+    fn combined_lifecycle_audit_records_tun_and_proxy_metadata() {
+        let mut config = CombinedTransparentProofConfig::new(SandboxId::new("test").unwrap());
+        config.http_proxy_bridge = Some(ExplicitProxyBridgeConfig {
+            sandbox_port: 8080,
+            backend_addr: SocketAddr::from(([127, 0, 0, 1], 18080)),
+        });
+        let mut audit = AuditBuffer::new(4);
+
+        emit_combined_lifecycle_audit(&mut audit, &config, AuditEventKind::TunConfigured, None)
+            .unwrap();
+        emit_combined_lifecycle_audit(
+            &mut audit,
+            &config,
+            AuditEventKind::ProxyListenerConfigured,
+            Some(("http", config.http_proxy_bridge.unwrap())),
+        )
+        .unwrap();
+
+        let tun = audit.pop_front().unwrap();
+        assert_eq!(tun.kind, AuditEventKind::TunConfigured);
+        assert_eq!(tun.sandbox_id.as_ref().unwrap().as_str(), "test");
+        assert!(tun.detail.unwrap().contains("tcp_ports"));
+        let proxy = audit.pop_front().unwrap();
+        assert_eq!(proxy.kind, AuditEventKind::ProxyListenerConfigured);
+        assert_eq!(proxy.destination.unwrap().port, 8080);
     }
 
     #[test]

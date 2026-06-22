@@ -11,8 +11,8 @@
 use foxprox_core::{
     Attribution, AuditBackpressure, AuditBuffer, AuditEvent, AuditEventKind, Decision,
     EgressContext, Frontend, Hostname, HttpMethod, NetworkEvent, Origin, PolicyEngine,
-    PolicyRuleSet, SandboxId, SocksDestination, TcpEgress, TcpEgressRequest, TransportEndpoint,
-    UnsupportedReason,
+    PolicyRuleSet, Protocol, SandboxId, SocksDestination, TcpEgress, TcpEgressRequest,
+    TransportEndpoint, UnsupportedReason,
 };
 use foxprox_egress::{egress_error_to_io, resolve_host_port, StdHostEgress};
 use std::io::{self, Read, Write};
@@ -121,6 +121,22 @@ where
     let limiter = ConnectionLimiter::new(config.max_connections)?;
     let listener = TcpListener::bind(config.listen_addr)?;
     let local_addr = listener.local_addr()?;
+    emit_proxy_lifecycle_audit(
+        &audit,
+        &config.sandbox_id,
+        Frontend::HttpProxy,
+        AuditEventKind::BrokerStarted,
+        local_addr,
+        "http proxy broker started",
+    )?;
+    emit_proxy_lifecycle_audit(
+        &audit,
+        &config.sandbox_id,
+        Frontend::HttpProxy,
+        AuditEventKind::ProxyListenerConfigured,
+        local_addr,
+        "http proxy listener configured",
+    )?;
     ready(local_addr)?;
     eprintln!("foxprox-proxy: listening on {local_addr}");
     for accepted in listener.incoming() {
@@ -166,6 +182,22 @@ where
     let limiter = ConnectionLimiter::new(config.max_connections)?;
     let listener = TcpListener::bind(config.listen_addr)?;
     let local_addr = listener.local_addr()?;
+    emit_proxy_lifecycle_audit(
+        &audit,
+        &config.sandbox_id,
+        Frontend::Socks5,
+        AuditEventKind::BrokerStarted,
+        local_addr,
+        "socks5 proxy broker started",
+    )?;
+    emit_proxy_lifecycle_audit(
+        &audit,
+        &config.sandbox_id,
+        Frontend::Socks5,
+        AuditEventKind::ProxyListenerConfigured,
+        local_addr,
+        "socks5 proxy listener configured",
+    )?;
     ready(local_addr)?;
     eprintln!("foxprox-proxy: socks5 listening on {local_addr}");
     for accepted in listener.incoming() {
@@ -264,6 +296,32 @@ fn shared_audit_buffer(capacity: usize) -> io::Result<SharedAuditBuffer> {
         ));
     }
     Ok(Arc::new(Mutex::new(AuditBuffer::new(capacity))))
+}
+
+fn emit_proxy_lifecycle_audit(
+    audit: &SharedAuditBuffer,
+    sandbox_id: &SandboxId,
+    frontend: Frontend,
+    kind: AuditEventKind,
+    listen_addr: SocketAddr,
+    detail: &'static str,
+) -> io::Result<()> {
+    let mut event = AuditEvent::new(frontend, kind).with_sandbox_id(sandbox_id.clone());
+    event.protocol = Some(Protocol::Tcp);
+    event.destination = Some(TransportEndpoint::from(listen_addr));
+    event.destination_port = Some(listen_addr.port());
+    event.detail = Some(detail.to_string());
+
+    let mut buffer = audit.lock().map_err(|_| {
+        io::Error::other("audit queue lock poisoned while recording proxy lifecycle event")
+    })?;
+    drain_audit_to_stderr(&mut buffer)?;
+    buffer
+        .try_push(event.clone())
+        .map_err(audit_backpressure_error)?;
+    drain_audit_to_stderr(&mut buffer)?;
+    eprintln!("foxprox-proxy: audit event={event:?}");
+    Ok(())
 }
 
 fn emit_proxy_audit(
@@ -1266,6 +1324,28 @@ mod tests {
             audit.attribution.unwrap().hostname.unwrap().as_str(),
             "example.com"
         );
+    }
+
+    #[test]
+    fn proxy_lifecycle_audit_records_listener_metadata() {
+        let audit = shared_audit_buffer(2).unwrap();
+        let listen_addr = SocketAddr::from(([127, 0, 0, 1], 18080));
+
+        emit_proxy_lifecycle_audit(
+            &audit,
+            &sandbox_id(),
+            Frontend::HttpProxy,
+            AuditEventKind::ProxyListenerConfigured,
+            listen_addr,
+            "http proxy listener configured",
+        )
+        .unwrap();
+
+        let mut buffer = audit.lock().unwrap();
+        let event = buffer.pop_front().unwrap();
+        assert_eq!(event.kind, AuditEventKind::ProxyListenerConfigured);
+        assert_eq!(event.sandbox_id.as_ref().unwrap().as_str(), "proxy-test");
+        assert_eq!(event.destination.unwrap().port, 18080);
     }
 
     #[test]

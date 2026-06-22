@@ -19,8 +19,8 @@ pub use udp::{run_udp_dns_proof, run_udp_dns_proof_with_ready, UdpDnsProofConfig
 use foxprox_core::{
     parse_http_request_head, parse_tls_client_hello, Attribution, AttributionConfidence,
     AttributionSource, AuditBackpressure, AuditBuffer, AuditEvent, AuditEventKind, Decision,
-    DnsCache, EgressContext, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, Protocol,
-    SandboxId, TcpEgressRequest, TransportEndpoint, UnsupportedReason,
+    DenialReason, DnsCache, EgressContext, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet,
+    Protocol, SandboxId, TcpEgressRequest, TransportEndpoint, UnsupportedReason,
 };
 use foxprox_egress::{egress_error_to_io, StdHostEgress};
 use smoltcp::iface::{Config, Interface, SocketSet};
@@ -125,6 +125,9 @@ where
         .get_mut::<tcp::Socket>(tcp_handle)
         .listen(config.tcp_port)
         .map_err(|error| io::Error::other(format!("listen failed: {error}")))?;
+    emit_tcp_lifecycle_audit(&mut audit, &config, AuditEventKind::SessionStarted)?;
+    emit_tcp_lifecycle_audit(&mut audit, &config, AuditEventKind::BrokerStarted)?;
+    emit_tcp_lifecycle_audit(&mut audit, &config, AuditEventKind::TunConfigured)?;
     eprintln!(
         "foxprox-net: listening for transparent TCP port {}",
         config.tcp_port
@@ -171,6 +174,24 @@ fn audit_backpressure_error(error: AuditBackpressure) -> io::Error {
         io::ErrorKind::WouldBlock,
         format!("audit queue backpressure: {error:?}"),
     )
+}
+
+fn emit_tcp_lifecycle_audit(
+    audit: &mut AuditBuffer,
+    config: &TcpProofConfig,
+    kind: AuditEventKind,
+) -> io::Result<()> {
+    let mut event = AuditEvent::new(Frontend::Tun, kind).with_sandbox_id(config.sandbox_id.clone());
+    event.protocol = Some(Protocol::Tcp);
+    event.destination = Some(TransportEndpoint::new(
+        IpAddr::V4(config.broker_ip),
+        config.tcp_port,
+    ));
+    event.detail = Some(format!(
+        "tcp_port={} broker_ip={} mtu={} prefix_len={}",
+        config.tcp_port, config.broker_ip, config.mtu, config.prefix_len
+    ));
+    emit_raw_audit(audit, event)
 }
 
 fn emit_tcp_unsupported_audit(
@@ -268,13 +289,33 @@ fn egress_attribution(event: &NetworkEvent) -> Attribution {
     }
 }
 
-fn transparent_tcp_audit_event(event: &NetworkEvent, decision: Decision) -> AuditEvent {
-    let kind = match event {
+pub(crate) fn emit_raw_audit(audit: &mut AuditBuffer, audit_event: AuditEvent) -> io::Result<()> {
+    drain_audit_to_stderr(audit)?;
+    audit
+        .try_push(audit_event.clone())
+        .map_err(audit_backpressure_error)?;
+    drain_audit_to_stderr(audit)?;
+    eprintln!("foxprox-net: audit event={audit_event:?}");
+    Ok(())
+}
+
+fn transparent_tcp_audit_kind(event: &NetworkEvent, decision: &Decision) -> AuditEventKind {
+    if matches!(decision.reason, Some(DenialReason::SniDnsMismatch)) {
+        return AuditEventKind::SniDnsMismatchDenied;
+    }
+    if matches!(decision.reason, Some(DenialReason::HiddenSni)) {
+        return AuditEventKind::HiddenSniDenied;
+    }
+    match event {
         NetworkEvent::TcpConnectAttempt { .. } => AuditEventKind::TcpConnect,
         NetworkEvent::HttpRequest { .. } => AuditEventKind::TransparentHttpRequest,
         NetworkEvent::TlsClientHello { .. } => AuditEventKind::TlsClientHello,
         _ => AuditEventKind::UnsupportedDenied,
-    };
+    }
+}
+
+fn transparent_tcp_audit_event(event: &NetworkEvent, decision: Decision) -> AuditEvent {
+    let kind = transparent_tcp_audit_kind(event, &decision);
     let mut audit = AuditEvent::new(Frontend::Tun, kind).with_decision(decision);
     if let Some(sandbox_id) = event.sandbox_id() {
         audit = audit.with_sandbox_id(sandbox_id.clone());
@@ -1134,7 +1175,7 @@ mod tests {
         let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
         let audit = transparent_tcp_audit_event(&event, decision);
 
-        assert_eq!(audit.kind, AuditEventKind::TlsClientHello);
+        assert_eq!(audit.kind, AuditEventKind::SniDnsMismatchDenied);
         assert_eq!(audit.hostname.unwrap().as_str(), "visible.example.com");
         assert_eq!(audit.attribution.unwrap().source, AttributionSource::TlsSni);
         assert_eq!(
@@ -1213,6 +1254,40 @@ mod tests {
         assert_eq!(audit.destination.unwrap().port, 443);
         assert_eq!(audit.destination_port, Some(443));
         assert_eq!(audit.attribution.unwrap().source, AttributionSource::TlsSni);
+    }
+
+    #[test]
+    fn transparent_tls_mismatch_audit_uses_specific_denial_kind() {
+        let event = NetworkEvent::TlsClientHello {
+            sandbox_id: SandboxId::new("test").unwrap(),
+            frontend: Frontend::Tun,
+            destination: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443),
+            sni: Some(Hostname::parse("wrong.example").unwrap()),
+            ech_present: false,
+            dns_hostname: Some(Hostname::parse("example.com").unwrap()),
+            mismatch: true,
+        };
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let audit = transparent_tcp_audit_event(&event, decision);
+
+        assert_eq!(audit.kind, AuditEventKind::SniDnsMismatchDenied);
+    }
+
+    #[test]
+    fn transparent_tls_hidden_sni_audit_uses_specific_denial_kind() {
+        let event = NetworkEvent::TlsClientHello {
+            sandbox_id: SandboxId::new("test").unwrap(),
+            frontend: Frontend::Tun,
+            destination: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443),
+            sni: None,
+            ech_present: true,
+            dns_hostname: Some(Hostname::parse("example.com").unwrap()),
+            mismatch: false,
+        };
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let audit = transparent_tcp_audit_event(&event, decision);
+
+        assert_eq!(audit.kind, AuditEventKind::HiddenSniDenied);
     }
 
     #[test]

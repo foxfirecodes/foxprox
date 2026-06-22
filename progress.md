@@ -1867,3 +1867,41 @@
   - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
   - Dependency checks passed: `cargo tree -p foxprox-core`, `cargo tree -p foxprox-net`, `cargo tree -p foxprox-cli`.
 - Next action: remove transient review artifact and commit `support multi-port combined tcp`.
+
+## 2026-06-22T22:39:18Z — start alpha completion reassessment after multi-port TCP
+
+- Current objective: reassess remaining alpha gaps after commits through `4dd6dfd`.
+- Context: explicit HTTP and SOCKS proxy bridges are sandbox/TUN-reachable, shared std egress adapters exist, combined TCP supports multiple transparent ports, DNS/UDP/ICMP/audit/resource-limit robustness slices are in place.
+- Next exact action: request a read-only alpha gap assessment against `docs/initial-impl.md`, `docs/arch.md`, and current code to identify the smallest remaining required alpha slice or confirm alpha is complete.
+
+## 2026-06-22T22:46:41Z — minimum audit event coverage WIP awaiting review
+
+- Current objective: close the P0 alpha gap from `context-build/alpha-gap-after-multi-port-tcp.md`: minimum structured audit event coverage.
+- Implemented WIP:
+  - Transparent TLS audit now maps `DenialReason::SniDnsMismatch` to `AuditEventKind::SniDnsMismatchDenied` and `DenialReason::HiddenSni` to `AuditEventKind::HiddenSniDenied`, with regression tests.
+  - Added raw audit enqueue helpers that preserve bounded backpressure/drain behavior.
+  - Standalone TCP proof emits `SessionStarted`, `BrokerStarted`, and `TunConfigured` lifecycle audit events before ready.
+  - Standalone UDP/DNS proof emits `SessionStarted`, `BrokerStarted`, and `TunConfigured` lifecycle audit events before ready.
+  - Combined transparent proof emits `SessionStarted`, `BrokerStarted`, `TunConfigured`, and `ProxyListenerConfigured` for HTTP/SOCKS bridges before ready, with focused metadata test.
+  - Standalone HTTP and SOCKS proxy proofs emit `BrokerStarted` and `ProxyListenerConfigured` after bind and before ready, with focused metadata test.
+  - ICMP proof emits `SessionStarted`, `BrokerStarted`, and `TunConfigured` after TUN fd receipt and before ready.
+- Focused verification passed after fixes:
+  - `cargo test -p foxprox-net -p foxprox-proxy -p foxprox-cli` passed: 48 net tests, 28 proxy tests, 10 CLI tests.
+- Next exact action: run clippy/full verification and request blocker review of audit event coverage/order/backpressure.
+
+## 2026-06-22T22:49:12Z — minimum audit event blocker fixed
+
+- Review result: `reviews/minimum-audit-events-final.md` found one blocker: combined runtime emitted `SessionStarted`/`BrokerStarted` after validation but before smoltcp/TUN and TCP/UDP/proxy listener setup, so later setup failure could leave misleading lifecycle audit events.
+- Fix applied: moved combined `SessionStarted` and `BrokerStarted` audit emits to after all combined TCP/UDP/proxy listener setup succeeds and immediately before `TunConfigured`, proxy listener audit events, and `ready()`.
+- Next exact action: rerun verification, then commit if clean.
+
+## 2026-06-22T22:52:18Z — minimum audit events final verification complete
+
+- Blocker fix verification passed:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 10 CLI tests, 53 core tests, 9 device tests, 7 egress tests, 49 net tests, 29 proxy tests, 2 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - Dependency checks passed: `cargo tree -p foxprox-core`, `cargo tree -p foxprox-net`, `cargo tree -p foxprox-proxy`, `cargo tree -p foxprox-cli`.
+- Removed transient review/context artifacts before commit.

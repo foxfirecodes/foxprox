@@ -103,6 +103,24 @@ where
     let (mut stream, _) = listener.accept()?;
     verify_peer_credentials(&stream)?;
     let tun_fd = recv_fd(stream.as_raw_fd())?;
+    emit_icmp_lifecycle_audit(
+        &mut audit,
+        &sandbox_id,
+        AuditEventKind::SessionStarted,
+        local_ip,
+    )?;
+    emit_icmp_lifecycle_audit(
+        &mut audit,
+        &sandbox_id,
+        AuditEventKind::BrokerStarted,
+        local_ip,
+    )?;
+    emit_icmp_lifecycle_audit(
+        &mut audit,
+        &sandbox_id,
+        AuditEventKind::TunConfigured,
+        local_ip,
+    )?;
     stream.write_all(b"ready\n")?;
     eprintln!("foxprox: received TUN fd; local ICMP proof address is {local_ip}");
 
@@ -869,6 +887,29 @@ fn audit_buffer(capacity: usize) -> io::Result<AuditBuffer> {
         ));
     }
     Ok(AuditBuffer::new(capacity))
+}
+
+fn emit_raw_cli_audit(audit: &mut AuditBuffer, audit_event: AuditEvent) -> io::Result<()> {
+    drain_audit_to_stderr(audit)?;
+    audit
+        .try_push(audit_event.clone())
+        .map_err(audit_backpressure_error)?;
+    drain_audit_to_stderr(audit)?;
+    eprintln!("foxprox: audit event={audit_event:?}");
+    Ok(())
+}
+
+fn emit_icmp_lifecycle_audit(
+    audit: &mut AuditBuffer,
+    sandbox_id: &SandboxId,
+    kind: AuditEventKind,
+    local_ip: Ipv4Addr,
+) -> io::Result<()> {
+    let mut event = AuditEvent::new(Frontend::Tun, kind).with_sandbox_id(sandbox_id.clone());
+    event.protocol = Some(Protocol::Icmp);
+    event.destination = Some(TransportEndpoint::new(std::net::IpAddr::V4(local_ip), 0));
+    event.detail = Some(format!("icmp proof local_ip={local_ip}"));
+    emit_raw_cli_audit(audit, event)
 }
 
 fn emit_icmp_audit(

@@ -229,6 +229,9 @@ where
             handle: sockets.add(socket),
         });
     }
+    emit_udp_lifecycle_audit(&mut audit, &config, AuditEventKind::SessionStarted)?;
+    emit_udp_lifecycle_audit(&mut audit, &config, AuditEventKind::BrokerStarted)?;
+    emit_udp_lifecycle_audit(&mut audit, &config, AuditEventKind::TunConfigured)?;
     eprintln!(
         "foxprox-net: DNS proof listening on {}:{} upstream={} udp_forward_ports={:?}",
         config.broker_ip, config.dns_port, config.upstream_dns, config.udp_forward_ports
@@ -674,6 +677,34 @@ pub(crate) fn validate_max_udp_flows(max_udp_flows: usize) -> io::Result<()> {
         ));
     }
     Ok(())
+}
+
+fn emit_udp_raw_audit(audit: &mut AuditBuffer, audit_event: AuditEvent) -> io::Result<()> {
+    drain_audit_to_stderr(audit)?;
+    audit
+        .try_push(audit_event.clone())
+        .map_err(audit_backpressure_error)?;
+    drain_audit_to_stderr(audit)?;
+    eprintln!("foxprox-net: udp audit event={audit_event:?}");
+    Ok(())
+}
+
+fn emit_udp_lifecycle_audit(
+    audit: &mut AuditBuffer,
+    config: &UdpDnsProofConfig,
+    kind: AuditEventKind,
+) -> io::Result<()> {
+    let mut event = AuditEvent::new(Frontend::Tun, kind).with_sandbox_id(config.sandbox_id.clone());
+    event.protocol = Some(Protocol::Dns);
+    event.destination = Some(TransportEndpoint::new(
+        IpAddr::V4(config.broker_ip),
+        config.dns_port,
+    ));
+    event.detail = Some(format!(
+        "broker_dns={}:{} upstream={} udp_forward_ports={:?}",
+        config.broker_ip, config.dns_port, config.upstream_dns, config.udp_forward_ports
+    ));
+    emit_udp_raw_audit(audit, event)
 }
 
 fn emit_udp_audit(
