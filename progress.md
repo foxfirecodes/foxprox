@@ -1134,3 +1134,23 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * Host/path/method decisions are preserved before any host egress permit is issued.
 * Audit evidence: transparent HTTP handler tests assert frontend, allow/deny/fail-closed decisions, rule IDs, Host attribution, requested path/method, and egress permit behavior.
 * Residual risk: live TCP stream buffering/reassembly, request body forwarding, response bridging, and interaction with smoltcp are still future work.
+
+## 2026-06-21 - Transparent packet DNS-attribution policy boundary
+
+* Invariant under work: generic transparent TCP/UDP packet decisions must be able to consume explicit DNS-cache attribution supplied by the flow layer so domain policy can apply without bypassing packet parsing, DNS bypass denial, or audit evidence.
+* Threat or failure mode addressed: a future TUN forwarding loop could either ignore DNS-correlated hostname policy for non-HTTP/TLS flows or apply raw IP forwarding before preserving which DNS hostname justified a domain allow.
+* Planned verification: extend the pure TUN packet handler context with optional DNS attribution for ordinary TCP/UDP only, add tests for DNS-attributed TCP domain allow and direct-DNS bypass still denying even when attribution is present, then run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Transparent packet DNS-attribution policy boundary results
+
+* Tests added/updated:
+  * DNS-attributed ordinary TUN TCP packets can satisfy domain policy and preserve hostname plus DNS attribution in audit.
+  * direct DNS bypass packets still deny before rules and ignore supplied DNS attribution, preventing resolver traffic from being laundered through domain attribution.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 159 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * the pure TUN packet boundary can now carry flow-layer DNS attribution for normal TCP/UDP decisions without altering strict packet parsing.
+  * DNS-classified packets keep bypass-prevention precedence and do not receive hostname attribution from the context.
+  * forwarded packet outcomes preserve the original packet wire bytes after policy allow.
+* Audit evidence: packet handler tests assert allow decision/rule ID, hostname and dns_attribution fields for DNS-attributed TCP, and null hostname fields on DNS-bypass denial.
+* Residual risk: the live flow layer must still perform bounded DNS cache lookup and choose when attribution is safe to supply; packet handler accepts only one already-selected hostname and does not resolve ambiguity among multiple cached hostnames.

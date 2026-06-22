@@ -1,3 +1,4 @@
+use crate::attribution::{HostAttribution, Hostname};
 use crate::audit::{AuditEvent, AuditEventKind, AuditPolicyContext};
 use crate::icmp::synthesize_icmpv4_echo_reply;
 use crate::packet::{parse_ip_packet, PacketParseError, PacketSummary};
@@ -9,6 +10,7 @@ use crate::PolicyConfig;
 pub struct TunPacketContext {
     pub timestamp_millis: u64,
     pub sandbox_id: SandboxId,
+    pub dns_attribution: Option<Hostname>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -60,6 +62,15 @@ pub fn handle_tun_packet(
     let mut request = summary.to_policy_request();
     request.sandbox_id = context.sandbox_id.clone();
     request.frontend = Frontend::Tun;
+    if matches!(
+        summary.protocol,
+        crate::types::Protocol::Tcp | crate::types::Protocol::Udp
+    ) {
+        if let Some(hostname) = context.dns_attribution.clone() {
+            request.dns_attribution = Some(hostname.clone());
+            request.attribution = HostAttribution::dns(hostname);
+        }
+    }
     let decision = PolicyEngine::decide(config, &request);
     let audit = AuditEvent::from_policy_decision(
         AuditPolicyContext::from_request(
@@ -123,8 +134,9 @@ impl PacketAuditKind for AuditEventKind {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
+    use crate::attribution::Hostname;
     use crate::audit::AuditDecision;
-    use crate::config::{Cidr, PolicyRule};
+    use crate::config::{Cidr, HostMatcher, PolicyRule};
     use crate::policy::{DenialReason, DenyBehavior};
     use crate::types::{Endpoint, Protocol};
 
@@ -134,11 +146,19 @@ mod tests {
         TunPacketContext {
             timestamp_millis: 200,
             sandbox_id: SandboxId::new("sandbox-tun"),
+            dns_attribution: None,
         }
     }
 
     fn ip(value: [u8; 4]) -> IpAddr {
         IpAddr::V4(Ipv4Addr::from(value))
+    }
+
+    fn context_with_dns_attribution(hostname: &str) -> TunPacketContext {
+        TunPacketContext {
+            dns_attribution: Some(Hostname::parse(hostname).unwrap()),
+            ..context()
+        }
     }
 
     #[test]
@@ -176,6 +196,44 @@ mod tests {
     }
 
     #[test]
+    fn dns_attributed_tun_tcp_can_satisfy_domain_policy_with_audit_evidence() {
+        let packet = ipv4_packet(6, &tcp_header(49152, 443));
+        let mut config = PolicyConfig::default();
+        config.rules.push(PolicyRule::allow_domain(
+            "allow-dns-name",
+            HostMatcher::exact("api.example.com").unwrap(),
+            Some(443),
+        ));
+
+        let outcome = handle_tun_packet(
+            &packet,
+            &config,
+            context_with_dns_attribution("api.example.com"),
+        );
+        let TunPacketOutcome::Forward {
+            summary,
+            wire,
+            decision,
+            audit,
+        } = outcome
+        else {
+            panic!("expected DNS-attributed packet forward");
+        };
+
+        assert_eq!(wire, packet);
+        assert_eq!(summary.protocol, Protocol::Tcp);
+        assert!(decision.is_allow());
+        assert_eq!(audit.kind, AuditEventKind::TcpConnect);
+        assert_eq!(audit.decision, Some(AuditDecision::Allow));
+        assert_eq!(audit.rule_id.as_deref(), Some("allow-dns-name"));
+        assert_eq!(audit.hostname.as_ref().unwrap().as_str(), "api.example.com");
+        assert_eq!(
+            audit.dns_attribution.as_ref().unwrap().as_str(),
+            "api.example.com"
+        );
+    }
+
+    #[test]
     fn direct_dns_bypass_packets_drop_before_allow_rules() {
         let packet = ipv4_packet(17, &udp_header(49152, 53));
         let mut config = PolicyConfig::default();
@@ -207,6 +265,43 @@ mod tests {
             })
         );
         assert_eq!(audit.reason, Some(DenialReason::DirectDnsBypass));
+    }
+
+    #[test]
+    fn direct_dns_bypass_ignores_supplied_dns_attribution() {
+        let packet = ipv4_packet(17, &udp_header(49152, 53));
+        let mut config = PolicyConfig::default();
+        config.rules.push(PolicyRule::allow_domain(
+            "allow-resolver-name",
+            HostMatcher::exact("resolver.example.com").unwrap(),
+            Some(53),
+        ));
+
+        let outcome = handle_tun_packet(
+            &packet,
+            &config,
+            context_with_dns_attribution("resolver.example.com"),
+        );
+        let TunPacketOutcome::Drop {
+            summary,
+            decision,
+            audit,
+            ..
+        } = outcome
+        else {
+            panic!("expected direct DNS bypass drop");
+        };
+
+        assert_eq!(summary.unwrap().protocol, Protocol::Dns);
+        assert_eq!(decision.reason(), Some(DenialReason::DirectDnsBypass));
+        assert_eq!(
+            audit.decision,
+            Some(AuditDecision::Deny {
+                behavior: DenyBehavior::Drop
+            })
+        );
+        assert_eq!(audit.hostname, None);
+        assert_eq!(audit.dns_attribution, None);
     }
 
     #[test]

@@ -209,3 +209,7 @@ The QUIC decision path should use QUIC headers for classification/audit and DNS 
 ## 2026-06-21 - Transparent HTTP must not fall back to generic TCP on parser failure
 
 For direct plaintext HTTP over TUN, malformed or incomplete request-head metadata should fail closed at the HTTP inspection boundary. Otherwise Host/path policy can be bypassed by relying on broader TCP/IP rules after parser failure.
+
+## 2026-06-21 - Packet-level DNS attribution must not weaken DNS bypass checks
+
+DNS cache attribution can safely enrich ordinary transparent TCP/UDP policy requests, but DNS-classified packets must keep direct-bypass denial precedence and ignore supplied attribution. Otherwise resolver traffic could be disguised as domain-authorized application traffic.
