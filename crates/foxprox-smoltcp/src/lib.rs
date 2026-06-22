@@ -44,6 +44,12 @@ pub struct SmoltcpTcpPayload {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TcpConnectReportMode {
+    ActiveClientSockets,
+    AcceptedListenerSockets,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SmoltcpTunPumpOutcome {
     NoPacket,
     PacketProcessed {
@@ -59,6 +65,7 @@ pub struct SmoltcpIpLoopback {
     tcp_handles: Vec<SocketHandle>,
     listener_ports: Vec<u16>,
     reported_connects: Vec<TcpStackConnectAttempt>,
+    connect_report_mode: TcpConnectReportMode,
     config: SmoltcpIpConfig,
 }
 
@@ -85,12 +92,17 @@ impl SmoltcpIpLoopback {
             tcp_handles: Vec::new(),
             listener_ports: Vec::new(),
             reported_connects: Vec::new(),
+            connect_report_mode: TcpConnectReportMode::ActiveClientSockets,
             config,
         })
     }
 
     pub fn config(&self) -> &SmoltcpIpConfig {
         &self.config
+    }
+
+    pub fn set_connect_report_mode(&mut self, mode: TcpConnectReportMode) {
+        self.connect_report_mode = mode;
     }
 
     pub fn listen_tcp(
@@ -161,7 +173,9 @@ impl SmoltcpIpLoopback {
     fn abort_matching_connect(&mut self, attempt: &TcpStackConnectAttempt) {
         for handle in &self.tcp_handles {
             let socket = self.sockets.get_mut::<tcp::Socket>(*handle);
-            if socket_matches_attempt(socket, attempt) {
+            if socket_matches_attempt(socket, attempt)
+                || socket_matches_attempt_reversed(socket, attempt)
+            {
                 socket.abort();
             }
         }
@@ -251,6 +265,34 @@ impl SmoltcpIpLoopback {
                 })
             })
             .collect()
+    }
+
+    pub fn accepted_tcp_connect_attempts(&mut self) -> Vec<TcpStackConnectAttempt> {
+        self.tcp_handles
+            .iter()
+            .filter_map(|handle| {
+                let socket = self.sockets.get::<tcp::Socket>(*handle);
+                if !socket.is_active() {
+                    return None;
+                }
+                let local = socket.local_endpoint()?;
+                if !self.listener_ports.contains(&local.port) {
+                    return None;
+                }
+                let remote = socket.remote_endpoint()?;
+                Some(TcpStackConnectAttempt {
+                    source: endpoint_to_foxprox(remote)?,
+                    destination: endpoint_to_foxprox(local)?,
+                })
+            })
+            .collect()
+    }
+
+    fn tcp_connect_attempts_for_mode(&mut self) -> Vec<TcpStackConnectAttempt> {
+        match self.connect_report_mode {
+            TcpConnectReportMode::ActiveClientSockets => self.active_tcp_connect_attempts(),
+            TcpConnectReportMode::AcceptedListenerSockets => self.accepted_tcp_connect_attempts(),
+        }
     }
 
     pub fn ingest_ip_packet(&mut self, packet: Vec<u8>) -> Result<(), SmoltcpAdapterError> {
@@ -393,9 +435,22 @@ fn socket_matches_attempt(socket: &tcp::Socket<'_>, attempt: &TcpStackConnectAtt
     local == attempt.source && remote == attempt.destination
 }
 
+fn socket_matches_attempt_reversed(
+    socket: &tcp::Socket<'_>,
+    attempt: &TcpStackConnectAttempt,
+) -> bool {
+    let Some(local) = socket.local_endpoint().and_then(endpoint_to_foxprox) else {
+        return false;
+    };
+    let Some(remote) = socket.remote_endpoint().and_then(endpoint_to_foxprox) else {
+        return false;
+    };
+    remote == attempt.source && local == attempt.destination
+}
+
 impl TcpStackAdapter for SmoltcpIpLoopback {
     fn next_connect_attempt(&mut self) -> Option<TcpStackConnectAttempt> {
-        self.active_tcp_connect_attempts()
+        self.tcp_connect_attempts_for_mode()
             .into_iter()
             .find(|attempt| !self.reported_connects.contains(attempt))
     }
@@ -687,6 +742,102 @@ mod tests {
             }
             other => panic!("expected TCP response packet, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tun_ingressed_syn_exports_accepted_listener_connect_attempt() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.set_connect_report_mode(TcpConnectReportMode::AcceptedListenerSockets);
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        let syn = ipv4_tcp_syn_packet(
+            Ipv4Addr::new(10, 66, 0, 2),
+            Ipv4Addr::new(10, 66, 0, 1),
+            50001,
+            8080,
+            7,
+        );
+        let mut reader = Cursor::new(syn);
+        let mut writer = Vec::new();
+        let mut buffer = vec![0; 1500];
+
+        pump_one_tun_packet(&mut adapter, &mut reader, &mut writer, &mut buffer, 1).unwrap();
+        let attempts = adapter.accepted_tcp_connect_attempts();
+
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].source.ip,
+            IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2))
+        );
+        assert_eq!(attempts[0].source.port, 50001);
+        assert_eq!(
+            attempts[0].destination.ip,
+            IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))
+        );
+        assert_eq!(attempts[0].destination.port, 8080);
+    }
+
+    #[test]
+    fn tun_ingressed_syn_is_policy_gated_by_tcp_stack_runtime() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.set_connect_report_mode(TcpConnectReportMode::AcceptedListenerSockets);
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        let syn = ipv4_tcp_syn_packet(
+            Ipv4Addr::new(10, 66, 0, 2),
+            Ipv4Addr::new(10, 66, 0, 1),
+            50001,
+            8080,
+            7,
+        );
+        let mut reader = Cursor::new(syn);
+        let mut writer = Vec::new();
+        let mut buffer = vec![0; 1500];
+        pump_one_tun_packet(&mut adapter, &mut reader, &mut writer, &mut buffer, 1).unwrap();
+        let mut rule = PolicyRule::allow("allow-tun-smoltcp-tcp");
+        rule.protocol = Some(Protocol::Tcp);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = TcpStackRuntime::new(
+            adapter,
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("smoltcp-tun-runtime").unwrap(),
+        );
+
+        let outcome = runtime.handle_next_connect(2).unwrap();
+        let (_adapter, egress, kernel) = runtime.into_parts();
+
+        assert!(matches!(outcome, TcpStackOutcome::HostConnectOpened { .. }));
+        assert_eq!(egress.tcp_attempts, 1);
+        assert_eq!(kernel.audit_sink().events().len(), 1);
+        assert_eq!(
+            kernel.audit_sink().events()[0]
+                .decision
+                .as_ref()
+                .unwrap()
+                .action,
+            DecisionAction::Allow
+        );
     }
 
     #[test]

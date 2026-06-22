@@ -1430,3 +1430,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: one-packet pump is synchronous and test-only so far; it does not integrate policy-gated connect handling, host socket opening, or continuous TUN fd operation.
 - Exact next step: commit smoltcp TUN packet pump, then connect packet-pumped smoltcp connect attempts to `TcpStackRuntime` so an ingress SYN can be policy-gated after the smoltcp poll.
+
+## 2026-06-22T22:23:05Z
+- Current objective: continue after smoltcp TUN packet pump toward policy-gated TCP connect handling from packet ingress.
+- Git status summary: clean worktree after commit `391d668`.
+- Intended slice: let the smoltcp adapter report accepted listener-side TCP sockets as normalized connect attempts for TUN-ingressed SYN packets, while preserving the existing internal client-socket reporting mode for loopback tests.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: accepted listener reporting will prove policy gating but still not complete the ACK/data/host bridge lifecycle from a live TUN fd.
+- Exact next step: add an explicit connect-report mode and a pump+runtime test for a raw SYN.
+
+## 2026-06-22T22:25:10Z
+- Current objective: policy-gate smoltcp connects that originate from packet-pumped TUN ingress.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on long assertions; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 20 smoltcp adapter tests passed. The adapter now has explicit `TcpConnectReportMode` values for internal active-client proofs versus TUN accepted-listener sockets, exports accepted listener attempts with sandbox source and destination endpoints, and proves a raw SYN pumped through smoltcp is consumed by `TcpStackRuntime` and audited/allowed before fake host egress.
+- Commit hash when committed: pending.
+- Remaining risks: denied accepted-listener reset is only indirectly supported, and accepted payloads are not yet linked to host bridges in the same packet-pumped session.
+- Exact next step: commit packet-pumped connect gating, then add a denied TUN-ingressed SYN regression proving `TcpStackRuntime` reset callbacks suppress and abort accepted listener sockets.

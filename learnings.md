@@ -50,3 +50,6 @@
 
 ## 2026-06-22T22:20:18Z
 - `smoltcp::phy::DeviceCapabilities` is non-exhaustive in 0.12, so custom devices must mutate `DeviceCapabilities::default()` rather than constructing it with struct update syntax.
+
+## 2026-06-22T22:25:10Z
+- smoltcp TUN-ingressed TCP connects surface on accepted listener-side sockets, while earlier loopback proofs used active client-side sockets; the adapter needs an explicit connect-report mode so tests do not conflate the two orientations.
