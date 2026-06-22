@@ -571,3 +571,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: ECH/hidden-SNI policy is represented but not specifically detected beyond missing visible SNI; stream buffering/reassembly is still absent.
 - Exact next step: commit TLS SNI wiring, then add explicit policy tests for SNI/DNS mismatch and hidden-SNI denial using the TCP metadata conversion path.
+
+## 2026-06-22T01:02:57Z
+- Current objective: continue autonomous verification-kernel work from the TLS SNI wiring checkpoint toward transparent policy and attribution alpha gaps.
+- Git status summary: clean worktree at session start.
+- Intended slice: add explicit policy/runtime verification for SNI/DNS mismatch and hidden-SNI/ECH denial using the TCP metadata conversion path before any TCP forwarding can rely on hostname attribution.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` after the smallest coherent change.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `crates/foxprox-core/src/policy.rs` if additional policy coverage is needed, and ledgers.
+- Remaining risks: this will still be metadata/policy verification only; stream buffering, smoltcp byte bridging, and real TCP forwarding remain pending.
+- Exact next step: add deterministic tests/helpers proving TLS SNI metadata with DNS mismatch fails closed before allow rules, and missing/hidden SNI is denied when hostname attribution is required.
+
+## 2026-06-22T01:11:45Z
+- Current objective: verify transparent TLS attribution denial behavior before forwarding can rely on SNI/DNS metadata.
+- Files changed: `crates/foxprox-core/src/policy.rs`, `crates/foxprox-runtime/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on rustfmt line wrapping; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 54 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 43 runtime tests, and 7 setup tests passed. New tests prove TLS SNI/DNS mismatch produced by the TCP metadata conversion path fails closed before broad allow rules, missing SNI on direct HTTPS requires hostname attribution unless an explicit destination rule allows it, and hidden/ECH-like SNI metadata is not allowed by broad rules.
+- Commit hash when committed: pending.
+- Remaining risks: SNI metadata is still per-segment without stream buffering/reassembly; ECH detection is represented by explicit metadata status rather than a real parser signal; smoltcp byte bridging remains absent.
+- Exact next step: commit TLS attribution policy hardening, then add QUIC metadata policy coverage beyond UDP/443 classification, including disabled-QUIC denial and DNS-attributed QUIC allow behavior.

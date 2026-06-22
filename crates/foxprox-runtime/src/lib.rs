@@ -948,7 +948,18 @@ pub fn tcpv4_tls_client_hello_to_event(
     sandbox_id: SandboxId,
     segment: &Tcpv4Segment<'_>,
 ) -> Result<NormalizedEvent, InspectError> {
+    tcpv4_tls_client_hello_to_event_with_dns_attribution(sandbox_id, segment, None)
+}
+
+pub fn tcpv4_tls_client_hello_to_event_with_dns_attribution(
+    sandbox_id: SandboxId,
+    segment: &Tcpv4Segment<'_>,
+    dns_attribution: Option<HostnameAttribution>,
+) -> Result<NormalizedEvent, InspectError> {
     let hello = parse_tls_client_hello_sni(segment.payload)?;
+    let sni_dns_mismatch = dns_attribution
+        .as_ref()
+        .is_some_and(|dns| dns.hostname != hello.sni);
     Ok(NormalizedEvent::TcpConnectAttempt {
         sandbox_id,
         frontend: FrontendKind::Tun,
@@ -963,8 +974,28 @@ pub fn tcpv4_tls_client_hello_to_event(
             AttributionConfidence::High,
         )),
         sni_status: SniStatus::Present,
-        sni_dns_mismatch: false,
+        sni_dns_mismatch,
     })
+}
+
+pub fn tcpv4_tls_client_hello_without_visible_sni_to_event(
+    sandbox_id: SandboxId,
+    segment: &Tcpv4Segment<'_>,
+    sni_status: SniStatus,
+) -> NormalizedEvent {
+    debug_assert_ne!(sni_status, SniStatus::Present);
+    NormalizedEvent::TcpConnectAttempt {
+        sandbox_id,
+        frontend: FrontendKind::Tun,
+        source: Some(Endpoint::new(
+            IpAddr::V4(segment.source),
+            segment.source_port,
+        )),
+        destination: Endpoint::new(IpAddr::V4(segment.destination), segment.destination_port),
+        hostname: None,
+        sni_status,
+        sni_dns_mismatch: false,
+    }
 }
 
 pub fn tcpv4_http_request_to_event(
@@ -1864,6 +1895,88 @@ mod tests {
             tcpv4_tls_client_hello_to_event(SandboxId::new("tls-tun").unwrap(), &tcp),
             Err(InspectError::MissingSni)
         );
+    }
+
+    #[test]
+    fn tcp_tls_sni_dns_mismatch_from_metadata_conversion_fails_closed() {
+        let hello = build_tls_client_hello("api.evil.example");
+        let packet = build_tcp_ipv4_packet(53000, 443, 0x18, &hello);
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        let event = tcpv4_tls_client_hello_to_event_with_dns_attribution(
+            SandboxId::new("tls-mismatch").unwrap(),
+            &tcp,
+            Some(HostnameAttribution::broker_dns(
+                Hostname::normalize("api.example.com").unwrap(),
+            )),
+        )
+        .unwrap();
+
+        let NormalizedEvent::TcpConnectAttempt {
+            sni_dns_mismatch,
+            hostname,
+            ..
+        } = &event
+        else {
+            panic!("expected TCP connect event");
+        };
+        assert!(*sni_dns_mismatch);
+        assert_eq!(
+            hostname.as_ref().unwrap().hostname.as_str(),
+            "api.evil.example"
+        );
+
+        let mut rules = RuleSet::default();
+        rules.push(PolicyRule::allow("allow-all-after-mismatch"));
+        let decision = PolicyEngine::new(PolicyConfig {
+            rules,
+            ..PolicyConfig::default()
+        })
+        .evaluate(&event.to_policy_input());
+        assert_eq!(decision.action, DecisionAction::FailClosed);
+        assert_eq!(decision.reason, DecisionReason::SniDnsMismatch);
+    }
+
+    #[test]
+    fn tcp_tls_missing_or_hidden_sni_metadata_is_not_allowed_by_broad_rules() {
+        let hello = build_tls_client_hello_without_extensions();
+        let packet = build_tcp_ipv4_packet(53000, 443, 0x18, &hello);
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        assert_eq!(
+            tcpv4_tls_client_hello_to_event(SandboxId::new("tls-missing").unwrap(), &tcp),
+            Err(InspectError::MissingSni)
+        );
+
+        let missing_event = tcpv4_tls_client_hello_without_visible_sni_to_event(
+            SandboxId::new("tls-missing").unwrap(),
+            &tcp,
+            SniStatus::Missing,
+        );
+        let missing_decision =
+            PolicyEngine::new(PolicyConfig::default()).evaluate(&missing_event.to_policy_input());
+        assert_eq!(missing_decision.action, DecisionAction::FailClosed);
+        assert_eq!(
+            missing_decision.reason,
+            DecisionReason::HostnameAttributionRequired
+        );
+
+        let mut rules = RuleSet::default();
+        rules.push(PolicyRule::allow("broad-allow-is-not-enough"));
+        let hidden_event = tcpv4_tls_client_hello_without_visible_sni_to_event(
+            SandboxId::new("tls-hidden").unwrap(),
+            &tcp,
+            SniStatus::HiddenOrEncrypted,
+        );
+        let hidden_decision = PolicyEngine::new(PolicyConfig {
+            rules,
+            ..PolicyConfig::default()
+        })
+        .evaluate(&hidden_event.to_policy_input());
+        assert_eq!(hidden_decision.action, DecisionAction::FailClosed);
+        assert_eq!(hidden_decision.reason, DecisionReason::HiddenSniOrEch);
     }
 
     #[test]

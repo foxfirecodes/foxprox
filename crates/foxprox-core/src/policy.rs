@@ -384,7 +384,19 @@ impl PolicyEngine {
             return Decision::denied(DecisionAction::FailClosed, DecisionReason::SniDnsMismatch);
         }
         if input.sni_status == SniStatus::HiddenOrEncrypted {
+            if let Some(decision) = self.evaluate_explicit_destination_rule(input) {
+                return decision;
+            }
             return Decision::denied(DecisionAction::FailClosed, DecisionReason::HiddenSniOrEch);
+        }
+        if self.requires_hostname_attribution(input) {
+            if let Some(decision) = self.evaluate_explicit_destination_rule(input) {
+                return decision;
+            }
+            return Decision::denied(
+                DecisionAction::FailClosed,
+                DecisionReason::HostnameAttributionRequired,
+            );
         }
         if input.quic_status != QuicStatus::NotQuic && !self.config.quic_enabled {
             return Decision::denied(DecisionAction::DenyDrop, DecisionReason::QuicDisabled);
@@ -398,24 +410,8 @@ impl PolicyEngine {
             };
         }
 
-        for rule in self.config.rules.iter() {
-            if rule.matches(input) {
-                let reason = if rule.action == DecisionAction::Allow {
-                    DecisionReason::RuleAllowed
-                } else {
-                    DecisionReason::RuleDenied
-                };
-                let mut decision = Decision {
-                    action: rule.action,
-                    reason,
-                    rule_id: Some(rule.id.clone()),
-                    timeout_override: None,
-                };
-                if let Some(timeout) = rule.timeout_override {
-                    decision = decision.with_timeout(timeout);
-                }
-                return decision;
-            }
+        if let Some(decision) = self.evaluate_first_matching_rule(input) {
+            return decision;
         }
 
         match self.config.default_action {
@@ -427,6 +423,53 @@ impl PolicyEngine {
             },
             action => Decision::denied(action, DecisionReason::DefaultDeny),
         }
+    }
+
+    fn requires_hostname_attribution(&self, input: &PolicyInput) -> bool {
+        self.config.require_hostname_for_domain_rules
+            && input.protocol == Protocol::Tcp
+            && input.hostname.is_none()
+            && matches!(input.sni_status, SniStatus::Missing)
+            && input
+                .destination
+                .as_ref()
+                .is_some_and(|destination| destination.port == 443)
+    }
+
+    fn evaluate_explicit_destination_rule(&self, input: &PolicyInput) -> Option<Decision> {
+        self.config
+            .rules
+            .iter()
+            .filter(|rule| rule.destination_ip.is_some() || rule.destination_port.is_some())
+            .find_map(|rule| self.evaluate_rule(rule, input))
+    }
+
+    fn evaluate_first_matching_rule(&self, input: &PolicyInput) -> Option<Decision> {
+        self.config
+            .rules
+            .iter()
+            .find_map(|rule| self.evaluate_rule(rule, input))
+    }
+
+    fn evaluate_rule(&self, rule: &PolicyRule, input: &PolicyInput) -> Option<Decision> {
+        if !rule.matches(input) {
+            return None;
+        }
+        let reason = if rule.action == DecisionAction::Allow {
+            DecisionReason::RuleAllowed
+        } else {
+            DecisionReason::RuleDenied
+        };
+        let mut decision = Decision {
+            action: rule.action,
+            reason,
+            rule_id: Some(rule.id.clone()),
+            timeout_override: None,
+        };
+        if let Some(timeout) = rule.timeout_override {
+            decision = decision.with_timeout(timeout);
+        }
+        Some(decision)
     }
 }
 
@@ -483,6 +526,69 @@ mod tests {
         let decision = engine.evaluate(&input);
         assert_eq!(decision.action, DecisionAction::RequireBrokerDns);
         assert_eq!(decision.reason, DecisionReason::DirectDnsBypass);
+    }
+
+    #[test]
+    fn missing_tls_sni_requires_hostname_or_explicit_destination_rule() {
+        let input = PolicyInput::new(sandbox(), FrontendKind::Tun, Protocol::Tcp).with_endpoints(
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 53000),
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443),
+        );
+
+        let denied = PolicyEngine::new(PolicyConfig::default()).evaluate(&input);
+        assert_eq!(denied.action, DecisionAction::FailClosed);
+        assert_eq!(denied.reason, DecisionReason::HostnameAttributionRequired);
+
+        let mut rule = PolicyRule::allow("allow-ip-https");
+        rule.protocol = Some(Protocol::Tcp);
+        rule.destination_ip = Some(IpMatcher::Exact(IpAddr::V4(Ipv4Addr::new(
+            93, 184, 216, 34,
+        ))));
+        rule.destination_port = Some(PortMatcher::Exact(443));
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let allowed = PolicyEngine::new(PolicyConfig {
+            rules,
+            ..PolicyConfig::default()
+        })
+        .evaluate(&input);
+        assert_eq!(allowed.action, DecisionAction::Allow);
+        assert_eq!(allowed.rule_id.as_deref(), Some("allow-ip-https"));
+    }
+
+    #[test]
+    fn hidden_sni_fails_closed_unless_explicit_destination_rule_allows() {
+        let mut broad_rules = RuleSet::default();
+        broad_rules.push(PolicyRule::allow("allow-all"));
+        let mut input = PolicyInput::new(sandbox(), FrontendKind::Tun, Protocol::Tcp)
+            .with_endpoints(
+                Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 53000),
+                Endpoint::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)), 443),
+            );
+        input.sni_status = SniStatus::HiddenOrEncrypted;
+
+        let denied = PolicyEngine::new(PolicyConfig {
+            rules: broad_rules,
+            ..PolicyConfig::default()
+        })
+        .evaluate(&input);
+        assert_eq!(denied.action, DecisionAction::FailClosed);
+        assert_eq!(denied.reason, DecisionReason::HiddenSniOrEch);
+
+        let mut explicit_rule = PolicyRule::allow("allow-hidden-by-ip");
+        explicit_rule.protocol = Some(Protocol::Tcp);
+        explicit_rule.destination_ip =
+            Some(IpMatcher::Exact(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))));
+        explicit_rule.destination_port = Some(PortMatcher::Exact(443));
+        let mut explicit_rules = RuleSet::default();
+        explicit_rules.push(explicit_rule);
+        let allowed = PolicyEngine::new(PolicyConfig {
+            rules: explicit_rules,
+            ..PolicyConfig::default()
+        })
+        .evaluate(&input);
+        assert_eq!(allowed.action, DecisionAction::Allow);
+        assert_eq!(allowed.rule_id.as_deref(), Some("allow-hidden-by-ip"));
     }
 
     #[test]

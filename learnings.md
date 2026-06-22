@@ -26,3 +26,6 @@
 
 ## 2026-06-22T00:42:45Z
 - Transparent HTTP inspection is only safe for complete buffered request headers; one TCP segment with incomplete headers must return `NeedMoreData` and wait for future stream reassembly rather than making a policy guess.
+
+## 2026-06-22T01:11:45Z
+- Hidden or absent SNI must not be governed by broad allow rules: only explicit destination rules can intentionally allow no-visible-SNI HTTPS, while SNI/DNS mismatches still fail closed before any allow rule.
