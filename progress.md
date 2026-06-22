@@ -1771,3 +1771,28 @@ Round-24 lifecycle findings are fixed. `RuntimeLifecycleHarness` now uses an exp
 
 ### Remaining blind spots
 - Lifecycle state is still a platform-independent harness. Final async runtime supervision must attach real listener tasks, TUN fd loops, child process exit status, and cleanup actions while preserving the same terminal lifecycle ledger semantics.
+
+## 2026-06-22 — Blocking DNS/HTTP runtime wiring proof
+
+### Commands run
+- `cargo fmt` — applied formatting for blocking runtime wiring harness.
+- `cargo test -p foxprox-egress blocking_dns_http_runtime --all-targets --all-features` — passed, targeted runtime wiring proof.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 118 core tests, 3 device tests, 27 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners ... ok`
+- `foxprox_egress::tests::blocking_dns_send_failure_does_not_publish_to_shared_proxy_cache ... ok`
+- `runtime::tests::runtime_lifecycle_exit_is_terminal ... ok`
+
+### Interpretation
+Added `BlockingDnsHttpRuntime` in `foxprox-egress` to bind DNS and HTTP proxy listeners through one shared DNS cache and one lifecycle harness. The regression drives real UDP DNS listener I/O, verifies the delivered DNS response populates the shared cache, then drives real TCP HTTP proxy listener I/O and verifies proxy domain resolution uses `resolution_source=broker_dns` before the allow/forward decision. Lifecycle start/exit evidence brackets the listener wiring proof.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The harness is still blocking/single-step and covers DNS + HTTP proxy only. The final runtime still needs concurrent async task scheduling, SOCKS listener inclusion, TUN fd loops, child process supervision, and cleanup actions while preserving shared-cache and lifecycle boundaries.

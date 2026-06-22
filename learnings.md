@@ -132,3 +132,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Runtime lifecycle state must be terminal
 
 - Runtime lifecycle evidence needs an explicit state machine rather than an optional start timestamp. Invalid transitions (`exit` before `start`, duplicate `start`, duplicate `exit`, or `start` after `exit`) should emit structured `broker_error` records and must not create misleading extra `network_session_start` or `network_session_exit` records.
+
+## 2026-06-22 — Listener wiring proofs must share the actual cache handle
+
+- Runtime listener wiring regressions should construct DNS and proxy listeners through the same runtime harness and `SharedDnsCache` handle, then drive real listener I/O. Manually seeding proxy cache is useful for unit tests but does not prove runtime wiring preserves delivery-gated DNS attribution.

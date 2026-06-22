@@ -11,8 +11,9 @@ use foxprox_core::{
     malformed_proxy_request, AuditKind, AuditRecord, BrokerRuntimeConfig, Decision, DenialReason,
     DnsBrokerHandler, DnsQueryMetadata, DnsUpstream, DnsUpstreamError, ExplicitProxyEgress,
     ExplicitProxyFrontend, Frontend, HttpProxyRequestMetadata, NetworkEndpoint, PolicyRequest,
-    Protocol, ProxyEgressError, ProxyParseError, SocksConnectMetadata, TcpEgress, TcpEgressError,
-    UdpEgress, UdpEgressError,
+    Protocol, ProxyEgressError, ProxyParseError, RuntimeComponent, RuntimeExitStatus,
+    RuntimeLifecycleError, RuntimeLifecycleHarness, SharedDnsCache, SocksConnectMetadata,
+    TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
 };
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -893,6 +894,122 @@ fn socks5_reply_code_for(decision: Decision) -> u8 {
 
 fn socks5_connect_response(reply_code: u8) -> [u8; 10] {
     [0x05, reply_code, 0x00, 0x01, 0, 0, 0, 0, 0, 0]
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockingProxyRuntimeError {
+    Dns(DnsUpstreamError),
+    HttpProxy(ProxyEgressError),
+    Lifecycle(RuntimeLifecycleError),
+}
+
+#[derive(Debug)]
+pub struct BlockingDnsHttpRuntime<U, E> {
+    sandbox_id: String,
+    shared_dns_cache: SharedDnsCache,
+    lifecycle: RuntimeLifecycleHarness,
+    dns_server: BlockingDnsBrokerServer<U>,
+    http_proxy_server: BlockingHttpProxyServer<E>,
+}
+
+impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind(
+        sandbox_id: impl Into<String>,
+        lifecycle_audit_capacity: usize,
+        shared_dns_cache: SharedDnsCache,
+        dns_bind_addr: SocketAddr,
+        dns_handler: DnsBrokerHandler<U>,
+        http_proxy_bind_addr: SocketAddr,
+        http_proxy_frontend: ExplicitProxyFrontend<E>,
+        io_timeout: Duration,
+        max_dns_query_bytes: usize,
+        max_http_request_bytes: usize,
+        now_ms: u64,
+    ) -> Result<Self, BlockingProxyRuntimeError> {
+        let sandbox_id = sandbox_id.into();
+        let dns_handler = dns_handler.with_shared_cache(shared_dns_cache.clone());
+        let http_proxy_frontend =
+            http_proxy_frontend.with_shared_dns_cache(shared_dns_cache.clone());
+        let dns_server = BlockingDnsBrokerServer::bind(
+            dns_bind_addr,
+            dns_handler,
+            io_timeout,
+            max_dns_query_bytes,
+        )
+        .map_err(BlockingProxyRuntimeError::Dns)?;
+        let http_proxy_server = BlockingHttpProxyServer::bind(
+            http_proxy_bind_addr,
+            http_proxy_frontend,
+            io_timeout,
+            max_http_request_bytes,
+        )
+        .map_err(BlockingProxyRuntimeError::HttpProxy)?;
+        let mut lifecycle =
+            RuntimeLifecycleHarness::new(sandbox_id.clone(), lifecycle_audit_capacity);
+        lifecycle
+            .start(
+                vec![
+                    RuntimeComponent::DnsListener,
+                    RuntimeComponent::HttpProxyListener,
+                ],
+                now_ms,
+            )
+            .map_err(BlockingProxyRuntimeError::Lifecycle)?;
+        Ok(Self {
+            sandbox_id,
+            shared_dns_cache,
+            lifecycle,
+            dns_server,
+            http_proxy_server,
+        })
+    }
+
+    pub fn dns_addr(&self) -> Result<SocketAddr, DnsUpstreamError> {
+        self.dns_server.local_addr()
+    }
+
+    pub fn http_proxy_addr(&self) -> Result<SocketAddr, ProxyEgressError> {
+        self.http_proxy_server.local_addr()
+    }
+
+    pub fn handle_dns_once(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<DnsBrokerStepResult, DnsUpstreamError> {
+        self.dns_server.handle_one(self.sandbox_id.clone(), now_ms)
+    }
+
+    pub fn handle_http_proxy_once(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<HttpProxyListenerStepResult, ProxyEgressError> {
+        self.http_proxy_server.handle_one(now_ms)
+    }
+
+    pub fn exit(
+        &mut self,
+        status: RuntimeExitStatus,
+        now_ms: u64,
+    ) -> Result<(), RuntimeLifecycleError> {
+        self.lifecycle.exit(status, now_ms)
+    }
+
+    pub fn shared_dns_cache(&self) -> SharedDnsCache {
+        self.shared_dns_cache.clone()
+    }
+
+    pub fn lifecycle(&self) -> &RuntimeLifecycleHarness {
+        &self.lifecycle
+    }
+
+    pub fn dns_server(&self) -> &BlockingDnsBrokerServer<U> {
+        &self.dns_server
+    }
+
+    pub fn http_proxy_server(&self) -> &BlockingHttpProxyServer<E> {
+        &self.http_proxy_server
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -2229,6 +2346,119 @@ mod tests {
         assert_eq!(result.response.unwrap()[3] & 0x0f, 5);
         let records: Vec<_> = handler.broker().audit().records().collect();
         assert_eq!(records[1].details["dns_upstream_error"], "unavailable");
+    }
+
+    #[test]
+    fn blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners() {
+        let query = dns_query(0x6b6b, "Broker.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let shared_cache = SharedDnsCache::default();
+
+        let mut dns_config = PolicyConfig::default();
+        dns_config.rules.push(
+            PolicyRule::allow("allow-broker-dns")
+                .protocol(Protocol::Dns)
+                .hostname("broker.test"),
+        );
+        let dns_broker = BrokerCore::new(PolicyEngine::new(dns_config), 16);
+        let dns_handler = DnsBrokerHandler::new(
+            dns_broker,
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+
+        let mut proxy_config = PolicyConfig::default();
+        proxy_config.rules.push(
+            PolicyRule::allow("allow-http-domain")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Http)
+                .origin("http", "broker.test", 80),
+        );
+        let proxy_broker = BrokerCore::new(PolicyEngine::new(proxy_config), 16);
+        let proxy_frontend =
+            ExplicitProxyFrontend::new("s1", proxy_broker, InMemoryExplicitProxyEgress::default());
+
+        let mut runtime = BlockingDnsHttpRuntime::bind(
+            "s1",
+            4,
+            shared_cache.clone(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            proxy_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            1_000,
+        )
+        .unwrap();
+
+        let dns_client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        dns_client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        dns_client
+            .send_to(&query, runtime.dns_addr().unwrap())
+            .unwrap();
+        let dns_step = runtime.handle_dns_once(1_010).unwrap();
+        assert_eq!(dns_step.decision, Decision::Allow);
+        assert_eq!(dns_step.send_status, "sent");
+        let mut dns_reply = [0u8; 512];
+        let (dns_reply_len, _) = dns_client.recv_from(&mut dns_reply).unwrap();
+        assert!(dns_reply_len > query.len());
+        assert!(shared_cache
+            .resolve_hostname("broker.test", 1_020)
+            .is_some());
+
+        let mut http_client = TcpStream::connect(runtime.http_proxy_addr().unwrap()).unwrap();
+        http_client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        http_client
+            .write_all(b"GET http://broker.test/ HTTP/1.1\r\nHost: broker.test\r\n\r\n")
+            .unwrap();
+        let http_step = runtime.handle_http_proxy_once(1_020).unwrap();
+        assert_eq!(http_step.decision, Decision::Allow);
+        assert!(http_step.forwarded);
+        assert_eq!(http_step.send_status, "sent");
+        let mut http_response = String::new();
+        http_client.read_to_string(&mut http_response).unwrap();
+        assert!(http_response.starts_with("HTTP/1.1 200 OK"));
+
+        let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
+        assert_eq!(lifecycle_records.len(), 1);
+        assert_eq!(lifecycle_records[0].kind, AuditKind::NetworkSessionStart);
+        assert_eq!(
+            lifecycle_records[0].details["runtime_components"],
+            "dns_listener,http_proxy_listener"
+        );
+
+        let proxy_records: Vec<_> = runtime
+            .http_proxy_server()
+            .frontend()
+            .broker()
+            .audit()
+            .records()
+            .collect();
+        assert_eq!(proxy_records[0].kind, AuditKind::ProxyDestinationResolved);
+        assert_eq!(proxy_records[0].details["resolution_source"], "broker_dns");
+        assert_eq!(proxy_records[0].details["selected_ip"], "127.0.0.1");
+        assert_eq!(proxy_records[1].kind, AuditKind::HttpRequestDecision);
+        assert_eq!(
+            runtime
+                .http_proxy_server()
+                .frontend()
+                .egress()
+                .forwarded_http()
+                .len(),
+            1
+        );
+
+        runtime.exit(RuntimeExitStatus::Clean, 1_100).unwrap();
+        let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
+        assert_eq!(lifecycle_records.len(), 2);
+        assert_eq!(lifecycle_records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(lifecycle_records[1].duration_ms, Some(100));
     }
 
     #[test]
