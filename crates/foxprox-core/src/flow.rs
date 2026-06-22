@@ -342,11 +342,19 @@ impl DnsCache {
 
     pub fn rollback_observation(&mut self, observation: &DnsObservation) {
         for address in &observation.addresses {
-            if let Some(observations) = self.by_ip.get_mut(address) {
-                observations.retain(|stored| stored != observation);
-                if observations.is_empty() {
-                    self.by_ip.remove(address);
+            let should_remove_key = if let Some(observations) = self.by_ip.get_mut(address) {
+                if let Some(index) = observations
+                    .iter()
+                    .rposition(|stored| stored == observation)
+                {
+                    observations.remove(index);
                 }
+                observations.is_empty()
+            } else {
+                false
+            };
+            if should_remove_key {
+                self.by_ip.remove(address);
             }
         }
     }

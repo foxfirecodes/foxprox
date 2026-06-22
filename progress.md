@@ -1298,3 +1298,36 @@ Round-13 high finding is fixed. `BlockingDnsBrokerServer::handle_one` now report
 
 ### Remaining blind spots
 - Send-failure rollback is implemented for the blocking listener proof; final async DNS runtime must preserve the same delivery-gated attribution behavior.
+
+## 2026-06-22 — Round-14 DNS rollback precision cycle
+
+### Behavior under work
+Fix round-14 high finding: DNS client-send rollback must remove only the just-inserted observation instance, not all equal historical observations, so a failed duplicate response cannot erase prior successfully delivered attribution.
+
+### Expected evidence
+- `DnsCache::rollback_observation` removes one matching observation per address.
+- A broker listener sequence with one successful DNS response followed by an identical same-timestamp send failure keeps the earlier delivered attribution in cache while still auditing the failed send.
+
+## 2026-06-22 — Round-14 precise DNS rollback fix
+
+### Commands run
+- `cargo fmt` — applied formatting for precise DNS rollback changes.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 10 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 103 core tests, 3 device tests, 10 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_dns_send_failure_rolls_back_only_latest_duplicate_observation ... ok`
+- `foxprox_egress::tests::blocking_dns_broker_server_audits_send_failure_and_rolls_back_cache ... ok`
+
+### Interpretation
+Round-14 high finding is fixed. DNS rollback now removes only one matching observation per address, preserving older delivered attributions even when a later identical same-timestamp DNS response fails client delivery. The integration regression proves a successful send followed by an identical failed send keeps attribution available while still recording `dns_client_send_failed` evidence.
+
+### Changed files
+- `crates/foxprox-core/src/flow.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `progress.md`
+
+### Remaining blind spots
+- Rollback precision is covered in the blocking DNS listener proof; async runtime must use the same delivery-token/rollback semantics.

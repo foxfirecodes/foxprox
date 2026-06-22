@@ -311,6 +311,7 @@ mod tests {
         BrokerCore, Cidr, Decision, DnsBrokerHandler, FlowKey, PolicyConfig, PolicyEngine,
         PolicyRule, Protocol, TcpForwarder, UdpForwarder, UdpTimeoutConfig,
     };
+    use std::collections::VecDeque;
     use std::io::{Read, Write};
     use std::net::{TcpListener, UdpSocket};
     use std::thread;
@@ -623,6 +624,62 @@ mod tests {
     }
 
     #[test]
+    fn blocking_dns_send_failure_rolls_back_only_latest_duplicate_observation() {
+        let query = dns_query(0x4949, "Example.COM", 1);
+        let small_response = dns_a_response(&query, [93, 184, 216, 34], 30);
+        let mut huge_response = small_response.clone();
+        huge_response.resize(70_000, 0);
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-example-dns")
+                .protocol(Protocol::Dns)
+                .hostname("example.com"),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 12);
+        let handler = DnsBrokerHandler::new(
+            broker,
+            SequenceDnsUpstream {
+                responses: VecDeque::from([small_response.clone(), huge_response]),
+            },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let mut server = BlockingDnsBrokerServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            handler,
+            Duration::from_secs(1),
+            512,
+        )
+        .unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client
+            .send_to(&query, server.local_addr().unwrap())
+            .unwrap();
+        let delivered = server.handle_one("s1", 1_000).unwrap();
+        assert_eq!(delivered.send_status, "sent");
+        let mut buf = [0u8; 512];
+        let _ = client.recv_from(&mut buf).unwrap();
+
+        client
+            .send_to(&query, server.local_addr().unwrap())
+            .unwrap();
+        let failed = server.handle_one("s1", 1_000).unwrap();
+        assert_eq!(failed.send_status, "send_failed");
+        assert!(server
+            .handler()
+            .cache()
+            .attribution_for("93.184.216.34".parse().unwrap(), 2_000)
+            .is_some());
+        let records: Vec<_> = server.handler().broker().audit().records().collect();
+        assert_eq!(
+            records.last().unwrap().details["error"],
+            "dns_client_send_failed"
+        );
+    }
+
+    #[test]
     fn blocking_dns_upstream_unavailable_maps_to_handler_fail_closed() {
         let query = dns_query(0x4343, "Example.COM", 1);
         let closed = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -669,6 +726,23 @@ mod tests {
     #[derive(Clone, Debug)]
     struct StaticDnsUpstream {
         response: Vec<u8>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct SequenceDnsUpstream {
+        responses: VecDeque<Vec<u8>>,
+    }
+
+    impl DnsUpstream for SequenceDnsUpstream {
+        fn exchange(
+            &mut self,
+            _query: &DnsQueryMetadata,
+            _packet: &[u8],
+        ) -> Result<Vec<u8>, DnsUpstreamError> {
+            self.responses
+                .pop_front()
+                .ok_or(DnsUpstreamError::Unavailable)
+        }
     }
 
     impl DnsUpstream for StaticDnsUpstream {
