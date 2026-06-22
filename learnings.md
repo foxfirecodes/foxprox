@@ -140,3 +140,7 @@ A deterministic blocking tunnel proof can use cloned `TcpStream`s, copy upload i
 ## 2026-06-21 — flow-close audit should keep directional bytes optional
 
 TCP bridge statistics are directional, but many audit records only have a total byte count or no bytes. Keep directional counts optional in the core audit schema so TCP close records can be precise without forcing UDP expiration or policy-decision records to invent fields.
+
+## 2026-06-21 — live DNS listener tests should bind policy to the actual socket
+
+When testing a broker DNS socket on loopback with an ephemeral port, construct the policy broker-resolver endpoint from `socket.local_addr()` instead of assuming UDP/53. This keeps direct-DNS policy and listener validation aligned with the live socket under test.

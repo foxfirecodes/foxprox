@@ -765,3 +765,25 @@
 - What failed or surprised the agent: no failures; adding optional directional byte fields preserved existing audit records while allowing TCP close records to be more precise than a single total.
 - What remains unproven: automatic emission of close audit from proxy listener bridge completion, TUN TCP flow close integration, durations/error reasons, and audit backpressure behavior in live forwarding are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — UDP DNS listener one-datagram runtime slice
+
+- Slice attempted: expose the DNS broker handler through a real UDP socket boundary for one datagram, sending the synthesized or upstream response back to the client.
+- Why next: DNS datagram policy/upstream handling is proven in memory, but alpha needs a DNS broker reachable by sandbox traffic; a one-datagram loopback listener is the smallest live socket proof before long-running runtime loops.
+- Verification plan: add a `serve_one_udp_query` helper in `foxprox-dns`, verify a loopback client sends a DNS query to the broker socket, the broker forwards to a loopback upstream, records attribution, and sends the upstream response back; run formatting, clippy, focused DNS tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — UDP DNS listener one-datagram runtime
+
+- Slice attempted: serve one broker DNS datagram over a real UDP socket and send the response back to the client.
+- Why next: DNS request policy/upstream handling was in-memory only; a live socket boundary proves the DNS broker can be reached by UDP traffic before adding long-running runtime loops or sandbox routing.
+- What changed: added `DnsServeOneResult`, `DnsServeError`, and `serve_one_udp_query` to `foxprox-dns`; the helper validates the socket local address matches the configured broker resolver, receives one datagram, maps peer/local addresses to normalized endpoints, invokes the DNS handler, and sends any synthesized/upstream response to the peer.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in `foxprox-dns`; `cargo fmt` was run.
+  - Focused check passed: `cargo test -p foxprox-dns udp_dns_listener -- --nocapture` verified a loopback client sent a DNS query to the broker UDP socket, the broker forwarded to a loopback upstream, returned the upstream response to the client, and populated attribution cache for a later TCP flow.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 6 `foxprox-dns` tests, 5 `foxprox-egress` tests, 6 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 20 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; binding the broker socket on an ephemeral port required policy rules to match the actual resolver endpoint rather than assuming port 53 in tests.
+- What remains unproven: long-running DNS runtime loop, sandbox-reachable resolver address from TUN/netns setup, concurrent queries, transaction matching beyond one datagram, cache limits, and UDP response packet routing through TUN are still absent.
+- Commit: this commit.

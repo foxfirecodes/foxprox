@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
+use std::net::{SocketAddr, UdpSocket};
 use std::time::SystemTime;
 
 use foxprox_core::{
@@ -24,6 +25,41 @@ pub struct DnsDatagramResult {
     pub forwarded: bool,
     pub recorded_answers: usize,
     pub upstream_error: Option<DnsForwardError>,
+}
+
+/// Result of serving one DNS datagram on a UDP socket.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DnsServeOneResult {
+    pub peer: SocketAddr,
+    pub received_bytes: usize,
+    pub sent_bytes: Option<usize>,
+    pub datagram: DnsDatagramResult,
+}
+
+/// DNS UDP listener/runtime errors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DnsServeError {
+    InvalidLocalAddress(String),
+    Io(String),
+}
+
+impl fmt::Display for DnsServeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidLocalAddress(error) => {
+                write!(f, "dns-listener-invalid-local-address: {error}")
+            }
+            Self::Io(error) => write!(f, "dns-listener-io-error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for DnsServeError {}
+
+impl From<std::io::Error> for DnsServeError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value.to_string())
+    }
 }
 
 /// DNS broker request handler for one datagram at a time.
@@ -107,6 +143,46 @@ impl DnsBrokerDatagramHandler {
             },
         }
     }
+}
+
+/// Receive and handle one DNS datagram from a UDP socket.
+pub fn serve_one_udp_query<E: UdpEgress>(
+    socket: &UdpSocket,
+    handler: &DnsBrokerDatagramHandler,
+    egress: &E,
+    sandbox_id: SandboxId,
+    cache: &mut DnsAttributionCache,
+    observed_at: SystemTime,
+) -> Result<DnsServeOneResult, DnsServeError> {
+    let local_addr = socket.local_addr().map_err(DnsServeError::from)?;
+    let resolver = Endpoint::udp(local_addr.ip(), local_addr.port());
+    if resolver != handler.resolver() {
+        return Err(DnsServeError::InvalidLocalAddress(format!(
+            "socket={local_addr} handler_resolver={:?}",
+            handler.resolver()
+        )));
+    }
+
+    let mut query = vec![0_u8; 4096];
+    let (received_bytes, peer) = socket.recv_from(&mut query).map_err(DnsServeError::from)?;
+    query.truncate(received_bytes);
+    let source = Endpoint::udp(peer.ip(), peer.port());
+    let datagram = handler.handle_query(egress, sandbox_id, source, &query, cache, observed_at);
+    let sent_bytes = match datagram.response.as_ref() {
+        Some(response) => Some(
+            socket
+                .send_to(response, peer)
+                .map_err(DnsServeError::from)?,
+        ),
+        None => None,
+    };
+
+    Ok(DnsServeOneResult {
+        peer,
+        received_bytes,
+        sent_bytes,
+        datagram,
+    })
 }
 
 /// Result of forwarding one DNS query upstream.
@@ -413,7 +489,7 @@ mod tests {
         RuleAction, SandboxId, TcpConnectAttempt,
     };
     use foxprox_egress::{HostUdpEgress, UdpEgress, UdpTarget};
-    use std::net::{Ipv4Addr, UdpSocket};
+    use std::net::Ipv4Addr;
     use std::thread;
     use std::time::{Duration, SystemTime};
 
@@ -464,14 +540,18 @@ mod tests {
     }
 
     fn allow_example_dns_policy() -> PolicyEngine {
+        allow_example_dns_policy_for(broker_resolver())
+    }
+
+    fn allow_example_dns_policy_for(resolver: Endpoint) -> PolicyEngine {
         let rule = PolicyRule::new("allow-example-dns", RuleAction::Allow)
             .unwrap()
             .with_protocol(Protocol::Dns)
             .with_hostname(HostnamePattern::new(".example.com").unwrap())
-            .with_destination_port(53);
+            .with_destination_port(resolver.port.unwrap_or(53));
         PolicyEngine::new(PolicyConfig {
             dns: DnsPolicy {
-                broker_resolvers: vec![broker_resolver()],
+                broker_resolvers: vec![resolver],
                 deny_direct_external_dns: true,
             },
             rules: vec![rule],
@@ -521,6 +601,75 @@ mod tests {
         assert!(result.forwarded);
         assert_eq!(result.recorded_answers, 1);
         assert_eq!(result.upstream_error, None);
+        let flow = NormalizedEvent::TcpConnectAttempt(TcpConnectAttempt {
+            sandbox_id: sandbox_id(),
+            frontend: FrontendKind::Tun,
+            source: Endpoint::tcp(Ipv4Addr::new(10, 0, 0, 2).into(), 49152),
+            destination: Endpoint::tcp(Ipv4Addr::new(93, 184, 216, 34).into(), 443),
+            attribution: None,
+        });
+        assert_eq!(
+            cache.enrich_event(flow, now).hostname(),
+            Some("dns.example.com")
+        );
+    }
+
+    #[test]
+    fn udp_dns_listener_serves_one_query_and_returns_upstream_response() {
+        let query = dns_a_query("dns.example.com");
+        let response = dns_a_response(&query, [93, 184, 216, 34], 60);
+        let upstream_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let upstream_addr = upstream_socket.local_addr().unwrap();
+        let expected_query = query.clone();
+        let upstream_response = response.clone();
+        let upstream = thread::spawn(move || {
+            let mut received = vec![0_u8; 512];
+            let (length, peer) = upstream_socket.recv_from(&mut received).unwrap();
+            received.truncate(length);
+            assert_eq!(received, expected_query);
+            upstream_socket.send_to(&upstream_response, peer).unwrap();
+        });
+
+        let broker_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let broker_addr = broker_socket.local_addr().unwrap();
+        let broker_resolver = Endpoint::udp(broker_addr.ip(), broker_addr.port());
+        let handler = DnsBrokerDatagramHandler::new(
+            allow_example_dns_policy_for(broker_resolver),
+            UdpDnsForwarder::new(
+                UdpTarget::new_ip(upstream_addr.ip(), upstream_addr.port()).unwrap(),
+            ),
+            broker_resolver,
+        );
+        let egress = HostUdpEgress::new(Duration::from_secs(1)).unwrap();
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(200);
+        let server = thread::spawn(move || {
+            let mut cache = DnsAttributionCache::new();
+            let result = serve_one_udp_query(
+                &broker_socket,
+                &handler,
+                &egress,
+                sandbox_id(),
+                &mut cache,
+                now,
+            )
+            .unwrap();
+            (result, cache)
+        });
+
+        let client = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        client.send_to(&query, broker_addr).unwrap();
+        let mut received = vec![0_u8; 512];
+        let (length, peer) = client.recv_from(&mut received).unwrap();
+        received.truncate(length);
+        let (served, cache) = server.join().unwrap();
+        upstream.join().unwrap();
+
+        assert_eq!(peer, broker_addr);
+        assert_eq!(received, response);
+        assert_eq!(served.received_bytes, query.len());
+        assert_eq!(served.sent_bytes, Some(response.len()));
+        assert!(served.datagram.forwarded);
+        assert_eq!(served.datagram.recorded_answers, 1);
         let flow = NormalizedEvent::TcpConnectAttempt(TcpConnectAttempt {
             sandbox_id: sandbox_id(),
             frontend: FrontendKind::Tun,
