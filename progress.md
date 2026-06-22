@@ -909,5 +909,5 @@
   - `cargo tree -p foxprox-net` — net exposes normalized stack lifecycle contract.
   - `cargo tree -p foxprox-runtime` — runtime records lifecycle audit through audit contract.
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
-- Commit hash after commit: pending.
+- Commit hash after commit: 8d27e4d.
 - Remaining boundary risks: actual smoltcp close detection, TCP byte counts, stream bridging, and continuous polling remain.
