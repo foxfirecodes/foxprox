@@ -372,6 +372,7 @@ pub struct StackDevicePacketOutcome {
     pub tcp_bytes_written_to_egress: usize,
     pub tcp_bytes_pending_to_egress: usize,
     pub tcp_data_without_bridge: usize,
+    pub tcp_bridges_removed: usize,
     pub flow_closed_events: usize,
     pub outbound_packets_written: usize,
 }
@@ -398,6 +399,7 @@ where
     let mut tcp_data_events = 0;
     let mut tcp_bytes_written_to_egress = 0;
     let mut tcp_data_without_bridge = 0;
+    let mut tcp_bridges_removed = 0;
     let mut flow_closed_events = 0;
 
     for (offset, event) in events.into_iter().enumerate() {
@@ -435,6 +437,16 @@ where
                 }
             }
             StackEvent::FlowClosed(closed) => {
+                let bridge_key = if closed.key.protocol == FlowProtocol::Tcp {
+                    Some(StackTcpFlowKey::new(
+                        closed.sandbox_id.clone(),
+                        closed.frontend,
+                        closed.key.source,
+                        closed.key.destination,
+                    ))
+                } else {
+                    None
+                };
                 let protocol = match closed.key.protocol {
                     FlowProtocol::Tcp => Protocol::Tcp,
                     FlowProtocol::Udp => Protocol::Udp,
@@ -453,6 +465,11 @@ where
                     }))
                     .map_err(BrokerError::Audit)
                     .map_err(RuntimeError::Broker)?;
+                if let Some(key) = bridge_key {
+                    if ctx.tcp_bridges.remove(&key).is_some() {
+                        tcp_bridges_removed += 1;
+                    }
+                }
                 flow_closed_events += 1;
             }
         }
@@ -471,6 +488,7 @@ where
         tcp_bytes_written_to_egress,
         tcp_bytes_pending_to_egress: ctx.tcp_bridges.total_pending_sandbox_bytes(),
         tcp_data_without_bridge,
+        tcp_bridges_removed,
         flow_closed_events,
         outbound_packets_written,
     })
@@ -520,7 +538,7 @@ mod tests {
         ProtocolMatcher, RuntimeConfig, SocksConnect, TcpConnectAttempt, UdpFlowAttempt,
     };
     use foxprox_device::PreopenedTunDevice;
-    use foxprox_egress::{MockEgress, MockHttpResponse, MockUdpHandle};
+    use foxprox_egress::{MockEgress, MockHttpResponse, MockTcpStream, MockUdpHandle};
     use foxprox_net::StackError;
 
     #[test]
@@ -567,6 +585,15 @@ mod tests {
         let mut egress = MockEgress::default();
         let mut audit = BoundedAuditSink::new(4);
         let mut tcp_bridges = StackTcpBridgeTable::default();
+        tcp_bridges.insert(
+            StackTcpFlowKey::new(
+                SandboxId::new("s1").unwrap(),
+                FrontendKind::Tun,
+                "10.0.0.2:49152".parse().unwrap(),
+                "203.0.113.10:80".parse().unwrap(),
+            ),
+            MockTcpStream,
+        );
 
         let outcome = process_one_stack_device_packet(
             &mut device,
@@ -583,6 +610,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome.flow_closed_events, 1);
+        assert_eq!(outcome.tcp_bridges_removed, 1);
+        assert!(tcp_bridges.is_empty());
         assert_eq!(audit.records().len(), 1);
         let record = audit.records().front().unwrap();
         assert_eq!(record.kind, foxprox_audit::AuditKind::FlowClosed);

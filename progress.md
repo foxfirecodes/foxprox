@@ -1044,3 +1044,23 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 9f8c4d2.
 - Remaining boundary risks: per-sandbox/global limits, async wakeups, and teardown policy for exceeded limits remain.
+
+## 2026-06-22 — Boundary objective: TCP bridge cleanup on normalized flow close
+
+- Boundary under work: remove runtime TCP bridge state when a stack adapter emits a normalized flow-close event.
+- Allowed dependency direction: flow lifecycle remains normalized (`StackFlowClosed`/`FlowKey`); runtime may use it to drop host stream handles; audit records normalized close data; smoltcp-specific close state stays adapter-local.
+- Dependency-risk assessment: bridge tables now retain host streams and pending buffers. Without cleanup, closed stack flows leak egress handles and memory. Runtime should react to the normalized close contract rather than adapter-specific socket state.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: runtime now derives a normalized `StackTcpFlowKey` from TCP `StackFlowClosed` events, records the flow-close audit record, and removes any matching bridge entry. Extended the flow-close runtime test to pre-seed a bridge and prove the close event removes it while preserving normalized audit behavior. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 99 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — cleanup is runtime-owned.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: detecting real smoltcp close events, teardown/audit reasons, and half-close semantics remain.

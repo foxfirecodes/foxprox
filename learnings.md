@@ -243,3 +243,8 @@
 
 - Partial-write buffering must have an explicit per-bridge pending byte cap before a continuous loop is safe; otherwise a slow host stream can become unbounded broker memory growth.
 - The pending limit belongs next to runtime bridge state because that is where normalized flow queues are retained and measured.
+
+## 2026-06-22 — bridge cleanup on flow close
+
+- Runtime should remove host stream bridge state from normalized `StackFlowClosed` events, not from adapter-specific socket handles, so cleanup remains stack-neutral.
+- Flow-close audit and bridge cleanup can share the same normalized close event while keeping audit concerned only with lifecycle records.
