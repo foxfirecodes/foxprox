@@ -172,3 +172,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Aggregate audit cursors should track sequence numbers
 
 - Bounded ledgers can replace records with lossy `audit_backpressure` while preserving length. Aggregate archive cursors must track last seen audit `sequence`, not record count, or they can miss replacement/backpressure evidence. A child exit is clean only when both process id and zero exit code are known.
+
+## 2026-06-22 — Signal and supervision-error paths need explicit evidence
+
+- A blocking child supervisor should preserve Unix signal status when available, and spawn/wait failures should be converted into structured lifecycle/broker-error evidence instead of only returning an error. Tests should start the lifecycle before launching the child so session records bracket the child lifetime.

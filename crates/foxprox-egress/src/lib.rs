@@ -1663,6 +1663,37 @@ mod tests {
         assert_eq!(records[1].details["child_status"], "failed");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn blocking_child_supervisor_signal_exit_is_fail_closed_in_lifecycle() {
+        let mut runtime = RuntimeLifecycleHarness::new("child-sandbox", 4);
+        runtime
+            .start(vec![RuntimeComponent::ChildProcess], 1_000)
+            .unwrap();
+        let mut supervisor = BlockingChildSupervisor;
+        let child_exit = supervisor
+            .run_to_exit("sh", ["-c", "kill -TERM $$"])
+            .unwrap();
+        assert!(child_exit.process_id.is_some());
+        assert_eq!(child_exit.exit_code, None);
+        assert_eq!(child_exit.signal, Some(15));
+
+        runtime
+            .exit_with_cleanup_and_child(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::ChildProcess]),
+                Some(child_exit),
+                1_100,
+            )
+            .unwrap();
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["child_status"], "signaled");
+        assert_eq!(records[1].details["child_signal"], "15");
+    }
+
     #[test]
     fn blocking_child_supervisor_spawn_failure_is_audited() {
         let mut runtime = RuntimeLifecycleHarness::new("child-sandbox", 4);

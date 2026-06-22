@@ -2040,3 +2040,30 @@ Addressed round-33 and round-34 high findings. Aggregate runtime archive cursors
 
 ### Remaining blind spots
 - Signal capture is now wired on Unix via `ExitStatusExt`, but signal-specific testing is still not covered. The final runtime still needs async process supervision, cancellation/join ordering, and one global audit sink/backpressure path across all tasks.
+
+## 2026-06-22 — Signal-aware child supervision and bracketing
+
+### Commands run
+- `cargo fmt` — applied formatting for signal-aware child supervision and supervision-error evidence.
+- `cargo test -p foxprox-egress blocking_child_supervisor --all-targets --all-features` — passed, 4 blocking child supervisor tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 127 core tests, 3 device tests, 34 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_child_supervisor_captures_clean_child_exit_for_lifecycle ... ok`
+- `foxprox_egress::tests::blocking_child_supervisor_nonzero_exit_is_fail_closed_in_lifecycle ... ok`
+- `foxprox_egress::tests::blocking_child_supervisor_signal_exit_is_fail_closed_in_lifecycle ... ok`
+- `foxprox_egress::tests::blocking_child_supervisor_spawn_failure_is_audited ... ok`
+
+### Interpretation
+Addressed round-34 supervision concerns. Blocking child supervisor tests now start lifecycle evidence before launching the child so `network_session_start`/`network_session_exit` bracket child lifetime. On Unix, `BlockingChildSupervisor` preserves signal termination via `ExitStatusExt::signal()`, producing `child_status=signaled` / `child_signal` lifecycle evidence. Spawn failure is converted into structured `broker_error` evidence through `RuntimeLifecycleHarness::record_child_supervision_error`.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Wait-failure is still difficult to trigger deterministically in the blocking proof. Final runtime still needs async child supervision, task cancellation/join ordering, and unified audit backpressure across all runtime tasks.
