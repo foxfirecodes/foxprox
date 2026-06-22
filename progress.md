@@ -2145,3 +2145,33 @@ Added `BlockingChildSupervisor::run_session_to_exit`, a concrete blocking proof 
 
 ### Remaining blind spots
 - This is still a blocking single-child proof. The final runtime still needs async child wait, task cancellation/join handling, TUN/smoltcp listener shutdown, and one shared audit sink with propagated backpressure.
+
+## 2026-06-22 — Record runtime task joins and preserve child-session backpressure evidence
+
+### Commands run
+- `cargo fmt` — applied formatting for runtime task join and child-session error changes.
+- `cargo test -p foxprox-core runtime::tests --all-targets --all-features` — passed, 20 runtime tests.
+- `cargo test -p foxprox-egress blocking_child_supervisor --all-targets --all-features` — passed, 6 blocking child supervisor tests.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 133 core tests, 3 device tests, 36 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed again after full tests.
+
+### Evidence excerpts
+- `runtime::tests::runtime_lifecycle_records_task_join_report ... ok`
+- `runtime::tests::runtime_lifecycle_task_join_failure_is_fail_closed ... ok`
+- `tests::blocking_child_supervisor_session_backpressure_returns_partial_lifecycle ... ok`
+- `tests::blocking_child_supervisor_session_spawn_failure_exits_fail_closed ... ok`
+
+### Interpretation
+Added structured task-join evidence to `network_session_exit` via `RuntimeTaskJoinReport`: completed/cancelled tasks record `task_join_status=complete`, while failed/join-failed tasks fail closed with `DenialReason::RuntimeState` and structured task counts. Addressed round-39 child-session backpressure concern by returning `BlockingChildSessionError::Lifecycle` with the partial `RuntimeLifecycleHarness`, so bounded-ledger backpressure still leaves caller-visible `broker_error` / `audit_backpressure` evidence.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Task-join evidence is still modeled by a synchronous lifecycle report. The final runtime still needs concrete async task supervision, real join/cancel ordering for listener/TUN/smoltcp loops, and one shared audit sink with propagated backpressure.

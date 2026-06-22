@@ -1499,6 +1499,28 @@ pub struct BlockingChildSession {
     pub outcome: BlockingChildSessionOutcome,
 }
 
+#[derive(Debug)]
+pub enum BlockingChildSessionError {
+    Lifecycle {
+        lifecycle: Box<RuntimeLifecycleHarness>,
+        error: RuntimeLifecycleError,
+    },
+}
+
+impl BlockingChildSessionError {
+    pub fn lifecycle(&self) -> &RuntimeLifecycleHarness {
+        match self {
+            Self::Lifecycle { lifecycle, .. } => lifecycle.as_ref(),
+        }
+    }
+
+    pub fn error(&self) -> RuntimeLifecycleError {
+        match self {
+            Self::Lifecycle { error, .. } => *error,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BlockingChildSupervisor;
 
@@ -1511,31 +1533,53 @@ impl BlockingChildSupervisor {
         args: I,
         start_ms: u64,
         exit_ms: u64,
-    ) -> Result<BlockingChildSession, RuntimeLifecycleError>
+    ) -> Result<BlockingChildSession, BlockingChildSessionError>
     where
         P: AsRef<OsStr>,
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
         let mut lifecycle = RuntimeLifecycleHarness::new(sandbox_id, lifecycle_audit_capacity);
-        lifecycle.start(vec![RuntimeComponent::ChildProcess], start_ms)?;
+        if let Err(error) = lifecycle.start(vec![RuntimeComponent::ChildProcess], start_ms) {
+            return Err(BlockingChildSessionError::Lifecycle {
+                lifecycle: Box::new(lifecycle),
+                error,
+            });
+        }
         let outcome = match self.run_to_exit(program, args) {
             Ok(child_exit) => {
-                lifecycle.exit_with_cleanup_and_child(
+                if let Err(error) = lifecycle.exit_with_cleanup_and_child(
                     RuntimeExitStatus::Clean,
                     RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::ChildProcess]),
                     Some(child_exit.clone()),
                     exit_ms,
-                )?;
+                ) {
+                    return Err(BlockingChildSessionError::Lifecycle {
+                        lifecycle: Box::new(lifecycle),
+                        error,
+                    });
+                }
                 BlockingChildSessionOutcome::Exited(child_exit)
             }
             Err(error) => {
-                lifecycle.record_child_supervision_error(error.as_detail(), exit_ms)?;
-                lifecycle.exit_with_cleanup(
+                if let Err(lifecycle_error) =
+                    lifecycle.record_child_supervision_error(error.as_detail(), exit_ms)
+                {
+                    return Err(BlockingChildSessionError::Lifecycle {
+                        lifecycle: Box::new(lifecycle),
+                        error: lifecycle_error,
+                    });
+                }
+                if let Err(lifecycle_error) = lifecycle.exit_with_cleanup(
                     RuntimeExitStatus::Clean,
                     RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::ChildProcess]),
                     exit_ms,
-                )?;
+                ) {
+                    return Err(BlockingChildSessionError::Lifecycle {
+                        lifecycle: Box::new(lifecycle),
+                        error: lifecycle_error,
+                    });
+                }
                 BlockingChildSessionOutcome::SupervisionError(error)
             }
         };
@@ -1789,6 +1833,39 @@ mod tests {
         assert_eq!(records[2].decision, Some(Decision::FailClosed));
         assert_eq!(records[2].reason, Some(DenialReason::RuntimeState));
         assert_eq!(records[2].details["child_status"], "unknown");
+    }
+
+    #[test]
+    fn blocking_child_supervisor_session_backpressure_returns_partial_lifecycle() {
+        let mut supervisor = BlockingChildSupervisor;
+        let error = supervisor
+            .run_session_to_exit(
+                "child-sandbox",
+                2,
+                "/definitely/not/a/real/foxprox-child",
+                std::iter::empty::<&str>(),
+                1_000,
+                1_010,
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            error.error(),
+            RuntimeLifecycleError::AuditBackpressure {
+                attempted_kind: AuditKind::NetworkSessionExit,
+            }
+        );
+        let records: Vec<_> = error.lifecycle().audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::BrokerError);
+        assert_eq!(records[0].decision, Some(Decision::FailClosed));
+        assert_eq!(
+            records[0].details["runtime_error"],
+            "child_supervision_error"
+        );
+        assert_eq!(records[1].kind, AuditKind::AuditBackpressure);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].details["attempted_kind"], "networksessionexit");
     }
 
     #[test]

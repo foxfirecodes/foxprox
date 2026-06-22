@@ -57,7 +57,8 @@ pub use proxy_frontend::{
 pub use runtime::{
     RuntimeAuditFanIn, RuntimeAuditFanInError, RuntimeAuditIngestReport, RuntimeChildExit,
     RuntimeCleanupAction, RuntimeCleanupReport, RuntimeComponent, RuntimeExitStatus,
-    RuntimeLifecycleError, RuntimeLifecycleHarness, RuntimeListenerConfig,
+    RuntimeLifecycleError, RuntimeLifecycleHarness, RuntimeListenerConfig, RuntimeTaskJoinReport,
+    RuntimeTaskOutcome, RuntimeTaskStatus,
 };
 pub use setup::{
     BwrapSetupPlan, NetworkSetupConfig, ProxyEnvironment, SetupExecutionReport, SetupHelperPlan,

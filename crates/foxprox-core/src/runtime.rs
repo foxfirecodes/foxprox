@@ -107,6 +107,91 @@ impl RuntimeCleanupReport {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeTaskStatus {
+    Completed,
+    Cancelled,
+    Failed,
+    JoinFailed,
+}
+
+impl RuntimeTaskStatus {
+    fn as_detail(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Cancelled => "cancelled",
+            Self::Failed => "failed",
+            Self::JoinFailed => "join_failed",
+        }
+    }
+
+    fn is_failed(self) -> bool {
+        matches!(self, Self::Failed | Self::JoinFailed)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeTaskOutcome {
+    pub component: RuntimeComponent,
+    pub task_name: String,
+    pub status: RuntimeTaskStatus,
+}
+
+impl RuntimeTaskOutcome {
+    pub fn new(
+        component: RuntimeComponent,
+        task_name: impl Into<String>,
+        status: RuntimeTaskStatus,
+    ) -> Self {
+        Self {
+            component,
+            task_name: task_name.into(),
+            status,
+        }
+    }
+
+    fn as_detail(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            self.component.as_detail(),
+            self.task_name,
+            self.status.as_detail()
+        )
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeTaskJoinReport {
+    pub outcomes: Vec<RuntimeTaskOutcome>,
+}
+
+impl RuntimeTaskJoinReport {
+    pub fn new(outcomes: Vec<RuntimeTaskOutcome>) -> Self {
+        Self { outcomes }
+    }
+
+    fn status_detail(&self) -> &'static str {
+        if self
+            .outcomes
+            .iter()
+            .any(|outcome| outcome.status.is_failed())
+        {
+            "failed"
+        } else if self.outcomes.is_empty() {
+            "not_recorded"
+        } else {
+            "complete"
+        }
+    }
+
+    fn has_failures(&self) -> bool {
+        self.outcomes
+            .iter()
+            .any(|outcome| outcome.status.is_failed())
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeChildExit {
     pub process_id: Option<u32>,
@@ -442,6 +527,17 @@ impl RuntimeLifecycleHarness {
         child_exit: Option<RuntimeChildExit>,
         now_ms: u64,
     ) -> Result<(), RuntimeLifecycleError> {
+        self.exit_with_cleanup_child_and_tasks(status, cleanup, child_exit, None, now_ms)
+    }
+
+    pub fn exit_with_cleanup_child_and_tasks(
+        &mut self,
+        status: RuntimeExitStatus,
+        cleanup: RuntimeCleanupReport,
+        child_exit: Option<RuntimeChildExit>,
+        task_report: Option<RuntimeTaskJoinReport>,
+        now_ms: u64,
+    ) -> Result<(), RuntimeLifecycleError> {
         let started_at_ms = match self.state {
             RuntimeLifecycleState::Running { started_at_ms } => started_at_ms,
             RuntimeLifecycleState::NotStarted => {
@@ -465,6 +561,9 @@ impl RuntimeLifecycleHarness {
             (Decision::FailClosed, Some(DenialReason::SetupFailed))
         } else if missing_child_status
             || child_exit.as_ref().is_some_and(RuntimeChildExit::is_failed)
+            || task_report
+                .as_ref()
+                .is_some_and(RuntimeTaskJoinReport::has_failures)
         {
             (Decision::FailClosed, Some(DenialReason::RuntimeState))
         } else {
@@ -494,6 +593,21 @@ impl RuntimeLifecycleHarness {
             cleanup_action_list(&cleanup.failed),
         )
         .with_detail("failed_cleanup_count", cleanup.failed.len().to_string());
+        if let Some(task_report) = task_report {
+            audit = audit
+                .with_detail("task_join_status", task_report.status_detail())
+                .with_detail("runtime_tasks", task_outcome_list(&task_report.outcomes))
+                .with_detail("runtime_task_count", task_report.outcomes.len().to_string())
+                .with_detail(
+                    "failed_runtime_task_count",
+                    task_report
+                        .outcomes
+                        .iter()
+                        .filter(|outcome| outcome.status.is_failed())
+                        .count()
+                        .to_string(),
+                );
+        }
         if missing_child_status {
             audit = audit.with_detail("child_status", "unknown");
         }
@@ -620,6 +734,14 @@ fn component_list(components: &[RuntimeComponent]) -> String {
     components
         .iter()
         .map(|component| component.as_detail())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn task_outcome_list(outcomes: &[RuntimeTaskOutcome]) -> String {
+    outcomes
+        .iter()
+        .map(RuntimeTaskOutcome::as_detail)
         .collect::<Vec<_>>()
         .join(",")
 }
@@ -894,6 +1016,88 @@ mod tests {
         assert_eq!(records[1].details["cleanup_count"], "2");
         assert_eq!(records[1].details["failed_cleanup_actions"], "");
         assert_eq!(records[1].details["failed_cleanup_count"], "0");
+    }
+
+    #[test]
+    fn runtime_lifecycle_records_task_join_report() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start(
+                vec![
+                    RuntimeComponent::DnsListener,
+                    RuntimeComponent::SmoltcpStack,
+                ],
+                1_000,
+            )
+            .unwrap();
+        runtime
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![
+                    RuntimeCleanupAction::DnsListener,
+                    RuntimeCleanupAction::SmoltcpStack,
+                ]),
+                None,
+                Some(RuntimeTaskJoinReport::new(vec![
+                    RuntimeTaskOutcome::new(
+                        RuntimeComponent::DnsListener,
+                        "dns_accept_loop",
+                        RuntimeTaskStatus::Completed,
+                    ),
+                    RuntimeTaskOutcome::new(
+                        RuntimeComponent::SmoltcpStack,
+                        "stack_poll_loop",
+                        RuntimeTaskStatus::Cancelled,
+                    ),
+                ])),
+                1_100,
+            )
+            .unwrap();
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::Allow));
+        assert_eq!(records[1].details["task_join_status"], "complete");
+        assert_eq!(
+            records[1].details["runtime_tasks"],
+            "dns_listener:dns_accept_loop:completed,smoltcp_stack:stack_poll_loop:cancelled"
+        );
+        assert_eq!(records[1].details["runtime_task_count"], "2");
+        assert_eq!(records[1].details["failed_runtime_task_count"], "0");
+    }
+
+    #[test]
+    fn runtime_lifecycle_task_join_failure_is_fail_closed() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start(vec![RuntimeComponent::TunDevice], 1_000)
+            .unwrap();
+        runtime
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::TunDevice]),
+                None,
+                Some(RuntimeTaskJoinReport::new(vec![RuntimeTaskOutcome::new(
+                    RuntimeComponent::TunDevice,
+                    "tun_read_loop",
+                    RuntimeTaskStatus::JoinFailed,
+                )])),
+                1_100,
+            )
+            .unwrap();
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["task_join_status"], "failed");
+        assert_eq!(
+            records[1].details["runtime_tasks"],
+            "tun_device:tun_read_loop:join_failed"
+        );
+        assert_eq!(records[1].details["failed_runtime_task_count"], "1");
     }
 
     #[test]

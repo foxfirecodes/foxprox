@@ -188,3 +188,8 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Supervised child proof should own start-to-exit evidence
 
 - A child supervisor proof is stronger when it owns the lifecycle: emit `network_session_start` before spawn, record structured `broker_error` on spawn/wait failure, and always emit terminal `network_session_exit`. Spawn failure must not leave only a running lifecycle plus broker error.
+
+## 2026-06-22 — Task joins are lifecycle evidence, and lifecycle errors must retain ledgers
+
+- Runtime exit evidence should include task join/cancellation outcomes; failed or unjoined runtime tasks are `runtime_state` failures, while graceful cancellation can be recorded as a successful join outcome.
+- Helpers that own lifecycle ledgers must return partial ledger evidence on audit backpressure. Returning only the error can hide the structured `broker_error`/`audit_backpressure` records needed to debug fail-closed shutdown.
