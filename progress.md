@@ -953,5 +953,5 @@
   - `cargo tree -p foxprox-egress` — egress depends only on `foxprox-core`.
   - `cargo tree -p foxprox-runtime` — runtime reaches stream handles through shared egress trait.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: f495281.
 - Remaining boundary risks: runtime connection-handle storage, backpressure, server-to-sandbox packet injection, and async stream IO remain.
