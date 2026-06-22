@@ -10,6 +10,10 @@ pub enum EgressRequest {
     TcpConnect {
         destination: SocketAddr,
     },
+    TcpStreamData {
+        destination: SocketAddr,
+        bytes: Vec<u8>,
+    },
     UdpDatagram {
         destination: SocketAddr,
         bytes: Vec<u8>,
@@ -31,6 +35,7 @@ impl EgressRequest {
     pub fn destination(&self) -> SocketAddr {
         match self {
             Self::TcpConnect { destination }
+            | Self::TcpStreamData { destination, .. }
             | Self::UdpDatagram { destination, .. }
             | Self::DnsQuery { destination, .. }
             | Self::HttpProxy { destination, .. }
@@ -40,7 +45,7 @@ impl EgressRequest {
 
     pub fn protocol(&self) -> Protocol {
         match self {
-            Self::TcpConnect { .. } => Protocol::Tcp,
+            Self::TcpConnect { .. } | Self::TcpStreamData { .. } => Protocol::Tcp,
             Self::UdpDatagram { .. } => Protocol::Udp,
             Self::DnsQuery { .. } => Protocol::Dns,
             Self::HttpProxy { .. } => Protocol::Http,

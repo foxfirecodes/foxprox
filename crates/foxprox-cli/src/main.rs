@@ -1906,6 +1906,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
     let inspection = foxprox_core::runtime::TransparentInspectionRuntime::new(inspect_policy);
     let mut bridge_runtime = TransparentTcpBridgeRuntime::listen(bridge_destination, 80, policy)?
         .with_inspection(inspection);
+    let mut bridge_egress = LocalTcpStreamEgress::new(echo_addr);
     let mut buf = [0_u8; 4096];
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut packets_read = 0_u64;
@@ -1926,24 +1927,13 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
                 if let Some(data) = step.egress_payload {
                     if !data.is_empty() && !response_written {
                         bridged_bytes = data.len();
-                        let mut stream =
-                            TcpStream::connect_timeout(&echo_addr, Duration::from_secs(2))
-                                .map_err(|err| {
-                                    format!("TCP bridge host egress connect failed: {err}")
-                                })?;
-                        stream
-                            .write_all(&data)
-                            .map_err(|err| format!("TCP bridge host egress write failed: {err}"))?;
-                        stream
-                            .set_read_timeout(Some(Duration::from_secs(2)))
-                            .map_err(|err| {
-                                format!("TCP bridge host egress timeout setup failed: {err}")
-                            })?;
-                        let mut reply = [0_u8; 1024];
-                        let reply_len = stream
-                            .read(&mut reply)
-                            .map_err(|err| format!("TCP bridge host egress read failed: {err}"))?;
-                        for emitted in bridge_runtime.send_egress_response(&reply[..reply_len])? {
+                        let outcome = bridge_egress.execute(&EgressRequest::TcpStreamData {
+                            destination: echo_addr,
+                            bytes: data,
+                        })?;
+                        for emitted in
+                            bridge_runtime.send_egress_response(&outcome.response_payload)?
+                        {
                             emitted_packets += 1;
                             fd_handoff::write_all_fd(fd, &emitted)?;
                         }
@@ -2027,6 +2017,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
     .with_metadata("bridged_bytes", bridged_bytes.to_string())
     .with_metadata("response_written", response_written.to_string())
     .with_metadata("policy_allowed", policy_allowed.to_string())
+    .with_metadata("egress_calls", bridge_egress.calls.to_string())
     .with_metadata("egress_fixture", echo_addr.to_string());
     if let Some(audit) = runtime_audit {
         record = record
@@ -3121,6 +3112,48 @@ fn parse_connect_request_target(headers: &str) -> Result<String, String> {
         return Err("CONNECT HTTP version missing".to_string());
     }
     Ok(target.to_string())
+}
+
+#[cfg(unix)]
+struct LocalTcpStreamEgress {
+    fixture: std::net::SocketAddr,
+    calls: usize,
+}
+
+#[cfg(unix)]
+impl LocalTcpStreamEgress {
+    fn new(fixture: std::net::SocketAddr) -> Self {
+        Self { fixture, calls: 0 }
+    }
+}
+
+#[cfg(unix)]
+impl EgressBackend for LocalTcpStreamEgress {
+    fn execute(&mut self, request: &EgressRequest) -> Result<EgressOutcome, String> {
+        let EgressRequest::TcpStreamData { bytes, .. } = request else {
+            return Err("local TCP stream egress only supports TCP stream data".to_string());
+        };
+        self.calls += 1;
+        let mut stream = TcpStream::connect_timeout(&self.fixture, Duration::from_secs(2))
+            .map_err(|err| format!("TCP stream host egress connect failed: {err}"))?;
+        stream
+            .write_all(bytes)
+            .map_err(|err| format!("TCP stream host egress write failed: {err}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|err| format!("TCP stream host egress timeout setup failed: {err}"))?;
+        let mut reply = [0_u8; 1024];
+        let reply_len = stream
+            .read(&mut reply)
+            .map_err(|err| format!("TCP stream host egress read failed: {err}"))?;
+        Ok(EgressOutcome {
+            connected: true,
+            bytes_sent: bytes.len() as u64,
+            bytes_received: reply_len as u64,
+            message: "local TCP stream fixture egress".to_string(),
+            response_payload: reply[..reply_len].to_vec(),
+        })
+    }
 }
 
 #[cfg(unix)]

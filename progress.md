@@ -755,3 +755,15 @@
 - Interpretation: audit backpressure is now wired into the reusable TCP bridge runtime boundary via `flush_audit_to`, not just modeled as a standalone buffer. Other runtime paths can use the same helper and should be migrated before production forwarding.
 - Next verification gap: add a small reusable host egress abstraction for TCP byte bridging so CLI smokes no longer hand-roll host TCP egress around the core bridge runtime.
 - Commit hash after commit: pending.
+
+## 2026-06-22T04:10:00Z — TCP stream data egress abstraction in bridge smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run tcp-bridge-smoke`
+- Environment assumptions: local host TCP fixture is available; environment smoke still owns fd IO and process lifecycle, while host egress is now routed through the shared egress abstraction.
+- Expected result: add a TCP stream-data egress request variant and use an `EgressBackend` implementation for the TCP bridge smoke instead of hand-rolled host socket bridging inline.
+- Observed result: pass. Workspace tests remained green (`foxprox-core` 52, `foxprox-cli` 2, `foxproxsetup` 7). `tcp-bridge-smoke` emitted `decision":"allow"`, `inspection_decision":"allow"`, and `egress_calls":"1"`.
+- Relevant output excerpt: `"egress_calls":"1"`; `"inspection_rule_id":"allow-transparent-http-bridge"`; `"status":"exit status: 0"`.
+- Changed files: `crates/foxprox-core/src/egress.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: TCP byte bridging now uses the shared host egress request model, reducing another piece of product behavior previously embedded only in CLI smoke code.
+- Next verification gap: broader production factoring into dedicated broker-device/broker-egress crates, or final review of remaining gaps before stopping.
+- Commit hash after commit: pending.
