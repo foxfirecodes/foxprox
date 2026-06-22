@@ -1174,5 +1174,5 @@
   - `cargo tree -p foxprox-packet` — packet remains core-only.
   - `cargo tree -p foxprox-runtime` — runtime depends on packet for packet synthesis, not raw formatting.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 75f68e5.
 - Remaining boundary risks: UDP idle expiry, IPv6 UDP responses, UDP checksums, ICMP errors, and rate limiting remain.
