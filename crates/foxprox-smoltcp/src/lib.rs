@@ -7,7 +7,7 @@
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use foxprox_core::Endpoint;
+use foxprox_core::{Endpoint, FlowKey, Protocol};
 use foxprox_runtime::{TcpStackAdapter, TcpStackConnectAttempt};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Loopback, Medium};
@@ -32,6 +32,12 @@ pub enum SmoltcpAdapterError {
     NoMatchingTcpSocket,
     TcpSendRejected,
     TcpRecvRejected,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SmoltcpTcpPayload {
+    pub flow: FlowKey,
+    pub bytes: Vec<u8>,
 }
 
 pub struct SmoltcpIpLoopback {
@@ -177,18 +183,38 @@ impl SmoltcpIpLoopback {
         port: u16,
         max_bytes: usize,
     ) -> Result<Vec<u8>, SmoltcpAdapterError> {
+        self.recv_on_listener_port_with_flow(port, max_bytes)
+            .map(|payload| payload.bytes)
+    }
+
+    pub fn recv_on_listener_port_with_flow(
+        &mut self,
+        port: u16,
+        max_bytes: usize,
+    ) -> Result<SmoltcpTcpPayload, SmoltcpAdapterError> {
         for handle in &self.tcp_handles {
             let socket = self.sockets.get_mut::<tcp::Socket>(*handle);
             if socket
                 .local_endpoint()
                 .is_some_and(|endpoint| endpoint.port == port)
             {
+                let local = socket
+                    .local_endpoint()
+                    .and_then(endpoint_to_foxprox)
+                    .ok_or(SmoltcpAdapterError::NoMatchingTcpSocket)?;
+                let remote = socket
+                    .remote_endpoint()
+                    .and_then(endpoint_to_foxprox)
+                    .ok_or(SmoltcpAdapterError::NoMatchingTcpSocket)?;
                 let mut bytes = vec![0; max_bytes];
                 let count = socket
                     .recv_slice(&mut bytes)
                     .map_err(|_| SmoltcpAdapterError::TcpRecvRejected)?;
                 bytes.truncate(count);
-                return Ok(bytes);
+                return Ok(SmoltcpTcpPayload {
+                    flow: FlowKey::new(Protocol::Tcp, remote, local),
+                    bytes,
+                });
             }
         }
         Err(SmoltcpAdapterError::NoMatchingTcpSocket)
@@ -427,21 +453,21 @@ mod tests {
         let mut received = None;
         for millis in 60..100 {
             adapter.poll_once(millis);
-            match adapter.recv_on_listener_port(8080, 64) {
-                Ok(bytes) if !bytes.is_empty() => {
-                    received = Some(bytes);
+            match adapter.recv_on_listener_port_with_flow(8080, 64) {
+                Ok(payload) if !payload.bytes.is_empty() => {
+                    received = Some(payload);
                     break;
                 }
                 Ok(_) | Err(SmoltcpAdapterError::TcpRecvRejected) => {}
                 Err(error) => panic!("unexpected recv error: {error:?}"),
             }
         }
+        let received = received.expect("listener should receive payload");
 
         assert_eq!(sent, b"hello-smoltcp".len());
-        assert_eq!(
-            received.expect("listener should receive payload"),
-            b"hello-smoltcp".to_vec()
-        );
+        assert_eq!(received.bytes, b"hello-smoltcp".to_vec());
+        assert_eq!(received.flow.source, attempt.source);
+        assert_eq!(received.flow.destination, attempt.destination);
     }
 
     #[test]

@@ -1325,3 +1325,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: payload movement is still inside smoltcp loopback; host socket bridging and TUN packet IO are not joined to it.
 - Exact next step: commit smoltcp byte movement proof, then add an adapter-level receive helper that exports listener bytes alongside the normalized connect attempt flow key for bridge integration.
+
+## 2026-06-22T22:07:30Z
+- Current objective: continue after smoltcp payload movement toward bridge-ready payload events.
+- Git status summary: clean worktree after commit `7d5d07b`.
+- Intended slice: export received smoltcp listener bytes with a normalized TCP `FlowKey` so runtime bridge code can associate payloads with opened flows without smoltcp endpoint types.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: this will still not write payloads into the host bridge automatically.
+- Exact next step: add `SmoltcpTcpPayload` and listener receive-with-flow tests.
+
+## 2026-06-22T22:09:10Z
+- Current objective: export smoltcp listener payloads with normalized flow keys.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 12 smoltcp adapter tests passed. `recv_on_listener_port_with_flow` now returns `SmoltcpTcpPayload` with a normalized TCP `FlowKey` and payload bytes, and the loopback payload test asserts the flow matches the exported connect attempt.
+- Commit hash when committed: pending.
+- Remaining risks: payloads are not yet handed to `TcpFlowRuntime` or a host bridge automatically.
+- Exact next step: commit smoltcp payload flow export, then add a runtime integration test that feeds a smoltcp payload event into `TcpFlowRuntime` with a fake bridge.
