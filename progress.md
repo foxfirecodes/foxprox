@@ -1151,5 +1151,5 @@
   - `cargo tree -p foxprox-runtime` — UDP bridge retention is runtime-owned.
   - `cargo tree -p foxprox-egress` — UDP socket IO remains behind egress.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 8afeb78.
 - Remaining boundary risks: UDP response packet synthesis, idle expiry, per-flow limits, ICMP errors, and rate limiting remain.
