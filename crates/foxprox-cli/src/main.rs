@@ -11,6 +11,7 @@ use std::os::unix::net::UnixListener;
 use foxprox_core::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
 use foxprox_core::dns::{parse_dns_query, synthesize_a_response, DnsCache};
 use foxprox_core::egress::{EgressBackend, EgressOutcome, EgressRequest};
+use foxprox_core::origin::parse_http_request;
 use foxprox_core::policy::{
     Cidr, PolicyConfig, PolicyEngine, PolicyRequest, PolicyRule, RuleAction,
 };
@@ -56,6 +57,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("tcp-synack-smoke");
             println!("tcp-bridge-smoke");
             println!("tcp-bridge-deny-smoke");
+            println!("http-proxy-smoke");
             Ok(())
         }
         [cmd, scenario] if cmd == "run" => run_named_scenario(scenario),
@@ -93,6 +95,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         tcp_bridge_smoke_records()
     } else if scenario == "tcp-bridge-deny-smoke" {
         tcp_bridge_deny_smoke_records()
+    } else if scenario == "http-proxy-smoke" {
+        http_proxy_smoke_records()
     } else {
         run_scenario(ScenarioName::parse(scenario)?)
     };
@@ -104,7 +108,7 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke|tcp-bridge-smoke|tcp-bridge-deny-smoke>",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke|tcp-bridge-smoke|tcp-bridge-deny-smoke|http-proxy-smoke>",
         ScenarioName::list().join("|")
     );
 }
@@ -2468,6 +2472,158 @@ fn run_udp_deny_smoke() -> Result<AuditRecord, String> {
         record = record.with_metadata("stderr", stderr);
     }
     Ok(record)
+}
+
+fn http_proxy_smoke_records() -> Vec<AuditRecord> {
+    match run_http_proxy_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::HttpRequest,
+            "http-proxy-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::HttpProxy)
+        .with_protocol(Protocol::Http)],
+    }
+}
+
+fn run_http_proxy_smoke() -> Result<AuditRecord, String> {
+    let origin = TcpListener::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind HTTP origin fixture: {err}"))?;
+    let origin_addr = origin
+        .local_addr()
+        .map_err(|err| format!("failed to inspect HTTP origin fixture: {err}"))?;
+    let origin_thread = std::thread::spawn(move || -> Result<(), String> {
+        let (mut stream, _peer) = origin
+            .accept()
+            .map_err(|err| format!("HTTP origin fixture accept failed: {err}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|err| format!("HTTP origin timeout setup failed: {err}"))?;
+        let mut buf = [0_u8; 1024];
+        let n = stream
+            .read(&mut buf)
+            .map_err(|err| format!("HTTP origin fixture read failed: {err}"))?;
+        let request = String::from_utf8_lossy(&buf[..n]);
+        if !request.starts_with("GET /ok HTTP/1.1") {
+            return Err(format!(
+                "HTTP origin received unexpected request: {request:?}"
+            ));
+        }
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\n\r\nfoxprox")
+            .map_err(|err| format!("HTTP origin fixture write failed: {err}"))?;
+        Ok(())
+    });
+
+    let proxy = TcpListener::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind HTTP proxy smoke listener: {err}"))?;
+    let proxy_addr = proxy
+        .local_addr()
+        .map_err(|err| format!("failed to inspect HTTP proxy smoke listener: {err}"))?;
+    let client_thread = std::thread::spawn(move || -> Result<(), String> {
+        let mut stream = TcpStream::connect_timeout(&proxy_addr, Duration::from_secs(5))
+            .map_err(|err| format!("HTTP proxy smoke client connect failed: {err}"))?;
+        stream
+            .write_all(b"GET http://example.com/ok HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            .map_err(|err| format!("HTTP proxy smoke client write failed: {err}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|err| format!("HTTP proxy smoke client timeout setup failed: {err}"))?;
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .map_err(|err| format!("HTTP proxy smoke client read failed: {err}"))?;
+        if !response.ends_with(b"foxprox") {
+            return Err(format!(
+                "HTTP proxy smoke client received unexpected response: {:?}",
+                String::from_utf8_lossy(&response)
+            ));
+        }
+        Ok(())
+    });
+
+    let (mut client, _peer) = proxy
+        .accept()
+        .map_err(|err| format!("HTTP proxy smoke accept failed: {err}"))?;
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|err| format!("HTTP proxy smoke client timeout setup failed: {err}"))?;
+    let mut request_bytes = [0_u8; 2048];
+    let n = client
+        .read(&mut request_bytes)
+        .map_err(|err| format!("HTTP proxy smoke read failed: {err}"))?;
+    let parsed = parse_http_request(&request_bytes[..n])?;
+    let policy = PolicyEngine::new(
+        PolicyConfig::deny_by_default().with_rule(
+            PolicyRule::new("allow-http-proxy-example", RuleAction::Allow)
+                .protocol(Protocol::Http)
+                .hostname("example.com")
+                .http_path_prefix("/ok"),
+        ),
+    );
+    let request = PolicyRequest::new("http-proxy-smoke", Frontend::HttpProxy, Protocol::Http)
+        .with_destination(origin_addr.ip(), origin_addr.port())
+        .with_hostname(
+            &parsed.host,
+            foxprox_core::audit::AttributionConfidence::High,
+        )
+        .with_http(&parsed.method, &parsed.path);
+    let outcome = policy.evaluate(&request);
+    if !outcome.decision.is_allow() {
+        return Err(format!(
+            "HTTP proxy smoke policy denied request: {}",
+            outcome.reason
+        ));
+    }
+
+    let mut origin_stream = TcpStream::connect_timeout(&origin_addr, Duration::from_secs(5))
+        .map_err(|err| format!("HTTP proxy smoke origin connect failed: {err}"))?;
+    let origin_request = format!(
+        "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        parsed.method, parsed.path, parsed.host
+    );
+    origin_stream
+        .write_all(origin_request.as_bytes())
+        .map_err(|err| format!("HTTP proxy smoke origin write failed: {err}"))?;
+    let mut origin_response = Vec::new();
+    origin_stream
+        .read_to_end(&mut origin_response)
+        .map_err(|err| format!("HTTP proxy smoke origin read failed: {err}"))?;
+    client
+        .write_all(&origin_response)
+        .map_err(|err| format!("HTTP proxy smoke client response write failed: {err}"))?;
+    drop(client);
+
+    origin_thread
+        .join()
+        .map_err(|_| "HTTP origin fixture thread panicked".to_string())??;
+    client_thread
+        .join()
+        .map_err(|_| "HTTP proxy smoke client thread panicked".to_string())??;
+
+    Ok(AuditRecord::new(
+        EventKind::HttpRequest,
+        "http-proxy-smoke",
+        Decision::Allow,
+        "HTTP proxy request was policy-allowed and forwarded to a local origin fixture",
+    )
+    .with_frontend(Frontend::HttpProxy)
+    .with_protocol(Protocol::Http)
+    .with_addresses(None, Some(origin_addr))
+    .with_hostname(
+        Some(parsed.host),
+        foxprox_core::audit::AttributionSource::ExplicitProxy,
+        foxprox_core::audit::AttributionConfidence::High,
+    )
+    .with_rule(outcome.rule_id)
+    .with_metadata("method", parsed.method)
+    .with_metadata("path", parsed.path)
+    .with_metadata("policy_decision", outcome.decision.as_str())
+    .with_metadata("policy_reason", outcome.reason)
+    .with_metadata("origin_fixture", origin_addr.to_string())
+    .with_bytes(n as u64, origin_response.len() as u64))
 }
 
 #[cfg(unix)]

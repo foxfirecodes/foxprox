@@ -491,3 +491,27 @@
 - Interpretation: both positive and negative TCP bridge environment proofs now include policy-before-smoltcp/egress enforcement evidence. The remaining quality gap is factoring this orchestration out of the CLI harness into a reusable broker runtime boundary.
 - Next verification gap: reusable TCP bridge runtime boundary or explicit proxy networking smoke.
 - Commit hash after commit: pending.
+
+## 2026-06-22T02:20:00Z — policy-gated TCP bridge commit recorded
+
+- Command executed: `git add crates/foxprox-cli/src/main.rs progress.md && git commit -m "Gate TCP bridge smoke with policy"`
+- Environment assumptions: policy-gated allow bridge and reset-based deny bridge smokes above were verified before commit.
+- Expected result: commit captures policy-before-smoltcp/egress evidence for the positive TCP bridge path.
+- Observed result: commit `0b1bd0d` created with 2 files changed.
+- Relevant output excerpt: `[harness-lab 0b1bd0d] Gate TCP bridge smoke with policy`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: policy-gated TCP bridge checkpoint is preserved.
+- Next verification gap: explicit proxy networking smoke or reusable TCP bridge runtime boundary.
+- Commit hash after commit: 0b1bd0d.
+
+## 2026-06-22T02:40:00Z — Explicit HTTP proxy forwarding smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run http-proxy-smoke`
+- Environment assumptions: local-only TCP sockets are available; the smoke uses an in-process client, explicit HTTP proxy listener, and origin fixture with no external network dependency.
+- Expected result: tests remain green; proxy parses an absolute-form HTTP request, evaluates host/path policy, forwards an origin-form request to a local host-owned origin socket, returns the response to the client, and emits structured audit metadata.
+- Observed result: pass. `foxprox-core` ran 41 tests, `foxprox-cli` ran 2 tests, `foxproxsetup` ran 7 tests, and `http-proxy-smoke` emitted `decision":"allow"`, `rule_id":"allow-http-proxy-example"`, `method":"GET"`, and `path":"/ok"`.
+- Relevant output excerpt: `"reason":"HTTP proxy request was policy-allowed and forwarded to a local origin fixture"`; `"frontend":"http_proxy"`; `"hostname":"example.com"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: explicit HTTP proxy networking now has a local forwarding proof, not just parser fixtures. Remaining explicit proxy gaps are denied HTTP proxy behavior, HTTPS CONNECT tunneling, and SOCKS5 TCP CONNECT forwarding.
+- Next verification gap: add an explicit HTTP proxy deny smoke or HTTPS CONNECT/SOCKS TCP CONNECT forwarding smoke.
+- Commit hash after commit: pending.
