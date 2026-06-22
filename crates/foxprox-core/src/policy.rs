@@ -641,6 +641,9 @@ impl PolicyEngine {
             );
         }
         if request.hidden_sni {
+            if let Some(rule) = self.explicit_ip_port_allow_rule(request) {
+                return PolicyDecision::allow(audit_kind, Some(rule.id.clone()));
+            }
             return PolicyDecision::deny(
                 Decision::DenyReset,
                 DenialReason::HiddenSni,
@@ -760,6 +763,22 @@ impl PolicyEngine {
             audit = audit.with_detail(key, value);
         }
         (decision, audit)
+    }
+
+    fn explicit_ip_port_allow_rule(&self, request: &PolicyRequest) -> Option<&PolicyRule> {
+        self.config.rules.iter().find(|rule| {
+            rule.action == RuleAction::Allow
+                && rule.matches(request)
+                && (rule.destination_cidr.is_some() || rule.destination_port.is_some())
+                && rule.hostname.is_none()
+                && rule.domain_suffix.is_none()
+                && rule.origin_scheme.is_none()
+                && rule.origin_host.is_none()
+                && rule.origin_port.is_none()
+                && rule.http_method.is_none()
+                && rule.http_path_prefix.is_none()
+                && rule.min_attribution_confidence.is_none()
+        })
     }
 
     fn is_direct_dns_bypass(&self, request: &PolicyRequest) -> bool {

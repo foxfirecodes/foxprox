@@ -597,3 +597,35 @@ The workspace now includes a minimal `foxprox` CLI surface for config validation
 
 ### Remaining blind spots
 - CLI currently validates/generates config only; it does not launch bwrap, open TUN, or start runtime forwarding listeners.
+
+## 2026-06-21 — Reviewer round 3 TLS policy fix cycle
+
+### Behavior under work
+Fix round-3 review findings for transparent TLS policy: hidden-SNI/malformed ClientHello denials must allow only explicit IP/port policy exceptions and malformed TLS bytes must not silently fall through to ordinary TCP allow.
+
+### Expected evidence
+- Missing-SNI ClientHello with an explicit TCP destination CIDR/port allow rule is allowed and opens egress.
+- Missing-SNI ClientHello without an explicit IP/port allow is denied as `hidden_sni`.
+- Truncated/malformed ClientHello on TCP/443 is denied before egress under default allow with structured `tls_client_hello_error` audit detail.
+
+### Commands run
+- `cargo fmt` — applied formatting for TLS policy fixes.
+- `cargo test --all-targets --all-features` — passed, 4 CLI tests and 90 core tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tcp::tests::hidden_sni_explicit_ip_port_allow_opens_egress ... ok`
+- `tcp::tests::tls_client_hello_missing_sni_is_hidden_sni_denied ... ok`
+- `tcp::tests::malformed_tls_client_hello_is_hidden_sni_denied_with_detail ... ok`
+
+### Interpretation
+Hidden-SNI behavior now matches the docs: it is denied by default but an explicit TCP IP/CIDR + port allow rule can permit it. Malformed/truncated TLS ClientHello bytes on TCP/443 no longer fall through to ordinary TCP default allow; they produce structured `tls_client_hello_error` detail and hidden-SNI denial evidence unless an explicit IP/port policy allows the opaque flow.
+
+### Changed files
+- `crates/foxprox-core/src/policy.rs`
+- `crates/foxprox-core/src/tcp.rs`
+- `progress.md`
+
+### Remaining blind spots
+- QUIC UDP flows still lack DNS-cache hostname attribution in the UDP forwarding harness; this is the next transparent attribution gap to close.

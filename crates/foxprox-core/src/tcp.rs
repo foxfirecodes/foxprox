@@ -210,14 +210,25 @@ impl<E: TcpEgress> TcpForwarder<E> {
                         request.sni_dns_mismatch = dns_hostname != sni_hostname;
                     }
                 }
-                Err(TlsClientHelloError::MissingSni) => {
+                Err(error) => {
                     request.hidden_sni = true;
+                    request =
+                        request.with_detail("tls_client_hello_error", tls_error_detail(&error));
                 }
-                Err(_) => {}
             },
             _ => {}
         }
         request
+    }
+}
+
+fn tls_error_detail(error: &TlsClientHelloError) -> &'static str {
+    match error {
+        TlsClientHelloError::NotTlsHandshake => "not_tls_handshake",
+        TlsClientHelloError::NotClientHello => "not_client_hello",
+        TlsClientHelloError::Truncated => "truncated",
+        TlsClientHelloError::MissingSni => "missing_sni",
+        TlsClientHelloError::Malformed => "malformed",
     }
 }
 
@@ -446,6 +457,71 @@ mod tests {
         let record = forwarder.broker().audit().records().next().unwrap();
         assert_eq!(record.kind, AuditKind::SniDnsMismatchDenied);
         assert_eq!(record.hostname.as_deref(), Some("evil.test"));
+    }
+
+    #[test]
+    fn hidden_sni_explicit_ip_port_allow_opens_egress() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-hidden-sni-ip")
+                .protocol(Protocol::Tcp)
+                .destination_cidr(Cidr::new("203.0.113.0".parse().unwrap(), 24))
+                .destination_port(443),
+        );
+        let key = FlowKey::tcp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.42".parse().unwrap(),
+            443,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut forwarder = TcpForwarder::new(
+            "s1",
+            broker,
+            InMemoryTcpEgress::with_scripted_reply(b"ok".to_vec()),
+        );
+
+        let result = forwarder
+            .connect_and_bridge(key, &test_client_hello_without_sni(), 2_000, 2_010)
+            .unwrap();
+        assert_eq!(result.decision, Decision::Allow);
+        assert!(result.opened_egress);
+        assert_eq!(forwarder.egress().opened().len(), 1);
+        let record = forwarder.broker().audit().records().next().unwrap();
+        assert_eq!(record.kind, AuditKind::TcpConnectDecision);
+        assert_eq!(record.rule_id.as_deref(), Some("allow-hidden-sni-ip"));
+        assert_eq!(record.details["tls_client_hello_error"], "missing_sni");
+    }
+
+    #[test]
+    fn malformed_tls_client_hello_is_hidden_sni_denied_with_detail() {
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let key = FlowKey::tcp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.42".parse().unwrap(),
+            443,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut forwarder = TcpForwarder::new(
+            "s1",
+            broker,
+            InMemoryTcpEgress::with_scripted_reply(Vec::new()),
+        );
+        let truncated = &test_client_hello("example.com")[..8];
+
+        let result = forwarder
+            .connect_and_bridge(key, truncated, 2_000, 2_010)
+            .unwrap();
+        assert_eq!(result.decision, Decision::DenyReset);
+        assert_eq!(result.reason, Some(DenialReason::HiddenSni));
+        assert!(forwarder.egress().opened().is_empty());
+        let record = forwarder.broker().audit().records().next().unwrap();
+        assert_eq!(record.kind, AuditKind::HiddenSniDenied);
+        assert_eq!(record.details["tls_client_hello_error"], "truncated");
     }
 
     #[test]
