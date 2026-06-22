@@ -424,3 +424,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: UDP egress is still trait-backed only; no real host UDP socket implementation or response routing to TUN exists.
 - Exact next step: commit UDP egress gating, then implement a minimal real host UDP socket backend or response-routing abstraction for allowed UDP datagrams.
+
+## 2026-06-22T00:02:29Z
+- Current objective: continue autonomous verification-kernel cycles from the policy-gated UDP egress checkpoint.
+- Git status summary: clean worktree at session start.
+- Intended slice: implement the minimal real host UDP socket backend or response-routing boundary for allowed non-DNS UDP datagrams without bypassing the verification kernel.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`; keep tests deterministic with loopback sockets only.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`, and `learnings.md` only if the socket boundary reveals a new assumption.
+- Remaining risks: UDP response routing back to TUN and long-lived socket lifecycle management are still outside this smallest slice.
+- Exact next step: add a standard-library host UDP egress implementation and verify an allowed datagram reaches a loopback UDP listener only after policy/audit approval.
+
+## 2026-06-22T00:05:20Z
+- Current objective: add a minimal real host UDP socket backend behind the verified egress boundary.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on one long test line; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 49 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 27 runtime tests, and 7 setup tests passed. New runtime test proves `StdHostEgress` sends an allowed UDP payload to a loopback UDP listener only after policy/audit approval.
+- Commit hash when committed: pending.
+- Remaining risks: `StdHostEgress` opens a one-shot UDP socket per datagram and does not yet route host UDP responses back into TUN packets; TCP forwarding remains connect-only.
+- Exact next step: commit the standard UDP egress backend, then add a UDP response routing abstraction that can synthesize TUN UDP response packets from host replies.

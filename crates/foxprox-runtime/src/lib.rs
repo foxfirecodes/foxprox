@@ -14,7 +14,8 @@ use foxprox_core::{
     UnsupportedIpv4Protocol, VerificationKernel,
 };
 use std::io::{self, Read, Write};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
+use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TcpConnectRequest {
@@ -39,6 +40,63 @@ pub enum EgressError {
 pub trait HostEgress {
     fn open_tcp(&mut self, request: TcpConnectRequest) -> Result<(), EgressError>;
     fn send_udp(&mut self, request: UdpDatagramRequest) -> Result<(), EgressError>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StdHostEgress {
+    tcp_connect_timeout: Duration,
+}
+
+impl StdHostEgress {
+    pub fn new(tcp_connect_timeout: Duration) -> Self {
+        Self {
+            tcp_connect_timeout,
+        }
+    }
+}
+
+impl Default for StdHostEgress {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(5))
+    }
+}
+
+impl HostEgress for StdHostEgress {
+    fn open_tcp(&mut self, request: TcpConnectRequest) -> Result<(), EgressError> {
+        TcpStream::connect_timeout(
+            &endpoint_to_socket_addr(&request.destination),
+            self.tcp_connect_timeout,
+        )
+        .map(|_| ())
+        .map_err(|_| EgressError::ConnectFailed)
+    }
+
+    fn send_udp(&mut self, request: UdpDatagramRequest) -> Result<(), EgressError> {
+        let socket = UdpSocket::bind(unspecified_socket_addr_for(request.destination.ip))
+            .map_err(|_| EgressError::SendFailed)?;
+        let bytes_sent = socket
+            .send_to(
+                &request.bytes,
+                endpoint_to_socket_addr(&request.destination),
+            )
+            .map_err(|_| EgressError::SendFailed)?;
+        if bytes_sent == request.bytes.len() {
+            Ok(())
+        } else {
+            Err(EgressError::SendFailed)
+        }
+    }
+}
+
+fn endpoint_to_socket_addr(endpoint: &Endpoint) -> SocketAddr {
+    SocketAddr::new(endpoint.ip, endpoint.port)
+}
+
+fn unspecified_socket_addr_for(destination: IpAddr) -> SocketAddr {
+    match destination {
+        IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+        IpAddr::V6(_) => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1389,6 +1447,45 @@ mod tests {
         assert!(matches!(outcome, RuntimeOutcome::EgressOpened { .. }));
         assert_eq!(runtime.egress().udp_attempts, 1);
         assert_eq!(runtime.egress().last_udp_payload, b"payload");
+    }
+
+    #[test]
+    fn std_host_egress_sends_allowed_udp_datagram_to_loopback() {
+        let server = std::net::UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let destination = Endpoint::new(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            server.local_addr().unwrap().port(),
+        );
+        let event = NormalizedEvent::UdpFlowAttempt {
+            sandbox_id: SandboxId::new("std-udp").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            destination,
+            hostname: None,
+            quic_status: QuicStatus::NotQuic,
+        };
+        let mut rules = RuleSet::default();
+        let mut rule = PolicyRule::allow("allow-loopback-udp");
+        rule.protocol = Some(Protocol::Udp);
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = BrokerRuntime::new(StdHostEgress::default(), kernel);
+
+        let outcome = runtime.handle_udp_datagram_event(&event, b"hello-loopback".to_vec(), 1);
+
+        assert!(matches!(outcome, RuntimeOutcome::EgressOpened { .. }));
+        let mut received = [0u8; 64];
+        let (bytes, _) = server.recv_from(&mut received).unwrap();
+        assert_eq!(&received[..bytes], b"hello-loopback");
     }
 
     #[test]
