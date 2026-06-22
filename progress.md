@@ -1391,6 +1391,48 @@
 - Current git status summary: combined/net/UDP/CLI/progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit combined transparent proof runtime, then reassess remaining P1/P2 alpha gaps.
 
+## 2026-06-22T01:04:20Z — combined transparent proof committed; next objective selected
+
+- Commit created: `8be6767` (`add combined transparent proof`).
+- Current objective: implement setup DNS configuration for the bwrap-compatible setup helper.
+- Rationale: alpha gap reassessment P1 noted `foxproxsetup` created/configured TUN and default route but did not configure sandbox DNS to point at the broker resolver, despite docs requiring broker DNS reachability.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: add resolver configuration in `crates/foxprox-setup/src/main.rs`.
+
+## 2026-06-22T01:05:11Z — setup DNS configuration pending review
+
+- Current objective: commit setup-helper DNS configuration.
+- Changes implemented:
+  - Added `resolv_conf: PathBuf` to setup args, defaulting to `/etc/resolv.conf`.
+  - Added `--resolv-conf PATH` override for tests or alternate bwrap mount layouts.
+  - `configure_network` now writes resolver config after loopback/TUN address/MTU/up/default-route setup, pointing `nameserver` at `broker_ip`.
+  - Added tests for `--resolv-conf` parsing and generated resolver contents.
+- Subagents/reviews requested: `setup-dns-final` is running.
+- Verification commands and outcomes:
+  - `cargo test -p foxprox-setup` passed: 2 setup tests.
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 8 CLI tests, 51 core tests, 9 device tests, 34 net tests, 28 proxy tests, 2 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-setup` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-setup/src/main.rs`, `progress.md`.
+- Current git status summary: setup/progress modified; review artifact pending.
+- Next exact action: read setup DNS review, fix blockers if any, then commit.
+
+## 2026-06-22T01:07:45Z — setup DNS configuration review passed
+
+- Current objective: commit setup-helper DNS configuration.
+- Review result: `setup-dns-final` found no blockers.
+- Confirmed behavior:
+  - `foxproxsetup` writes resolver config pointing DNS at broker IP after TUN address/route setup.
+  - `--resolv-conf PATH` override is available for test or alternate bwrap mount layouts.
+  - Target exec remains after broker ready handshake and capability drop.
+- Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed; setup tests cover parser/write behavior; no dependency creep.
+- Files changed: `crates/foxprox-setup/src/main.rs`, `progress.md`.
+- Current git status summary: setup/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit setup DNS configuration, then reassess remaining P1/P2 alpha gaps.
+
 ## 2026-06-22T00:12:18Z — ICMP audit/cleanup rereview passed
 
 - Current objective: commit cleanup-safe setup socket binding plus ICMP proof audit coverage.
