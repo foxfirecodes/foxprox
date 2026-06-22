@@ -253,3 +253,8 @@
 
 - Runtime bridge polling must not call blocking std TCP reads. Configure standard TCP streams returned for bridge-like CONNECT paths as nonblocking in egress, and normalize `WouldBlock` to zero progress in `HostTcpStream`.
 - Keep explicit HTTP request forwarding on its separate response path so changing bridge stream readiness does not affect synchronous one-shot HTTP proxy forwarding.
+
+## 2026-06-22 — smoltcp close events
+
+- Store normalized flow keys and byte counters alongside private smoltcp listener sockets so close events can be emitted after smoltcp resets endpoints/state.
+- Runtime bridge cleanup and audit can now be driven by real adapter lifecycle events without exposing smoltcp `State` or socket handles.

@@ -1085,3 +1085,24 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 79a4fb8.
 - Remaining boundary risks: async connect timeouts, readiness registration, write fairness, and handling repeated zero-progress streams remain.
+
+## 2026-06-22 — Boundary objective: smoltcp normalized flow-close detection
+
+- Boundary under work: emit normalized stack flow-close events from smoltcp TCP socket lifecycle without exposing smoltcp state.
+- Allowed dependency direction: smoltcp socket states and endpoints stay in `foxprox-smoltcp`; emitted close data uses `StackFlowClosed`, `FlowKey`, and normalized byte counts; runtime/audit consume only the stack-neutral lifecycle event.
+- Dependency-risk assessment: runtime can clean bridges when it receives normalized close events, but smoltcp was not yet producing real close events. Adding adapter-local state for flow keys and byte counts proves cleanup/audit can be driven by actual stack lifecycle.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for smoltcp/runtime/audit.
+- Observed results: extended smoltcp listener state with normalized flow keys, byte counters, connection start time, and close emission state. `collect_tcp_events` now emits `StackEvent::FlowClosed(StackFlowClosed)` when an observed TCP socket is no longer active, with normalized byte counts and duration, while smoltcp state remains private. Added a RST-based test proving a real smoltcp close emits a normalized close event with 5 sandbox-to-host and 6 host-to-sandbox bytes. All verification passed.
+- Changed files:
+  - `crates/foxprox-smoltcp/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 101 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated in adapter crate.
+  - `cargo tree -p foxprox-runtime` — runtime consumes normalized close events.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: FIN half-close nuance, timeout-driven closes, and richer close reasons remain.

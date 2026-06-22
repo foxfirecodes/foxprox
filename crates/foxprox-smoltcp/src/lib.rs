@@ -8,9 +8,10 @@
 use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use foxprox_core::{FrontendKind, NormalizedEvent, SandboxId, TcpConnectAttempt};
+use foxprox_core::{ByteCounts, FrontendKind, NormalizedEvent, SandboxId, TcpConnectAttempt};
 use foxprox_net::{
-    OutboundIpPacket, StackAdapter, StackError, StackEvent, StackTcpData, StackTcpWrite,
+    FlowKey, FlowProtocol, OutboundIpPacket, StackAdapter, StackError, StackEvent, StackFlowClosed,
+    StackTcpData, StackTcpWrite,
 };
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -100,6 +101,11 @@ impl SmoltcpStackAdapter {
             tcp_listeners.push(TcpListenerState {
                 handle,
                 observed_connect: false,
+                closed_reported: false,
+                flow_key: None,
+                sandbox_to_host_bytes: 0,
+                host_to_sandbox_bytes: 0,
+                connected_at_millis: 0,
             });
         }
         Ok(Self {
@@ -122,6 +128,26 @@ impl SmoltcpStackAdapter {
         let mut events = Vec::new();
         for listener in &mut self.tcp_listeners {
             let socket = self.sockets.get_mut::<tcp::Socket>(listener.handle);
+            if listener.observed_connect && !listener.closed_reported && !socket.is_active() {
+                if let Some(key) = listener.flow_key.clone() {
+                    listener.closed_reported = true;
+                    events.push(StackEvent::FlowClosed(StackFlowClosed {
+                        sandbox_id: self.sandbox_id.clone(),
+                        frontend: self.frontend,
+                        key,
+                        byte_counts: ByteCounts::new(
+                            listener.sandbox_to_host_bytes,
+                            listener.host_to_sandbox_bytes,
+                        ),
+                        duration: std::time::Duration::from_millis(
+                            self.now_millis
+                                .saturating_sub(listener.connected_at_millis)
+                                .max(0) as u64,
+                        ),
+                    }));
+                }
+                continue;
+            }
             let Some(remote) = endpoint_to_socket_addr(socket.remote_endpoint()) else {
                 continue;
             };
@@ -130,6 +156,15 @@ impl SmoltcpStackAdapter {
             };
             if !listener.observed_connect {
                 listener.observed_connect = true;
+                listener.closed_reported = false;
+                listener.flow_key = Some(FlowKey {
+                    source: remote,
+                    destination: local,
+                    protocol: FlowProtocol::Tcp,
+                });
+                listener.sandbox_to_host_bytes = 0;
+                listener.host_to_sandbox_bytes = 0;
+                listener.connected_at_millis = self.now_millis;
                 events.push(StackEvent::PolicyEvent(NormalizedEvent::TcpConnectAttempt(
                     TcpConnectAttempt {
                         sandbox_id: self.sandbox_id.clone(),
@@ -145,6 +180,7 @@ impl SmoltcpStackAdapter {
                     .recv(|bytes| (bytes.len(), bytes.to_vec()))
                     .unwrap_or_default();
                 if !data.is_empty() {
+                    listener.sandbox_to_host_bytes += data.len() as u64;
                     events.push(StackEvent::TcpData(StackTcpData {
                         sandbox_id: self.sandbox_id.clone(),
                         frontend: self.frontend,
@@ -188,6 +224,11 @@ fn endpoint_to_socket_addr(endpoint: Option<IpEndpoint>) -> Option<SocketAddr> {
 struct TcpListenerState {
     handle: SocketHandle,
     observed_connect: bool,
+    closed_reported: bool,
+    flow_key: Option<FlowKey>,
+    sandbox_to_host_bytes: u64,
+    host_to_sandbox_bytes: u64,
+    connected_at_millis: i64,
 }
 
 impl StackAdapter for SmoltcpStackAdapter {
@@ -214,6 +255,7 @@ impl StackAdapter for SmoltcpStackAdapter {
                 let written = socket.send_slice(&data.bytes).map_err(|error| {
                     StackError::Adapter(format!("smoltcp TCP send failed: {error:?}"))
                 })?;
+                listener.host_to_sandbox_bytes += written as u64;
                 let now = self.now();
                 self.iface.poll(now, &mut self.device, &mut self.sockets);
                 return Ok(written);
@@ -450,6 +492,57 @@ mod tests {
     }
 
     #[test]
+    fn tcp_reset_emits_normalized_flow_closed_event_with_byte_counts() {
+        let config = SmoltcpAdapterConfig::new(
+            SandboxId::new("s1").unwrap(),
+            FrontendKind::Tun,
+            "10.0.0.1".parse().unwrap(),
+            24,
+            1500,
+        )
+        .unwrap()
+        .with_tcp_listener(80);
+        let mut adapter = SmoltcpStackAdapter::new(config).unwrap();
+        let syn = tcp_syn_packet();
+        adapter.ingest_ip_packet(&syn).unwrap();
+        let syn_ack = adapter
+            .poll_outbound_packets()
+            .unwrap()
+            .remove(0)
+            .bytes()
+            .to_vec();
+        let server_seq = u32::from_be_bytes([syn_ack[24], syn_ack[25], syn_ack[26], syn_ack[27]]);
+        let data_packet = tcp_ack_data_packet(0x1234_5679, server_seq.wrapping_add(1), b"hello");
+        let data_events = adapter.ingest_ip_packet(&data_packet).unwrap();
+        assert!(data_events
+            .iter()
+            .any(|event| matches!(event, StackEvent::TcpData(_))));
+        adapter
+            .send_tcp_data_to_sandbox(&StackTcpWrite {
+                sandbox_id: SandboxId::new("s1").unwrap(),
+                frontend: FrontendKind::Tun,
+                source: "10.0.0.2:49152".parse().unwrap(),
+                destination: "10.0.0.1:80".parse().unwrap(),
+                bytes: b"world!".to_vec(),
+            })
+            .unwrap();
+        adapter.poll_outbound_packets().unwrap();
+
+        let rst = tcp_rst_packet(0x1234_567e, server_seq.wrapping_add(7));
+        let close_events = adapter.ingest_ip_packet(&rst).unwrap();
+
+        let Some(StackEvent::FlowClosed(closed)) = close_events
+            .iter()
+            .find(|event| matches!(event, StackEvent::FlowClosed(_)))
+        else {
+            panic!("expected flow closed event");
+        };
+        assert_eq!(closed.key.source, "10.0.0.2:49152".parse().unwrap());
+        assert_eq!(closed.key.destination, "10.0.0.1:80".parse().unwrap());
+        assert_eq!(closed.byte_counts, ByteCounts::new(5, 6));
+    }
+
+    #[test]
     fn adapter_rejects_invalid_public_config_without_exposing_smoltcp_errors() {
         assert!(SmoltcpAdapterConfig::new(
             SandboxId::new("s1").unwrap(),
@@ -553,6 +646,16 @@ mod tests {
         assert_eq!(event.destination, "10.0.0.1:80".parse().unwrap());
         assert_eq!(outbound.len(), 1);
         assert_eq!(outbound[0].bytes()[9], 6);
+    }
+
+    fn tcp_rst_packet(seq: u32, ack: u32) -> Vec<u8> {
+        let mut packet = tcp_ack_data_packet(seq, ack, &[]);
+        packet[33] = 0x14;
+        packet[36] = 0;
+        packet[37] = 0;
+        let tcp_checksum = tcp_checksum_ipv4([10, 0, 0, 2], [10, 0, 0, 1], &packet[20..]);
+        packet[36..38].copy_from_slice(&tcp_checksum.to_be_bytes());
+        packet
     }
 
     fn tcp_ack_packet(seq: u32, ack: u32) -> Vec<u8> {
