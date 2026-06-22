@@ -175,6 +175,8 @@ impl SetupHelperPlan {
             );
         }
         steps.extend([
+            SetupHelperStep::new("close_setup_fds", vec!["close-setup-fds".to_string()])
+                .with_evidence("closes_setup_only_fds", "true"),
             SetupHelperStep::new(
                 "drop_setup_capability",
                 vec!["capsh".to_string(), "--drop=cap_net_admin".to_string()],
@@ -320,6 +322,7 @@ mod tests {
                 "configure_dns",
                 "configure_proxy_reachability",
                 "handoff_tun_fd",
+                "close_setup_fds",
                 "drop_setup_capability",
                 "exec_target",
             ]
@@ -330,11 +333,12 @@ mod tests {
             .any(|w| w == ["dev", "foxprox0", "mode"]));
         assert_eq!(plan.steps[4].evidence["dns_mode"], "broker_dns");
         assert_eq!(plan.steps[6].evidence["setup_control_fd"], "9");
+        assert_eq!(plan.steps[7].evidence["closes_setup_only_fds"], "true");
         assert_eq!(
-            plan.steps[7].evidence["dropped_capability"],
+            plan.steps[8].evidence["dropped_capability"],
             "CAP_NET_ADMIN"
         );
-        assert_eq!(plan.steps[8].evidence["target_argc"], "2");
+        assert_eq!(plan.steps[9].evidence["target_argc"], "2");
     }
 
     #[test]
@@ -348,7 +352,7 @@ mod tests {
         assert_eq!(audit.frontend, Some(Frontend::Setup));
         assert_eq!(audit.details["setup_helper"], "foxproxsetup");
         assert_eq!(audit.details["drops_capability"], "CAP_NET_ADMIN");
-        assert_eq!(audit.details["steps"], "8");
+        assert_eq!(audit.details["steps"], "9");
     }
 
     #[test]

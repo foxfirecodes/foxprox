@@ -1073,3 +1073,38 @@ The bwrap setup helper is now represented by a structured `SetupHelperPlan`, and
 
 ### Remaining blind spots
 - `foxproxsetup` is still plan-first and does not execute privileged `ip` commands, send a real TUN fd, or exec the target. Real privileged setup execution remains runtime integration work.
+
+## 2026-06-21 — Round-9 TCP bridge observability fixes cycle
+
+### Behavior under work
+Fix round-9 high/blocker findings before further runtime work: TCP stream egress responses emitted by smoltcp must be audited and written to the packet device, TCP egress decision/close records must preserve the accepted sandbox source endpoint, and the setup helper plan must include closing setup-only file descriptors before exec.
+
+### Expected evidence
+- `SmoltcpTunBridge::bridge_first_tcp_stream_to_egress` writes newly emitted host-response packets to the underlying `PacketDevice` after structured `to_sandbox` write-attempt audit.
+- TCP connect/close audit records include the accepted smoltcp stream's sandbox source endpoint.
+- `SetupHelperPlan` includes `close_setup_fds` before `exec_target`, with structured evidence.
+
+### Commands run
+- `cargo fmt` — applied formatting for round-9 TCP bridge and setup helper fixes.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 103 core tests, 3 device tests, 3 egress tests, and 7 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_stack::tests::smoltcp_tun_bridge_audits_tcp_egress_and_flow_close ... ok`
+- `setup::tests::setup_helper_plan_contains_network_setup_and_exec_contract ... ok`
+- `foxprox_cli::tests::foxproxsetup_plan_parses_bwrap_helper_flags ... ok`
+
+### Interpretation
+Round-9 findings are fixed. The smoltcp TCP bridge now derives the accepted sandbox peer endpoint from smoltcp socket metadata, includes it in TCP connect/close/error audit records, collects newly emitted host-response IP packets, gates each `to_sandbox` packet with structured write-attempt audit, and writes them through the underlying `PacketDevice`. The setup helper plan now includes `close_setup_fds` with explicit `closes_setup_only_fds=true` evidence before capability drop and target exec.
+
+### Changed files
+- `crates/foxprox-stack/src/lib.rs`
+- `crates/foxprox-core/src/setup.rs`
+- `crates/foxprox-cli/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Packet writes are still exercised through in-memory devices; real TUN fd IO and continuous async scheduling remain runtime integration work.
+- `foxproxsetup` remains plan-first and still does not execute privileged setup commands or fd passing.

@@ -67,3 +67,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-21 — foxproxsetup contract as plan-first helper
 
 - The setup helper can be made testable before privileged execution by parsing the exact bwrap-emitted `foxproxsetup` flag shape into a structured `SetupHelperPlan`. Tests should assert helper steps and audit fields rather than executing `ip` or requiring `CAP_NET_ADMIN`.
+
+## 2026-06-21 — Smoltcp stream identity and packet-device writes
+
+- When bridging smoltcp TCP stream bytes to host egress, preserve `tcp::Socket` remote/local endpoints before auditing egress. Host responses sent into a smoltcp socket must also be collected from the stack's emitted packet queue, audited as `to_sandbox` write attempts, and written through the `PacketDevice`; `packets_emitted` alone is not sufficient runtime evidence.

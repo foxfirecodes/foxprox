@@ -337,6 +337,7 @@ mod tests {
         assert_eq!(value["audit"]["kind"], "tun_configured");
         assert_eq!(value["plan"]["steps"][0]["name"], "create_tun");
         assert_eq!(value["plan"]["steps"][6]["name"], "handoff_tun_fd");
+        assert_eq!(value["plan"]["steps"][7]["name"], "close_setup_fds");
         assert_eq!(value["plan"]["target_command"][0], "curl");
     }
 

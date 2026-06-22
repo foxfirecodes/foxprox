@@ -19,6 +19,7 @@ use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::net::IpAddr;
 use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -206,6 +207,28 @@ impl SmoltcpIpStack {
 
     pub fn outbound_packets(&self) -> Vec<Vec<u8>> {
         self.device.outbound_packets()
+    }
+
+    pub fn outbound_len(&self) -> usize {
+        self.device.outbound.borrow().len()
+    }
+
+    pub fn outbound_packets_since(&self, index: usize) -> Vec<Vec<u8>> {
+        self.device
+            .outbound
+            .borrow()
+            .iter()
+            .skip(index)
+            .cloned()
+            .collect()
+    }
+
+    pub fn first_tcp_endpoints(&mut self) -> Option<(NetworkEndpoint, NetworkEndpoint)> {
+        let handle = self.tcp_handles.first().copied()?;
+        let socket = self.sockets.get_mut::<tcp::Socket>(handle);
+        let remote = socket.remote_endpoint()?;
+        let local = socket.local_endpoint()?;
+        Some((network_endpoint(remote), network_endpoint(local)))
     }
 
     pub fn mtu(&self) -> usize {
@@ -466,10 +489,14 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                 None,
             ));
         }
+        let (source, local_destination) = self
+            .stack
+            .first_tcp_endpoints()
+            .ok_or(TcpEgressError::BridgeFailed)?;
         let request = PolicyRequest::tcp_connect(
             self.sandbox_id.clone(),
             Frontend::Tun,
-            NetworkEndpoint::default(),
+            source.clone(),
             destination.clone(),
         );
         let policy_decision = self.broker.evaluate(&request);
@@ -488,6 +515,7 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                 let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
                     .with_frontend(Frontend::Tun)
                     .with_protocol(foxprox_core::Protocol::Tcp)
+                    .with_source(source.clone())
                     .with_destination(destination)
                     .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
                     .with_detail("stack", "smoltcp")
@@ -496,9 +524,44 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                 return Err(error);
             }
         };
+        let outbound_start = self.stack.outbound_len();
         let stack = self
             .stack
             .send_first_tcp_stream_response(&to_sandbox, closed_at_ms as i64)?;
+        let emitted_packets = self.stack.outbound_packets_since(outbound_start);
+        let mut packets_written = 0usize;
+        for packet in emitted_packets {
+            let parsed =
+                ParsedIpPacket::parse(&packet).map_err(|_| TcpEgressError::BridgeFailed)?;
+            let packet_request = request_for_packet(&self.sandbox_id, &parsed);
+            let outbound_audit = packet_audit(
+                &self.sandbox_id,
+                &parsed,
+                closed_at_ms as i64,
+                packet.len(),
+                "to_sandbox",
+            )
+            .with_detail("stack", "smoltcp")
+            .with_detail("write_phase", "attempt")
+            .with_detail("tcp_stream_local", endpoint_detail(&local_destination))
+            .with_detail("tcp_stream_remote", endpoint_detail(&source));
+            if let Err(decision) = self
+                .broker
+                .append_audit_for(&packet_request, outbound_audit)
+            {
+                return Ok(tcp_stream_evidence(
+                    ByteCounts::ZERO,
+                    stack,
+                    false,
+                    decision.decision,
+                    decision.reason,
+                ));
+            }
+            self.device
+                .write_packet(&packet)
+                .map_err(|_| TcpEgressError::BridgeFailed)?;
+            packets_written += 1;
+        }
         let byte_counts = ByteCounts {
             from_sandbox: from_sandbox.len() as u64,
             to_sandbox: to_sandbox.len() as u64,
@@ -510,6 +573,7 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         )
         .with_frontend(Frontend::Tun)
         .with_protocol(foxprox_core::Protocol::Tcp)
+        .with_source(source)
         .with_destination(destination)
         .with_byte_counts(byte_counts.clone())
         .with_duration_ms(closed_at_ms.saturating_sub(opened_at_ms))
@@ -518,7 +582,7 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
             return Ok(tcp_stream_evidence(
                 byte_counts,
                 stack,
-                true,
+                packets_written > 0,
                 decision.decision,
                 decision.reason,
             ));
@@ -526,7 +590,7 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         Ok(tcp_stream_evidence(
             byte_counts,
             stack,
-            true,
+            packets_written > 0,
             Decision::Allow,
             None,
         ))
@@ -540,6 +604,26 @@ impl StackPollEvidence {
             packets_emitted: 0,
             outbound_bytes: 0,
         }
+    }
+}
+
+fn network_endpoint(endpoint: smoltcp::wire::IpEndpoint) -> NetworkEndpoint {
+    NetworkEndpoint::socket(smoltcp_ip_to_std(endpoint.addr), endpoint.port)
+}
+
+fn smoltcp_ip_to_std(address: IpAddress) -> IpAddr {
+    address
+        .to_string()
+        .parse()
+        .expect("smoltcp IP formats as std IP")
+}
+
+fn endpoint_detail(endpoint: &NetworkEndpoint) -> String {
+    match (endpoint.ip, endpoint.port) {
+        (Some(ip), Some(port)) => format!("{ip}:{port}"),
+        (Some(ip), None) => ip.to_string(),
+        (None, Some(port)) => format!(":{port}"),
+        (None, None) => "unknown".to_string(),
     }
 }
 
@@ -818,14 +902,30 @@ mod tests {
         assert_eq!(evidence.byte_counts.to_sandbox, 9);
         assert!(evidence.stack.packets_emitted >= 1);
         assert_eq!(egress.requests, vec![b"hello foxprox".to_vec()]);
+        let reply = bridge.device().outbound().last().unwrap();
+        assert_eq!(tcp_payload(reply), b"host pong");
         let records: Vec<_> = bridge.broker().audit().records().collect();
-        assert_eq!(records.len(), 2);
+        assert_eq!(records.len(), 3);
         assert_eq!(records[0].kind, AuditKind::TcpConnectDecision);
         assert_eq!(records[0].decision, Some(Decision::Allow));
-        assert_eq!(records[1].kind, AuditKind::TcpFlowClosed);
-        assert_eq!(records[1].details["stack"], "smoltcp");
-        assert_eq!(records[1].byte_counts.as_ref().unwrap().from_sandbox, 13);
-        assert_eq!(records[1].byte_counts.as_ref().unwrap().to_sandbox, 9);
+        assert_eq!(
+            records[0].source.as_ref().unwrap().ip.unwrap().to_string(),
+            "10.0.2.15"
+        );
+        assert_eq!(records[0].source.as_ref().unwrap().port, Some(50_000));
+        assert_eq!(records[1].kind, AuditKind::PacketObserved);
+        assert_eq!(records[1].details["direction"], "to_sandbox");
+        assert_eq!(records[1].details["write_phase"], "attempt");
+        assert_eq!(records[1].details["tcp_stream_remote"], "10.0.2.15:50000");
+        assert_eq!(records[2].kind, AuditKind::TcpFlowClosed);
+        assert_eq!(records[2].details["stack"], "smoltcp");
+        assert_eq!(
+            records[2].source.as_ref().unwrap().ip.unwrap().to_string(),
+            "10.0.2.15"
+        );
+        assert_eq!(records[2].source.as_ref().unwrap().port, Some(50_000));
+        assert_eq!(records[2].byte_counts.as_ref().unwrap().from_sandbox, 13);
+        assert_eq!(records[2].byte_counts.as_ref().unwrap().to_sandbox, 9);
     }
 
     #[test]
