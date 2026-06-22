@@ -112,3 +112,7 @@ Audit records are not a replacement for frontend control state. HTTP CONNECT egr
 ## 2026-06-21 — SOCKS IP-form requests make deterministic egress tests
 
 When testing SOCKS5-to-egress integration, use IPv4 address-form CONNECT requests to loopback. The parsed event yields a direct IP target and avoids DNS resolution variability while still exercising the shared egress boundary.
+
+## 2026-06-21 — UDP egress connect needs datagram evidence
+
+A UDP socket can connect locally without proving a peer exists. Verify UDP egress with an actual send/receive exchange against a loopback UDP server rather than treating `UdpSocket::connect` alone as forwarding evidence.

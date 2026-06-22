@@ -8,7 +8,7 @@
 
 use std::fmt;
 use std::io;
-use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::time::Duration;
 
 /// Host-side TCP connect target.
@@ -18,7 +18,47 @@ pub struct TcpTarget {
     port: u16,
 }
 
+/// Host-side UDP datagram target.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct UdpTarget {
+    host: String,
+    port: u16,
+}
+
 impl TcpTarget {
+    pub fn new_host(host: impl Into<String>, port: u16) -> Result<Self, EgressError> {
+        let host = host
+            .into()
+            .trim()
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        if host.is_empty() {
+            return Err(EgressError::InvalidTarget(
+                "host must not be empty".to_owned(),
+            ));
+        }
+        if port == 0 {
+            return Err(EgressError::InvalidTarget(
+                "port must not be zero".to_owned(),
+            ));
+        }
+        Ok(Self { host, port })
+    }
+
+    pub fn new_ip(ip: IpAddr, port: u16) -> Result<Self, EgressError> {
+        Self::new_host(ip.to_string(), port)
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+}
+
+impl UdpTarget {
     pub fn new_host(host: impl Into<String>, port: u16) -> Result<Self, EgressError> {
         let host = host
             .into()
@@ -72,9 +112,35 @@ impl TcpEgressConnection {
     }
 }
 
+/// Host UDP session returned by the egress backend.
+#[derive(Debug)]
+pub struct UdpEgressSession {
+    target: UdpTarget,
+    socket: UdpSocket,
+}
+
+impl UdpEgressSession {
+    pub fn target(&self) -> &UdpTarget {
+        &self.target
+    }
+
+    pub fn socket(&self) -> &UdpSocket {
+        &self.socket
+    }
+
+    pub fn into_inner(self) -> UdpSocket {
+        self.socket
+    }
+}
+
 /// TCP egress backend interface.
 pub trait TcpEgress {
     fn connect(&self, target: &TcpTarget) -> Result<TcpEgressConnection, EgressError>;
+}
+
+/// UDP egress backend interface.
+pub trait UdpEgress {
+    fn connect(&self, target: &UdpTarget) -> Result<UdpEgressSession, EgressError>;
 }
 
 /// Blocking host TCP connector used by initial proxy/runtime proofs.
@@ -95,6 +161,27 @@ impl HostTcpEgress {
 
     pub fn connect_timeout(&self) -> Duration {
         self.connect_timeout
+    }
+}
+
+/// Blocking host UDP connector used by initial UDP/DNS forwarding proofs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HostUdpEgress {
+    read_timeout: Duration,
+}
+
+impl HostUdpEgress {
+    pub fn new(read_timeout: Duration) -> Result<Self, EgressError> {
+        if read_timeout.is_zero() {
+            return Err(EgressError::InvalidTarget(
+                "read timeout must not be zero".to_owned(),
+            ));
+        }
+        Ok(Self { read_timeout })
+    }
+
+    pub fn read_timeout(&self) -> Duration {
+        self.read_timeout
     }
 }
 
@@ -133,6 +220,44 @@ impl TcpEgress for HostTcpEgress {
     }
 }
 
+impl UdpEgress for HostUdpEgress {
+    fn connect(&self, target: &UdpTarget) -> Result<UdpEgressSession, EgressError> {
+        let mut addrs = (target.host.as_str(), target.port)
+            .to_socket_addrs()
+            .map_err(|error| EgressError::UdpResolve {
+                target: target.clone(),
+                error: error.to_string(),
+            })?;
+        let addr = addrs
+            .next()
+            .ok_or_else(|| EgressError::UdpNoResolvedAddresses {
+                target: target.clone(),
+            })?;
+        let bind_addr = match addr {
+            SocketAddr::V4(_) => SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
+            SocketAddr::V6(_) => SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+        };
+        let socket = UdpSocket::bind(bind_addr).map_err(|error| EgressError::UdpBind {
+            target: target.clone(),
+            error: error.to_string(),
+        })?;
+        socket
+            .connect(addr)
+            .map_err(|error| EgressError::UdpConnect {
+                target: target.clone(),
+                addr,
+                error: error.to_string(),
+            })?;
+        socket
+            .set_read_timeout(Some(self.read_timeout))
+            .map_err(EgressError::from)?;
+        Ok(UdpEgressSession {
+            target: target.clone(),
+            socket,
+        })
+    }
+}
+
 /// Egress errors suitable for audit/retry diagnostics.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum EgressError {
@@ -146,6 +271,22 @@ pub enum EgressError {
     },
     Connect {
         target: TcpTarget,
+        addr: SocketAddr,
+        error: String,
+    },
+    UdpResolve {
+        target: UdpTarget,
+        error: String,
+    },
+    UdpNoResolvedAddresses {
+        target: UdpTarget,
+    },
+    UdpBind {
+        target: UdpTarget,
+        error: String,
+    },
+    UdpConnect {
+        target: UdpTarget,
         addr: SocketAddr,
         error: String,
     },
@@ -175,6 +316,30 @@ impl fmt::Display for EgressError {
                 "egress-connect-failed: {}:{} via {addr}: {error}",
                 target.host, target.port
             ),
+            Self::UdpResolve { target, error } => write!(
+                f,
+                "udp-egress-resolve-failed: {}:{}: {error}",
+                target.host, target.port
+            ),
+            Self::UdpNoResolvedAddresses { target } => write!(
+                f,
+                "udp-egress-resolve-empty: {}:{}",
+                target.host, target.port
+            ),
+            Self::UdpBind { target, error } => write!(
+                f,
+                "udp-egress-bind-failed: {}:{}: {error}",
+                target.host, target.port
+            ),
+            Self::UdpConnect {
+                target,
+                addr,
+                error,
+            } => write!(
+                f,
+                "udp-egress-connect-failed: {}:{} via {addr}: {error}",
+                target.host, target.port
+            ),
             Self::Io(error) => write!(f, "egress-io-error: {error}"),
         }
     }
@@ -192,7 +357,7 @@ impl From<io::Error> for EgressError {
 mod tests {
     use super::*;
     use std::io::{Read, Write};
-    use std::net::{Ipv4Addr, TcpListener};
+    use std::net::{Ipv4Addr, TcpListener, UdpSocket};
     use std::thread;
 
     #[test]
@@ -221,13 +386,51 @@ mod tests {
     }
 
     #[test]
-    fn tcp_target_rejects_empty_host_and_zero_port() {
+    fn host_udp_egress_connects_to_loopback_socket_and_exchanges_datagrams() {
+        let server_socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let server_addr = server_socket.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let mut request = [0_u8; 4];
+            let (length, peer) = server_socket.recv_from(&mut request).unwrap();
+            server_socket.send_to(b"pong", peer).unwrap();
+            (length, request)
+        });
+        let egress = HostUdpEgress::new(Duration::from_secs(1)).unwrap();
+        let target = UdpTarget::new_ip(server_addr.ip(), server_addr.port()).unwrap();
+
+        let session = egress
+            .connect(&target)
+            .expect("UDP egress connect succeeds");
+        session.socket().send(b"ping").unwrap();
+        let mut response = [0_u8; 4];
+        let response_len = session.socket().recv(&mut response).unwrap();
+        let (request_len, request) = server.join().unwrap();
+
+        assert_eq!(session.target(), &target);
+        assert_eq!(request_len, 4);
+        assert_eq!(&request, b"ping");
+        assert_eq!(response_len, 4);
+        assert_eq!(&response, b"pong");
+    }
+
+    #[test]
+    fn tcp_and_udp_targets_reject_empty_host_and_zero_port() {
         assert_eq!(
             TcpTarget::new_host("  ", 443).unwrap_err().to_string(),
             "invalid-egress-target: host must not be empty"
         );
         assert_eq!(
             TcpTarget::new_host("example.com", 0)
+                .unwrap_err()
+                .to_string(),
+            "invalid-egress-target: port must not be zero"
+        );
+        assert_eq!(
+            UdpTarget::new_host("  ", 53).unwrap_err().to_string(),
+            "invalid-egress-target: host must not be empty"
+        );
+        assert_eq!(
+            UdpTarget::new_host("example.com", 0)
                 .unwrap_err()
                 .to_string(),
             "invalid-egress-target: port must not be zero"

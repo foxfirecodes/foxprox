@@ -613,3 +613,24 @@
 - What failed or surprised the agent: no failures; SOCKS IP-form requests are useful for deterministic loopback egress tests because the parsed event can produce an IP target without DNS resolution.
 - What remains unproven: SOCKS5 greeting negotiation, full bidirectional stream pumping, plaintext HTTP proxy forwarding, UDP egress/DNS upstream forwarding, TCP close/byte-count audit, and TUN TCP forwarding are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — host UDP egress proof slice
+
+- Slice attempted: add a shared host UDP egress backend proof with real loopback datagram exchange.
+- Why next: UDP flow tracking, DNS classification, and UDP policy exist, but there is no host UDP socket backend for DNS/UDP forwarding; alpha requires UDP forwarding and DNS upstream egress.
+- Verification plan: extend `foxprox-egress` with typed UDP target/session support, verify a loopback UDP server receives a datagram and replies through an egress-owned socket, validate target errors, then run focused egress tests plus formatting, clippy, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — host UDP egress proof
+
+- Slice attempted: shared host UDP egress backend proof with real loopback datagram exchange.
+- Why next: UDP policy/flow tracking existed, but no shared UDP socket backend was available for future UDP forwarding or DNS upstream queries.
+- What changed: extended `foxprox-egress` with `UdpTarget`, `UdpEgress` trait, `HostUdpEgress`, `UdpEgressSession`, UDP-specific resolve/bind/connect errors, read-timeout validation, and a loopback UDP datagram exchange test.
+- Verification:
+  - Focused checks passed: `cargo test -p foxprox-egress udp` ran 2 tests for UDP loopback datagram exchange and shared TCP/UDP target validation.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 4 `foxprox-egress` tests, 5 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 15 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed.
+- What failed or surprised the agent: no failures; UDP `connect` sets a default peer for send/recv but does not prove remote reachability until a datagram exchange test does so.
+- What remains unproven: UDP forwarding from normalized flow events, DNS upstream query/response handling, reply routing to sandbox, UDP resource limits, and live expiration scheduling are still absent.
+- Commit: this commit.
