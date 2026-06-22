@@ -10,6 +10,7 @@
 
 pub mod audit;
 pub mod broker;
+pub mod config;
 pub mod dns;
 pub mod dns_handler;
 pub mod flow;
@@ -26,6 +27,9 @@ pub mod udp;
 
 pub use audit::{AuditError, AuditRecord, BoundedAuditLedger};
 pub use broker::BrokerCore;
+pub use config::{
+    BrokerRuntimeConfig, ProxyListenerConfig, ResourceLimitConfig, RuntimeConfigError,
+};
 pub use dns::{
     build_refused_response, parse_dns_query, DnsParseError, DnsQueryMetadata, DnsQueryType,
 };

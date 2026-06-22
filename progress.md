@@ -531,3 +531,33 @@ Transparent TCP byte inspection now reaches the forwarding harness. Direct HTTP 
 
 ### Remaining blind spots
 - The harness still represents a deterministic stream chunk, not full smoltcp stream reassembly or async socket bridging. TLS/HTTP parsers are connected to the harness but not yet to a real TUN TCP stack.
+
+## 2026-06-21 — Runtime config schema observability cycle
+
+### Behavior under work
+Add an explicit serde-compatible runtime configuration schema tying setup, policy, audit capacity, proxy listener settings, UDP limits, and DNS upstream together with validation and structured audit evidence.
+
+### Expected evidence
+- Valid runtime config serializes stable structured fields and emits `broker_started` audit summary details.
+- Invalid setup/policy/audit/listener/resource-limit values produce stable validation error codes and fail-closed `broker_error` audit evidence.
+
+### Commands run
+- `cargo fmt` — applied formatting for `config.rs`.
+- `cargo test --all-targets --all-features` — passed, 88 unit tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `config::tests::runtime_config_serializes_stable_alpha_fields_and_audit ... ok`
+- `config::tests::runtime_config_validation_reports_setup_policy_and_limit_errors ... ok`
+
+### Interpretation
+The core now exposes a serde-compatible alpha runtime configuration schema for setup, policy, audit capacity, DNS upstream, proxy listener toggles, and UDP active-flow limits. Validation catches setup, policy, audit, listener, and resource-limit errors with stable codes and fail-closed `broker_error` audit evidence.
+
+### Changed files
+- `crates/foxprox-core/src/config.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `progress.md`
+
+### Remaining blind spots
+- Config loading from CLI/files is still not implemented; this commit provides the schema and validation contract that CLI/runtime layers must use.
