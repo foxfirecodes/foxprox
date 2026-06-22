@@ -8,7 +8,10 @@
 
 use std::fmt;
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
+use std::net::{
+    IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket,
+};
+use std::thread;
 use std::time::Duration;
 
 /// Host-side TCP connect target.
@@ -110,6 +113,43 @@ impl TcpEgressConnection {
     pub fn into_inner(self) -> TcpStream {
         self.stream
     }
+}
+
+/// Byte counts returned after a TCP bridge finishes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TcpBridgeStats {
+    pub client_to_target_bytes: u64,
+    pub target_to_client_bytes: u64,
+}
+
+/// Copy bytes bidirectionally between a frontend client stream and a host egress
+/// TCP connection until both directions reach EOF.
+pub fn bridge_tcp_streams(
+    client: TcpStream,
+    target: TcpEgressConnection,
+) -> Result<TcpBridgeStats, EgressError> {
+    let mut client_reader = client.try_clone().map_err(EgressError::from)?;
+    let mut target_writer = target.stream.try_clone().map_err(EgressError::from)?;
+    let mut target_reader = target.into_inner();
+    let mut client_writer = client;
+
+    let upload = thread::spawn(move || -> Result<u64, EgressError> {
+        let bytes = io::copy(&mut client_reader, &mut target_writer).map_err(EgressError::from)?;
+        let _ = target_writer.shutdown(Shutdown::Write);
+        Ok(bytes)
+    });
+
+    let target_to_client_bytes =
+        io::copy(&mut target_reader, &mut client_writer).map_err(EgressError::from)?;
+    let _ = client_writer.shutdown(Shutdown::Write);
+    let client_to_target_bytes = upload
+        .join()
+        .map_err(|_| EgressError::Io("tcp-bridge-upload-thread-panicked".to_owned()))??;
+
+    Ok(TcpBridgeStats {
+        client_to_target_bytes,
+        target_to_client_bytes,
+    })
 }
 
 /// Host UDP session returned by the egress backend.
@@ -383,6 +423,41 @@ mod tests {
         assert_eq!(connection.target(), &target);
         assert_eq!(&request, b"ping");
         assert_eq!(&response, b"pong");
+    }
+
+    #[test]
+    fn tcp_bridge_moves_bytes_between_client_and_egress_and_counts_them() {
+        let upstream_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream = thread::spawn(move || {
+            let (mut stream, _) = upstream_listener.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            stream.write_all(b"pong").unwrap();
+            request
+        });
+
+        let client_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let client_addr = client_listener.local_addr().unwrap();
+        let client = TcpStream::connect(client_addr).unwrap();
+        let (broker_client, _) = client_listener.accept().unwrap();
+        let egress = HostTcpEgress::new(Duration::from_secs(1)).unwrap();
+        let target = TcpTarget::new_ip(upstream_addr.ip(), upstream_addr.port()).unwrap();
+        let connection = egress.connect(&target).unwrap();
+
+        let bridge = thread::spawn(move || bridge_tcp_streams(broker_client, connection));
+        let mut client = client;
+        client.write_all(b"ping").unwrap();
+        client.shutdown(Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+
+        let stats = bridge.join().unwrap().unwrap();
+        let upstream_request = upstream.join().unwrap();
+        assert_eq!(&upstream_request, b"ping");
+        assert_eq!(&response, b"pong");
+        assert_eq!(stats.client_to_target_bytes, 4);
+        assert_eq!(stats.target_to_client_bytes, 4);
     }
 
     #[test]

@@ -132,3 +132,7 @@ Explicit HTTP proxy requests arrive in absolute-form, but origin servers expect 
 ## 2026-06-21 — SOCKS5 greeting is protocol state, not policy state
 
 SOCKS5 method negotiation should be validated before CONNECT policy events exist. Keep it as a frontend protocol preflight that accepts only no-authentication for alpha and rejects unsupported or malformed greetings without emitting misleading network-policy audit records.
+
+## 2026-06-21 — TCP tunnel pumps need EOF and byte-count evidence
+
+A deterministic blocking tunnel proof can use cloned `TcpStream`s, copy upload in one thread, copy download in the caller, and shut down write halves on EOF. Return byte counts separately so later flow-close audit code can consume forwarding evidence without coupling egress to policy types.

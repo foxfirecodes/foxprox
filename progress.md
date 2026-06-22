@@ -721,3 +721,25 @@
 - What failed or surprised the agent: no behavior failures; method-count length validation is enough for the greeting boundary without coupling it to later CONNECT policy evaluation.
 - What remains unproven: listener state machine joining greeting plus CONNECT, proxy authentication rejection in a live stream, full SOCKS stream pumping, TCP close/byte-count audit, and runtime resource limits are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — TCP egress bridge byte-pump slice
+
+- Slice attempted: add a reusable blocking TCP bridge that copies bytes bidirectionally between a frontend client stream and a shared host egress connection, returning byte-count evidence.
+- Why next: proxy paths can establish egress connections, but CONNECT/SOCKS still lack a tunnel pump; a deterministic loopback bridge proof reduces that runtime forwarding gap before listener state machines are added.
+- Verification plan: extend `foxprox-egress` with a `bridge_tcp_streams` helper and byte-count stats, verify a local client sends bytes through the bridge to an upstream loopback server and receives the response, then run formatting, clippy, focused egress tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — TCP egress bridge byte-pump
+
+- Slice attempted: reusable blocking TCP bridge between a frontend client stream and a shared host egress connection.
+- Why next: proxy CONNECT/SOCKS paths could establish egress but did not yet prove a tunnel pump; this adds byte-moving evidence without introducing listener state machines or async runtime complexity.
+- What changed: `foxprox-egress` now exposes `TcpBridgeStats` and `bridge_tcp_streams`, which copies client→target and target→client concurrently until EOF, shuts down write halves, and returns byte counts for later flow-close audit integration.
+- Verification:
+  - `cargo fmt --check` passed.
+  - Focused check passed: `cargo test -p foxprox-egress tcp_bridge -- --nocapture` verified a loopback client sent `ping` through the bridge to an upstream egress server, received `pong`, and reported 4 bytes in each direction.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 5 `foxprox-dns` tests, 5 `foxprox-egress` tests, 5 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 20 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no failures; an EOF-driven blocking bridge is enough for deterministic local tunnel evidence, though async/backpressure and cancellation remain future runtime work.
+- What remains unproven: integrating the bridge with CONNECT/SOCKS listener state machines, TCP flow close audit records, resource limits/cancellation, TUN TCP forwarding, and async backpressure are still absent.
+- Commit: this commit.
