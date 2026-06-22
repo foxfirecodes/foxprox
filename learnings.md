@@ -221,3 +221,7 @@ DNS cache APIs should not force callers to choose the first hostname for an IP. 
 ## 2026-06-21 - UDP lifecycle audit needs reply-side byte accounting
 
 UDP pseudo-flows are bidirectional once a host socket is opened. Expiration audit records should include host-to-sandbox bytes as well as sandbox-to-host bytes, using saturating counters so large flows cannot wrap audit totals.
+
+## 2026-06-21 - bwrap setup argv needs explicit helper-target separation
+
+The setup backend should construct `foxproxsetup -- target...` explicitly and validate empty/NUL argv before launch. This avoids ambiguous command lines where the target could run without the network setup helper or where malformed env/argv reaches process spawning.

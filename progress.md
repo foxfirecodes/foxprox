@@ -1194,3 +1194,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * lifecycle audit records now reflect complete broker-mediated datagram volume for the pseudo-flow.
 * Audit evidence: flow and audit tests assert bidirectional byte totals and JSON byte_count fields for UDP lifecycle events.
 * Residual risk: live host UDP socket mapping and actual reply packet synthesis/routing remain future work; this commit only strengthens bounded core flow accounting.
+
+## 2026-06-21 - bwrap setup command construction boundary
+
+* Invariant under work: bwrap-compatible setup must be constructed through a validated builder that always requests a new network namespace, temporary setup-only `CAP_NET_ADMIN`, `/dev/net/tun` access, and `foxproxsetup -- target...` command separation.
+* Threat or failure mode addressed: an integration caller could accidentally launch a target without network isolation, omit TUN access, keep capability semantics implicit, or build ambiguous helper/target argv that bypasses the broker setup phase.
+* Planned verification: add a small integration crate with pure command/env builders, validation tests for required bwrap flags and target separation, negative tests for empty command/helper/target/NUL env values, then run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - bwrap setup command construction boundary results
+
+* Tests added/updated:
+  * bwrap setup command builder includes `--unshare-user`, `--unshare-net`, setup-only `--cap-add CAP_NET_ADMIN`, `/dev/net/tun` bind, and explicit `foxproxsetup -- target...` argv separation.
+  * empty bwrap program, setup helper, target argv, and NUL-containing target args fail validation.
+  * proxy environment variables are emitted in deterministic HTTP/HTTPS/ALL/NO proxy order and NUL-containing values fail validation.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` found test slice comparison type errors in the new integrations crate.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: core 161 tests, integrations 3 tests, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * integration code now has a pure, validated setup command boundary rather than ad hoc bwrap argv construction.
+  * invalid setup argv/env inputs fail before launch, preserving the requirement that setup runs before target application execution.
+* Audit evidence: no runtime audit event in this pure builder; lifecycle events for broker/session/TUN/proxy setup already exist in core and remain the expected runtime emission points.
+* Residual risk: actual `foxproxsetup` implementation, fd handoff, privilege drop, route/DNS configuration, and broker launch synchronization remain future integration work.
