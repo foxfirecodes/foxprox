@@ -26,6 +26,64 @@ impl RuntimeComponent {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum RuntimeCleanupAction {
+    TunDevice,
+    SmoltcpStack,
+    DnsListener,
+    HttpProxyListener,
+    Socks5Listener,
+    SetupControlFd,
+    ChildProcess,
+}
+
+impl RuntimeCleanupAction {
+    pub fn as_detail(self) -> &'static str {
+        match self {
+            Self::TunDevice => "tun_device",
+            Self::SmoltcpStack => "smoltcp_stack",
+            Self::DnsListener => "dns_listener",
+            Self::HttpProxyListener => "http_proxy_listener",
+            Self::Socks5Listener => "socks5_listener",
+            Self::SetupControlFd => "setup_control_fd",
+            Self::ChildProcess => "child_process",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeCleanupReport {
+    pub attempted: Vec<RuntimeCleanupAction>,
+    pub failed: Vec<RuntimeCleanupAction>,
+}
+
+impl RuntimeCleanupReport {
+    pub fn all_succeeded(actions: Vec<RuntimeCleanupAction>) -> Self {
+        Self {
+            attempted: actions,
+            failed: Vec::new(),
+        }
+    }
+
+    pub fn with_failures(
+        attempted: Vec<RuntimeCleanupAction>,
+        failed: Vec<RuntimeCleanupAction>,
+    ) -> Self {
+        Self { attempted, failed }
+    }
+
+    fn status_detail(&self) -> &'static str {
+        if !self.failed.is_empty() {
+            "failed"
+        } else if self.attempted.is_empty() {
+            "not_attempted"
+        } else {
+            "complete"
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeExitStatus {
     Clean,
     Failed,
@@ -133,6 +191,15 @@ impl RuntimeLifecycleHarness {
         status: RuntimeExitStatus,
         now_ms: u64,
     ) -> Result<(), RuntimeLifecycleError> {
+        self.exit_with_cleanup(status, RuntimeCleanupReport::default(), now_ms)
+    }
+
+    pub fn exit_with_cleanup(
+        &mut self,
+        status: RuntimeExitStatus,
+        cleanup: RuntimeCleanupReport,
+        now_ms: u64,
+    ) -> Result<(), RuntimeLifecycleError> {
         let started_at_ms = match self.state {
             RuntimeLifecycleState::Running { started_at_ms } => started_at_ms,
             RuntimeLifecycleState::NotStarted => {
@@ -150,9 +217,15 @@ impl RuntimeLifecycleHarness {
                 );
             }
         };
-        let (decision, reason) = match status {
-            RuntimeExitStatus::Clean => (Decision::Allow, None),
-            RuntimeExitStatus::Failed => (Decision::FailClosed, Some(DenialReason::SetupFailed)),
+        let (decision, reason) = if !cleanup.failed.is_empty() {
+            (Decision::FailClosed, Some(DenialReason::SetupFailed))
+        } else {
+            match status {
+                RuntimeExitStatus::Clean => (Decision::Allow, None),
+                RuntimeExitStatus::Failed => {
+                    (Decision::FailClosed, Some(DenialReason::SetupFailed))
+                }
+            }
         };
         let audit = AuditRecord::new_at(
             AuditKind::NetworkSessionExit,
@@ -164,7 +237,15 @@ impl RuntimeLifecycleHarness {
         .with_duration_ms(now_ms.saturating_sub(started_at_ms))
         .with_detail("runtime_status", status.as_detail())
         .with_detail("runtime_components", component_list(&self.components))
-        .with_detail("component_count", self.components.len().to_string());
+        .with_detail("component_count", self.components.len().to_string())
+        .with_detail("cleanup_status", cleanup.status_detail())
+        .with_detail("cleanup_actions", cleanup_action_list(&cleanup.attempted))
+        .with_detail("cleanup_count", cleanup.attempted.len().to_string())
+        .with_detail(
+            "failed_cleanup_actions",
+            cleanup_action_list(&cleanup.failed),
+        )
+        .with_detail("failed_cleanup_count", cleanup.failed.len().to_string());
         self.append_required(audit)?;
         self.state = RuntimeLifecycleState::Exited {
             started_at_ms,
@@ -240,6 +321,14 @@ fn runtime_error_detail(error: RuntimeLifecycleError) -> &'static str {
         RuntimeLifecycleError::AlreadyRunning => "already_running",
         RuntimeLifecycleError::AlreadyExited => "already_exited",
     }
+}
+
+fn cleanup_action_list(actions: &[RuntimeCleanupAction]) -> String {
+    actions
+        .iter()
+        .map(|action| action.as_detail())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn component_list(components: &[RuntimeComponent]) -> String {
@@ -343,6 +432,80 @@ mod tests {
         assert_eq!(records[1].details["runtime_error"], "already_running");
         assert_eq!(records[1].details["attempted_transition"], "start");
         assert_eq!(records[1].details["lifecycle_state"], "running");
+    }
+
+    #[test]
+    fn runtime_lifecycle_exit_records_cleanup_success() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start(
+                vec![RuntimeComponent::TunDevice, RuntimeComponent::DnsListener],
+                1_000,
+            )
+            .unwrap();
+        runtime
+            .exit_with_cleanup(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![
+                    RuntimeCleanupAction::DnsListener,
+                    RuntimeCleanupAction::TunDevice,
+                ]),
+                1_100,
+            )
+            .unwrap();
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::Allow));
+        assert_eq!(records[1].details["cleanup_status"], "complete");
+        assert_eq!(
+            records[1].details["cleanup_actions"],
+            "dns_listener,tun_device"
+        );
+        assert_eq!(records[1].details["cleanup_count"], "2");
+        assert_eq!(records[1].details["failed_cleanup_actions"], "");
+        assert_eq!(records[1].details["failed_cleanup_count"], "0");
+    }
+
+    #[test]
+    fn runtime_lifecycle_cleanup_failure_is_fail_closed_and_terminal() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start(vec![RuntimeComponent::TunDevice], 1_000)
+            .unwrap();
+        runtime
+            .exit_with_cleanup(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::with_failures(
+                    vec![
+                        RuntimeCleanupAction::TunDevice,
+                        RuntimeCleanupAction::SetupControlFd,
+                    ],
+                    vec![RuntimeCleanupAction::TunDevice],
+                ),
+                1_100,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.exit(RuntimeExitStatus::Clean, 1_200),
+            Err(RuntimeLifecycleError::AlreadyExited)
+        );
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::SetupFailed));
+        assert_eq!(records[1].details["runtime_status"], "clean");
+        assert_eq!(records[1].details["cleanup_status"], "failed");
+        assert_eq!(
+            records[1].details["cleanup_actions"],
+            "tun_device,setup_control_fd"
+        );
+        assert_eq!(records[1].details["failed_cleanup_actions"], "tun_device");
+        assert_eq!(records[2].kind, AuditKind::BrokerError);
+        assert_eq!(records[2].details["runtime_error"], "already_exited");
     }
 
     #[test]

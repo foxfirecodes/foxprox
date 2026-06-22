@@ -1821,3 +1821,29 @@ Added `BlockingProxyRuntime` to bind DNS, HTTP proxy, and SOCKS5 proxy listeners
 
 ### Remaining blind spots
 - The runtime proof is still blocking/single-step. Final alpha runtime still needs concurrent async task scheduling, TUN fd loops, smoltcp integration under the runtime supervisor, child process exit status, and cleanup actions.
+
+## 2026-06-22 — Runtime cleanup ledger evidence
+
+### Commands run
+- `cargo fmt` — applied formatting for cleanup ledger additions.
+- `cargo test -p foxprox-core runtime::tests --all-targets --all-features` — passed, 7 runtime lifecycle tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 120 core tests, 3 device tests, 28 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_lifecycle_exit_records_cleanup_success ... ok`
+- `runtime::tests::runtime_lifecycle_cleanup_failure_is_fail_closed_and_terminal ... ok`
+- `runtime::tests::runtime_lifecycle_exit_is_terminal ... ok`
+
+### Interpretation
+Added `RuntimeCleanupAction` and `RuntimeCleanupReport`, plus `RuntimeLifecycleHarness::exit_with_cleanup`, so `network_session_exit` records cleanup attempts and failures with structured fields: `cleanup_status`, `cleanup_actions`, `cleanup_count`, `failed_cleanup_actions`, and `failed_cleanup_count`. Cleanup failure turns the exit decision into `fail_closed` with `SetupFailed` while preserving terminal lifecycle semantics.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Cleanup is still a platform-independent ledger contract. Final runtime must attach concrete cleanup actions for listener sockets, TUN fd, smoltcp state, setup control fd, and child process supervision.
