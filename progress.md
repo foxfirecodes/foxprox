@@ -1062,5 +1062,5 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-runtime` — cleanup is runtime-owned.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 4bda7b1.
 - Remaining boundary risks: detecting real smoltcp close events, teardown/audit reasons, and half-close semantics remain.
