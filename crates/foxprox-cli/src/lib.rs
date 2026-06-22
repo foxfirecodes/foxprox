@@ -124,13 +124,34 @@ pub fn process_tun_io_once(
     sandbox_id: &str,
     tun: &mut TunPacketIo,
 ) -> Result<PacketOnceSummary, CliError> {
-    let packet = tun.read_packet()?;
-    let mut outbound = Vec::new();
-    let summary = process_packet_once(config_toml, sandbox_id, &packet, &mut outbound)?;
-    if !outbound.is_empty() {
-        tun.write_packet(&outbound)?;
+    process_tun_io_packets(config_toml, sandbox_id, tun, 1).and_then(|mut summaries| {
+        summaries
+            .pop()
+            .ok_or_else(|| CliError::Core("tun-io-no-packet-read".to_owned()))
+    })
+}
+
+/// Process up to `packet_limit` packets from a TUN-like fd.
+pub fn process_tun_io_packets(
+    config_toml: &str,
+    sandbox_id: &str,
+    tun: &mut TunPacketIo,
+    packet_limit: usize,
+) -> Result<Vec<PacketOnceSummary>, CliError> {
+    let mut summaries = Vec::new();
+    for _ in 0..packet_limit {
+        let packet = tun.read_packet()?;
+        if packet.is_empty() {
+            break;
+        }
+        let mut outbound = Vec::new();
+        let summary = process_packet_once(config_toml, sandbox_id, &packet, &mut outbound)?;
+        if !outbound.is_empty() {
+            tun.write_packet(&outbound)?;
+        }
+        summaries.push(summary);
     }
-    Ok(summary)
+    Ok(summaries)
 }
 
 /// Execute the `packet-once` command using process stdin/stdout semantics.
@@ -288,6 +309,47 @@ mod tests {
         assert_eq!(summary.outbound_packet_count, 1);
         assert_eq!(summary.outbound_byte_count, packet.len());
         assert_eq!(reply[20], 0);
+    }
+
+    #[test]
+    fn tun_io_packet_loop_processes_multiple_datagrams_with_audit_and_replies() {
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixDatagram;
+
+        let (peer, broker_side) = UnixDatagram::pair().unwrap();
+        let owned: OwnedFd = broker_side.into();
+        let mut tun = TunPacketIo::from_owned_fd(owned, 4096).unwrap();
+        let packet = echo_request_packet();
+        peer.send(&packet).unwrap();
+        peer.send(&packet).unwrap();
+
+        let summaries = process_tun_io_packets(
+            r#"
+            default_policy = "deny"
+
+            [icmp]
+            allow_echo = true
+            "#,
+            "tun-loop-test",
+            &mut tun,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(summaries.len(), 2);
+        for summary in &summaries {
+            let audit: Value = serde_json::from_str(&summary.audit_json_line).unwrap();
+            assert_eq!(audit["kind"], "icmp_message");
+            assert_eq!(audit["decision"], "allowed");
+            assert_eq!(summary.outbound_packet_count, 1);
+        }
+        for _ in 0..2 {
+            let mut reply = vec![0_u8; packet.len()];
+            let length = peer.recv(&mut reply).unwrap();
+            reply.truncate(length);
+            assert_eq!(reply.len(), packet.len());
+            assert_eq!(reply[20], 0);
+        }
     }
 
     #[test]

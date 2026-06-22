@@ -204,3 +204,7 @@ A broker-facing TUN IO wrapper only needs an owned fd with read/write behavior f
 ## 2026-06-21 — fd-backed packet processing can reuse packet-once core
 
 Keep packet processing byte-oriented and isolate fd reads/writes in `TunPacketIo`; then a TUN runtime helper can read one packet from a received fd, call the existing broker path, and write replies without duplicating policy/audit logic.
+
+## 2026-06-21 — use datagram fd stand-ins for multi-packet TUN tests
+
+For tests that need to prove multiple TUN packet reads remain separate, a Unix datagram pair is a better fd stand-in than a Unix stream pair because each send maps to one read-sized datagram.

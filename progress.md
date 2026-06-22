@@ -1117,3 +1117,24 @@
 - What failed or surprised the agent: no behavior failures; the existing packet-once core was reusable once fd IO was isolated in the device crate.
 - What remains unproven: continuous TUN event loop, real received TUN fd from bwrap setup, packet batching/MTU behavior, and live sandbox ping are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — bounded TUN fd packet loop slice
+
+- Slice attempted: process multiple packets from the TUN fd adapter in a bounded loop, emitting audit for each packet and writing replies back to the fd.
+- Why next: one-shot TUN fd processing works, but a broker runtime needs repeated packet handling; a bounded deterministic loop is the smallest step before long-running scheduling.
+- Verification plan: add `process_tun_io_packets` with an explicit packet limit, test two ICMP echo datagrams over a Unix datagram fd stand-in and verify two audit lines plus two reply packets, then run formatting, clippy, focused CLI tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — bounded TUN fd packet loop
+
+- Slice attempted: process multiple packets from the TUN fd adapter in a bounded loop, emitting audit for each packet and writing replies back to the fd.
+- Why next: one-shot TUN fd processing works, but broker runtime needs repeated packet handling before a long-running scheduler can be trusted.
+- What changed: `process_tun_io_once` now delegates to new `process_tun_io_packets`, which loops up to an explicit packet limit, stops on empty reads, collects per-packet summaries, and writes each synthesized reply through `TunPacketIo`.
+- Verification:
+  - Focused check passed: `cargo test -p foxprox-cli tun_io_packet_loop -- --nocapture` verified two ICMP echo datagrams over a Unix datagram fd stand-in produced two allowed JSON audit summaries and two echo replies.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 6 `foxprox-cli` tests and all existing workspace tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: stream fds are fine for one-shot IO, but datagram fds better preserve packet boundaries for multi-packet tests.
+- What remains unproven: unbounded/long-running runtime scheduling, graceful shutdown, real TUN fd readiness, and live sandbox traffic are still absent.
+- Commit: this commit.
