@@ -168,3 +168,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Child supervision proof can use a blocking process runner
 
 - A host-runtime proof should convert real `std::process::Command` results into `RuntimeChildExit` and feed that into lifecycle exit evidence. Test-harness subprocesses are a deterministic way to prove clean and non-zero child exits without depending on external binaries.
+
+## 2026-06-22 — Aggregate audit cursors should track sequence numbers
+
+- Bounded ledgers can replace records with lossy `audit_backpressure` while preserving length. Aggregate archive cursors must track last seen audit `sequence`, not record count, or they can miss replacement/backpressure evidence. A child exit is clean only when both process id and zero exit code are known.

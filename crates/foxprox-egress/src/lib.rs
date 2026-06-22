@@ -19,6 +19,8 @@ use foxprox_core::{
 use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -915,9 +917,9 @@ pub struct BlockingDnsHttpRuntime<U, E> {
     dns_server: Option<BlockingDnsBrokerServer<U>>,
     http_proxy_server: Option<BlockingHttpProxyServer<E>>,
     aggregate_audit_records: Vec<AuditRecord>,
-    lifecycle_audit_len: usize,
-    dns_audit_len: usize,
-    http_proxy_audit_len: usize,
+    last_lifecycle_sequence: u64,
+    last_dns_sequence: u64,
+    last_http_proxy_sequence: u64,
 }
 
 impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
@@ -988,7 +990,11 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
             )
             .map_err(BlockingProxyRuntimeError::Lifecycle)?;
         let aggregate_audit_records: Vec<_> = lifecycle.audit().records().cloned().collect();
-        let lifecycle_audit_len = aggregate_audit_records.len();
+        let last_lifecycle_sequence = aggregate_audit_records
+            .iter()
+            .map(|record| record.sequence)
+            .max()
+            .unwrap_or(0);
         Ok(Self {
             sandbox_id,
             shared_dns_cache,
@@ -996,9 +1002,9 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
             dns_server: Some(dns_server),
             http_proxy_server: Some(http_proxy_server),
             aggregate_audit_records,
-            lifecycle_audit_len,
-            dns_audit_len: 0,
-            http_proxy_audit_len: 0,
+            last_lifecycle_sequence,
+            last_dns_sequence: 0,
+            last_http_proxy_sequence: 0,
         })
     }
 
@@ -1054,12 +1060,13 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
         if self.http_proxy_server.is_some() {
             cleanup_actions.push(RuntimeCleanupAction::HttpProxyListener);
         }
-        self.lifecycle.exit_with_cleanup(
+        let result = self.lifecycle.exit_with_cleanup(
             status,
             RuntimeCleanupReport::all_succeeded(cleanup_actions),
             now_ms,
-        )?;
+        );
         self.archive_new_lifecycle_records();
+        result?;
         self.archive_new_dns_records();
         self.archive_new_http_records();
         self.dns_server = None;
@@ -1094,10 +1101,14 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
             .lifecycle
             .audit()
             .records()
-            .skip(self.lifecycle_audit_len)
+            .filter(|record| record.sequence > self.last_lifecycle_sequence)
             .cloned()
             .collect();
-        self.lifecycle_audit_len += records.len();
+        self.last_lifecycle_sequence = records
+            .iter()
+            .map(|record| record.sequence)
+            .max()
+            .unwrap_or(self.last_lifecycle_sequence);
         self.aggregate_audit_records.extend(records);
     }
 
@@ -1108,10 +1119,14 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
                 .broker()
                 .audit()
                 .records()
-                .skip(self.dns_audit_len)
+                .filter(|record| record.sequence > self.last_dns_sequence)
                 .cloned()
                 .collect();
-            self.dns_audit_len += records.len();
+            self.last_dns_sequence = records
+                .iter()
+                .map(|record| record.sequence)
+                .max()
+                .unwrap_or(self.last_dns_sequence);
             self.aggregate_audit_records.extend(records);
         }
     }
@@ -1123,10 +1138,14 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
                 .broker()
                 .audit()
                 .records()
-                .skip(self.http_proxy_audit_len)
+                .filter(|record| record.sequence > self.last_http_proxy_sequence)
                 .cloned()
                 .collect();
-            self.http_proxy_audit_len += records.len();
+            self.last_http_proxy_sequence = records
+                .iter()
+                .map(|record| record.sequence)
+                .max()
+                .unwrap_or(self.last_http_proxy_sequence);
             self.aggregate_audit_records.extend(records);
         }
     }
@@ -1141,10 +1160,10 @@ pub struct BlockingProxyRuntime<U, H, S> {
     http_proxy_server: Option<BlockingHttpProxyServer<H>>,
     socks5_proxy_server: Option<BlockingSocks5ProxyServer<S>>,
     aggregate_audit_records: Vec<AuditRecord>,
-    lifecycle_audit_len: usize,
-    dns_audit_len: usize,
-    http_proxy_audit_len: usize,
-    socks5_proxy_audit_len: usize,
+    last_lifecycle_sequence: u64,
+    last_dns_sequence: u64,
+    last_http_proxy_sequence: u64,
+    last_socks5_proxy_sequence: u64,
 }
 
 impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingProxyRuntime<U, H, S> {
@@ -1240,7 +1259,11 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
             )
             .map_err(BlockingProxyRuntimeError::Lifecycle)?;
         let aggregate_audit_records: Vec<_> = lifecycle.audit().records().cloned().collect();
-        let lifecycle_audit_len = aggregate_audit_records.len();
+        let last_lifecycle_sequence = aggregate_audit_records
+            .iter()
+            .map(|record| record.sequence)
+            .max()
+            .unwrap_or(0);
         Ok(Self {
             sandbox_id,
             shared_dns_cache,
@@ -1249,10 +1272,10 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
             http_proxy_server: Some(http_proxy_server),
             socks5_proxy_server: Some(socks5_proxy_server),
             aggregate_audit_records,
-            lifecycle_audit_len,
-            dns_audit_len: 0,
-            http_proxy_audit_len: 0,
-            socks5_proxy_audit_len: 0,
+            last_lifecycle_sequence,
+            last_dns_sequence: 0,
+            last_http_proxy_sequence: 0,
+            last_socks5_proxy_sequence: 0,
         })
     }
 
@@ -1331,12 +1354,13 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
         if self.socks5_proxy_server.is_some() {
             cleanup_actions.push(RuntimeCleanupAction::Socks5Listener);
         }
-        self.lifecycle.exit_with_cleanup(
+        let result = self.lifecycle.exit_with_cleanup(
             status,
             RuntimeCleanupReport::all_succeeded(cleanup_actions),
             now_ms,
-        )?;
+        );
         self.archive_new_lifecycle_records();
+        result?;
         self.archive_new_dns_records();
         self.archive_new_http_records();
         self.archive_new_socks5_records();
@@ -1379,10 +1403,14 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
             .lifecycle
             .audit()
             .records()
-            .skip(self.lifecycle_audit_len)
+            .filter(|record| record.sequence > self.last_lifecycle_sequence)
             .cloned()
             .collect();
-        self.lifecycle_audit_len += records.len();
+        self.last_lifecycle_sequence = records
+            .iter()
+            .map(|record| record.sequence)
+            .max()
+            .unwrap_or(self.last_lifecycle_sequence);
         self.aggregate_audit_records.extend(records);
     }
 
@@ -1393,10 +1421,14 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
                 .broker()
                 .audit()
                 .records()
-                .skip(self.dns_audit_len)
+                .filter(|record| record.sequence > self.last_dns_sequence)
                 .cloned()
                 .collect();
-            self.dns_audit_len += records.len();
+            self.last_dns_sequence = records
+                .iter()
+                .map(|record| record.sequence)
+                .max()
+                .unwrap_or(self.last_dns_sequence);
             self.aggregate_audit_records.extend(records);
         }
     }
@@ -1408,10 +1440,14 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
                 .broker()
                 .audit()
                 .records()
-                .skip(self.http_proxy_audit_len)
+                .filter(|record| record.sequence > self.last_http_proxy_sequence)
                 .cloned()
                 .collect();
-            self.http_proxy_audit_len += records.len();
+            self.last_http_proxy_sequence = records
+                .iter()
+                .map(|record| record.sequence)
+                .max()
+                .unwrap_or(self.last_http_proxy_sequence);
             self.aggregate_audit_records.extend(records);
         }
     }
@@ -1423,10 +1459,14 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
                 .broker()
                 .audit()
                 .records()
-                .skip(self.socks5_proxy_audit_len)
+                .filter(|record| record.sequence > self.last_socks5_proxy_sequence)
                 .cloned()
                 .collect();
-            self.socks5_proxy_audit_len += records.len();
+            self.last_socks5_proxy_sequence = records
+                .iter()
+                .map(|record| record.sequence)
+                .max()
+                .unwrap_or(self.last_socks5_proxy_sequence);
             self.aggregate_audit_records.extend(records);
         }
     }
@@ -1464,9 +1504,19 @@ impl BlockingChildSupervisor {
         Ok(RuntimeChildExit {
             process_id: Some(process_id),
             exit_code: status.code(),
-            signal: None,
+            signal: child_signal(&status),
         })
     }
+}
+
+#[cfg(unix)]
+fn child_signal(status: &std::process::ExitStatus) -> Option<i32> {
+    status.signal()
+}
+
+#[cfg(not(unix))]
+fn child_signal(_status: &std::process::ExitStatus) -> Option<i32> {
+    None
 }
 
 #[derive(Clone, Debug)]
@@ -1556,6 +1606,10 @@ mod tests {
 
     #[test]
     fn blocking_child_supervisor_captures_clean_child_exit_for_lifecycle() {
+        let mut runtime = RuntimeLifecycleHarness::new("child-sandbox", 4);
+        runtime
+            .start(vec![RuntimeComponent::ChildProcess], 1_000)
+            .unwrap();
         let mut supervisor = BlockingChildSupervisor;
         let child_exit = supervisor
             .run_to_exit(std::env::current_exe().unwrap(), ["--list"])
@@ -1563,10 +1617,6 @@ mod tests {
         assert_eq!(child_exit.exit_code, Some(0));
         assert!(child_exit.process_id.is_some());
 
-        let mut runtime = RuntimeLifecycleHarness::new("child-sandbox", 4);
-        runtime
-            .start(vec![RuntimeComponent::ChildProcess], 1_000)
-            .unwrap();
         runtime
             .exit_with_cleanup_and_child(
                 RuntimeExitStatus::Clean,
@@ -1584,6 +1634,10 @@ mod tests {
 
     #[test]
     fn blocking_child_supervisor_nonzero_exit_is_fail_closed_in_lifecycle() {
+        let mut runtime = RuntimeLifecycleHarness::new("child-sandbox", 4);
+        runtime
+            .start(vec![RuntimeComponent::ChildProcess], 1_000)
+            .unwrap();
         let mut supervisor = BlockingChildSupervisor;
         let child_exit = supervisor
             .run_to_exit(
@@ -1594,10 +1648,6 @@ mod tests {
         assert_ne!(child_exit.exit_code, Some(0));
         assert!(child_exit.process_id.is_some());
 
-        let mut runtime = RuntimeLifecycleHarness::new("child-sandbox", 4);
-        runtime
-            .start(vec![RuntimeComponent::ChildProcess], 1_000)
-            .unwrap();
         runtime
             .exit_with_cleanup_and_child(
                 RuntimeExitStatus::Clean,
@@ -1611,6 +1661,38 @@ mod tests {
         assert_eq!(records[1].decision, Some(Decision::FailClosed));
         assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
         assert_eq!(records[1].details["child_status"], "failed");
+    }
+
+    #[test]
+    fn blocking_child_supervisor_spawn_failure_is_audited() {
+        let mut runtime = RuntimeLifecycleHarness::new("child-sandbox", 4);
+        runtime
+            .start(vec![RuntimeComponent::ChildProcess], 1_000)
+            .unwrap();
+        let mut supervisor = BlockingChildSupervisor;
+        let error = supervisor
+            .run_to_exit(
+                "/definitely/not/a/real/foxprox-child",
+                std::iter::empty::<&str>(),
+            )
+            .unwrap_err();
+        assert_eq!(error, ChildSupervisorError::SpawnFailed);
+        runtime
+            .record_child_supervision_error("spawn_failed", 1_010)
+            .unwrap();
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].kind, AuditKind::BrokerError);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(
+            records[1].details["runtime_error"],
+            "child_supervision_error"
+        );
+        assert_eq!(
+            records[1].details["child_supervision_error"],
+            "spawn_failed"
+        );
     }
 
     #[test]
@@ -3327,6 +3409,76 @@ mod tests {
         );
         assert_eq!(aggregate[dns_index].hostname.as_deref(), Some("later.test"));
         assert_eq!(aggregate[exit_index].details["cleanup_status"], "complete");
+    }
+
+    #[test]
+    fn blocking_proxy_runtime_aggregate_captures_backpressure_replacement() {
+        let query = dns_query(0x9e9e, "Unused.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+
+        let http_config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(http_config), 1),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+
+        let mut runtime = BlockingProxyRuntime::bind(
+            "s1",
+            8,
+            SharedDnsCache::default(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            4_000,
+        )
+        .unwrap();
+
+        for now_ms in [4_010, 4_020] {
+            let mut http_client = TcpStream::connect(runtime.http_proxy_addr().unwrap()).unwrap();
+            http_client
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            http_client
+                .write_all(b"GET http://127.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                .unwrap();
+            let _ = runtime.handle_http_proxy_once(now_ms).unwrap();
+            let mut http_response = String::new();
+            http_client.read_to_string(&mut http_response).unwrap();
+            assert!(http_response.starts_with("HTTP/1.1"));
+        }
+
+        let aggregate = runtime.audit_records();
+        assert!(aggregate
+            .iter()
+            .any(|record| record.kind == AuditKind::HttpRequestDecision));
+        let backpressure = aggregate
+            .iter()
+            .find(|record| record.kind == AuditKind::AuditBackpressure)
+            .expect("aggregate captures replacement audit_backpressure record");
+        assert_eq!(
+            backpressure.details["attempted_kind"],
+            "httprequestdecision"
+        );
     }
 
     #[test]

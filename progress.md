@@ -2011,3 +2011,32 @@ Added `BlockingChildSupervisor`, a concrete host process runner that spawns a ch
 
 ### Remaining blind spots
 - The child supervisor is blocking and one-shot. Final runtime still needs async child wait integration, signal handling, task cancellation/join ordering, and unified audit backpressure across all runtime tasks.
+
+## 2026-06-22 — Sequence-based aggregate audit and supervision error evidence
+
+### Commands run
+- `cargo fmt` — applied formatting for sequence-based aggregate cursors and child supervision error evidence.
+- `cargo test -p foxprox-core runtime::tests --all-targets --all-features` — passed, 14 runtime lifecycle tests.
+- `cargo test -p foxprox-egress blocking_child_supervisor --all-targets --all-features` — passed, 3 blocking child supervisor tests.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_aggregate_captures_backpressure_replacement --all-targets --all-features` — passed, aggregate backpressure replacement regression.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 127 core tests, 3 device tests, 33 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_lifecycle_missing_child_process_id_is_fail_closed ... ok`
+- `runtime::tests::runtime_lifecycle_child_supervision_error_is_audited ... ok`
+- `foxprox_egress::tests::blocking_child_supervisor_spawn_failure_is_audited ... ok`
+- `foxprox_egress::tests::blocking_proxy_runtime_aggregate_captures_backpressure_replacement ... ok`
+
+### Interpretation
+Addressed round-33 and round-34 high findings. Aggregate runtime archive cursors now use last seen audit `sequence` per ledger, so lossy backpressure replacement records are captured even when bounded ledger length does not grow. Lifecycle exit backpressure is archived before returning an error, and listener handles are retired only after successful exit evidence. Child exit status is clean only with a known process id and zero exit code; missing process id with exit code 0 is now fail-closed. Added observable child supervision error evidence and a blocking spawn-failure regression that emits structured `broker_error` details.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Signal capture is now wired on Unix via `ExitStatusExt`, but signal-specific testing is still not covered. The final runtime still needs async process supervision, cancellation/join ordering, and one global audit sink/backpressure path across all tasks.

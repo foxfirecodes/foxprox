@@ -133,9 +133,9 @@ impl RuntimeChildExit {
     fn status_detail(&self) -> &'static str {
         if self.signal.is_some() {
             "signaled"
-        } else if self.exit_code == Some(0) {
+        } else if self.process_id.is_some() && self.exit_code == Some(0) {
             "clean"
-        } else if self.exit_code.is_some() {
+        } else if self.process_id.is_some() && self.exit_code.is_some() {
             "failed"
         } else {
             "unknown"
@@ -143,7 +143,7 @@ impl RuntimeChildExit {
     }
 
     fn is_failed(&self) -> bool {
-        self.signal.is_some() || self.exit_code != Some(0)
+        self.process_id.is_none() || self.signal.is_some() || self.exit_code != Some(0)
     }
 }
 
@@ -286,6 +286,44 @@ impl RuntimeLifecycleHarness {
         if let Some(reachable_addr) = config.reachable_addr {
             audit = audit.with_detail("reachable_addr", reachable_addr);
         }
+        self.append_required(audit)
+    }
+
+    pub fn record_child_supervision_error(
+        &mut self,
+        error: impl Into<String>,
+        now_ms: u64,
+    ) -> Result<(), RuntimeLifecycleError> {
+        match self.state {
+            RuntimeLifecycleState::Running { .. } => {}
+            RuntimeLifecycleState::NotStarted => {
+                return self.reject_invalid_transition(
+                    RuntimeLifecycleError::NotStarted,
+                    "child_supervision_error",
+                    now_ms,
+                );
+            }
+            RuntimeLifecycleState::Exited { .. } => {
+                return self.reject_invalid_transition(
+                    RuntimeLifecycleError::AlreadyExited,
+                    "child_supervision_error",
+                    now_ms,
+                );
+            }
+        }
+        let audit = AuditRecord::new_at(
+            AuditKind::BrokerError,
+            self.sandbox_id.clone(),
+            now_ms as u128,
+        )
+        .with_frontend(Frontend::Core)
+        .with_decision(Decision::FailClosed, Some(DenialReason::RuntimeState))
+        .with_detail("runtime_error", "child_supervision_error")
+        .with_detail("child_status", "unknown")
+        .with_detail("child_supervision_error", error)
+        .with_detail("lifecycle_state", self.state.as_detail())
+        .with_detail("runtime_components", component_list(&self.components))
+        .with_detail("component_count", self.components.len().to_string());
         self.append_required(audit)
     }
 
@@ -689,6 +727,33 @@ mod tests {
     }
 
     #[test]
+    fn runtime_lifecycle_child_supervision_error_is_audited() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start(vec![RuntimeComponent::ChildProcess], 1_000)
+            .unwrap();
+        runtime
+            .record_child_supervision_error("spawn_failed", 1_010)
+            .unwrap();
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].kind, AuditKind::BrokerError);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(
+            records[1].details["runtime_error"],
+            "child_supervision_error"
+        );
+        assert_eq!(records[1].details["child_status"], "unknown");
+        assert_eq!(
+            records[1].details["child_supervision_error"],
+            "spawn_failed"
+        );
+        assert_eq!(records[1].details["lifecycle_state"], "running");
+    }
+
+    #[test]
     fn runtime_lifecycle_records_clean_child_exit() {
         let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
         runtime
@@ -737,6 +802,35 @@ mod tests {
         assert_eq!(records[1].details["child_status"], "signaled");
         assert_eq!(records[1].details["child_process_id"], "43");
         assert_eq!(records[1].details["child_signal"], "15");
+    }
+
+    #[test]
+    fn runtime_lifecycle_missing_child_process_id_is_fail_closed() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start(vec![RuntimeComponent::Socks5Listener], 1_000)
+            .unwrap();
+        runtime
+            .exit_with_cleanup_and_child(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::Socks5Listener]),
+                Some(RuntimeChildExit {
+                    process_id: None,
+                    exit_code: Some(0),
+                    signal: None,
+                }),
+                1_250,
+            )
+            .unwrap();
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["child_status"], "unknown");
+        assert_eq!(records[1].details["child_exit_code"], "0");
+        assert!(!records[1].details.contains_key("child_process_id"));
     }
 
     #[test]
