@@ -103,3 +103,8 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Setup execution harness boundary
 
 - Setup execution can be made observable without tying core to Linux command execution by running `SetupHelperPlan` steps through an injectable runner. The harness should stop at the first failed step and emit `broker_error` with `setup_step`, `setup_step_index`, and `completed_steps`.
+
+## 2026-06-22 — Pre-exec setup evidence and proxy DNS boundary
+
+- Setup execution reports must emit `tun_configured` before any target `exec`; an actual exec cannot return to produce audit evidence. Keep target command separate from setup steps and mark it ready only after setup/drop steps finish.
+- Blocking explicit proxy host egress must not call host name resolution for proxy domain destinations. Domain CONNECT/HTTP forwarding should fail closed or be resolved through an audited broker DNS path before host TCP connect.

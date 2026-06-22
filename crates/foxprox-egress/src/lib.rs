@@ -15,7 +15,7 @@ use foxprox_core::{
     SocksConnectMetadata, TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
 };
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -86,12 +86,8 @@ impl BlockingExplicitProxyEgress {
         }
     }
 
-    fn connect_host_port(&self, host: &str, port: u16) -> Result<TcpStream, ProxyEgressError> {
-        let destination = (host, port)
-            .to_socket_addrs()
-            .map_err(|_| ProxyEgressError::SendFailed)?
-            .next()
-            .ok_or(ProxyEgressError::SendFailed)?;
+    fn connect_ip_literal(&self, ip: IpAddr, port: u16) -> Result<TcpStream, ProxyEgressError> {
+        let destination = SocketAddr::new(ip, port);
         let stream = TcpStream::connect_timeout(&destination, self.connect_timeout)
             .map_err(|_| ProxyEgressError::SendFailed)?;
         stream
@@ -116,7 +112,11 @@ impl ExplicitProxyEgress for BlockingExplicitProxyEgress {
         request: &HttpProxyRequestMetadata,
         bytes: &[u8],
     ) -> Result<(), ProxyEgressError> {
-        let mut stream = self.connect_host_port(&request.host, request.port)?;
+        let ip = request
+            .host
+            .parse::<IpAddr>()
+            .map_err(|_| ProxyEgressError::SendFailed)?;
+        let mut stream = self.connect_ip_literal(ip, request.port)?;
         stream
             .write_all(bytes)
             .map_err(|_| ProxyEgressError::SendFailed)?;
@@ -135,11 +135,7 @@ impl ExplicitProxyEgress for BlockingExplicitProxyEgress {
         _bytes: &[u8],
     ) -> Result<(), ProxyEgressError> {
         let stream = if let Some(ip) = request.destination_ip {
-            let destination = SocketAddr::new(ip, request.destination_port);
-            TcpStream::connect_timeout(&destination, self.connect_timeout)
-                .map_err(|_| ProxyEgressError::SendFailed)?
-        } else if let Some(host) = request.destination_host.as_deref() {
-            self.connect_host_port(host, request.destination_port)?
+            self.connect_ip_literal(ip, request.destination_port)?
         } else {
             return Err(ProxyEgressError::SendFailed);
         };
@@ -625,9 +621,14 @@ impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
                 &mut stream,
             ));
         }
-        stream
-            .write_all(&[0x05, 0x00])
-            .map_err(|_| ProxyEgressError::SendFailed)?;
+        if let Some(step) = self.handle_socks5_method_selection_response(
+            client,
+            greeting.len(),
+            &mut stream,
+            now_ms,
+        ) {
+            return Ok(step);
+        }
         let request = match read_socks5_connect_request(&mut stream, self.max_request_bytes) {
             Ok(request) => request,
             Err(_) => {
@@ -649,6 +650,47 @@ impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
 
     pub fn frontend(&self) -> &ExplicitProxyFrontend<E> {
         &self.frontend
+    }
+
+    fn handle_socks5_method_selection_response<W: Write>(
+        &mut self,
+        client: SocketAddr,
+        greeting_len: usize,
+        writer: &mut W,
+        now_ms: u64,
+    ) -> Option<Socks5ListenerStepResult> {
+        let response = [0x05, 0x00];
+        if writer.write_all(&response).is_ok() {
+            return None;
+        }
+        let sandbox_id = self.frontend.sandbox_id().to_string();
+        let audit = AuditRecord::new_at(AuditKind::BrokerError, sandbox_id.clone(), now_ms as u128)
+            .with_frontend(Frontend::Socks5Proxy)
+            .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+            .with_detail("client", client.to_string())
+            .with_detail("greeting_len", greeting_len.to_string())
+            .with_detail("request_len", "0")
+            .with_detail("response_len", response.len().to_string())
+            .with_detail("send_status", "send_failed")
+            .with_detail("error", "socks5_method_selection_send_failed");
+        let request = PolicyRequest::unsupported(
+            sandbox_id,
+            Frontend::Socks5Proxy,
+            DenialReason::ResourceLimit,
+        );
+        let _ = self.frontend.broker_mut().append_audit_for(&request, audit);
+        Some(Socks5ListenerStepResult {
+            client,
+            greeting_len,
+            request_len: 0,
+            response_len: response.len(),
+            sent_response: false,
+            send_status: "send_failed".to_string(),
+            reply_code: 0x00,
+            decision: Decision::FailClosed,
+            reason: Some(DenialReason::ResourceLimit),
+            forwarded: false,
+        })
     }
 
     fn handle_socks5_malformed<W: Write>(
@@ -1305,6 +1347,98 @@ mod tests {
         assert_eq!(records[0].decision, Some(Decision::Allow));
         assert_eq!(records[1].kind, AuditKind::BrokerError);
         assert_eq!(records[1].sandbox_id, "sandbox-http");
+        assert_eq!(records[1].details["error"], "proxy_egress_send_failed");
+    }
+
+    #[test]
+    fn blocking_socks5_method_selection_write_failure_is_audited() {
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 8);
+        let frontend = ExplicitProxyFrontend::new(
+            "socks-sandbox",
+            broker,
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut server = BlockingSocks5ProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            frontend,
+            Duration::from_secs(1),
+            4096,
+        )
+        .unwrap();
+        let mut writer = FailingWriter;
+
+        let step = server
+            .handle_socks5_method_selection_response(
+                "127.0.0.1:43210".parse().unwrap(),
+                3,
+                &mut writer,
+                3_000,
+            )
+            .unwrap();
+        assert_eq!(step.decision, Decision::FailClosed);
+        assert_eq!(step.reason, Some(DenialReason::ResourceLimit));
+        assert!(!step.sent_response);
+        assert_eq!(step.send_status, "send_failed");
+        assert_eq!(step.reply_code, 0x00);
+        let records: Vec<_> = server.frontend().broker().audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::BrokerError);
+        assert_eq!(records[0].sandbox_id, "socks-sandbox");
+        assert_eq!(
+            records[0].details["error"],
+            "socks5_method_selection_send_failed"
+        );
+        assert_eq!(records[0].details["send_status"], "send_failed");
+    }
+
+    #[test]
+    fn blocking_explicit_proxy_socks_egress_rejects_domain_without_host_dns() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-socks-domain")
+                .frontend(Frontend::Socks5Proxy)
+                .protocol(Protocol::Socks)
+                .hostname("example.com")
+                .destination_port(443),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let frontend = ExplicitProxyFrontend::new(
+            "socks-sandbox",
+            broker,
+            BlockingExplicitProxyEgress::new(Duration::from_secs(1), Duration::from_secs(1), 1024),
+        );
+        let mut server = BlockingSocks5ProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            frontend,
+            Duration::from_secs(1),
+            4096,
+        )
+        .unwrap();
+        let mut response = Vec::new();
+        let request = [
+            0x05, 0x01, 0x00, 0x03, 11, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c', b'o',
+            b'm', 0x01, 0xbb,
+        ];
+
+        let step = server
+            .handle_socks5_connect_request(
+                "127.0.0.1:43210".parse().unwrap(),
+                3,
+                &request,
+                &mut response,
+                3_000,
+            )
+            .unwrap();
+        assert_eq!(step.decision, Decision::FailClosed);
+        assert_eq!(step.reason, Some(DenialReason::ResourceLimit));
+        assert!(!step.forwarded);
+        assert_eq!(step.reply_code, 0x01);
+        assert_eq!(response, socks5_connect_response(0x01));
+        let records: Vec<_> = server.frontend().broker().audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::SocksConnectDecision);
+        assert_eq!(records[0].decision, Some(Decision::Allow));
+        assert_eq!(records[1].kind, AuditKind::BrokerError);
         assert_eq!(records[1].details["error"], "proxy_egress_send_failed");
     }
 

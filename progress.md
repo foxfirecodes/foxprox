@@ -1501,3 +1501,31 @@ The setup helper path now has an executable harness over `SetupHelperPlan` using
 
 ### Remaining blind spots
 - The harness intentionally does not run Linux `ip`, open `/dev/net/tun`, pass real fds, or exec a target process. Concrete privileged setup execution and fd handoff remain runtime integration work outside the platform-independent core.
+
+## 2026-06-22 — Round-17 pre-exec setup and proxy DNS-boundary fix
+
+### Commands run
+- `cargo fmt` — applied formatting for round-17 fixes.
+- `cargo test -p foxprox-core --all-targets --all-features` — passed, 106 core tests.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 23 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 106 core tests, 3 device tests, 23 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_core::setup::tests::setup_execution_harness_records_successful_steps ... ok`
+- `foxprox_egress::tests::blocking_explicit_proxy_socks_egress_rejects_domain_without_host_dns ... ok`
+- `foxprox_egress::tests::blocking_socks5_method_selection_write_failure_is_audited ... ok`
+
+### Interpretation
+Round-17 high findings are fixed. `SetupHelperPlan` now keeps target execution out of setup steps; the execution harness emits `tun_configured` after setup/close/drop steps and before target exec readiness, avoiding the impossible pattern where real exec would happen before audit evidence can be returned. `BlockingExplicitProxyEgress` no longer uses host DNS resolution for proxy domain destinations: HTTP egress requires an IP-literal host, SOCKS hostnames fail closed until an audited broker DNS resolution path exists, and an egress regression proves allowed SOCKS domain requests become structured `proxy_egress_send_failed` instead of using libc DNS. SOCKS5 method-selection success-reply write failures now produce structured `broker_error` evidence instead of escaping as an unobservable listener error.
+
+### Changed files
+- `crates/foxprox-core/src/setup.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Domain-based explicit proxy host egress needs an audited broker DNS resolution path before TCP connect.
+- Setup execution remains an injectable harness, not real Linux `/dev/net/tun` creation, fd passing, or target exec.

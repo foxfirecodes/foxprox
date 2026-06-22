@@ -182,8 +182,6 @@ impl SetupHelperPlan {
                 vec!["capsh".to_string(), "--drop=cap_net_admin".to_string()],
             )
             .with_evidence("dropped_capability", "CAP_NET_ADMIN"),
-            SetupHelperStep::new("exec_target", target_command.to_vec())
-                .with_evidence("target_argc", target_command.len().to_string()),
         ]);
         Self {
             proxy_environment: config.proxy_environment(),
@@ -202,6 +200,7 @@ impl SetupHelperPlan {
             .with_detail("tun_name", self.config.tun_name.clone())
             .with_detail("mtu", self.config.mtu.to_string())
             .with_detail("steps", self.steps.len().to_string())
+            .with_detail("target_argc", self.target_command.len().to_string())
             .with_detail("drops_capability", "CAP_NET_ADMIN")
     }
 }
@@ -387,7 +386,6 @@ mod tests {
                 "handoff_tun_fd",
                 "close_setup_fds",
                 "drop_setup_capability",
-                "exec_target",
             ]
         );
         assert!(plan.steps[0]
@@ -401,7 +399,7 @@ mod tests {
             plan.steps[8].evidence["dropped_capability"],
             "CAP_NET_ADMIN"
         );
-        assert_eq!(plan.steps[9].evidence["target_argc"], "2");
+        assert_eq!(plan.target_command.len(), 2);
     }
 
     #[test]
@@ -415,7 +413,8 @@ mod tests {
         assert_eq!(audit.frontend, Some(Frontend::Setup));
         assert_eq!(audit.details["setup_helper"], "foxproxsetup");
         assert_eq!(audit.details["drops_capability"], "CAP_NET_ADMIN");
-        assert_eq!(audit.details["steps"], "9");
+        assert_eq!(audit.details["steps"], "8");
+        assert_eq!(audit.details["target_argc"], "1");
     }
 
     #[derive(Default)]
@@ -446,10 +445,13 @@ mod tests {
         assert!(report.failed_step.is_none());
         assert!(report.target_exec_ready);
         assert_eq!(report.completed_steps, runner.ran_steps);
-        assert_eq!(report.completed_steps.last().unwrap(), "exec_target");
+        assert_eq!(
+            report.completed_steps.last().unwrap(),
+            "drop_setup_capability"
+        );
         assert_eq!(report.audit.kind, AuditKind::TunConfigured);
         assert_eq!(report.audit.decision, Some(Decision::Allow));
-        assert_eq!(report.audit.details["executed_steps"], "9");
+        assert_eq!(report.audit.details["executed_steps"], "8");
         assert_eq!(report.audit.details["target_exec_ready"], "true");
     }
 
