@@ -1,6 +1,8 @@
 use crate::audit::{AuditDecision, AuditEvent, AuditEventKind};
 use crate::dns::{
-    build_dns_empty_response, parse_dns_query, DnsBuildError, DnsQueryMetadata, DnsResponseCode,
+    build_dns_empty_response, parse_dns_address_response, parse_dns_query,
+    DnsAddressResponseMetadata, DnsAttributionCache, DnsBuildError, DnsParseError,
+    DnsQueryMetadata, DnsResponseCode, DnsResponseObserveOutcome, DnsTransactionError,
     PendingDnsObserveOutcome, PendingDnsQueryTable,
 };
 use crate::policy::{Decision, DenialReason, PolicyEngine, PolicyRequest};
@@ -33,6 +35,32 @@ pub enum BrokerDnsQueryOutcome {
     Drop {
         audit: AuditEvent,
         response_error: Option<DnsBuildError>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BrokerDnsResponseContext {
+    pub timestamp_millis: u64,
+    pub sandbox_id: SandboxId,
+    pub frontend: Frontend,
+    pub source: Option<Endpoint>,
+    pub destination: Option<Endpoint>,
+    pub max_response_bytes: usize,
+    pub max_answers: usize,
+    pub now_millis: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BrokerDnsResponseOutcome {
+    Forward {
+        response: DnsAddressResponseMetadata,
+        cache: DnsResponseObserveOutcome,
+        audit: AuditEvent,
+    },
+    Drop {
+        audit: AuditEvent,
+        parse_error: Option<DnsParseError>,
+        transaction_error: Option<DnsTransactionError>,
     },
 }
 
@@ -123,6 +151,76 @@ fn handle_broker_dns_query_inner(
     }
 }
 
+pub fn handle_broker_dns_response(
+    wire: &[u8],
+    pending_queries: &mut PendingDnsQueryTable,
+    cache: &mut DnsAttributionCache,
+    context: BrokerDnsResponseContext,
+) -> BrokerDnsResponseOutcome {
+    let response =
+        match parse_dns_address_response(wire, context.max_response_bytes, context.max_answers) {
+            Ok(response) => response,
+            Err(error) => {
+                return BrokerDnsResponseOutcome::Drop {
+                    audit: dns_response_parse_failure_audit(&context),
+                    parse_error: Some(error),
+                    transaction_error: None,
+                };
+            }
+        };
+
+    let (Some(client), Some(upstream)) = (context.destination, context.source) else {
+        return BrokerDnsResponseOutcome::Drop {
+            audit: dns_response_parse_failure_audit(&context),
+            parse_error: None,
+            transaction_error: None,
+        };
+    };
+
+    match pending_queries.validate_response_and_observe(
+        cache,
+        client,
+        upstream,
+        &response,
+        context.now_millis,
+    ) {
+        Ok(cache_outcome) => {
+            let audit = AuditEvent::from_dns_response_metadata(
+                context.timestamp_millis,
+                context.sandbox_id,
+                context.frontend,
+                context.source,
+                context.destination,
+                &response,
+                &Decision::Allow { rule_id: None },
+            );
+            BrokerDnsResponseOutcome::Forward {
+                response,
+                cache: cache_outcome,
+                audit,
+            }
+        }
+        Err(error) => {
+            let audit = AuditEvent::from_dns_response_metadata(
+                context.timestamp_millis,
+                context.sandbox_id,
+                context.frontend,
+                context.source,
+                context.destination,
+                &response,
+                &Decision::FailClosed {
+                    reason: DenialReason::AttributionMismatch,
+                },
+            );
+            BrokerDnsResponseOutcome::Drop {
+                audit,
+                parse_error: None,
+                transaction_error: Some(error),
+            }
+        }
+    }
+}
+
 fn denial_response_code(decision: &Decision) -> DnsResponseCode {
     match decision {
         Decision::Allow { .. } => DnsResponseCode::NoError,
@@ -136,6 +234,33 @@ fn dns_parse_failure_audit(context: &BrokerDnsQueryContext) -> AuditEvent {
         timestamp_millis: context.timestamp_millis,
         sandbox_id: context.sandbox_id.clone(),
         kind: AuditEventKind::DnsQuery,
+        frontend: Some(context.frontend),
+        protocol: Some(Protocol::Dns),
+        source: context.source,
+        destination: context.destination,
+        requested_port: context.destination.and_then(|endpoint| endpoint.port),
+        hostname: None,
+        hostname_source: HostnameSource::None,
+        hostname_confidence: HostnameConfidence::None,
+        dns_query_type: None,
+        dns_response_code: None,
+        dns_answer_count: None,
+        dns_min_ttl_seconds: None,
+        decision: Some(AuditDecision::FailClosed),
+        rule_id: None,
+        reason: Some(DenialReason::MalformedInput),
+        http_method: None,
+        http_path_query: None,
+        byte_count: None,
+        flow_duration_millis: None,
+    }
+}
+
+fn dns_response_parse_failure_audit(context: &BrokerDnsResponseContext) -> AuditEvent {
+    AuditEvent {
+        timestamp_millis: context.timestamp_millis,
+        sandbox_id: context.sandbox_id.clone(),
+        kind: AuditEventKind::DnsResponse,
         frontend: Some(context.frontend),
         protocol: Some(Protocol::Dns),
         source: context.source,
@@ -199,6 +324,19 @@ mod tests {
             destination: Some(endpoint([10, 0, 2, 3], 53)),
             max_query_bytes: 512,
             max_response_bytes: 512,
+        }
+    }
+
+    fn response_context() -> BrokerDnsResponseContext {
+        BrokerDnsResponseContext {
+            timestamp_millis: 124,
+            sandbox_id: SandboxId::new("sandbox-dns"),
+            frontend: Frontend::Tun,
+            source: Some(endpoint([8, 8, 8, 8], 53)),
+            destination: Some(endpoint([10, 0, 0, 2], 40000)),
+            max_response_bytes: 512,
+            max_answers: 8,
+            now_millis: 1_100,
         }
     }
 
@@ -285,6 +423,151 @@ mod tests {
         assert!(pending_queries
             .validate_response(endpoint([10, 0, 0, 2], 40000), upstream, &response, 1_100)
             .is_ok());
+    }
+
+    #[test]
+    fn correlated_dns_responses_forward_and_update_cache_with_audit() {
+        let config = broker_config_with_rule(PolicyRule::allow_domain(
+            "allow-example-dns",
+            HostMatcher::exact("example.com").unwrap(),
+            Some(53),
+        ));
+        let mut pending_queries = PendingDnsQueryTable::new(4, 5_000);
+        let upstream = endpoint([8, 8, 8, 8], 53);
+        let BrokerDnsQueryOutcome::Forward { query, .. } = handle_broker_dns_query_with_pending(
+            &query("example.com", 1),
+            &config,
+            context(),
+            &mut pending_queries,
+            upstream,
+            1_000,
+        ) else {
+            panic!("expected query forward");
+        };
+        let wire_response = crate::dns::build_dns_address_response(
+            &query,
+            [IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+            60,
+            512,
+            8,
+        )
+        .unwrap();
+        let mut cache = DnsAttributionCache::new(8, 60_000);
+
+        let outcome = handle_broker_dns_response(
+            &wire_response,
+            &mut pending_queries,
+            &mut cache,
+            response_context(),
+        );
+        let BrokerDnsResponseOutcome::Forward {
+            response,
+            cache: cache_outcome,
+            audit,
+        } = outcome
+        else {
+            panic!("expected response forward");
+        };
+
+        assert_eq!(response.hostname.as_str(), "example.com");
+        assert_eq!(cache_outcome.cache.stored, 1);
+        assert_eq!(pending_queries.len(), 0);
+        assert_eq!(
+            cache
+                .lookup(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 1_200)
+                .len(),
+            1
+        );
+        assert_eq!(audit.kind, AuditEventKind::DnsResponse);
+        assert_eq!(audit.decision, Some(AuditDecision::Allow));
+        assert_eq!(audit.hostname_confidence, HostnameConfidence::Medium);
+        assert_eq!(audit.dns_answer_count, Some(1));
+        assert_eq!(audit.dns_min_ttl_seconds, Some(60));
+    }
+
+    #[test]
+    fn dns_response_replay_or_malformed_input_drops_without_cache_update() {
+        let config = broker_config_with_rule(PolicyRule::allow_domain(
+            "allow-example-dns",
+            HostMatcher::exact("example.com").unwrap(),
+            Some(53),
+        ));
+        let mut pending_queries = PendingDnsQueryTable::new(4, 5_000);
+        let upstream = endpoint([8, 8, 8, 8], 53);
+        let BrokerDnsQueryOutcome::Forward { query, .. } = handle_broker_dns_query_with_pending(
+            &query("example.com", 1),
+            &config,
+            context(),
+            &mut pending_queries,
+            upstream,
+            1_000,
+        ) else {
+            panic!("expected query forward");
+        };
+        let wire_response = crate::dns::build_dns_address_response(
+            &query,
+            [IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+            60,
+            512,
+            8,
+        )
+        .unwrap();
+        let mut cache = DnsAttributionCache::new(8, 60_000);
+
+        assert!(matches!(
+            handle_broker_dns_response(
+                &wire_response,
+                &mut pending_queries,
+                &mut cache,
+                response_context(),
+            ),
+            BrokerDnsResponseOutcome::Forward { .. }
+        ));
+        let replay = handle_broker_dns_response(
+            &wire_response,
+            &mut pending_queries,
+            &mut cache,
+            response_context(),
+        );
+        let BrokerDnsResponseOutcome::Drop {
+            audit,
+            parse_error,
+            transaction_error,
+        } = replay
+        else {
+            panic!("expected replay drop");
+        };
+        assert_eq!(parse_error, None);
+        assert_eq!(
+            transaction_error,
+            Some(DnsTransactionError::UnmatchedResponse)
+        );
+        assert_eq!(audit.decision, Some(AuditDecision::FailClosed));
+        assert_eq!(audit.reason, Some(DenialReason::AttributionMismatch));
+
+        let malformed = handle_broker_dns_response(
+            &[0u8; 4],
+            &mut pending_queries,
+            &mut cache,
+            response_context(),
+        );
+        let BrokerDnsResponseOutcome::Drop {
+            audit,
+            parse_error,
+            transaction_error,
+        } = malformed
+        else {
+            panic!("expected malformed drop");
+        };
+        assert_eq!(parse_error, Some(DnsParseError::Truncated));
+        assert_eq!(transaction_error, None);
+        assert_eq!(audit.reason, Some(DenialReason::MalformedInput));
+        assert_eq!(
+            cache
+                .lookup(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)), 1_200)
+                .len(),
+            0
+        );
     }
 
     #[test]

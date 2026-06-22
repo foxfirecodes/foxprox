@@ -141,3 +141,7 @@ Malformed DNS bytes may not contain a trustworthy transaction ID or question, so
 ## 2026-06-21 - Pending DNS state should be created only after allow decisions
 
 Strict parsing alone is not enough to justify pending DNS transaction state. The core handler should observe pending transactions only for policy-allowed queries that are actually going to be forwarded upstream; denied or malformed queries must not leave state that a later response could match.
+
+## 2026-06-21 - DNS responses should be forwarded only after transaction-gated cache observation
+
+The safe DNS response path is strict parse, pending transaction validation, then cache observation and forward/audit as one operation. Replays or unmatched responses should use fail-closed attribution-mismatch audit and must not mutate the attribution cache.

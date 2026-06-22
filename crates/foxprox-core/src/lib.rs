@@ -33,8 +33,9 @@ pub use dns::{
     PendingDnsObserveStatus, PendingDnsQuery, PendingDnsQueryTable,
 };
 pub use dns_handler::{
-    handle_broker_dns_query, handle_broker_dns_query_with_pending, BrokerDnsQueryContext,
-    BrokerDnsQueryOutcome,
+    handle_broker_dns_query, handle_broker_dns_query_with_pending, handle_broker_dns_response,
+    BrokerDnsQueryContext, BrokerDnsQueryOutcome, BrokerDnsResponseContext,
+    BrokerDnsResponseOutcome,
 };
 pub use flow::{
     UdpFlowClass, UdpFlowEntry, UdpFlowKey, UdpFlowObserveOutcome, UdpFlowObserveStatus,

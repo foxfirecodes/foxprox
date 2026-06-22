@@ -780,3 +780,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * denied and malformed DNS queries keep pending state empty, preventing stale or cache-poisonable transaction entries.
 * Audit evidence: forward/deny handler tests continue to assert DNS audit metadata while pending tests verify transaction state is bounded and response-correlation compatible.
 * Residual risk: upstream UDP send/receive code, retransmission/timeout policy, response audit emission, and automatic correlated cache insertion in a runtime loop remain future work.
+
+## 2026-06-21 - Broker DNS response correlation helper
+
+* Invariant under work: upstream DNS responses must be parsed strictly, matched against bounded pending transactions, and update hostname attribution cache only through the correlation-gated path before being forwarded back to the sandbox.
+* Threat or failure mode addressed: a future DNS receive loop could forward or cache unsolicited, mismatched, malformed, or replayed DNS responses, poisoning hostname attribution or breaking auditability of DNS-cache confidence.
+* Planned verification: add a pure DNS response handling helper with tests for correlated response forwarding/cache insertion/audit, replay rejection, malformed response fail-closed audit/drop, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Broker DNS response correlation helper results
+
+* Tests added/updated:
+  * correlated upstream DNS responses parse strictly, validate against pending client/upstream/transaction/query metadata, update DNS attribution cache, and produce allow audit preserving medium-confidence DNS-cache semantics, answer count, and TTL.
+  * replayed responses after pending consumption are dropped with fail-closed attribution-mismatch audit and no second cache mutation.
+  * malformed upstream response bytes are dropped with malformed-input audit and parser error evidence.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 113 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * only responses matching existing pending DNS transactions can be forwarded and cached for hostname attribution.
+  * unsolicited/replayed responses fail closed and cannot poison DNS cache state.
+  * malformed responses fail closed before transaction validation or cache mutation.
+* Audit evidence: response handler tests assert DNS response audit kind, allow/fail-closed decisions, attribution confidence, answer counts, TTLs, and denial reasons for replay/malformed paths.
+* Residual risk: this remains a pure core helper; actual UDP socket IO, forwarding original response bytes back to the sandbox, async audit buffering, and upstream retry/timeout policy remain future work.
