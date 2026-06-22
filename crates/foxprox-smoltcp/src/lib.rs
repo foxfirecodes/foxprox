@@ -8,10 +8,12 @@
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
+use std::time::Duration;
 
 use foxprox_core::{Endpoint, FlowKey, Protocol};
 use foxprox_runtime::{
-    TcpBridgeError, TcpFlowRuntime, TcpStackAdapter, TcpStackConnectAttempt, TcpStreamBridge,
+    TcpBridgeError, TcpFlowRuntime, TcpStackAdapter, TcpStackConnectAttempt,
+    TcpStackLifecycleEvent, TcpStreamBridge,
 };
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -104,6 +106,14 @@ impl<B> SmoltcpTcpBridgeSession<B> {
 
     pub fn into_parts(self) -> (SmoltcpIpLoopback, TcpFlowRuntime<B>) {
         (self.adapter, self.flow_runtime)
+    }
+
+    pub fn close_flow(
+        &mut self,
+        flow: &FlowKey,
+        duration: Duration,
+    ) -> Result<TcpStackLifecycleEvent, TcpBridgeError> {
+        self.flow_runtime.close_flow(flow, duration)
     }
 }
 
@@ -1265,6 +1275,57 @@ mod tests {
             }
             other => panic!("expected TCP payload packet, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn bridge_session_close_reports_bidirectional_byte_counts() {
+        let mut adapter = packet_pumped_adapter_with_unread_payload(b"close-request");
+        let attempt = adapter.accepted_tcp_connect_attempts().remove(0);
+        let flow = FlowKey::new(Protocol::Tcp, attempt.source, attempt.destination);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = vec![0; b"close-request".len()];
+            stream.read_exact(&mut received).unwrap();
+            stream.write_all(b"close-reply").unwrap();
+            received
+        });
+        let host_stream = TcpStream::connect(listen_addr).unwrap();
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("packet-pumped-close").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let bridge = StdTcpStreamBridge::new(flow.clone(), host_stream, Vec::new()).unwrap();
+        let mut flow_runtime = TcpFlowRuntime::new(&components, bridge);
+        flow_runtime.mark_opened(flow.clone()).unwrap();
+        let mut session = SmoltcpTcpBridgeSession::new(adapter, flow_runtime);
+        let mut tun_writer = Vec::new();
+
+        session.forward_sandbox_payload_once(8080, 64).unwrap();
+        session
+            .pump_host_to_sandbox_once(&flow, 64, &mut tun_writer, 4)
+            .unwrap();
+        let lifecycle = session
+            .close_flow(&flow, Duration::from_millis(25))
+            .unwrap();
+
+        assert_eq!(server.join().unwrap(), b"close-request".to_vec());
+        assert!(!tun_writer.is_empty());
+        assert_eq!(
+            lifecycle,
+            TcpStackLifecycleEvent::FlowClosed {
+                flow,
+                bytes_from_sandbox: b"close-request".len() as u64,
+                bytes_from_host: b"close-reply".len() as u64,
+                duration: Duration::from_millis(25)
+            }
+        );
     }
 
     #[test]

@@ -1589,3 +1589,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: session still depends on callers to establish/open flows and uses Vec-backed host-read staging; continuous event loop, real TUN fd, and lifecycle close auditing remain.
 - Exact next step: commit host-to-sandbox session pump, then add flow close accounting for the session path so packet-pumped bridge byte counts can become audited lifecycle events.
+
+## 2026-06-22T22:36:50Z
+- Current objective: continue after bidirectional smoltcp session pumping by adding close accounting for the session path.
+- Git status summary: clean worktree after commit `5f54fb4`.
+- Intended slice: expose session flow close through `TcpFlowRuntime` and verify packet-pumped sandbox bytes plus host-read bytes produce an auditable `TcpStackLifecycleEvent::FlowClosed` with byte counts and duration.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: lifecycle event emission to audit sink is still handled by runtime kernel code outside this session harness.
+- Exact next step: add `close_flow` on the session and a bidirectional close-count regression.
+
+## 2026-06-22T22:38:05Z
+- Current objective: add close accounting to the smoltcp TCP bridge session path.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 28 smoltcp adapter tests passed. `SmoltcpTcpBridgeSession::close_flow` now delegates to `TcpFlowRuntime` close accounting, and the regression proves packet-pumped sandbox bytes plus host-read bytes produce a `TcpStackLifecycleEvent::FlowClosed` with expected byte counts and duration.
+- Commit hash when committed: pending.
+- Remaining risks: the lifecycle event is returned but not emitted through `VerificationKernel::emit_audit_event` by the session harness; continuous live fd loop remains.
+- Exact next step: commit session close accounting, then add a policy-open helper that marks the `TcpFlowRuntime` flow opened when `TcpStackRuntime` allows an accepted smoltcp connect, eliminating manual `mark_opened` in packet-pumped bridge tests.
