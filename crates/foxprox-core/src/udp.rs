@@ -1,6 +1,6 @@
 use crate::audit::AuditRecord;
 use crate::broker::BrokerCore;
-use crate::flow::{FlowKey, UdpFlowManager, UdpTimeoutConfig};
+use crate::flow::{DnsCache, FlowKey, UdpFlowManager, UdpTimeoutConfig};
 use crate::policy::{PolicyDecision, PolicyRequest};
 use crate::types::{AuditKind, Decision, DenialReason, Frontend, NetworkEndpoint, Protocol};
 use serde::{Deserialize, Serialize};
@@ -62,7 +62,27 @@ impl<E: UdpEgress> UdpForwarder<E> {
         payload: &[u8],
         now_ms: u64,
     ) -> Result<UdpForwardResult, UdpEgressError> {
-        let request = self.request_for_key(&key);
+        self.handle_outbound_datagram_inner(key, payload, now_ms, None)
+    }
+
+    pub fn handle_outbound_datagram_with_dns_cache(
+        &mut self,
+        key: FlowKey,
+        payload: &[u8],
+        now_ms: u64,
+        dns_cache: &DnsCache,
+    ) -> Result<UdpForwardResult, UdpEgressError> {
+        self.handle_outbound_datagram_inner(key, payload, now_ms, Some(dns_cache))
+    }
+
+    fn handle_outbound_datagram_inner(
+        &mut self,
+        key: FlowKey,
+        payload: &[u8],
+        now_ms: u64,
+        dns_cache: Option<&DnsCache>,
+    ) -> Result<UdpForwardResult, UdpEgressError> {
+        let request = self.request_for_key(&key, dns_cache, now_ms);
         let decision = self.broker.evaluate(&request);
         if decision.decision.is_deny() {
             return Ok(result_from_decision(decision, false));
@@ -165,7 +185,12 @@ impl<E: UdpEgress> UdpForwarder<E> {
             .is_some_and(|limit| self.flows.get(key).is_none() && self.flows.len() >= limit)
     }
 
-    fn request_for_key(&self, key: &FlowKey) -> PolicyRequest {
+    fn request_for_key(
+        &self,
+        key: &FlowKey,
+        dns_cache: Option<&DnsCache>,
+        now_ms: u64,
+    ) -> PolicyRequest {
         let protocol = match key.destination_port {
             53 => Protocol::Dns,
             443 => Protocol::Quic,
@@ -174,6 +199,14 @@ impl<E: UdpEgress> UdpForwarder<E> {
         let mut request = PolicyRequest::new(self.sandbox_id.clone(), Frontend::Tun, protocol)
             .with_destination(key.destination());
         request.source = key.source();
+        if protocol == Protocol::Quic {
+            request = request.with_detail("udp_classification", "quic_candidate");
+            if let Some(attribution) =
+                dns_cache.and_then(|cache| cache.attribution_for(key.destination_ip, now_ms))
+            {
+                request = request.with_attribution(attribution);
+            }
+        }
         request
     }
 }
@@ -467,6 +500,90 @@ mod tests {
     }
 
     #[test]
+    fn quic_hostname_policy_uses_dns_cache_attribution() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-quic-host")
+                .protocol(Protocol::Quic)
+                .hostname("example.com")
+                .destination_port(443),
+        );
+        let key = FlowKey::udp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.42".parse().unwrap(),
+            443,
+        );
+        let mut dns_cache = DnsCache::default();
+        dns_cache.observe(
+            "s1",
+            "example.com",
+            "A",
+            vec!["203.0.113.42".parse().unwrap()],
+            1_000,
+            60_000,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 5);
+        let mut forwarder = UdpForwarder::new(
+            "s1",
+            broker,
+            InMemoryUdpEgress::default(),
+            UdpTimeoutConfig::default(),
+        );
+
+        let result = forwarder
+            .handle_outbound_datagram_with_dns_cache(key, &[0xc0, 0, 0, 1], 2_000, &dns_cache)
+            .unwrap();
+        assert_eq!(result.decision, Decision::Allow);
+        assert!(result.sent);
+        let records: Vec<_> = forwarder.broker().audit().records().collect();
+        assert_eq!(records[0].kind, AuditKind::UdpPacketDecision);
+        assert_eq!(records[0].rule_id.as_deref(), Some("allow-quic-host"));
+        assert_eq!(records[0].hostname.as_deref(), Some("example.com"));
+        assert_eq!(records[0].details["udp_classification"], "quic_candidate");
+    }
+
+    #[test]
+    fn quic_hostname_policy_without_attribution_denies_before_egress() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-quic-host")
+                .protocol(Protocol::Quic)
+                .hostname("example.com")
+                .destination_port(443),
+        );
+        let key = FlowKey::udp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.42".parse().unwrap(),
+            443,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut forwarder = UdpForwarder::new(
+            "s1",
+            broker,
+            InMemoryUdpEgress::default(),
+            UdpTimeoutConfig::default(),
+        );
+
+        let result = forwarder
+            .handle_outbound_datagram(key, &[0xc0, 0, 0, 1], 2_000)
+            .unwrap();
+        assert_eq!(result.decision, Decision::DenyDrop);
+        assert_eq!(
+            result.reason,
+            Some(DenialReason::HostnameAttributionRequired)
+        );
+        assert!(forwarder.egress().sent().is_empty());
+        let record = forwarder.broker().audit().records().next().unwrap();
+        assert_eq!(record.kind, AuditKind::UdpPacketDecision);
+        assert_eq!(
+            record.reason,
+            Some(DenialReason::HostnameAttributionRequired)
+        );
+    }
+
+    #[test]
     fn quic_candidate_records_lifecycle_and_uses_quic_timeout() {
         let config = PolicyConfig {
             default_decision: Decision::Allow,
@@ -495,7 +612,8 @@ mod tests {
         assert_eq!(flow.classification, UdpClassification::QuicCandidate);
         assert_eq!(flow.timeout_ms, 180_000);
         let records: Vec<_> = forwarder.broker().audit().records().collect();
-        assert_eq!(records[0].kind, AuditKind::QuicCandidateFlowCreated);
+        assert_eq!(records[0].kind, AuditKind::UdpPacketDecision);
+        assert_eq!(records[0].details["udp_classification"], "quic_candidate");
         assert_eq!(records[1].kind, AuditKind::UdpFlowCreated);
         assert_eq!(records[2].kind, AuditKind::QuicCandidateFlowCreated);
     }

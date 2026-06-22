@@ -819,7 +819,7 @@ fn audit_kind_for(request: &PolicyRequest) -> AuditKind {
         (_, Protocol::Dns) => AuditKind::DnsQueryDecision,
         (_, Protocol::Tcp) => AuditKind::TcpConnectDecision,
         (_, Protocol::Udp) => AuditKind::UdpPacketDecision,
-        (_, Protocol::Quic) => AuditKind::QuicCandidateFlowCreated,
+        (_, Protocol::Quic) => AuditKind::UdpPacketDecision,
         (_, Protocol::Icmp) => AuditKind::IcmpDecision,
         (Frontend::HttpProxy, Protocol::Http) => AuditKind::HttpRequestDecision,
         (Frontend::HttpProxy, Protocol::Https) => AuditKind::HttpsConnectDecision,

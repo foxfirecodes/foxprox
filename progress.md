@@ -629,3 +629,35 @@ Hidden-SNI behavior now matches the docs: it is denied by default but an explici
 
 ### Remaining blind spots
 - QUIC UDP flows still lack DNS-cache hostname attribution in the UDP forwarding harness; this is the next transparent attribution gap to close.
+
+## 2026-06-21 — QUIC DNS attribution observability cycle
+
+### Behavior under work
+Close the remaining transparent QUIC attribution gap by letting UDP/443 forwarding requests use DNS cache hostname attribution and separating QUIC policy-decision audit from QUIC flow-lifecycle audit.
+
+### Expected evidence
+- QUIC UDP/443 with DNS-cache attribution can match hostname policy rules and emits `udp_packet_decision` plus `quic_candidate_flow_created` lifecycle evidence.
+- QUIC hostname policy without attribution is denied with `hostname_attribution_required` and no egress.
+- QUIC-disabled policy denial emits a packet-decision audit rather than a duplicate flow-created decision event.
+
+### Commands run
+- `cargo fmt` — applied formatting for QUIC attribution changes.
+- `cargo test --all-targets --all-features` — passed, 4 CLI tests and 92 core tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `udp::tests::quic_hostname_policy_uses_dns_cache_attribution ... ok`
+- `udp::tests::quic_hostname_policy_without_attribution_denies_before_egress ... ok`
+- `udp::tests::quic_candidate_records_lifecycle_and_uses_quic_timeout ... ok`
+
+### Interpretation
+Transparent QUIC candidate decisions can now consume DNS-cache attribution before egress. Hostname-based QUIC policy allows only when attribution is present, otherwise it denies with `hostname_attribution_required`. QUIC policy decisions now emit `udp_packet_decision` while `quic_candidate_flow_created` remains a flow-lifecycle event, removing duplicate decision/lifecycle event ambiguity.
+
+### Changed files
+- `crates/foxprox-core/src/policy.rs`
+- `crates/foxprox-core/src/udp.rs`
+- `progress.md`
+
+### Remaining blind spots
+- QUIC metadata parsing remains best-effort candidate classification by UDP/443/payload shape; no full QUIC/TLS metadata parser or HTTP/3 semantic inspection is implemented.
