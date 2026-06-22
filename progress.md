@@ -699,3 +699,25 @@
 - What failed or surprised the agent: no behavior failures; the forwarding helper can reuse the parsed `HttpRequest` event as control state for target and path rewrite instead of reparsing the absolute URI separately.
 - What remains unproven: streaming response/body pump, hop-by-hop header handling, listener runtime, CONNECT/SOCKS bidirectional pumps, TCP flow close/byte-count audit, and TUN TCP forwarding are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — SOCKS5 greeting negotiation slice
+
+- Slice attempted: add the missing SOCKS5 method-negotiation boundary before CONNECT preflight so real clients can be accepted only when no-authentication is offered.
+- Why next: SOCKS5 CONNECT parsing/egress exists but assumes negotiation has already completed; alpha SOCKS5 frontend behavior needs deterministic greeting responses and rejection of unsupported authentication before request handling.
+- Verification plan: add `Socks5Preflight::handle_greeting`, accept version 5 with method 0x00, reject unsupported auth, malformed lengths, and wrong versions with no-acceptable-methods, then run formatting, clippy, focused proxy tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — SOCKS5 greeting negotiation
+
+- Slice attempted: SOCKS5 method-negotiation handling before CONNECT request parsing.
+- Why next: SOCKS5 CONNECT policy/egress assumed the method-negotiation phase had already completed; real SOCKS5 clients need deterministic no-auth acceptance or unsupported-auth rejection first.
+- What changed: added `Socks5GreetingPreflight`, `Socks5GreetingResponse`, and `Socks5Preflight::handle_greeting`; alpha accepts only SOCKS5 method `0x00` (no authentication) and rejects unsupported methods, malformed method counts, empty method lists, and non-SOCKS5 versions with `0x05 0xff`.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in a new assertion; `cargo fmt` was run.
+  - Focused checks passed: `cargo test -p foxprox-proxy socks5_greeting -- --nocapture` ran 2 tests covering no-auth acceptance and unsupported/malformed greeting rejection.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 5 `foxprox-dns` tests, 4 `foxprox-egress` tests, 5 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 20 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed after formatting.
+- What failed or surprised the agent: no behavior failures; method-count length validation is enough for the greeting boundary without coupling it to later CONNECT policy evaluation.
+- What remains unproven: listener state machine joining greeting plus CONNECT, proxy authentication rejection in a live stream, full SOCKS stream pumping, TCP close/byte-count audit, and runtime resource limits are still absent.
+- Commit: this commit.

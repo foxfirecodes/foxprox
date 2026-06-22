@@ -128,3 +128,7 @@ A broker-owned DNS resolver needs a pre-egress request boundary: parse the quest
 ## 2026-06-21 — HTTP proxy forwarding must rewrite before upstream egress
 
 Explicit HTTP proxy requests arrive in absolute-form, but origin servers expect origin-form request targets. Reuse the parsed `HttpRequest` event to choose the host egress target and rewrite only the request line to the normalized path/query before writing to the shared TCP egress connection.
+
+## 2026-06-21 — SOCKS5 greeting is protocol state, not policy state
+
+SOCKS5 method negotiation should be validated before CONNECT policy events exist. Keep it as a frontend protocol preflight that accepts only no-authentication for alpha and rejects unsupported or malformed greetings without emitting misleading network-policy audit records.

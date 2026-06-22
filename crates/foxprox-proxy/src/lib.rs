@@ -73,6 +73,29 @@ impl HttpProxyResponse {
     }
 }
 
+/// Result of one SOCKS5 method-negotiation greeting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Socks5GreetingPreflight {
+    pub response: Socks5GreetingResponse,
+    pub accepted: bool,
+}
+
+/// Client-visible SOCKS5 method-negotiation response bytes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Socks5GreetingResponse {
+    NoAuthenticationRequired,
+    NoAcceptableMethods,
+}
+
+impl Socks5GreetingResponse {
+    pub fn as_bytes(self) -> &'static [u8] {
+        match self {
+            Self::NoAuthenticationRequired => b"\x05\x00",
+            Self::NoAcceptableMethods => b"\x05\xff",
+        }
+    }
+}
+
 /// Result of one SOCKS5 CONNECT preflight evaluation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Socks5ConnectPreflight {
@@ -338,6 +361,21 @@ impl Socks5Preflight {
         Self { policy }
     }
 
+    /// Handle one SOCKS5 method-negotiation greeting.
+    ///
+    /// Alpha supports only method 0x00 (no authentication). Unsupported
+    /// authentication methods, malformed lengths, and non-SOCKS5 versions are
+    /// rejected with the standard no-acceptable-methods response.
+    pub fn handle_greeting(&self, greeting: &[u8]) -> Socks5GreetingPreflight {
+        let accepted = socks5_greeting_offers_no_auth(greeting);
+        let response = if accepted {
+            Socks5GreetingResponse::NoAuthenticationRequired
+        } else {
+            Socks5GreetingResponse::NoAcceptableMethods
+        };
+        Socks5GreetingPreflight { response, accepted }
+    }
+
     /// Parse and evaluate one SOCKS5 CONNECT request message.
     ///
     /// Allowed decisions produce a SOCKS5 success reply for a future TCP bridge.
@@ -472,6 +510,17 @@ fn rewrite_http_request_for_origin(
     rewritten.extend_from_slice(version.as_bytes());
     rewritten.extend_from_slice(rest);
     Some(rewritten)
+}
+
+fn socks5_greeting_offers_no_auth(greeting: &[u8]) -> bool {
+    if greeting.len() < 2 || greeting[0] != 5 {
+        return false;
+    }
+    let method_count = usize::from(greeting[1]);
+    if method_count == 0 || greeting.len() != 2 + method_count {
+        return false;
+    }
+    greeting[2..].contains(&0x00)
 }
 
 fn malformed_http_event(
@@ -947,6 +996,37 @@ mod tests {
             tunnel.egress_error,
             Some(EgressError::Connect { .. })
         ));
+    }
+
+    #[test]
+    fn socks5_greeting_accepts_no_authentication_method() {
+        let handler = Socks5Preflight::new(allow_example_socks_policy());
+
+        let result = handler.handle_greeting(b"\x05\x02\x02\x00");
+
+        assert!(result.accepted);
+        assert_eq!(
+            result.response,
+            Socks5GreetingResponse::NoAuthenticationRequired
+        );
+        assert_eq!(result.response.as_bytes(), b"\x05\x00");
+    }
+
+    #[test]
+    fn socks5_greeting_rejects_unsupported_auth_or_malformed_lengths() {
+        let handler = Socks5Preflight::new(allow_example_socks_policy());
+
+        for greeting in [
+            b"\x05\x01\x02".as_slice(),
+            b"\x04\x01\x00".as_slice(),
+            b"\x05\x00".as_slice(),
+            b"\x05\x02\x00".as_slice(),
+        ] {
+            let result = handler.handle_greeting(greeting);
+            assert!(!result.accepted);
+            assert_eq!(result.response, Socks5GreetingResponse::NoAcceptableMethods);
+            assert_eq!(result.response.as_bytes(), b"\x05\xff");
+        }
     }
 
     #[test]
