@@ -968,3 +968,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: reads are one-shot and blocking; there is no event loop, readiness polling, smoltcp stream source, or timeout configuration on the bridge runtime yet.
 - Exact next step: commit bounded TCP host-read support, then add a nonblocking/readiness-safe outcome so the future event loop can avoid blocking when no host bytes are available.
+
+## 2026-06-22T21:34:47Z
+- Current objective: continue after bounded TCP host-read commit toward event-loop-safe bridge reads.
+- Git status summary: clean worktree after commit `b417796`.
+- Intended slice: add an explicit nonblocking/no-data outcome for `StdTcpStreamBridge` host reads so future runtime loops do not treat readiness absence as an IO failure.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with a loopback nonblocking socket.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this still does not add a poller or async event loop; it only makes no-data behavior typed and testable.
+- Exact next step: add a `WouldBlock` read outcome and deterministic nonblocking loopback coverage.
+
+## 2026-06-22T21:35:26Z
+- Current objective: make TCP host-read no-data behavior typed for future nonblocking event loops.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 76 runtime tests, and 7 setup tests passed. New loopback test proves a nonblocking host TCP stream with no available data returns `TcpHostReadOutcome::WouldBlock` without mutating sandbox output or treating readiness absence as an IO failure.
+- Commit hash when committed: pending.
+- Remaining risks: no poller/async runtime exists yet; the bridge only exposes a typed one-shot no-data outcome for a future loop.
+- Exact next step: commit nonblocking host-read outcome, then add a bridge pump helper that combines sandbox-to-host writes and host-to-sandbox reads for one opened flow with explicit outcomes.

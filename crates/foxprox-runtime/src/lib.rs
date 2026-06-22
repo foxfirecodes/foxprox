@@ -343,6 +343,7 @@ pub trait TcpStreamBridge {
 pub enum TcpHostReadOutcome {
     Bytes { count: usize },
     Eof,
+    WouldBlock,
 }
 
 #[derive(Debug)]
@@ -382,10 +383,13 @@ impl<W> StdTcpStreamBridge<W> {
     {
         self.ensure_flow(flow)?;
         let mut buffer = vec![0; max_bytes];
-        let count = self
-            .host_stream
-            .read(&mut buffer)
-            .map_err(|_| TcpBridgeError::IoFailed)?;
+        let count = match self.host_stream.read(&mut buffer) {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(TcpHostReadOutcome::WouldBlock);
+            }
+            Err(_) => return Err(TcpBridgeError::IoFailed),
+        };
         if count == 0 {
             return Ok(TcpHostReadOutcome::Eof);
         }
@@ -2292,6 +2296,30 @@ mod tests {
         server.join().unwrap();
         assert_eq!(outcome, TcpHostReadOutcome::Bytes { count: 9 });
         assert_eq!(bridge.sandbox_writer(), &b"from-host".to_vec());
+    }
+
+    #[test]
+    fn std_tcp_stream_bridge_reports_nonblocking_no_data_without_error() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        });
+        let flow = FlowKey::new(
+            Protocol::Tcp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            Endpoint::new(listen_addr.ip(), listen_addr.port()),
+        );
+        let host_stream = TcpStream::connect(listen_addr).unwrap();
+        host_stream.set_nonblocking(true).unwrap();
+        let mut bridge = StdTcpStreamBridge::new(flow.clone(), host_stream, Vec::new()).unwrap();
+
+        let outcome = bridge.read_host_once_to_sandbox(&flow, 32).unwrap();
+
+        assert_eq!(outcome, TcpHostReadOutcome::WouldBlock);
+        assert!(bridge.sandbox_writer().is_empty());
+        server.join().unwrap();
     }
 
     #[test]
