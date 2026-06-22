@@ -498,3 +498,5 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * audit backpressure continues to reject the new event without increasing queue capacity.
 * Audit evidence: unit tests assert DNS query type/hostname/endpoints and bounded-buffer behavior.
 * Residual risk: DNS response audit fields, serialized sink output, audit drain/backpressure policy in async runtime, and actual DNS socket handler integration remain future work.
+
+* Commit hash: 7309f22 preserve dns query metadata in audit.
