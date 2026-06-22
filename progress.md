@@ -1430,3 +1430,24 @@
 - What failed or surprised the agent: `DeviceCapabilities` is non-exhaustive in smoltcp, so the implementation must mutate `DeviceCapabilities::default()` rather than constructing it with a struct literal.
 - What remains unproven: smoltcp stream accept/read/write bridging to host TCP sockets, live TUN fd device integration, and full sandbox `curl` forwarding.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — smoltcp handshake payload receive slice
+
+- Slice attempted: extend the smoltcp proof from SYN/SYN-ACK to an established TCP socket receiving client payload bytes after handshake.
+- Why next: SYN/SYN-ACK proves raw packet ingress/egress, but TCP forwarding requires stream data extraction before host bridging can be added.
+- Verification plan: feed SYN, capture server sequence from SYN-ACK, feed ACK+payload from the client, poll smoltcp, and assert the listening socket can read the payload. Run focused tcp tests plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — smoltcp handshake payload receive
+
+- Slice attempted: extend the smoltcp proof from SYN/SYN-ACK to an established TCP socket receiving client payload bytes after handshake.
+- Why next: SYN/SYN-ACK proves raw packet ingress/egress, but TCP forwarding requires stream data extraction before host bridging can be added.
+- What changed: `foxprox-tcp` now tests a full minimal client-to-smoltcp handshake progression: feed SYN, capture the server sequence from smoltcp's SYN-ACK, feed ACK+PSH payload from the client, poll smoltcp, and read payload bytes from the accepted socket.
+- Verification:
+  - Focused check passed: `cargo test -p foxprox-tcp -- --nocapture`, with `smoltcp_socket_receives_payload_after_handshake` proving the socket receives `hello`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 2 `foxprox-tcp` tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; smoltcp accepted a minimal ACK+PSH packet once the test echoed back the server sequence from SYN-ACK.
+- What remains unproven: sending data from smoltcp back to the sandbox after host egress response, and bridging accepted socket payloads to real host TCP streams.
+- Commit: this commit.

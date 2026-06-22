@@ -112,6 +112,43 @@ mod tests {
     use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 
     #[test]
+    fn smoltcp_socket_receives_payload_after_handshake() {
+        let mut device = InMemoryIpDevice::new(1500);
+        device.push_rx(ipv4_tcp_syn_packet());
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = 0x1234;
+        let now = Instant::from_millis(0);
+        let mut iface = Interface::new(config, &mut device, now);
+        iface.update_ip_addrs(|ip_addrs| {
+            ip_addrs
+                .push(IpCidr::new(IpAddress::v4(10, 0, 0, 1), 24))
+                .unwrap();
+        });
+        let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
+        let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 1024]);
+        let tcp_socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
+        let mut sockets = SocketSet::new(vec![]);
+        let handle = sockets.add(tcp_socket);
+        sockets.get_mut::<tcp::Socket>(handle).listen(8080).unwrap();
+
+        iface.poll(now, &mut device, &mut sockets);
+        let syn_ack = device
+            .take_tx()
+            .into_iter()
+            .find(|packet| packet.len() >= 40 && packet[9] == 6)
+            .unwrap();
+        let server_seq = u32::from_be_bytes([syn_ack[24], syn_ack[25], syn_ack[26], syn_ack[27]]);
+        device.push_rx(ipv4_tcp_packet(2, server_seq + 1, 0x18, b"hello"));
+
+        iface.poll(Instant::from_millis(1), &mut device, &mut sockets);
+        let socket = sockets.get_mut::<tcp::Socket>(handle);
+        let mut received = [0_u8; 16];
+        let length = socket.recv_slice(&mut received).unwrap();
+
+        assert_eq!(&received[..length], b"hello");
+    }
+
+    #[test]
     fn smoltcp_ip_device_accepts_tcp_syn_and_emits_syn_ack() {
         let mut device = InMemoryIpDevice::new(1500);
         device.push_rx(ipv4_tcp_syn_packet());
@@ -148,13 +185,19 @@ mod tests {
     }
 
     fn ipv4_tcp_syn_packet() -> Vec<u8> {
-        let mut tcp = vec![0_u8; 20];
+        ipv4_tcp_packet(1, 0, 0x02, &[])
+    }
+
+    fn ipv4_tcp_packet(seq: u32, ack: u32, flags: u8, payload: &[u8]) -> Vec<u8> {
+        let mut tcp = vec![0_u8; 20 + payload.len()];
         tcp[0..2].copy_from_slice(&49152_u16.to_be_bytes());
         tcp[2..4].copy_from_slice(&8080_u16.to_be_bytes());
-        tcp[4..8].copy_from_slice(&1_u32.to_be_bytes());
+        tcp[4..8].copy_from_slice(&seq.to_be_bytes());
+        tcp[8..12].copy_from_slice(&ack.to_be_bytes());
         tcp[12] = 5 << 4;
-        tcp[13] = 0x02;
+        tcp[13] = flags;
         tcp[14..16].copy_from_slice(&64240_u16.to_be_bytes());
+        tcp[20..].copy_from_slice(payload);
         let mut packet = ipv4_packet(6, [10, 0, 0, 2], [10, 0, 0, 1], &tcp);
         let checksum = tcp_checksum(&packet);
         packet[36..38].copy_from_slice(&checksum.to_be_bytes());
