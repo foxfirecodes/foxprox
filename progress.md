@@ -592,5 +592,5 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-config` — config depends only on `foxprox-core`.
   - `cargo tree -p foxprox-frontends` — frontends depend only on `foxprox-core`.
-- Commit hash after commit: pending.
+- Commit hash after commit: 4db40c8.
 - Remaining boundary risks: streaming listener read limits, SOCKS handshake limits/timeouts, and fuzzing proxy parser inputs remain.
