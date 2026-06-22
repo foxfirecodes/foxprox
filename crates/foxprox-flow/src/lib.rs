@@ -103,6 +103,51 @@ impl ExpiredUdpFlow {
             rule_id: None,
             reason: Some("idle-timeout".to_owned()),
             byte_count: Some(self.state.byte_count),
+            client_to_target_bytes: None,
+            target_to_client_bytes: None,
+        }
+    }
+}
+
+/// Close evidence for one TCP flow after a bridge/tunnel finishes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClosedTcpFlow {
+    pub sandbox_id: SandboxId,
+    pub frontend: FrontendKind,
+    pub source: Option<Endpoint>,
+    pub destination: Option<Endpoint>,
+    pub attribution: Option<HostnameAttribution>,
+    pub closed_at: SystemTime,
+    pub client_to_target_bytes: u64,
+    pub target_to_client_bytes: u64,
+    pub reason: String,
+}
+
+impl ClosedTcpFlow {
+    pub fn audit_record(&self) -> AuditRecord {
+        AuditRecord {
+            timestamp: self.closed_at,
+            kind: AuditKind::TcpFlowClosed,
+            sandbox_id: self.sandbox_id.clone(),
+            frontend: self.frontend,
+            protocol: Protocol::Tcp,
+            source: self.source,
+            destination: self.destination,
+            hostname: self
+                .attribution
+                .as_ref()
+                .map(|attribution| attribution.hostname.clone()),
+            hostname_confidence: self.attribution.as_ref().map(|attr| attr.confidence),
+            http_method: None,
+            http_scheme: None,
+            http_path_query: None,
+            decision: AuditDecision::Observed,
+            denial_behavior: None,
+            rule_id: None,
+            reason: Some(self.reason.clone()),
+            byte_count: Some(self.client_to_target_bytes + self.target_to_client_bytes),
+            client_to_target_bytes: Some(self.client_to_target_bytes),
+            target_to_client_bytes: Some(self.target_to_client_bytes),
         }
     }
 }
@@ -347,6 +392,43 @@ mod tests {
         assert_eq!(value["decision"], "observed");
         assert_eq!(value["byte_count"], 128);
         assert_eq!(value["reason"], "idle-timeout");
+    }
+
+    #[test]
+    fn closed_tcp_flow_emits_structured_audit_with_directional_byte_counts() {
+        let closed = ClosedTcpFlow {
+            sandbox_id: SandboxId::new("flow-test").unwrap(),
+            frontend: FrontendKind::HttpProxy,
+            source: Some(Endpoint::tcp(Ipv4Addr::new(10, 0, 0, 2).into(), 49152)),
+            destination: Some(Endpoint::tcp(Ipv4Addr::new(93, 184, 216, 34).into(), 443)),
+            attribution: Some(HostnameAttribution::new(
+                "api.example.com",
+                AttributionSource::ExplicitProxyHost,
+                AttributionConfidence::High,
+            )),
+            closed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(2_000),
+            client_to_target_bytes: 123,
+            target_to_client_bytes: 456,
+            reason: "eof".to_owned(),
+        };
+
+        let audit = closed.audit_record();
+        let line = audit_record_to_json_line(&audit).unwrap();
+        let value: Value = serde_json::from_str(&line).unwrap();
+
+        assert_eq!(audit.kind, AuditKind::TcpFlowClosed);
+        assert_eq!(audit.decision, AuditDecision::Observed);
+        assert_eq!(audit.protocol, Protocol::Tcp);
+        assert_eq!(audit.byte_count, Some(579));
+        assert_eq!(audit.client_to_target_bytes, Some(123));
+        assert_eq!(audit.target_to_client_bytes, Some(456));
+        assert_eq!(value["kind"], "tcp_flow_closed");
+        assert_eq!(value["decision"], "observed");
+        assert_eq!(value["hostname"], "api.example.com");
+        assert_eq!(value["byte_count"], 579);
+        assert_eq!(value["client_to_target_bytes"], 123);
+        assert_eq!(value["target_to_client_bytes"], 456);
+        assert_eq!(value["reason"], "eof");
     }
 
     #[test]

@@ -103,6 +103,8 @@ struct JsonAuditRecord<'a> {
     rule_id: Option<&'a str>,
     reason: Option<&'a str>,
     byte_count: Option<u64>,
+    client_to_target_bytes: Option<u64>,
+    target_to_client_bytes: Option<u64>,
 }
 
 impl<'a> From<&'a AuditRecord> for JsonAuditRecord<'a> {
@@ -125,6 +127,8 @@ impl<'a> From<&'a AuditRecord> for JsonAuditRecord<'a> {
             rule_id: record.rule_id.as_deref(),
             reason: record.reason.as_deref(),
             byte_count: record.byte_count,
+            client_to_target_bytes: record.client_to_target_bytes,
+            target_to_client_bytes: record.target_to_client_bytes,
         }
     }
 }
@@ -158,6 +162,7 @@ fn ip_addr(value: IpAddr) -> String {
 fn audit_kind(value: AuditKind) -> &'static str {
     match value {
         AuditKind::TcpConnect => "tcp_connect",
+        AuditKind::TcpFlowClosed => "tcp_flow_closed",
         AuditKind::UdpFlow => "udp_flow",
         AuditKind::UdpFlowExpired => "udp_flow_expired",
         AuditKind::DnsQuery => "dns_query",

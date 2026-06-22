@@ -743,3 +743,25 @@
 - What failed or surprised the agent: no failures; an EOF-driven blocking bridge is enough for deterministic local tunnel evidence, though async/backpressure and cancellation remain future runtime work.
 - What remains unproven: integrating the bridge with CONNECT/SOCKS listener state machines, TCP flow close audit records, resource limits/cancellation, TUN TCP forwarding, and async backpressure are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — TCP bridge stats → flow close audit slice
+
+- Slice attempted: convert TCP bridge byte-count evidence into a structured TCP flow-close audit record.
+- Why next: the TCP bridge now returns byte counts, but alpha audit requires TCP flow closed events with byte counts; this is the smallest policy-independent close-audit boundary before proxy listener integration.
+- Verification plan: extend core/audit schema with `tcp_flow_closed` and directional byte counts, add a `ClosedTcpFlow` helper in `foxprox-flow`, verify JSON output includes total and directional counts, then run formatting, clippy, focused flow/audit tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — TCP bridge stats → flow close audit
+
+- Slice attempted: convert TCP bridge byte-count evidence into externally serializable TCP flow-close audit.
+- Why next: the bridge returns byte counts, and alpha audit requires TCP flow closed events with byte counts before proxy/TUN runtimes can claim lifecycle observability.
+- What changed: added `AuditKind::TcpFlowClosed`, directional byte-count fields to `AuditRecord`/JSON output, and `ClosedTcpFlow` in `foxprox-flow` with observed close audit records carrying source/destination, hostname attribution, total bytes, direction bytes, and close reason.
+- Verification:
+  - `cargo fmt --check` passed.
+  - Focused checks passed: `cargo test -p foxprox-flow closed_tcp_flow -- --nocapture` verified `tcp_flow_closed` JSON with total and directional byte counts; `cargo test -p foxprox-audit serializes_broker_audit_record_as_json_line` verified existing audit serialization still works.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 5 `foxprox-dns` tests, 5 `foxprox-egress` tests, 6 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 20 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no failures; adding optional directional byte fields preserved existing audit records while allowing TCP close records to be more precise than a single total.
+- What remains unproven: automatic emission of close audit from proxy listener bridge completion, TUN TCP flow close integration, durations/error reasons, and audit backpressure behavior in live forwarding are still absent.
+- Commit: this commit.

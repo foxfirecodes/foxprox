@@ -136,3 +136,7 @@ SOCKS5 method negotiation should be validated before CONNECT policy events exist
 ## 2026-06-21 — TCP tunnel pumps need EOF and byte-count evidence
 
 A deterministic blocking tunnel proof can use cloned `TcpStream`s, copy upload in one thread, copy download in the caller, and shut down write halves on EOF. Return byte counts separately so later flow-close audit code can consume forwarding evidence without coupling egress to policy types.
+
+## 2026-06-21 — flow-close audit should keep directional bytes optional
+
+TCP bridge statistics are directional, but many audit records only have a total byte count or no bytes. Keep directional counts optional in the core audit schema so TCP close records can be precise without forcing UDP expiration or policy-decision records to invent fields.

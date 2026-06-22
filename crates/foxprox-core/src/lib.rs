@@ -998,6 +998,7 @@ pub struct PolicyEvaluation {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum AuditKind {
     TcpConnect,
+    TcpFlowClosed,
     UdpFlow,
     UdpFlowExpired,
     DnsQuery,
@@ -1038,6 +1039,8 @@ pub struct AuditRecord {
     pub rule_id: Option<String>,
     pub reason: Option<String>,
     pub byte_count: Option<u64>,
+    pub client_to_target_bytes: Option<u64>,
+    pub target_to_client_bytes: Option<u64>,
 }
 
 impl AuditRecord {
@@ -1079,6 +1082,8 @@ impl AuditRecord {
             rule_id,
             reason,
             byte_count: None,
+            client_to_target_bytes: None,
+            target_to_client_bytes: None,
         }
     }
 }
