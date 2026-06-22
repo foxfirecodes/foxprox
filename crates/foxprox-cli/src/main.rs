@@ -10,15 +10,11 @@ use std::os::unix::net::UnixListener;
 
 use foxprox_core::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
 use foxprox_core::egress::{EgressBackend, EgressOutcome, EgressRequest};
-use foxprox_core::origin::{
-    parse_connect_target, parse_http_request, parse_socks5_connect_request,
-};
-use foxprox_core::policy::{
-    Cidr, PolicyConfig, PolicyEngine, PolicyRequest, PolicyRule, RuleAction,
-};
+use foxprox_core::origin::parse_socks5_connect_request;
+use foxprox_core::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule, RuleAction};
 use foxprox_core::runtime::{
-    TransparentDnsRuntime, TransparentTcpBridgeRuntime, TransparentTcpRuntime,
-    TransparentUdpRuntime,
+    ExplicitProxyRuntime, TransparentDnsRuntime, TransparentTcpBridgeRuntime,
+    TransparentTcpRuntime, TransparentUdpRuntime,
 };
 use foxprox_core::scenario::{run_scenario, ScenarioName};
 use foxprox_core::smoltcp_gate::feed_tcp_syn_to_smoltcp_listener;
@@ -2520,7 +2516,6 @@ fn run_http_proxy_smoke() -> Result<AuditRecord, String> {
     let n = client
         .read(&mut request_bytes)
         .map_err(|err| format!("HTTP proxy smoke read failed: {err}"))?;
-    let parsed = parse_http_request(&request_bytes[..n])?;
     let policy = PolicyEngine::new(
         PolicyConfig::deny_by_default().with_rule(
             PolicyRule::new("allow-http-proxy-example", RuleAction::Allow)
@@ -2529,20 +2524,15 @@ fn run_http_proxy_smoke() -> Result<AuditRecord, String> {
                 .http_path_prefix("/ok"),
         ),
     );
-    let request = PolicyRequest::new("http-proxy-smoke", Frontend::HttpProxy, Protocol::Http)
-        .with_destination(origin_addr.ip(), origin_addr.port())
-        .with_hostname(
-            &parsed.host,
-            foxprox_core::audit::AttributionConfidence::High,
-        )
-        .with_http(&parsed.method, &parsed.path);
-    let outcome = policy.evaluate(&request);
-    if !outcome.decision.is_allow() {
-        return Err(format!(
-            "HTTP proxy smoke policy denied request: {}",
-            outcome.reason
-        ));
-    }
+    let mut proxy_runtime = ExplicitProxyRuntime::new(policy);
+    let parsed = proxy_runtime
+        .evaluate_http_request("http-proxy-smoke", &request_bytes[..n], origin_addr)?
+        .ok_or_else(|| "HTTP proxy smoke policy denied request".to_string())?;
+    let proxy_audit = proxy_runtime
+        .audit
+        .last()
+        .cloned()
+        .ok_or_else(|| "HTTP proxy runtime did not emit audit".to_string())?;
 
     let mut origin_stream = TcpStream::connect_timeout(&origin_addr, Duration::from_secs(5))
         .map_err(|err| format!("HTTP proxy smoke origin connect failed: {err}"))?;
@@ -2583,11 +2573,12 @@ fn run_http_proxy_smoke() -> Result<AuditRecord, String> {
         foxprox_core::audit::AttributionSource::ExplicitProxy,
         foxprox_core::audit::AttributionConfidence::High,
     )
-    .with_rule(outcome.rule_id)
+    .with_rule(proxy_audit.rule_id.clone())
     .with_metadata("method", parsed.method)
     .with_metadata("path", parsed.path)
-    .with_metadata("policy_decision", outcome.decision.as_str())
-    .with_metadata("policy_reason", outcome.reason)
+    .with_metadata("policy_decision", proxy_audit.decision.as_str())
+    .with_metadata("policy_reason", proxy_audit.reason.clone())
+    .with_metadata("runtime_audit", proxy_audit.to_json_line())
     .with_metadata("origin_fixture", origin_addr.to_string())
     .with_bytes(n as u64, origin_response.len() as u64))
 }
@@ -2674,7 +2665,6 @@ fn run_http_proxy_deny_smoke() -> Result<AuditRecord, String> {
     let n = client
         .read(&mut request_bytes)
         .map_err(|err| format!("HTTP deny proxy read failed: {err}"))?;
-    let parsed = parse_http_request(&request_bytes[..n])?;
     let policy = PolicyEngine::new(
         PolicyConfig::deny_by_default().with_rule(
             PolicyRule::new("deny-http-admin", RuleAction::DenyReset)
@@ -2683,14 +2673,18 @@ fn run_http_proxy_deny_smoke() -> Result<AuditRecord, String> {
                 .http_path_prefix("/admin"),
         ),
     );
-    let request = PolicyRequest::new("proxy-deny-smoke", Frontend::HttpProxy, Protocol::Http)
-        .with_hostname(
-            &parsed.host,
-            foxprox_core::audit::AttributionConfidence::High,
-        )
-        .with_http(&parsed.method, &parsed.path);
-    let outcome = policy.evaluate(&request);
-    if outcome.decision.is_allow() {
+    let mut proxy_runtime = ExplicitProxyRuntime::new(policy);
+    let allowed = proxy_runtime.evaluate_http_request(
+        "proxy-deny-smoke",
+        &request_bytes[..n],
+        "127.0.0.1:0".parse().expect("static socket valid"),
+    )?;
+    let proxy_audit = proxy_runtime
+        .audit
+        .last()
+        .cloned()
+        .ok_or_else(|| "HTTP deny proxy runtime did not emit audit".to_string())?;
+    if allowed.is_some() || proxy_audit.decision.is_allow() {
         return Err("HTTP deny smoke policy unexpectedly allowed request".to_string());
     }
     client
@@ -2704,21 +2698,36 @@ fn run_http_proxy_deny_smoke() -> Result<AuditRecord, String> {
     Ok(AuditRecord::new(
         EventKind::HttpRequest,
         "proxy-deny-smoke",
-        outcome.decision,
+        proxy_audit.decision,
         "HTTP proxy request was denied before host egress",
     )
     .with_frontend(Frontend::HttpProxy)
     .with_protocol(Protocol::Http)
     .with_hostname(
-        Some(parsed.host),
+        proxy_audit.hostname.clone(),
         foxprox_core::audit::AttributionSource::ExplicitProxy,
         foxprox_core::audit::AttributionConfidence::High,
     )
-    .with_rule(outcome.rule_id)
-    .with_metadata("method", parsed.method)
-    .with_metadata("path", parsed.path)
-    .with_metadata("policy_decision", outcome.decision.as_str())
-    .with_metadata("policy_reason", outcome.reason)
+    .with_rule(proxy_audit.rule_id.clone())
+    .with_metadata(
+        "method",
+        proxy_audit
+            .metadata
+            .get("method")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string()),
+    )
+    .with_metadata(
+        "path",
+        proxy_audit
+            .metadata
+            .get("path")
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string()),
+    )
+    .with_metadata("policy_decision", proxy_audit.decision.as_str())
+    .with_metadata("policy_reason", proxy_audit.reason.clone())
+    .with_metadata("runtime_audit", proxy_audit.to_json_line())
     .with_metadata("egress_calls", "0")
     .with_bytes(n as u64, 0))
 }
@@ -2799,7 +2808,6 @@ fn run_https_connect_smoke() -> Result<AuditRecord, String> {
         .map_err(|err| format!("HTTPS CONNECT proxy timeout setup failed: {err}"))?;
     let request = read_http_headers(&mut client, "HTTPS CONNECT proxy")?;
     let target = parse_connect_request_target(&request)?;
-    let parsed = parse_connect_target(&target)?;
     let policy = PolicyEngine::new(
         PolicyConfig::deny_by_default().with_rule(
             PolicyRule::new("allow-https-connect-example", RuleAction::Allow)
@@ -2808,23 +2816,15 @@ fn run_https_connect_smoke() -> Result<AuditRecord, String> {
                 .port(443),
         ),
     );
-    let policy_request = PolicyRequest::new(
-        "https-connect-smoke",
-        Frontend::HttpProxy,
-        Protocol::HttpsConnect,
-    )
-    .with_destination(origin_addr.ip(), parsed.port)
-    .with_hostname(
-        &parsed.host,
-        foxprox_core::audit::AttributionConfidence::High,
-    );
-    let outcome = policy.evaluate(&policy_request);
-    if !outcome.decision.is_allow() {
-        return Err(format!(
-            "HTTPS CONNECT smoke policy denied request: {}",
-            outcome.reason
-        ));
-    }
+    let mut proxy_runtime = ExplicitProxyRuntime::new(policy);
+    let parsed = proxy_runtime
+        .evaluate_https_connect("https-connect-smoke", &target, origin_addr)?
+        .ok_or_else(|| "HTTPS CONNECT smoke policy denied request".to_string())?;
+    let proxy_audit = proxy_runtime
+        .audit
+        .last()
+        .cloned()
+        .ok_or_else(|| "HTTPS CONNECT runtime did not emit audit".to_string())?;
 
     let mut origin_stream = TcpStream::connect_timeout(&origin_addr, Duration::from_secs(5))
         .map_err(|err| format!("HTTPS CONNECT origin connect failed: {err}"))?;
@@ -2868,10 +2868,11 @@ fn run_https_connect_smoke() -> Result<AuditRecord, String> {
         foxprox_core::audit::AttributionSource::ExplicitProxy,
         foxprox_core::audit::AttributionConfidence::High,
     )
-    .with_rule(outcome.rule_id)
+    .with_rule(proxy_audit.rule_id.clone())
     .with_metadata("connect_port", parsed.port.to_string())
-    .with_metadata("policy_decision", outcome.decision.as_str())
-    .with_metadata("policy_reason", outcome.reason)
+    .with_metadata("policy_decision", proxy_audit.decision.as_str())
+    .with_metadata("policy_reason", proxy_audit.reason.clone())
+    .with_metadata("runtime_audit", proxy_audit.to_json_line())
     .with_metadata("origin_fixture", origin_addr.to_string())
     .with_bytes(n as u64, reply_n as u64))
 }
@@ -2979,7 +2980,6 @@ fn run_socks5_smoke() -> Result<AuditRecord, String> {
     let n = client
         .read(&mut request_bytes)
         .map_err(|err| format!("SOCKS5 proxy CONNECT read failed: {err}"))?;
-    let parsed = parse_socks5_connect_request(&request_bytes[..n])?;
     let policy = PolicyEngine::new(
         PolicyConfig::deny_by_default().with_rule(
             PolicyRule::new("allow-socks5-example", RuleAction::Allow)
@@ -2988,19 +2988,15 @@ fn run_socks5_smoke() -> Result<AuditRecord, String> {
                 .port(443),
         ),
     );
-    let policy_request = PolicyRequest::new("socks5-smoke", Frontend::Socks5, Protocol::Socks)
-        .with_destination(origin_addr.ip(), parsed.destination_port)
-        .with_hostname(
-            &parsed.destination_host,
-            foxprox_core::audit::AttributionConfidence::High,
-        );
-    let outcome = policy.evaluate(&policy_request);
-    if !outcome.decision.is_allow() {
-        return Err(format!(
-            "SOCKS5 smoke policy denied request: {}",
-            outcome.reason
-        ));
-    }
+    let mut proxy_runtime = ExplicitProxyRuntime::new(policy);
+    let parsed = proxy_runtime
+        .evaluate_socks5_connect("socks5-smoke", &request_bytes[..n], origin_addr)?
+        .ok_or_else(|| "SOCKS5 smoke policy denied request".to_string())?;
+    let proxy_audit = proxy_runtime
+        .audit
+        .last()
+        .cloned()
+        .ok_or_else(|| "SOCKS5 runtime did not emit audit".to_string())?;
 
     let mut origin_stream = TcpStream::connect_timeout(&origin_addr, Duration::from_secs(5))
         .map_err(|err| format!("SOCKS5 origin connect failed: {err}"))?;
@@ -3044,10 +3040,11 @@ fn run_socks5_smoke() -> Result<AuditRecord, String> {
         foxprox_core::audit::AttributionSource::ExplicitProxy,
         foxprox_core::audit::AttributionConfidence::High,
     )
-    .with_rule(outcome.rule_id)
+    .with_rule(proxy_audit.rule_id.clone())
     .with_metadata("connect_port", parsed.destination_port.to_string())
-    .with_metadata("policy_decision", outcome.decision.as_str())
-    .with_metadata("policy_reason", outcome.reason)
+    .with_metadata("policy_decision", proxy_audit.decision.as_str())
+    .with_metadata("policy_reason", proxy_audit.reason.clone())
+    .with_metadata("runtime_audit", proxy_audit.to_json_line())
     .with_metadata("origin_fixture", origin_addr.to_string())
     .with_bytes(read_n as u64, reply_n as u64))
 }

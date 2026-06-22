@@ -803,3 +803,39 @@
 - Interpretation: DNS runtime factoring checkpoint is preserved.
 - Next verification gap: final review after runtime factoring; remaining work is likely crate decomposition and production async/resource hardening.
 - Commit hash after commit: 10d0d28.
+
+## 2026-06-22T05:00:00Z — Post-runtime-factoring verification sweep
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run all >/tmp/foxprox-all-post-factor.jsonl && cargo run -p foxprox-cli --bin foxprox-lab -- run robustness >/tmp/foxprox-robust-post-factor.jsonl && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run dns-smoke >/tmp/foxprox-dns-post-factor.jsonl && target/debug/foxprox-lab run dns-attribution-smoke >/tmp/foxprox-dns-attr-post-factor.jsonl && target/debug/foxprox-lab run tcp-bridge-smoke >/tmp/foxprox-tcp-bridge-post-factor.jsonl && target/debug/foxprox-lab run tcp-bridge-deny-smoke >/tmp/foxprox-tcp-deny-post-factor.jsonl`
+- Environment assumptions: local bwrap/TUN fd handoff and sandbox Python are available for environment smokes; all host egress remains local fixture traffic.
+- Expected result: after factoring TCP bridge and DNS behavior into reusable runtime boundaries, deterministic scenarios and key environment smokes still pass.
+- Observed result: pass. `foxprox-core` ran 54 tests; `foxprox-cli` ran 2 tests; `foxproxsetup` ran 7 tests. DNS attribution and TCP bridge smokes completed successfully.
+- Relevant output excerpt: `OK`; DNS attribution `"decision":"allow"`, `"attributed_hostname":"lab.example"`, `"forwarded":"true"`; TCP bridge `"decision":"allow"`, `"egress_calls":"1"`, `"inspection_decision":"allow"`.
+- Changed files: `progress.md`.
+- Interpretation: runtime factoring preserved alpha behavior while moving more broker semantics out of CLI-only smoke code.
+- Next verification gap: create dedicated crate boundaries for device/runtime/egress or continue factoring remaining CLI-only explicit proxy forwarding into reusable core helpers.
+- Commit hash after commit: pending.
+
+## 2026-06-22T05:20:00Z — Explicit proxy runtime boundary
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run http-proxy-smoke`; `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run https-connect-smoke && cargo run -p foxprox-cli --bin foxprox-lab -- run socks5-smoke`
+- Environment assumptions: explicit proxy smokes use local client/proxy/origin TCP fixtures only; no external network.
+- Expected result: HTTP proxy, HTTPS CONNECT, and SOCKS5 policy/audit handling should move into a reusable core explicit proxy runtime while smoke commands continue to tunnel bytes through local fixtures.
+- Observed result: pass. `foxprox-core` increased to 56 tests; `foxprox-cli` ran 2 tests; `foxproxsetup` ran 7 tests. HTTP, CONNECT, and SOCKS5 smokes emitted allow records with nested runtime audit from `ExplicitProxyRuntime`.
+- Relevant output excerpt: `runtime::tests::explicit_proxy_runtime_allows_http_request_by_host_path ... ok`; `runtime::tests::explicit_proxy_runtime_denies_malformed_socks_before_egress ... ok`; `"event":"https_connect","runtime_audit":"{...}`; `"event":"socks_connect","runtime_audit":"{...}`.
+- Changed files: `crates/foxprox-core/src/runtime.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: explicit proxy policy/audit semantics are now reusable core runtime behavior rather than CLI-only smoke logic; CLI still owns socket accept/tunnel mechanics.
+- Next verification gap: migrate negative proxy smoke onto `ExplicitProxyRuntime`, then final review/commit.
+- Commit hash after commit: pending.
+
+## 2026-06-22T05:35:00Z — Proxy deny smoke uses explicit proxy runtime
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run proxy-deny-smoke`
+- Environment assumptions: local-only HTTP proxy deny fixture; malformed CONNECT and unsupported SOCKS fixtures remain deterministic no-egress checks.
+- Expected result: HTTP proxy deny path should use `ExplicitProxyRuntime` and still prove denied traffic does not reach host egress.
+- Observed result: pass. Workspace tests remained green (`foxprox-core` 56, `foxprox-cli` 2, `foxproxsetup` 7). `proxy-deny-smoke` emitted `deny_reset` for `/admin` with nested `ExplicitProxyRuntime` audit and zero egress calls; malformed CONNECT and unsupported SOCKS still failed closed.
+- Relevant output excerpt: `"rule_id":"deny-http-admin"`; `"egress_calls":"0"`; `"runtime_audit":"{...\"event\":\"http_request\"...\"decision\":\"deny_reset\"...}"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: explicit proxy allow and HTTP-deny paths now share the reusable runtime boundary. Remaining malformed CONNECT request-line parsing is still a CLI helper because it extracts the CONNECT target from raw HTTP headers before target policy evaluation.
+- Next verification gap: commit runtime factoring work and run a final post-factoring smoke subset.
+- Commit hash after commit: pending.

@@ -7,7 +7,10 @@ use crate::audit::{
 };
 use crate::dns::{parse_dns_query, synthesize_a_response, DnsCache};
 use crate::egress::{EgressBackend, EgressRequest};
-use crate::origin::{parse_http_request, parse_tls_client_hello};
+use crate::origin::{
+    parse_connect_target, parse_http_request, parse_socks5_connect_request, parse_tls_client_hello,
+    ConnectTarget, HttpRequestMeta, SocksConnectRequest,
+};
 use crate::packet::{
     parse_icmp_echo_request, parse_ipv4, parse_tcp, parse_udp, synthesize_icmp_echo_reply,
     synthesize_udp_reply,
@@ -188,6 +191,175 @@ impl<B: EgressBackend> TransparentUdpRuntime<B> {
                 Ok(None)
             }
         }
+    }
+}
+
+/// Reusable explicit proxy policy/audit runtime.
+///
+/// This runtime parses explicit HTTP, HTTPS CONNECT, and SOCKS5 TCP CONNECT requests, applies the
+/// shared policy engine, and records normalized audit. Socket tunneling remains in the caller or a
+/// future egress crate.
+#[derive(Debug)]
+pub struct ExplicitProxyRuntime {
+    pub policy: PolicyEngine,
+    pub audit: Vec<AuditRecord>,
+}
+
+impl ExplicitProxyRuntime {
+    pub fn new(policy: PolicyEngine) -> Self {
+        Self {
+            policy,
+            audit: Vec::new(),
+        }
+    }
+
+    pub fn evaluate_http_request(
+        &mut self,
+        sandbox_id: impl Into<String>,
+        bytes: &[u8],
+        egress_destination: SocketAddr,
+    ) -> Result<Option<HttpRequestMeta>, String> {
+        let sandbox_id = sandbox_id.into();
+        let parsed = match parse_http_request(bytes) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                self.audit.push(
+                    AuditRecord::new(
+                        EventKind::HttpRequest,
+                        sandbox_id,
+                        Decision::FailClosed,
+                        format!("malformed HTTP proxy request fails closed: {err}"),
+                    )
+                    .with_frontend(Frontend::HttpProxy)
+                    .with_protocol(Protocol::Http),
+                );
+                return Ok(None);
+            }
+        };
+        let request = PolicyRequest::new(&sandbox_id, Frontend::HttpProxy, Protocol::Http)
+            .with_destination(egress_destination.ip(), parsed.port)
+            .with_hostname(&parsed.host, AttributionConfidence::High)
+            .with_http(&parsed.method, &parsed.path);
+        let outcome = self.policy.evaluate(&request);
+        let allowed = outcome.decision.is_allow();
+        self.audit.push(
+            AuditRecord::new(
+                EventKind::HttpRequest,
+                sandbox_id,
+                outcome.decision,
+                outcome.reason,
+            )
+            .with_frontend(Frontend::HttpProxy)
+            .with_protocol(Protocol::Http)
+            .with_addresses(None, Some(egress_destination))
+            .with_hostname(
+                Some(parsed.host.clone()),
+                AttributionSource::ExplicitProxy,
+                AttributionConfidence::High,
+            )
+            .with_rule(outcome.rule_id)
+            .with_metadata("method", parsed.method.clone())
+            .with_metadata("path", parsed.path.clone()),
+        );
+        Ok(allowed.then_some(parsed))
+    }
+
+    pub fn evaluate_https_connect(
+        &mut self,
+        sandbox_id: impl Into<String>,
+        target: &str,
+        egress_destination: SocketAddr,
+    ) -> Result<Option<ConnectTarget>, String> {
+        let sandbox_id = sandbox_id.into();
+        let parsed = match parse_connect_target(target) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                self.audit.push(
+                    AuditRecord::new(
+                        EventKind::HttpsConnect,
+                        sandbox_id,
+                        Decision::FailClosed,
+                        format!("malformed CONNECT target fails closed: {err}"),
+                    )
+                    .with_frontend(Frontend::HttpProxy)
+                    .with_protocol(Protocol::HttpsConnect),
+                );
+                return Ok(None);
+            }
+        };
+        let request = PolicyRequest::new(&sandbox_id, Frontend::HttpProxy, Protocol::HttpsConnect)
+            .with_destination(egress_destination.ip(), parsed.port)
+            .with_hostname(&parsed.host, AttributionConfidence::High);
+        let outcome = self.policy.evaluate(&request);
+        let allowed = outcome.decision.is_allow();
+        self.audit.push(
+            AuditRecord::new(
+                EventKind::HttpsConnect,
+                sandbox_id,
+                outcome.decision,
+                outcome.reason,
+            )
+            .with_frontend(Frontend::HttpProxy)
+            .with_protocol(Protocol::HttpsConnect)
+            .with_addresses(None, Some(egress_destination))
+            .with_hostname(
+                Some(parsed.host.clone()),
+                AttributionSource::ExplicitProxy,
+                AttributionConfidence::High,
+            )
+            .with_rule(outcome.rule_id)
+            .with_metadata("connect_port", parsed.port.to_string()),
+        );
+        Ok(allowed.then_some(parsed))
+    }
+
+    pub fn evaluate_socks5_connect(
+        &mut self,
+        sandbox_id: impl Into<String>,
+        bytes: &[u8],
+        egress_destination: SocketAddr,
+    ) -> Result<Option<SocksConnectRequest>, String> {
+        let sandbox_id = sandbox_id.into();
+        let parsed = match parse_socks5_connect_request(bytes) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                self.audit.push(
+                    AuditRecord::new(
+                        EventKind::SocksConnect,
+                        sandbox_id,
+                        Decision::FailClosed,
+                        format!("malformed or unsupported SOCKS5 request fails closed: {err}"),
+                    )
+                    .with_frontend(Frontend::Socks5)
+                    .with_protocol(Protocol::Socks),
+                );
+                return Ok(None);
+            }
+        };
+        let request = PolicyRequest::new(&sandbox_id, Frontend::Socks5, Protocol::Socks)
+            .with_destination(egress_destination.ip(), parsed.destination_port)
+            .with_hostname(&parsed.destination_host, AttributionConfidence::High);
+        let outcome = self.policy.evaluate(&request);
+        let allowed = outcome.decision.is_allow();
+        self.audit.push(
+            AuditRecord::new(
+                EventKind::SocksConnect,
+                sandbox_id,
+                outcome.decision,
+                outcome.reason,
+            )
+            .with_frontend(Frontend::Socks5)
+            .with_protocol(Protocol::Socks)
+            .with_addresses(None, Some(egress_destination))
+            .with_hostname(
+                Some(parsed.destination_host.clone()),
+                AttributionSource::ExplicitProxy,
+                AttributionConfidence::High,
+            )
+            .with_rule(outcome.rule_id)
+            .with_metadata("connect_port", parsed.destination_port.to_string()),
+        );
+        Ok(allowed.then_some(parsed))
     }
 }
 
@@ -1068,6 +1240,51 @@ mod tests {
             Some("allow-attributed-quic")
         );
         assert_eq!(runtime.egress.requests.len(), 1);
+    }
+
+    #[test]
+    fn explicit_proxy_runtime_allows_http_request_by_host_path() {
+        let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
+        let policy = PolicyEngine::new(
+            PolicyConfig::deny_by_default().with_rule(
+                PolicyRule::new("allow-http-proxy", RuleAction::Allow)
+                    .protocol(Protocol::Http)
+                    .hostname("example.com")
+                    .http_path_prefix("/ok"),
+            ),
+        );
+        let mut runtime = ExplicitProxyRuntime::new(policy);
+        let parsed = runtime
+            .evaluate_http_request(
+                "lab",
+                b"GET http://example.com/ok HTTP/1.1\r\nHost: example.com\r\n\r\n",
+                destination,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.host, "example.com");
+        assert_eq!(runtime.audit[0].decision, Decision::Allow);
+        assert_eq!(
+            runtime.audit[0].rule_id.as_deref(),
+            Some("allow-http-proxy")
+        );
+    }
+
+    #[test]
+    fn explicit_proxy_runtime_denies_malformed_socks_before_egress() {
+        let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1080);
+        let policy = PolicyEngine::new(PolicyConfig::deny_by_default());
+        let mut runtime = ExplicitProxyRuntime::new(policy);
+        let parsed = runtime
+            .evaluate_socks5_connect(
+                "lab",
+                &[0x05, 0x03, 0x00, 0x01, 127, 0, 0, 1, 0, 53],
+                destination,
+            )
+            .unwrap();
+        assert!(parsed.is_none());
+        assert_eq!(runtime.audit[0].decision, Decision::FailClosed);
+        assert!(runtime.audit[0].reason.contains("SOCKS5"));
     }
 
     #[test]
