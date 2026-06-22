@@ -1331,3 +1331,38 @@ Round-14 high finding is fixed. DNS rollback now removes only one matching obser
 
 ### Remaining blind spots
 - Rollback precision is covered in the blocking DNS listener proof; async runtime must use the same delivery-token/rollback semantics.
+
+## 2026-06-22 — Blocking HTTP proxy listener proof cycle
+
+### Behavior under work
+Add a concrete single-step TCP listener proof for explicit HTTP proxy traffic, so a sandbox-reachable TCP connection can feed `ExplicitProxyFrontend`, return a client-visible status, and expose structured listener step evidence.
+
+### Expected evidence
+- A local TCP client can send an absolute-form HTTP proxy request to `BlockingHttpProxyServer::handle_one`, which routes through the shared policy/audit frontend and returns a response on the client socket.
+- Denied proxy requests produce client-visible denial status and structured step evidence without forwarding to egress.
+- Client response write failures emit structured `broker_error` evidence before returning step failure.
+
+## 2026-06-22 — Blocking HTTP proxy listener proof
+
+### Commands run
+- `cargo fmt` — applied formatting for blocking HTTP proxy listener proof.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 12 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 103 core tests, 3 device tests, 12 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_http_proxy_server_handles_allowed_request ... ok`
+- `foxprox_egress::tests::blocking_http_proxy_server_denies_without_forwarding ... ok`
+
+### Interpretation
+The egress crate now includes a concrete single-step blocking HTTP proxy listener proof. A local TCP client can connect, send an absolute-form HTTP proxy request, and receive a client-visible status while `BlockingHttpProxyServer` delegates parse/policy/egress to the shared `ExplicitProxyFrontend`. Allowed requests forward through the configured proxy egress and emit `http_request_decision`; denied CONNECT requests return 403, do not forward, and preserve policy audit evidence. Listener step results expose client address, request length, response length, status code, send status, decision, reason, and forwarded flag.
+
+### Changed files
+- `crates/foxprox-core/src/proxy_frontend.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The listener proof writes synthetic proxy status responses and handles one accepted connection; final async proxy runtime still needs streaming HTTP response/CONNECT tunneling, SOCKS listener sockets, and process lifecycle supervision.

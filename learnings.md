@@ -87,3 +87,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — DNS client delivery gates attribution usefulness
 
 - DNS attribution should not outlive failed client delivery in listener paths. If a broker listener cannot send the DNS response back to the sandbox, rollback the just-committed observation and emit `dns_client_send_failed` broker-error evidence so cache state reflects what the sandbox could actually observe.
+
+## 2026-06-22 — Explicit proxy listener proof boundary
+
+- A concrete proxy listener can remain bounded and observable by handling one TCP request at a time, delegating parse/policy/egress to `ExplicitProxyFrontend`, and returning a structured listener step result with client address, request/response lengths, status code, send status, decision, and forwarded flag.

@@ -9,11 +9,12 @@
 
 use foxprox_core::{
     AuditKind, AuditRecord, BrokerRuntimeConfig, Decision, DenialReason, DnsBrokerHandler,
-    DnsHandlerResult, DnsQueryMetadata, DnsUpstream, DnsUpstreamError, Frontend, NetworkEndpoint,
-    PolicyRequest, Protocol, TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
+    DnsHandlerResult, DnsQueryMetadata, DnsUpstream, DnsUpstreamError, ExplicitProxyEgress,
+    ExplicitProxyFrontend, Frontend, NetworkEndpoint, PolicyRequest, Protocol, ProxyEgressError,
+    TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
 };
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, UdpSocket};
+use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -268,6 +269,155 @@ impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HttpProxyListenerStepResult {
+    pub client: SocketAddr,
+    pub request_len: usize,
+    pub response_len: usize,
+    pub sent_response: bool,
+    pub send_status: String,
+    pub status_code: u16,
+    pub decision: Decision,
+    pub reason: Option<DenialReason>,
+    pub forwarded: bool,
+}
+
+#[derive(Debug)]
+pub struct BlockingHttpProxyServer<E> {
+    listener: TcpListener,
+    frontend: ExplicitProxyFrontend<E>,
+    io_timeout: Duration,
+    max_request_bytes: usize,
+}
+
+impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
+    pub fn bind(
+        bind_addr: SocketAddr,
+        frontend: ExplicitProxyFrontend<E>,
+        io_timeout: Duration,
+        max_request_bytes: usize,
+    ) -> Result<Self, ProxyEgressError> {
+        let listener = TcpListener::bind(bind_addr).map_err(|_| ProxyEgressError::SendFailed)?;
+        listener
+            .set_nonblocking(false)
+            .map_err(|_| ProxyEgressError::SendFailed)?;
+        Ok(Self {
+            listener,
+            frontend,
+            io_timeout,
+            max_request_bytes,
+        })
+    }
+
+    pub fn local_addr(&self) -> Result<SocketAddr, ProxyEgressError> {
+        self.listener
+            .local_addr()
+            .map_err(|_| ProxyEgressError::SendFailed)
+    }
+
+    pub fn handle_one(
+        &mut self,
+        now_ms: u64,
+    ) -> Result<HttpProxyListenerStepResult, ProxyEgressError> {
+        let (mut stream, client) = self
+            .listener
+            .accept()
+            .map_err(|_| ProxyEgressError::SendFailed)?;
+        stream
+            .set_read_timeout(Some(self.io_timeout))
+            .map_err(|_| ProxyEgressError::SendFailed)?;
+        stream
+            .set_write_timeout(Some(self.io_timeout))
+            .map_err(|_| ProxyEgressError::SendFailed)?;
+        let request = read_http_proxy_request(&mut stream, self.max_request_bytes)?;
+        let request_len = request.len();
+        let result = self.frontend.handle_http_proxy_bytes(&request)?;
+        let (status_code, response) = http_proxy_response_for(&request, result.decision);
+        match stream.write_all(response.as_bytes()) {
+            Ok(()) => Ok(HttpProxyListenerStepResult {
+                client,
+                request_len,
+                response_len: response.len(),
+                sent_response: true,
+                send_status: "sent".to_string(),
+                status_code,
+                decision: result.decision,
+                reason: result.reason,
+                forwarded: result.forwarded,
+            }),
+            Err(_) => {
+                let audit =
+                    AuditRecord::new_at(AuditKind::BrokerError, "proxy-listener", now_ms as u128)
+                        .with_frontend(Frontend::HttpProxy)
+                        .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+                        .with_detail("client", client.to_string())
+                        .with_detail("request_len", request_len.to_string())
+                        .with_detail("response_len", response.len().to_string())
+                        .with_detail("send_status", "send_failed")
+                        .with_detail("error", "http_proxy_client_send_failed");
+                let request = PolicyRequest::unsupported(
+                    "proxy-listener".to_string(),
+                    Frontend::HttpProxy,
+                    DenialReason::ResourceLimit,
+                );
+                let _ = self.frontend.broker_mut().append_audit_for(&request, audit);
+                Ok(HttpProxyListenerStepResult {
+                    client,
+                    request_len,
+                    response_len: response.len(),
+                    sent_response: false,
+                    send_status: "send_failed".to_string(),
+                    status_code,
+                    decision: Decision::FailClosed,
+                    reason: Some(DenialReason::ResourceLimit),
+                    forwarded: result.forwarded,
+                })
+            }
+        }
+    }
+
+    pub fn frontend(&self) -> &ExplicitProxyFrontend<E> {
+        &self.frontend
+    }
+}
+
+fn read_http_proxy_request(
+    stream: &mut TcpStream,
+    max_request_bytes: usize,
+) -> Result<Vec<u8>, ProxyEgressError> {
+    let mut request = Vec::new();
+    let mut chunk = [0u8; 256];
+    while request.len() < max_request_bytes.max(1) {
+        let remaining = max_request_bytes.max(1).saturating_sub(request.len());
+        let read_len = remaining.min(chunk.len());
+        let len = stream
+            .read(&mut chunk[..read_len])
+            .map_err(|_| ProxyEgressError::SendFailed)?;
+        if len == 0 {
+            break;
+        }
+        request.extend_from_slice(&chunk[..len]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    Ok(request)
+}
+
+fn http_proxy_response_for(request: &[u8], decision: Decision) -> (u16, &'static str) {
+    if decision.is_allow() {
+        if request.starts_with(b"CONNECT ") {
+            (200, "HTTP/1.1 200 Connection Established\r\n\r\n")
+        } else {
+            (200, "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+        }
+    } else if matches!(decision, Decision::FailClosed) {
+        (400, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+    } else {
+        (403, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BlockingUdpEgress {
     bind_addr: SocketAddr,
@@ -308,8 +458,9 @@ fn socket_addr(endpoint: NetworkEndpoint) -> Option<SocketAddr> {
 mod tests {
     use super::*;
     use foxprox_core::{
-        BrokerCore, Cidr, Decision, DnsBrokerHandler, FlowKey, PolicyConfig, PolicyEngine,
-        PolicyRule, Protocol, TcpForwarder, UdpForwarder, UdpTimeoutConfig,
+        BrokerCore, Cidr, Decision, DnsBrokerHandler, ExplicitProxyFrontend, FlowKey,
+        InMemoryExplicitProxyEgress, PolicyConfig, PolicyEngine, PolicyRule, Protocol,
+        TcpForwarder, UdpForwarder, UdpTimeoutConfig,
     };
     use std::collections::VecDeque;
     use std::io::{Read, Write};
@@ -380,6 +531,80 @@ mod tests {
         let mut buf = [0u8; 16];
         let (len, _) = receiver.recv_from(&mut buf).unwrap();
         assert_eq!(&buf[..len], b"hello");
+    }
+
+    #[test]
+    fn blocking_http_proxy_server_handles_allowed_request() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-http-proxy")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Http)
+                .origin("http", "example.com", 80),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let frontend =
+            ExplicitProxyFrontend::new("s1", broker, InMemoryExplicitProxyEgress::default());
+        let mut server = BlockingHttpProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            frontend,
+            Duration::from_secs(1),
+            4096,
+        )
+        .unwrap();
+        let mut client = TcpStream::connect(server.local_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client
+            .write_all(b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            .unwrap();
+
+        let step = server.handle_one(1_000).unwrap();
+        assert_eq!(step.decision, Decision::Allow);
+        assert!(step.forwarded);
+        assert_eq!(step.status_code, 200);
+        assert_eq!(step.send_status, "sent");
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        let records: Vec<_> = server.frontend().broker().audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::HttpRequestDecision);
+        assert_eq!(records[0].decision, Some(Decision::Allow));
+    }
+
+    #[test]
+    fn blocking_http_proxy_server_denies_without_forwarding() {
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 8);
+        let frontend =
+            ExplicitProxyFrontend::new("s1", broker, InMemoryExplicitProxyEgress::default());
+        let mut server = BlockingHttpProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            frontend,
+            Duration::from_secs(1),
+            4096,
+        )
+        .unwrap();
+        let mut client = TcpStream::connect(server.local_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client
+            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
+            .unwrap();
+
+        let step = server.handle_one(1_000).unwrap();
+        assert_eq!(step.decision, Decision::DenyDrop);
+        assert!(!step.forwarded);
+        assert_eq!(step.status_code, 403);
+        assert_eq!(step.send_status, "sent");
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 403 Forbidden"));
+        let records: Vec<_> = server.frontend().broker().audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].decision, Some(Decision::DenyDrop));
     }
 
     #[test]

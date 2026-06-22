@@ -133,6 +133,10 @@ impl<E: ExplicitProxyEgress> ExplicitProxyFrontend<E> {
         &self.broker
     }
 
+    pub fn broker_mut(&mut self) -> &mut BrokerCore {
+        &mut self.broker
+    }
+
     pub fn egress(&self) -> &E {
         &self.egress
     }
