@@ -335,3 +335,15 @@
 - Interpretation: TCP connect scaffold checkpoint is preserved.
 - Next verification gap: real TCP stack/forwarding proof or smaller bwrap/TUN TCP SYN arrival smoke.
 - Commit hash after commit: f1f5e6b.
+
+## 2026-06-22T00:05:00Z — TCP SYN arrival environment smoke
+
+- Command executed: `cargo fmt --all && cargo test --all`; `cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run tcp-syn-smoke`
+- Environment assumptions: bwrap, `/dev/net/tun`, Python, and Unix fd handoff are available; the sandbox TCP connect attempt is expected to time out because the harness observes only the SYN and does not yet synthesize TCP stack responses back to the sandbox.
+- Expected result: deterministic tests remain green; a sandbox TCP connect attempt emits a TCP SYN on the handed-off TUN fd; the transparent TCP runtime evaluates an allow rule, records audit output, and invokes a host TCP egress fixture exactly once.
+- Observed result: pass. `foxprox-core` ran 38 tests, `foxprox-cli` ran 2 tests, `foxproxsetup` ran 7 tests, and `tcp-syn-smoke` emitted `decision":"allow"`, `syn_observed":"true"`, and `egress_calls":"1"`.
+- Relevant output excerpt: `"reason":"sandbox TCP SYN reached the handed-off TUN fd and invoked policy-gated egress"`; `"runtime_audit":"{...\"event\":\"tcp_connect_attempt\",...\"destination\":\"203.0.113.20:8080\",...\"rule_id\":\"allow-tcp-syn-smoke\"...}"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: the harness now proves real TCP connect attempts reach the broker-owned TUN fd and enter the policy/audit/egress boundary. This is still not the smoltcp TCP forwarding gate because no SYN-ACK, stream lifecycle, or byte bridging is implemented.
+- Next verification gap: implement a userspace TCP stack/forwarding proof (smoltcp or equivalent) that responds to the sandbox TCP handshake and bridges bytes to a local host TCP fixture.
+- Commit hash after commit: pending.

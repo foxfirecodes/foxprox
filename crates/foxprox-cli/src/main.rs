@@ -1,5 +1,5 @@
 use std::env;
-use std::net::UdpSocket;
+use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
@@ -11,7 +11,7 @@ use foxprox_core::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
 use foxprox_core::dns::{parse_dns_query, synthesize_a_response, DnsCache};
 use foxprox_core::egress::{EgressBackend, EgressOutcome, EgressRequest};
 use foxprox_core::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule, RuleAction};
-use foxprox_core::runtime::TransparentUdpRuntime;
+use foxprox_core::runtime::{TransparentTcpRuntime, TransparentUdpRuntime};
 use foxprox_core::scenario::{run_scenario, ScenarioName};
 
 fn main() -> ExitCode {
@@ -48,6 +48,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("udp-deny-smoke");
             println!("dns-smoke");
             println!("dns-attribution-smoke");
+            println!("tcp-syn-smoke");
             Ok(())
         }
         [cmd, scenario] if cmd == "run" => run_named_scenario(scenario),
@@ -77,6 +78,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         dns_smoke_records()
     } else if scenario == "dns-attribution-smoke" {
         dns_attribution_smoke_records()
+    } else if scenario == "tcp-syn-smoke" {
+        tcp_syn_smoke_records()
     } else {
         run_scenario(ScenarioName::parse(scenario)?)
     };
@@ -88,7 +91,7 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke>",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke>",
         ScenarioName::list().join("|")
     );
 }
@@ -1272,6 +1275,245 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
 }
 
 #[cfg(unix)]
+fn tcp_syn_smoke_records() -> Vec<AuditRecord> {
+    match run_tcp_syn_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::TcpConnectAttempt,
+            "tcp-syn-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::Harness)
+        .with_protocol(Protocol::Tcp)],
+    }
+}
+
+#[cfg(not(unix))]
+fn tcp_syn_smoke_records() -> Vec<AuditRecord> {
+    vec![AuditRecord::new(
+        EventKind::TcpConnectAttempt,
+        "tcp-syn-smoke",
+        Decision::FailClosed,
+        "TCP SYN smoke is only supported on Unix",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Tcp)]
+}
+
+#[cfg(unix)]
+fn run_tcp_syn_smoke() -> Result<AuditRecord, String> {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind TCP connect fixture: {err}"))?;
+    let fixture_addr = listener
+        .local_addr()
+        .map_err(|err| format!("failed to inspect TCP connect fixture: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make TCP fixture nonblocking: {err}"))?;
+    let tcp_fixture_thread = std::thread::spawn(move || -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match listener.accept() {
+                Ok((_stream, _peer)) => return Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(err) => return Err(format!("TCP connect fixture accept failed: {err}")),
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err("TCP connect fixture did not receive egress connect".to_string())
+    });
+
+    let helper = setup_helper_path()?;
+    let target_dir = helper
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| {
+            format!(
+                "could not derive target directory from {}",
+                helper.display()
+            )
+        })?
+        .to_path_buf();
+    let socket_dir = target_dir.join(format!("fxtcp-{}", std::process::id()));
+    let socket_path = socket_dir.join("s");
+    let _ = std::fs::remove_file(&socket_path);
+    std::fs::create_dir_all(&socket_dir)
+        .map_err(|err| format!("failed to create TCP SYN smoke socket dir: {err}"))?;
+    let handoff_listener = UnixListener::bind(&socket_path)
+        .map_err(|err| format!("failed to bind TCP SYN smoke handoff socket: {err}"))?;
+    handoff_listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make TCP SYN handoff listener nonblocking: {err}"))?;
+
+    let mut child = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--ro-bind",
+        ])
+        .arg(&target_dir)
+        .arg(&target_dir)
+        .args(["--bind"])
+        .arg(&socket_dir)
+        .arg(&socket_dir)
+        .args(["--proc", "/proc", "--"])
+        .env("FOXPROX_SETUP_SOCKET", &socket_path)
+        .arg(&helper)
+        .args([
+            "--",
+            "/usr/bin/python3",
+            "-c",
+            "import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.settimeout(1);\ntry:\n s.connect(('203.0.113.20',8080)); sys.exit(4)\nexcept (socket.timeout,OSError):\n sys.exit(0)",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn bwrap TCP SYN smoke: {err}"))?;
+
+    let fd = accept_handoff_fd(&handoff_listener, &mut child, Duration::from_secs(10))?;
+    fd_handoff::set_nonblocking(fd)?;
+    let destination_ip = "203.0.113.20"
+        .parse()
+        .map_err(|err| format!("invalid TCP SYN smoke destination IP: {err}"))?;
+    let policy = PolicyEngine::new(
+        PolicyConfig::deny_by_default().with_rule(
+            PolicyRule::new("allow-tcp-syn-smoke", RuleAction::Allow)
+                .protocol(Protocol::Tcp)
+                .destination(Cidr::host(destination_ip))
+                .port(8080),
+        ),
+    );
+    let mut runtime = TransparentTcpRuntime::new(policy, LocalTcpConnectEgress::new(fixture_addr));
+    let mut buf = [0_u8; 2048];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut packets_read = 0_u64;
+    let mut syn_observed = false;
+    while Instant::now() < deadline {
+        match fd_handoff::read_fd(fd, &mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                packets_read += 1;
+                let packet = &buf[..n];
+                let parsed = match foxprox_core::packet::parse_ipv4(packet) {
+                    Ok(parsed) => parsed,
+                    Err(_) => continue,
+                };
+                if parsed.protocol_number != 6 {
+                    continue;
+                }
+                let tcp = match foxprox_core::packet::parse_tcp(parsed.payload) {
+                    Ok(tcp) => tcp,
+                    Err(_) => continue,
+                };
+                if tcp.destination_port != 8080 || !tcp.syn {
+                    continue;
+                }
+                runtime.handle_ipv4_packet("tcp-syn-smoke", packet)?;
+                syn_observed = runtime
+                    .audit
+                    .last()
+                    .is_some_and(|audit| audit.decision == Decision::Allow);
+                break;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(format!("failed to read TUN fd during TCP SYN smoke: {err}")),
+        }
+        if child
+            .try_wait()
+            .map_err(|err| format!("failed to poll bwrap TCP SYN smoke: {err}"))?
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !syn_observed {
+        return Err("timed out waiting for allowed TCP SYN on handed-off TUN fd".to_string());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for bwrap TCP SYN smoke: {err}"))?;
+    fd_handoff::close_fd(fd);
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir(&socket_dir);
+    let egress_calls = runtime.egress.calls;
+    let fixture_result = if egress_calls > 0 {
+        Some(
+            tcp_fixture_thread
+                .join()
+                .map_err(|_| "TCP connect fixture thread panicked".to_string())?,
+        )
+    } else {
+        None
+    };
+    if let Some(result) = fixture_result {
+        result?;
+    }
+    let runtime_audit = runtime.audit.last().cloned();
+    let success = output.status.success() && syn_observed && egress_calls == 1;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut record = AuditRecord::new(
+        EventKind::TcpConnectAttempt,
+        "tcp-syn-smoke",
+        if success {
+            Decision::Allow
+        } else {
+            Decision::FailClosed
+        },
+        if success {
+            "sandbox TCP SYN reached the handed-off TUN fd and invoked policy-gated egress"
+        } else {
+            "TCP SYN was observed but the sandbox target or egress fixture failed"
+        },
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Tcp)
+    .with_metadata("status", output.status.to_string())
+    .with_metadata("packets_read", packets_read.to_string())
+    .with_metadata("syn_observed", syn_observed.to_string())
+    .with_metadata("egress_calls", egress_calls.to_string())
+    .with_metadata("egress_fixture", fixture_addr.to_string());
+    if let Some(audit) = runtime_audit {
+        let runtime_audit_json = audit.to_json_line();
+        record = record
+            .with_metadata("policy_decision", audit.decision.as_str())
+            .with_metadata("policy_reason", audit.reason.clone())
+            .with_metadata("runtime_audit", runtime_audit_json);
+        if let Some(rule_id) = audit.rule_id {
+            record = record.with_metadata("rule_id", rule_id);
+        }
+    }
+    if !stdout.is_empty() {
+        record = record.with_metadata("stdout", stdout);
+    }
+    if !stderr.is_empty() {
+        record = record.with_metadata("stderr", stderr);
+    }
+    Ok(record)
+}
+
+#[cfg(unix)]
 fn udp_deny_smoke_records() -> Vec<AuditRecord> {
     match run_udp_deny_smoke() {
         Ok(record) => vec![record],
@@ -1463,6 +1705,38 @@ fn run_udp_deny_smoke() -> Result<AuditRecord, String> {
         record = record.with_metadata("stderr", stderr);
     }
     Ok(record)
+}
+
+#[cfg(unix)]
+struct LocalTcpConnectEgress {
+    fixture: std::net::SocketAddr,
+    calls: usize,
+}
+
+#[cfg(unix)]
+impl LocalTcpConnectEgress {
+    fn new(fixture: std::net::SocketAddr) -> Self {
+        Self { fixture, calls: 0 }
+    }
+}
+
+#[cfg(unix)]
+impl EgressBackend for LocalTcpConnectEgress {
+    fn execute(&mut self, request: &EgressRequest) -> Result<EgressOutcome, String> {
+        let EgressRequest::TcpConnect { destination } = request else {
+            return Err("local TCP egress only supports TCP connects".to_string());
+        };
+        self.calls += 1;
+        let _stream = TcpStream::connect_timeout(&self.fixture, Duration::from_secs(2))
+            .map_err(|err| format!("host TCP egress connect failed: {err}"))?;
+        Ok(EgressOutcome {
+            connected: true,
+            bytes_sent: 0,
+            bytes_received: 0,
+            message: format!("local TCP fixture egress for {destination}"),
+            response_payload: Vec::new(),
+        })
+    }
 }
 
 #[cfg(unix)]
