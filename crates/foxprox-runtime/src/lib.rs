@@ -258,6 +258,70 @@ where
     })
 }
 
+pub struct BridgeMaintenanceStep<'a, S, T, U> {
+    pub adapter: &'a mut S,
+    pub tcp_bridges: &'a mut StackTcpBridgeTable<T>,
+    pub udp_bridges: &'a mut UdpBridgeTable<U>,
+    pub max_tcp_read_bytes_per_stream: usize,
+    pub max_udp_read_bytes_per_flow: usize,
+    pub now_millis: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BridgeMaintenanceOutcome {
+    pub tcp_pending_bytes_written_to_egress: usize,
+    pub tcp_streams_read: usize,
+    pub tcp_bytes_read_from_egress: usize,
+    pub tcp_bytes_enqueued_to_stack: usize,
+    pub udp_flows_read: usize,
+    pub udp_bytes_read_from_egress: usize,
+    pub udp_flows_expired: usize,
+    pub outbound_packets_written: usize,
+}
+
+/// Flush bridge state once without reading a new device packet or invoking
+/// policy. This is the synchronous maintenance primitive for a future event loop.
+pub fn process_bridge_maintenance_tick<D, S, T, U>(
+    device: &mut D,
+    step: BridgeMaintenanceStep<'_, S, T, U>,
+) -> Result<BridgeMaintenanceOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    S: StackAdapter,
+    T: HostTcpStream,
+    U: HostUdpFlow,
+{
+    let tcp_pending_bytes_written_to_egress = step
+        .tcp_bridges
+        .flush_pending_sandbox_writes()
+        .map_err(BrokerError::Egress)
+        .map_err(RuntimeError::Broker)?;
+    let tcp = flush_tcp_bridge_reads_to_stack_device(
+        device,
+        step.adapter,
+        step.tcp_bridges,
+        step.max_tcp_read_bytes_per_stream,
+    )?;
+    let udp = flush_udp_bridge_reads_to_device(
+        device,
+        step.udp_bridges,
+        step.max_udp_read_bytes_per_flow,
+        step.now_millis,
+    )?;
+    let udp_flows_expired = step.udp_bridges.expire_idle(step.now_millis);
+
+    Ok(BridgeMaintenanceOutcome {
+        tcp_pending_bytes_written_to_egress,
+        tcp_streams_read: tcp.tcp_streams_read,
+        tcp_bytes_read_from_egress: tcp.tcp_bytes_read_from_egress,
+        tcp_bytes_enqueued_to_stack: tcp.tcp_bytes_enqueued_to_stack,
+        udp_flows_read: udp.udp_flows_read,
+        udp_bytes_read_from_egress: udp.udp_bytes_read_from_egress,
+        udp_flows_expired,
+        outbound_packets_written: tcp.outbound_packets_written + udp.outbound_packets_written,
+    })
+}
+
 /// Context for processing one IPv4 packet while retaining UDP egress handles.
 pub struct DevicePacketStepWithUdp<'a, E, A>
 where
@@ -868,6 +932,62 @@ mod tests {
         }));
         assert_eq!(writes.borrow().as_slice(), &[b"ping".to_vec()]);
         assert_eq!(audit.records().len(), 1);
+    }
+
+    #[test]
+    fn bridge_maintenance_tick_flushes_tcp_udp_and_expiry() {
+        let cursor = Cursor::new(Vec::new());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let tcp_key = StackTcpFlowKey::new(
+            SandboxId::new("s1").unwrap(),
+            FrontendKind::Tun,
+            "10.0.0.2:49152".parse().unwrap(),
+            "203.0.113.10:80".parse().unwrap(),
+        );
+        let mut tcp_bridges = StackTcpBridgeTable::default();
+        tcp_bridges.insert(
+            tcp_key,
+            ReadableTcpStream::new(vec![b"tcp".to_vec()].into()),
+        );
+        let udp_key = UdpFlowKey {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:53000".parse().unwrap(),
+            destination: "203.0.113.10:12345".parse().unwrap(),
+        };
+        let mut udp_bridges = UdpBridgeTable::default();
+        udp_bridges.insert_with_timeout(
+            udp_key,
+            ReadableUdpFlow::new(vec![b"udp".to_vec()].into()),
+            10,
+            5,
+        );
+        let mut adapter = ReadBackStackAdapter {
+            writes: Vec::new(),
+            outbound: vec![OutboundIpPacket::new(vec![0x45, 0, 0, 20]).unwrap()],
+        };
+
+        let outcome = process_bridge_maintenance_tick(
+            &mut device,
+            BridgeMaintenanceStep {
+                adapter: &mut adapter,
+                tcp_bridges: &mut tcp_bridges,
+                udp_bridges: &mut udp_bridges,
+                max_tcp_read_bytes_per_stream: 1024,
+                max_udp_read_bytes_per_flow: 1024,
+                now_millis: 20,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.tcp_streams_read, 1);
+        assert_eq!(outcome.tcp_bytes_read_from_egress, 3);
+        assert_eq!(outcome.tcp_bytes_enqueued_to_stack, 3);
+        assert_eq!(outcome.udp_flows_read, 1);
+        assert_eq!(outcome.udp_bytes_read_from_egress, 3);
+        assert_eq!(outcome.udp_flows_expired, 0);
+        assert_eq!(outcome.outbound_packets_written, 2);
+        assert_eq!(adapter.writes[0].bytes, b"tcp");
     }
 
     #[test]

@@ -1235,3 +1235,23 @@
   - `cargo tree -p foxprox-packet` — checksum logic remains packet/core-only.
 - Commit hash after commit: cf1b824.
 - Remaining boundary risks: IPv6 UDP responses, ICMP errors, and rate limiting remain.
+
+## 2026-06-22 — Boundary objective: bridge maintenance tick contract
+
+- Boundary under work: one bounded runtime maintenance tick that flushes retained TCP/UDP bridge state without parsing packets or invoking policy.
+- Allowed dependency direction: runtime coordinates `HostTcpStream`, `HostUdpFlow`, stack adapter write-back, and device writes through existing contracts; packet formatting stays in packet/adapter crates; policy/audit remain outside bridge maintenance.
+- Dependency-risk assessment: forwarding pieces are now implemented as separate functions. A small maintenance tick proves how a future loop can flush pending TCP writes, TCP host reads, UDP host reads, and UDP expiry without hardwiring smoltcp or std sockets into orchestration.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/audit.
+- Observed results: added `BridgeMaintenanceStep`, `BridgeMaintenanceOutcome`, and `process_bridge_maintenance_tick` in runtime. The tick flushes pending sandbox-to-host TCP bytes, host-to-sandbox TCP reads through the stack adapter, host UDP reply reads through packet synthesis/device write-back, and UDP idle expiry without invoking policy or exposing socket/stack internals. Added a runtime test proving one maintenance tick flushes both TCP and UDP paths and reports combined outbound packet writes. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 108 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — maintenance orchestration stays in runtime over contracts.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: blocking device read integration, readiness registration, async scheduling, and fair per-flow budgets remain.

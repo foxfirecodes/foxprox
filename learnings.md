@@ -288,3 +288,8 @@
 
 - UDP response checksum calculation should stay in `foxprox-packet` with IPv4 pseudo-header construction, keeping runtime response routing at the opaque-packet level.
 - Even though IPv4 permits a zero UDP checksum, emitting a real checksum improves compatibility without widening policy or audit contracts.
+
+## 2026-06-22 — bridge maintenance tick
+
+- Keep bridge maintenance separate from packet-ingest steps: it can flush nonblocking host streams, adapter write-back, UDP replies, and UDP expiry without re-entering policy.
+- A synchronous tick contract gives a safe stepping stone toward async/readiness scheduling while preserving stack/egress/device boundaries.
