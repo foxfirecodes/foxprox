@@ -563,3 +563,27 @@
 - Interpretation: Milestone 5 has stronger deterministic harness coverage for transparent HTTP and TLS attribution decisions. The remaining quality gap is end-to-end environment smoke coverage for transparent HTTP/TLS bytes through the smoltcp bridge, plus explicit denied/malformed proxy smokes.
 - Next verification gap: add denied/malformed explicit proxy smoke or wire transparent HTTP inspection into the TCP bridge environment smoke.
 - Commit hash after commit: pending.
+
+## 2026-06-22T01:28:00Z — transparent inspection commit recorded
+
+- Command executed: `git add README.md crates/foxprox-core/src/runtime.rs crates/foxprox-core/src/scenario.rs progress.md && git commit -m "Add transparent inspection runtime"`
+- Environment assumptions: deterministic inspection tests and `inspect` scenario above were verified before commit.
+- Expected result: commit captures transparent HTTP/TLS inspection runtime, scenario output, README update, and prior explicit-proxy commit ledger note.
+- Observed result: commit `52eef84` created with 4 files changed.
+- Relevant output excerpt: `[harness-lab 52eef84] Add transparent inspection runtime`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: transparent inspection checkpoint is preserved.
+- Next verification gap: denied/malformed explicit proxy smoke or environment smoke that feeds transparent HTTP bytes through the TCP bridge into the inspection runtime.
+- Commit hash after commit: 52eef84.
+
+## 2026-06-22T01:40:00Z — Denied and malformed explicit proxy smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run proxy-deny-smoke`
+- Environment assumptions: local-only TCP socket for the HTTP deny path; malformed CONNECT and unsupported SOCKS fixtures are deterministic parser checks with no host egress.
+- Expected result: denied HTTP proxy request receives a local 403/reset-style policy decision before egress; malformed CONNECT and unsupported SOCKS requests fail closed with zero egress calls.
+- Observed result: pass. Workspace tests remained green (`foxprox-core` 44, `foxprox-cli` 2, `foxproxsetup` 7). `proxy-deny-smoke` emitted `deny_reset` for `/admin` HTTP and `fail_closed` records for malformed CONNECT and SOCKS UDP ASSOCIATE.
+- Relevant output excerpt: `"event":"http_request","decision":"deny_reset","rule_id":"deny-http-admin","egress_calls":"0"`; `"reason":"malformed CONNECT request denied before egress: request is not CONNECT"`; `"reason":"unsupported SOCKS request denied before egress: only SOCKS5 TCP CONNECT is supported"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: explicit proxy networking now has allow, deny, and malformed/unsupported smoke coverage across HTTP, HTTPS CONNECT, and SOCKS5 TCP CONNECT scope.
+- Next verification gap: wire transparent HTTP inspection into an environment smoke through the smoltcp TCP bridge, or add audit backpressure/resource-limit modeling for robustness.
+- Commit hash after commit: pending.

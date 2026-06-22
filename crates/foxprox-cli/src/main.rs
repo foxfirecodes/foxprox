@@ -62,6 +62,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("http-proxy-smoke");
             println!("https-connect-smoke");
             println!("socks5-smoke");
+            println!("proxy-deny-smoke");
             Ok(())
         }
         [cmd, scenario] if cmd == "run" => run_named_scenario(scenario),
@@ -105,6 +106,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         https_connect_smoke_records()
     } else if scenario == "socks5-smoke" {
         socks5_smoke_records()
+    } else if scenario == "proxy-deny-smoke" {
+        proxy_deny_smoke_records()
     } else {
         run_scenario(ScenarioName::parse(scenario)?)
     };
@@ -116,7 +119,7 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke|tcp-bridge-smoke|tcp-bridge-deny-smoke|http-proxy-smoke|https-connect-smoke|socks5-smoke>",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke|tcp-bridge-smoke|tcp-bridge-deny-smoke|http-proxy-smoke|https-connect-smoke|socks5-smoke|proxy-deny-smoke>",
         ScenarioName::list().join("|")
     );
 }
@@ -2660,6 +2663,137 @@ fn run_http_proxy_smoke() -> Result<AuditRecord, String> {
     .with_metadata("policy_reason", outcome.reason)
     .with_metadata("origin_fixture", origin_addr.to_string())
     .with_bytes(n as u64, origin_response.len() as u64))
+}
+
+fn proxy_deny_smoke_records() -> Vec<AuditRecord> {
+    let mut records = Vec::new();
+    records.push(match run_http_proxy_deny_smoke() {
+        Ok(record) => record,
+        Err(err) => AuditRecord::new(
+            EventKind::HttpRequest,
+            "proxy-deny-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::HttpProxy)
+        .with_protocol(Protocol::Http),
+    });
+
+    let connect_err = parse_connect_request_target("GET / HTTP/1.1\r\n\r\n")
+        .expect_err("malformed CONNECT fixture should fail");
+    records.push(
+        AuditRecord::new(
+            EventKind::HttpsConnect,
+            "proxy-deny-smoke",
+            Decision::FailClosed,
+            format!("malformed CONNECT request denied before egress: {connect_err}"),
+        )
+        .with_frontend(Frontend::HttpProxy)
+        .with_protocol(Protocol::HttpsConnect)
+        .with_metadata("egress_calls", "0"),
+    );
+
+    let socks_err = parse_socks5_connect_request(&[0x05, 0x03, 0x00, 0x01, 127, 0, 0, 1, 0, 53])
+        .expect_err("SOCKS UDP ASSOCIATE fixture should fail");
+    records.push(
+        AuditRecord::new(
+            EventKind::SocksConnect,
+            "proxy-deny-smoke",
+            Decision::FailClosed,
+            format!("unsupported SOCKS request denied before egress: {socks_err}"),
+        )
+        .with_frontend(Frontend::Socks5)
+        .with_protocol(Protocol::Socks)
+        .with_metadata("egress_calls", "0"),
+    );
+    records
+}
+
+fn run_http_proxy_deny_smoke() -> Result<AuditRecord, String> {
+    let proxy = TcpListener::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind HTTP deny proxy listener: {err}"))?;
+    let proxy_addr = proxy
+        .local_addr()
+        .map_err(|err| format!("failed to inspect HTTP deny proxy listener: {err}"))?;
+    let client_thread = std::thread::spawn(move || -> Result<(), String> {
+        let mut stream = TcpStream::connect_timeout(&proxy_addr, Duration::from_secs(5))
+            .map_err(|err| format!("HTTP deny client connect failed: {err}"))?;
+        stream
+            .write_all(b"GET http://example.com/admin HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            .map_err(|err| format!("HTTP deny client write failed: {err}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|err| format!("HTTP deny client timeout setup failed: {err}"))?;
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .map_err(|err| format!("HTTP deny client read failed: {err}"))?;
+        let response_text = String::from_utf8_lossy(&response);
+        if !response_text.starts_with("HTTP/1.1 403") {
+            return Err(format!(
+                "HTTP deny client received unexpected response: {response_text:?}"
+            ));
+        }
+        Ok(())
+    });
+
+    let (mut client, _peer) = proxy
+        .accept()
+        .map_err(|err| format!("HTTP deny proxy accept failed: {err}"))?;
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|err| format!("HTTP deny proxy timeout setup failed: {err}"))?;
+    let mut request_bytes = [0_u8; 2048];
+    let n = client
+        .read(&mut request_bytes)
+        .map_err(|err| format!("HTTP deny proxy read failed: {err}"))?;
+    let parsed = parse_http_request(&request_bytes[..n])?;
+    let policy = PolicyEngine::new(
+        PolicyConfig::deny_by_default().with_rule(
+            PolicyRule::new("deny-http-admin", RuleAction::DenyReset)
+                .protocol(Protocol::Http)
+                .hostname("example.com")
+                .http_path_prefix("/admin"),
+        ),
+    );
+    let request = PolicyRequest::new("proxy-deny-smoke", Frontend::HttpProxy, Protocol::Http)
+        .with_hostname(
+            &parsed.host,
+            foxprox_core::audit::AttributionConfidence::High,
+        )
+        .with_http(&parsed.method, &parsed.path);
+    let outcome = policy.evaluate(&request);
+    if outcome.decision.is_allow() {
+        return Err("HTTP deny smoke policy unexpectedly allowed request".to_string());
+    }
+    client
+        .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .map_err(|err| format!("HTTP deny response write failed: {err}"))?;
+    drop(client);
+    client_thread
+        .join()
+        .map_err(|_| "HTTP deny client thread panicked".to_string())??;
+
+    Ok(AuditRecord::new(
+        EventKind::HttpRequest,
+        "proxy-deny-smoke",
+        outcome.decision,
+        "HTTP proxy request was denied before host egress",
+    )
+    .with_frontend(Frontend::HttpProxy)
+    .with_protocol(Protocol::Http)
+    .with_hostname(
+        Some(parsed.host),
+        foxprox_core::audit::AttributionSource::ExplicitProxy,
+        foxprox_core::audit::AttributionConfidence::High,
+    )
+    .with_rule(outcome.rule_id)
+    .with_metadata("method", parsed.method)
+    .with_metadata("path", parsed.path)
+    .with_metadata("policy_decision", outcome.decision.as_str())
+    .with_metadata("policy_reason", outcome.reason)
+    .with_metadata("egress_calls", "0")
+    .with_bytes(n as u64, 0))
 }
 
 fn run_https_connect_smoke() -> Result<AuditRecord, String> {
