@@ -670,3 +670,27 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: 615aec7.
 - Remaining boundary risks: async/nonblocking audit backpressure and log rotation remain.
+
+## 2026-06-21 — Boundary objective: TUN device IO contract
+
+- Boundary under work: concrete read/write IO boundary for opaque IP packets from a TUN-like device without leaking file descriptors or raw packet buffers to policy/audit.
+- Allowed dependency direction: `foxprox-device` owns device IO and exports opaque packet bytes; core/policy/audit must not depend on device, Linux fd, or TUN implementation types.
+- Dependency-risk assessment: production TUN loops need a narrow IO contract before adding Linux-specific creation/setup. Keep the first implementation generic over `Read + Write` so tests can prove behavior without unsafe or kernel dependencies.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency tree checks for `foxprox-device` plus policy/audit.
+- Observed results: added `foxprox-device` with opaque `DevicePacket`, `PacketDevice`, and generic blocking `Read + Write` IO wrapper. Tests cover read, write, empty packet, invalid max size, and oversized writes without introducing policy/audit dependencies on device or fd types. All verification passed.
+- Changed files:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `crates/foxprox-device/Cargo.toml`
+  - `crates/foxprox-device/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 77 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-device` — device has no project crate dependencies.
+  - `cargo tree -p foxprox-policy` — policy depends only on `foxprox-core`.
+  - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: Linux TUN creation/ioctl, fd handoff, async readiness, and namespace setup remain.

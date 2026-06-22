@@ -21,6 +21,10 @@ name = "foxprox-core"
 version = "0.1.0"
 
 [[package]]
+name = "foxprox-device"
+version = "0.1.0"
+
+[[package]]
 name = "foxprox-dns"
 version = "0.1.0"
 dependencies = [

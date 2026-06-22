@@ -158,3 +158,8 @@
 
 - Concrete audit sinks should live in `foxprox-audit`; runtime code can then record normalized `AuditRecord`s through `AuditSink` without owning serialization details.
 - Audit IO errors need an audit-layer error variant so broker orchestration can distinguish sink backpressure from writer failures.
+
+## 2026-06-21 — TUN device IO contract
+
+- A generic `Read + Write` packet device can prove opaque TUN-style packet IO without unsafe code or kernel setup, leaving Linux TUN creation/fd handoff as a later device-backend expansion.
+- Device IO should reject empty and oversized packets at the device boundary so policy/audit never need raw packet buffer validation.
