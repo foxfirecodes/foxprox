@@ -8,8 +8,8 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    BrokerRuntimeConfig, DnsQueryMetadata, DnsUpstream, DnsUpstreamError, NetworkEndpoint,
-    TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
+    BrokerRuntimeConfig, Decision, DenialReason, DnsBrokerHandler, DnsQueryMetadata, DnsUpstream,
+    DnsUpstreamError, NetworkEndpoint, TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
 };
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
@@ -121,10 +121,89 @@ impl DnsUpstream for BlockingDnsUpstream {
             .recv_from(&mut response)
             .map_err(|_| DnsUpstreamError::Unavailable)?;
         if peer != self.upstream {
-            return Err(DnsUpstreamError::Unavailable);
+            return Err(DnsUpstreamError::SourceMismatch);
         }
         response.truncate(len);
         Ok(response)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DnsBrokerStepResult {
+    pub client: SocketAddr,
+    pub query_len: usize,
+    pub response_len: usize,
+    pub sent_response: bool,
+    pub decision: Decision,
+    pub reason: Option<DenialReason>,
+}
+
+#[derive(Debug)]
+pub struct BlockingDnsBrokerServer<U> {
+    socket: UdpSocket,
+    handler: DnsBrokerHandler<U>,
+    max_query_bytes: usize,
+}
+
+impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
+    pub fn bind(
+        bind_addr: SocketAddr,
+        handler: DnsBrokerHandler<U>,
+        timeout: Duration,
+        max_query_bytes: usize,
+    ) -> Result<Self, DnsUpstreamError> {
+        let socket = UdpSocket::bind(bind_addr).map_err(|_| DnsUpstreamError::Unavailable)?;
+        socket
+            .set_read_timeout(Some(timeout))
+            .map_err(|_| DnsUpstreamError::Unavailable)?;
+        socket
+            .set_write_timeout(Some(timeout))
+            .map_err(|_| DnsUpstreamError::Unavailable)?;
+        Ok(Self {
+            socket,
+            handler,
+            max_query_bytes,
+        })
+    }
+
+    pub fn local_addr(&self) -> Result<SocketAddr, DnsUpstreamError> {
+        self.socket
+            .local_addr()
+            .map_err(|_| DnsUpstreamError::Unavailable)
+    }
+
+    pub fn handle_one(
+        &mut self,
+        sandbox_id: impl Into<String>,
+        now_ms: u64,
+    ) -> Result<DnsBrokerStepResult, DnsUpstreamError> {
+        let mut query = vec![0u8; self.max_query_bytes.max(1)];
+        let (query_len, client) = self
+            .socket
+            .recv_from(&mut query)
+            .map_err(|_| DnsUpstreamError::Unavailable)?;
+        query.truncate(query_len);
+        let result = self.handler.handle_query(sandbox_id, &query, now_ms);
+        let response_len = result.response.as_ref().map_or(0, Vec::len);
+        let mut sent_response = false;
+        if let Some(response) = result.response.as_ref() {
+            self.socket
+                .send_to(response, client)
+                .map_err(|_| DnsUpstreamError::Unavailable)?;
+            sent_response = true;
+        }
+        Ok(DnsBrokerStepResult {
+            client,
+            query_len,
+            response_len,
+            sent_response,
+            decision: result.decision.decision,
+            reason: result.decision.reason,
+        })
+    }
+
+    pub fn handler(&self) -> &DnsBrokerHandler<U> {
+        &self.handler
     }
 }
 
@@ -331,8 +410,104 @@ mod tests {
             .attribution_for("93.184.216.34".parse().unwrap(), 2_000)
             .is_none());
         let records: Vec<_> = handler.broker().audit().records().collect();
-        assert_eq!(records[1].details["dns_upstream_error"], "unavailable");
+        assert_eq!(records[1].details["dns_upstream_error"], "source_mismatch");
         server.join().unwrap();
+    }
+
+    #[test]
+    fn blocking_dns_broker_server_handles_one_allowed_query() {
+        let resolver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        resolver
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let resolver_addr = resolver.local_addr().unwrap();
+        let query = dns_query(0x4646, "Example.COM", 1);
+        let response = dns_a_response(&query, [93, 184, 216, 34], 30);
+        let expected_response = response.clone();
+        let resolver_thread = thread::spawn(move || {
+            let mut buf = [0u8; 512];
+            let (_, peer) = resolver.recv_from(&mut buf).unwrap();
+            resolver.send_to(&expected_response, peer).unwrap();
+        });
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-example-dns")
+                .protocol(Protocol::Dns)
+                .hostname("example.com"),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let upstream = BlockingDnsUpstream::new(
+            resolver_addr,
+            "127.0.0.1:0".parse().unwrap(),
+            Duration::from_secs(1),
+            512,
+        );
+        let handler = DnsBrokerHandler::new(broker, upstream, "10.0.2.3".parse().unwrap());
+        let mut server = BlockingDnsBrokerServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            handler,
+            Duration::from_secs(1),
+            512,
+        )
+        .unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client
+            .send_to(&query, server.local_addr().unwrap())
+            .unwrap();
+
+        let step = server.handle_one("s1", 1_000).unwrap();
+        assert_eq!(step.query_len, query.len());
+        assert_eq!(step.response_len, response.len());
+        assert!(step.sent_response);
+        assert_eq!(step.decision, Decision::Allow);
+        let mut buf = [0u8; 512];
+        let (len, _) = client.recv_from(&mut buf).unwrap();
+        assert_eq!(&buf[..len], response.as_slice());
+        let records: Vec<_> = server.handler().broker().audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].details["returned_addresses"], "93.184.216.34");
+        resolver_thread.join().unwrap();
+    }
+
+    #[test]
+    fn blocking_dns_broker_server_sends_refused_for_denied_query() {
+        let query = dns_query(0x4747, "blocked.test", 1);
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 8);
+        let upstream = BlockingDnsUpstream::new(
+            "127.0.0.1:9".parse().unwrap(),
+            "127.0.0.1:0".parse().unwrap(),
+            Duration::from_millis(10),
+            512,
+        );
+        let handler = DnsBrokerHandler::new(broker, upstream, "10.0.2.3".parse().unwrap());
+        let mut server = BlockingDnsBrokerServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            handler,
+            Duration::from_secs(1),
+            512,
+        )
+        .unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client
+            .send_to(&query, server.local_addr().unwrap())
+            .unwrap();
+
+        let step = server.handle_one("s1", 1_000).unwrap();
+        assert_eq!(step.decision, Decision::DenyDrop);
+        assert!(step.sent_response);
+        let mut buf = [0u8; 512];
+        let (len, _) = client.recv_from(&mut buf).unwrap();
+        assert_eq!(buf[3] & 0x0f, 5);
+        assert_eq!(step.response_len, len);
+        let records: Vec<_> = server.handler().broker().audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].decision, Some(Decision::DenyDrop));
     }
 
     #[test]

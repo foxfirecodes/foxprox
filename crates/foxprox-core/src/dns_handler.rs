@@ -20,6 +20,7 @@ pub struct DnsHandlerResult {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DnsUpstreamError {
     Unavailable,
+    SourceMismatch,
     MalformedResponse,
 }
 
@@ -401,6 +402,7 @@ fn dns_parse_error_detail(error: &DnsParseError) -> &'static str {
 fn dns_upstream_error_detail(error: &DnsUpstreamError) -> &'static str {
     match error {
         DnsUpstreamError::Unavailable => "unavailable",
+        DnsUpstreamError::SourceMismatch => "source_mismatch",
         DnsUpstreamError::MalformedResponse => "malformed_response",
     }
 }

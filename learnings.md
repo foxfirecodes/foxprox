@@ -79,3 +79,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — DNS upstream config needs a socket identity
 
 - Treat DNS upstream identity as a full `SocketAddr`, not just an IP. The port is part of both runtime configuration and source-validation evidence for UDP DNS replies; zero ports should fail config validation before runtime.
+
+## 2026-06-22 — DNS source mismatch deserves distinct audit evidence
+
+- Wrong-source DNS responses are not just generic upstream unavailability: they are attribution-safety failures. Model them as `DnsUpstreamError::SourceMismatch` so fail-closed audit records can distinguish spoofed/misdelivered replies from timeouts or socket errors.

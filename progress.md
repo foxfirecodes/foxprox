@@ -1235,3 +1235,39 @@ Runtime config now carries `dns_upstream` as a full socket address (`1.1.1.1:53`
 
 ### Remaining blind spots
 - Config now carries the resolver socket identity, but there is still no long-running async DNS listener wiring runtime config into a process lifecycle.
+
+## 2026-06-22 — Blocking DNS broker UDP listener proof cycle
+
+### Behavior under work
+Add a concrete blocking UDP broker listener proof that receives DNS datagrams on a sandbox-reachable socket, runs them through `DnsBrokerHandler`, and sends allowed/refused responses back to the client with structured step evidence.
+
+### Expected evidence
+- A local UDP client can send a DNS query to the broker socket and receive the upstream-validated response through `BlockingDnsBrokerServer::handle_one`.
+- The listener step result records client address, response length, send status, and policy decision.
+- Denied/refused paths remain handler-owned and observable through broker audit records.
+
+## 2026-06-22 — Round-12 DNS source-mismatch evidence and listener proof
+
+### Commands run
+- `cargo fmt` — applied formatting for DNS source-mismatch evidence and blocking broker listener proof.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 8 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 103 core tests, 3 device tests, 8 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_dns_upstream_rejects_wrong_source_response ... ok`
+- `foxprox_egress::tests::blocking_dns_broker_server_handles_one_allowed_query ... ok`
+- `foxprox_egress::tests::blocking_dns_broker_server_sends_refused_for_denied_query ... ok`
+
+### Interpretation
+Round-12 high finding is fixed: wrong-source DNS replies now map to `DnsUpstreamError::SourceMismatch`, producing structured `dns_upstream_error=source_mismatch` and preserving fail-closed/no-cache behavior. The egress crate also now includes a blocking DNS broker UDP listener proof that receives one client datagram, delegates policy/upstream/cache behavior to `DnsBrokerHandler`, sends a response when available, and returns structured step evidence including client, query length, response length, send status, decision, and reason.
+
+### Changed files
+- `crates/foxprox-core/src/dns_handler.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The DNS listener proof is blocking and single-step; final runtime still needs async lifecycle management, retry policy, and integration with sandbox setup/broker process supervision.
