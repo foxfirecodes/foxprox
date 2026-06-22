@@ -184,3 +184,7 @@ In the setup helper sequence, configure the interface and resolver before sendin
 ## 2026-06-21 — create TUN before mutating sandbox network config
 
 The production setup sequence should create the TUN fd first, then configure interface state, resolver, and handoff. If TUN creation fails, do not run `ip` commands or write resolver files; this avoids partial sandbox network setup with no broker fd.
+
+## 2026-06-21 — flow limits should reject only new state
+
+When a UDP flow table is at capacity, reject new flow creation but keep allowing updates to existing flows. Otherwise a full table could break cleanup/refresh behavior for flows that are already being tracked.

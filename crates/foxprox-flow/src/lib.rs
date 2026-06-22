@@ -68,6 +68,10 @@ pub struct UdpFlowState {
 pub enum UdpFlowObservation {
     Created(UdpFlowState),
     Updated(UdpFlowState),
+    LimitReached {
+        max_flows: usize,
+        attempted_key: UdpFlowKey,
+    },
     IgnoredNonUdpEvent,
     IgnoredMissingEndpoint,
 }
@@ -164,6 +168,7 @@ fn protocol_for_classification(classification: UdpClassification) -> Protocol {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UdpFlowTable {
     timeouts: UdpFlowTimeouts,
+    max_flows: Option<usize>,
     flows: HashMap<UdpFlowKey, UdpFlowState>,
 }
 
@@ -171,6 +176,15 @@ impl UdpFlowTable {
     pub fn new(timeouts: UdpFlowTimeouts) -> Self {
         Self {
             timeouts,
+            max_flows: None,
+            flows: HashMap::new(),
+        }
+    }
+
+    pub fn with_max_flows(timeouts: UdpFlowTimeouts, max_flows: usize) -> Self {
+        Self {
+            timeouts,
+            max_flows: Some(max_flows),
             flows: HashMap::new(),
         }
     }
@@ -199,6 +213,15 @@ impl UdpFlowTable {
                 existing.attribution = input.attribution;
             }
             return UdpFlowObservation::Updated(existing.clone());
+        }
+
+        if let Some(max_flows) = self.max_flows {
+            if self.flows.len() >= max_flows {
+                return UdpFlowObservation::LimitReached {
+                    max_flows,
+                    attempted_key: key,
+                };
+            }
         }
 
         let state = UdpFlowState {
@@ -429,6 +452,49 @@ mod tests {
         assert_eq!(value["client_to_target_bytes"], 123);
         assert_eq!(value["target_to_client_bytes"], 456);
         assert_eq!(value["reason"], "eof");
+    }
+
+    #[test]
+    fn udp_flow_limit_rejects_new_flows_but_allows_updates_and_frees_after_expiry() {
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(2_500);
+        let mut table = UdpFlowTable::with_max_flows(
+            UdpFlowTimeouts {
+                dns: Duration::from_secs(5),
+                generic: Duration::from_secs(10),
+                quic_candidate: Duration::from_secs(60),
+            },
+            1,
+        );
+        let first = udp_event(12345);
+        let second_packet = ipv4_packet(
+            17,
+            [10, 0, 0, 2],
+            [203, 0, 113, 11],
+            &udp_payload(53001, 12346, 8),
+        );
+        let second = parse_ipv4_packet(&context(), &second_packet).unwrap();
+
+        assert!(matches!(
+            table.observe_event(&first, now, 20),
+            UdpFlowObservation::Created(_)
+        ));
+        assert!(matches!(
+            table.observe_event(&first, now + Duration::from_secs(1), 5),
+            UdpFlowObservation::Updated(_)
+        ));
+        let limited = table.observe_event(&second, now + Duration::from_secs(2), 20);
+        assert!(matches!(
+            limited,
+            UdpFlowObservation::LimitReached { max_flows: 1, .. }
+        ));
+        assert_eq!(table.len(), 1);
+
+        let expired = table.expire(now + Duration::from_secs(11));
+        assert_eq!(expired.len(), 1);
+        assert!(matches!(
+            table.observe_event(&second, now + Duration::from_secs(12), 20),
+            UdpFlowObservation::Created(_)
+        ));
     }
 
     #[test]

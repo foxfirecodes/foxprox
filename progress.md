@@ -1007,3 +1007,25 @@
 - What failed or surprised the agent: no behavior failures; failing before any setup side effects is important because a missing/unauthorized TUN device should not leave partial routes or resolver state behind.
 - What remains unproven: successful privileged TUN creation/configuration/handoff in bwrap, capability drop, target exec, broker read loop over received fd, and live sandbox packet logs are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — UDP flow table resource limit slice
+
+- Slice attempted: enforce a configurable maximum number of UDP pseudo-flows so forwarding state cannot grow without bound.
+- Why next: UDP flow lifecycle and expiration are implemented, but alpha robustness requires resource limits before live UDP forwarding relies on the flow table.
+- Verification plan: extend `UdpFlowTable` with an optional max-flow limit, reject creation of new flows when full while allowing updates to existing flows, verify expiration frees capacity, then run formatting, clippy, focused flow tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — UDP flow table resource limit
+
+- Slice attempted: enforce a maximum active UDP pseudo-flow count in the flow table.
+- Why next: UDP flow lifecycle and expiration are implemented, but live UDP forwarding needs resource limits to avoid unbounded flow-state growth.
+- What changed: `UdpFlowTable` now carries an optional `max_flows`, exposes `with_max_flows`, and returns `UdpFlowObservation::LimitReached` when a new flow would exceed the limit; updates to existing flows are still allowed, and expiration frees capacity for later new flows.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting for the new enum variant; `cargo fmt` was run.
+  - Focused check passed: `cargo test -p foxprox-flow udp_flow_limit -- --nocapture` verified limit rejection for a second new flow, permitted updates to the existing flow, and capacity reuse after expiration.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 7 `foxprox-flow` tests and all existing workspace tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; the limit belongs on new-flow creation only so active flows can refresh/close cleanly even when the table is full.
+- What remains unproven: loading max-flow limits from TOML, runtime action when limits are hit, audit events for resource-limit drops, TCP/proxy connection limits, and async backpressure are still absent.
+- Commit: this commit.
