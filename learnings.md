@@ -117,3 +117,8 @@
 
 - Mapping `Deny(IcmpUnreachable)` to ICMP bytes belongs in the packet crate, not policy or audit; policy should choose only the normalized denial action.
 - Drop and reset decisions intentionally produce no packet-level synthetic response from the IPv4 packet helper, preserving explicit denial semantics.
+
+## 2026-06-21 — Standard-library egress backend
+
+- A minimal blocking egress backend can live in `foxprox-egress` and still preserve frontend independence as long as it accepts only normalized core events.
+- Plain HTTP forwarding should reject normalized HTTPS-scheme `HttpRequest` values in the std backend; HTTPS traffic should use CONNECT/SOCKS/TCP paths unless a future TLS-aware proxy layer is added.

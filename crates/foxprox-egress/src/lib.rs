@@ -6,11 +6,12 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
-use std::net::SocketAddr;
+use std::io::Write;
+use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 
 use foxprox_core::{
-    DestinationHost, DnsQuery, HttpRequest, HttpsConnect, NormalizedEvent, SocksConnect,
-    TcpConnectAttempt, UdpFlowAttempt,
+    DestinationHost, DnsQuery, HttpMethod, HttpRequest, HttpScheme, HttpsConnect, NormalizedEvent,
+    SocksConnect, TcpConnectAttempt, UdpFlowAttempt,
 };
 
 /// Shared host-side egress backend used by all frontends after policy allows an
@@ -94,6 +95,119 @@ pub struct MockUdpHandle;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MockHttpResponse;
+
+/// Standard-library host egress backend.
+///
+/// This implementation centralizes host socket opening behind the shared egress
+/// trait. It is intentionally blocking and minimal; async backpressure and
+/// streaming adapters can wrap the same normalized contract later.
+#[derive(Clone, Debug, Default)]
+pub struct StdHostEgress;
+
+impl HostEgress for StdHostEgress {
+    type TcpStream = TcpStream;
+    type UdpHandle = UdpSocket;
+    type HttpResponse = StdHttpResponse;
+
+    fn connect_tcp(&mut self, event: &TcpConnectAttempt) -> Result<Self::TcpStream, EgressError> {
+        TcpStream::connect(event.destination)
+            .map_err(|error| EgressError::ConnectFailed(error.to_string()))
+    }
+
+    fn open_udp_flow(&mut self, event: &UdpFlowAttempt) -> Result<Self::UdpHandle, EgressError> {
+        let bind_addr = match event.destination.ip() {
+            IpAddr::V4(_) => "0.0.0.0:0",
+            IpAddr::V6(_) => "[::]:0",
+        };
+        let socket = UdpSocket::bind(bind_addr)
+            .map_err(|error| EgressError::ConnectFailed(error.to_string()))?;
+        socket
+            .connect(event.destination)
+            .map_err(|error| EgressError::ConnectFailed(error.to_string()))?;
+        Ok(socket)
+    }
+
+    fn proxy_http_request(
+        &mut self,
+        event: &HttpRequest,
+    ) -> Result<Self::HttpResponse, EgressError> {
+        if event.scheme != HttpScheme::Http {
+            return Err(EgressError::UnsupportedAllowedEvent);
+        }
+        let mut stream = connect_destination(&event.host, event.port)?;
+        let host = destination_host_to_string(&event.host);
+        let request = format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            http_method_as_str(&event.method),
+            event.path_query,
+            format_http_host_header(&event.host, event.port)
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| EgressError::ConnectFailed(error.to_string()))?;
+        Ok(StdHttpResponse { stream, host })
+    }
+
+    fn proxy_connect(&mut self, event: &HttpsConnect) -> Result<Self::TcpStream, EgressError> {
+        connect_destination(&event.host, event.port)
+    }
+
+    fn socks_connect(&mut self, event: &SocksConnect) -> Result<Self::TcpStream, EgressError> {
+        connect_destination(&event.destination, event.port)
+    }
+
+    fn resolve_dns(&mut self, event: &DnsQuery) -> Result<Vec<SocketAddr>, EgressError> {
+        (event.hostname.as_str(), 0)
+            .to_socket_addrs()
+            .map(|addrs| addrs.collect())
+            .map_err(|error| EgressError::DnsFailed(error.to_string()))
+    }
+}
+
+#[derive(Debug)]
+pub struct StdHttpResponse {
+    pub stream: TcpStream,
+    pub host: String,
+}
+
+fn connect_destination(host: &DestinationHost, port: u16) -> Result<TcpStream, EgressError> {
+    match host {
+        DestinationHost::Ip(ip) => TcpStream::connect(SocketAddr::new(*ip, port))
+            .map_err(|error| EgressError::ConnectFailed(error.to_string())),
+        DestinationHost::Hostname(hostname) => (hostname.as_str(), port)
+            .to_socket_addrs()
+            .map_err(|error| EgressError::ConnectFailed(error.to_string()))?
+            .next()
+            .ok_or_else(|| EgressError::ConnectFailed("destination did not resolve".into()))
+            .and_then(|addr| {
+                TcpStream::connect(addr)
+                    .map_err(|error| EgressError::ConnectFailed(error.to_string()))
+            }),
+    }
+}
+
+fn http_method_as_str(method: &HttpMethod) -> &str {
+    match method {
+        HttpMethod::Get => "GET",
+        HttpMethod::Post => "POST",
+        HttpMethod::Put => "PUT",
+        HttpMethod::Patch => "PATCH",
+        HttpMethod::Delete => "DELETE",
+        HttpMethod::Head => "HEAD",
+        HttpMethod::Options => "OPTIONS",
+        HttpMethod::Trace => "TRACE",
+        HttpMethod::Connect => "CONNECT",
+        HttpMethod::Other(method) => method.as_str(),
+    }
+}
+
+fn format_http_host_header(host: &DestinationHost, port: u16) -> String {
+    match host {
+        DestinationHost::Ip(IpAddr::V6(ip)) => format!("[{ip}]:{port}"),
+        DestinationHost::Ip(ip) => format!("{ip}:{port}"),
+        DestinationHost::Hostname(hostname) => format!("{hostname}:{port}"),
+    }
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum EgressError {
@@ -203,6 +317,16 @@ mod tests {
         assert_eq!(egress.tcp_connects.len(), 1);
         assert_eq!(egress.proxy_connects.len(), 1);
         assert_eq!(egress.http_requests.len(), 1);
+    }
+
+    #[test]
+    fn std_egress_formats_normalized_destinations_without_frontend_types() {
+        let ipv6 = DestinationHost::Ip("2001:db8::1".parse().unwrap());
+        assert_eq!(format_http_host_header(&ipv6, 8080), "[2001:db8::1]:8080");
+        let hostname =
+            DestinationHost::Hostname(foxprox_core::Hostname::new("Example.COM").unwrap());
+        assert_eq!(destination_host_to_string(&hostname), "example.com");
+        assert_eq!(http_method_as_str(&foxprox_core::HttpMethod::Post), "POST");
     }
 
     #[test]

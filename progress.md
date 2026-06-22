@@ -531,3 +531,21 @@
   - `cargo tree -p foxprox-packet` — packet crate depends only on `foxprox-core`.
 - Commit hash after commit: a057b35.
 - Remaining boundary risks: net/device orchestration must call this helper with the original packet, IPv6 ICMP unreachable synthesis is not implemented, and TCP reset denial synthesis remains behind the future stack adapter.
+
+## 2026-06-21 — Boundary objective: standard-library host egress backend
+
+- Boundary under work: production-oriented host egress implementation for TCP, UDP, CONNECT/SOCKS destinations, and basic plaintext HTTP dispatch behind the shared `HostEgress` trait.
+- Allowed dependency direction: `foxprox-egress` consumes only normalized core events and standard-library sockets; frontends and policy must not own host socket opening.
+- Dependency-risk assessment: explicit proxy and transparent paths can bypass shared enforcement if production socket opening is implemented in frontends. A std-backed egress type keeps host networking centralized while leaving async/backpressure refinements for later.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: all verification passed.
+- Changed files:
+  - `crates/foxprox-egress/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 67 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: async egress, stream backpressure, HTTP response parsing/streaming, connection timeouts, DNS upstream selection, and integration with TUN/proxy listener event loops remain.
