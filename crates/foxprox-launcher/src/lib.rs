@@ -142,6 +142,7 @@ mod tests {
                 addresses: vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
             }],
             tcp_max_open_flows: 64,
+            tcp_metadata_buffer_bytes: 4096,
         }
     }
 

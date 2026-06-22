@@ -1073,3 +1073,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: full session assembly still does not create a TCP bridge runtime from a real accepted smoltcp stream and host socket pair.
 - Exact next step: commit configured bridge construction, then add explicit TCP metadata buffer size configuration and validation so stream inspection buffers are bounded by runtime config.
+
+## 2026-06-22T21:42:52Z
+- Current objective: continue after configured TCP bridge construction toward bounded TCP metadata inspection configuration.
+- Git status summary: clean worktree after commit `f547d58`.
+- Intended slice: add a validated TCP metadata buffer byte limit to runtime config/components so future stream inspection buffers are centrally bounded.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `crates/foxprox-launcher/src/lib.rs`, `progress.md`.
+- Remaining risks: this config value will not yet be wired into a smoltcp stream adapter; it makes the limit validated and available to callers.
+- Exact next step: extend runtime config/components with `tcp_metadata_buffer_bytes` and zero-limit tests.
+
+## 2026-06-22T21:43:49Z
+- Current objective: add validated TCP metadata buffer size configuration.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `crates/foxprox-launcher/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 81 runtime tests, and 7 setup tests passed. Runtime config now validates nonzero `tcp_metadata_buffer_bytes`, preserves it in runtime components, and rejects zero-sized metadata buffers before construction.
+- Commit hash when committed: pending.
+- Remaining risks: the configured metadata buffer size is not yet applied by a helper that creates per-flow TCP metadata buffers.
+- Exact next step: commit TCP metadata buffer configuration, then add a helper that fetches per-flow metadata buffers using `BrokerRuntimeComponents::tcp_metadata_buffer_bytes`.
