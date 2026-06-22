@@ -2,6 +2,7 @@ use crate::audit::AuditRecord;
 use crate::broker::BrokerCore;
 use crate::packet::{synthesize_icmpv4_echo_reply, IpParseError, ParsedIpPacket};
 use crate::policy::{PolicyDecision, PolicyRequest};
+use crate::runtime::{RuntimeComponent, RuntimeTaskOutcome, RuntimeTaskStatus};
 use crate::types::{AuditKind, Decision, DenialReason, Frontend, Protocol};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -11,7 +12,7 @@ pub trait PacketDevice {
     fn write_packet(&mut self, packet: &[u8]) -> Result<(), DeviceIoError>;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DeviceIoError {
     ReadFailed,
     WriteFailed,
@@ -23,6 +24,13 @@ pub struct TunPacketHarnessResult {
     pub decision: Decision,
     pub reason: Option<DenialReason>,
     pub wrote_packet: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TunPacketLoopReport {
+    pub processed_packets: usize,
+    pub error: Option<DeviceIoError>,
+    pub task_outcome: RuntimeTaskOutcome,
 }
 
 #[derive(Clone, Debug)]
@@ -54,6 +62,34 @@ impl<D: PacketDevice> TunPacketHarness<D> {
             }
         };
         Ok(Some(self.process_packet(&packet, now_ms)?))
+    }
+
+    pub fn process_packet_loop(&mut self, now_ms: u64, max_packets: usize) -> TunPacketLoopReport {
+        let mut processed_packets = 0usize;
+        while processed_packets < max_packets {
+            match self.process_next_packet(now_ms) {
+                Ok(Some(_)) => processed_packets += 1,
+                Ok(None) => {
+                    return TunPacketLoopReport {
+                        processed_packets,
+                        error: None,
+                        task_outcome: tun_task_outcome(RuntimeTaskStatus::Completed),
+                    };
+                }
+                Err(error) => {
+                    return TunPacketLoopReport {
+                        processed_packets,
+                        error: Some(error),
+                        task_outcome: tun_task_outcome(RuntimeTaskStatus::Failed),
+                    };
+                }
+            }
+        }
+        TunPacketLoopReport {
+            processed_packets,
+            error: None,
+            task_outcome: tun_task_outcome(RuntimeTaskStatus::Cancelled),
+        }
     }
 
     pub fn process_packet(
@@ -217,6 +253,10 @@ fn request_for_packet(sandbox_id: &str, parsed: &ParsedIpPacket) -> PolicyReques
     request
 }
 
+fn tun_task_outcome(status: RuntimeTaskStatus) -> RuntimeTaskOutcome {
+    RuntimeTaskOutcome::new(RuntimeComponent::TunDevice, "tun_packet_loop", status)
+}
+
 fn result_from_decision(
     parsed: Option<ParsedIpPacket>,
     decision: PolicyDecision,
@@ -370,6 +410,47 @@ mod tests {
         assert_eq!(records[0].reason, Some(DenialReason::SetupFailed));
         assert_eq!(records[0].details["direction"], "from_sandbox");
         assert_eq!(records[0].details["device_io_error"], "read_failed");
+    }
+
+    #[test]
+    fn tun_packet_loop_reports_read_failure_task_outcome() {
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut harness = TunPacketHarness::new("s1", broker, FailingReadDevice);
+
+        let report = harness.process_packet_loop(1_000, 8);
+
+        assert_eq!(report.processed_packets, 0);
+        assert_eq!(report.error, Some(DeviceIoError::ReadFailed));
+        assert_eq!(report.task_outcome.component, RuntimeComponent::TunDevice);
+        assert_eq!(report.task_outcome.task_name, "tun_packet_loop");
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Failed);
+        let records: Vec<_> = harness.broker().audit().records().collect();
+        assert_eq!(records[0].kind, AuditKind::BrokerError);
+        assert_eq!(records[0].details["device_io_error"], "read_failed");
+    }
+
+    #[test]
+    fn tun_packet_loop_reports_idle_completion() {
+        let packet = ipv4_packet(17, 0, &[0x12, 0x34, 0x30, 0x39, 0, 8, 0, 0]);
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let device = InMemoryPacketDevice::with_inbound([packet]);
+        let mut harness = TunPacketHarness::new("s1", broker, device);
+
+        let report = harness.process_packet_loop(1_000, 8);
+
+        assert_eq!(report.processed_packets, 1);
+        assert_eq!(report.error, None);
+        assert_eq!(report.task_outcome.component, RuntimeComponent::TunDevice);
+        assert_eq!(report.task_outcome.task_name, "tun_packet_loop");
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Completed);
     }
 
     #[test]

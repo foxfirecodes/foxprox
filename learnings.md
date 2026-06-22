@@ -205,3 +205,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Task reports must prove coverage, not just success
 
 - A non-empty task report with only successful outcomes can still be incomplete. Runtime exit must compare task outcomes with the components started for the session and fail closed with `task_join_status=incomplete` when any component is missing.
+
+## 2026-06-22 — Packet loops should return task outcomes
+
+- Single-step packet processing is not enough for runtime supervision. A bounded TUN packet loop should report processed count, terminal device error, and a `RuntimeTaskOutcome` so lifecycle exit can include concrete task join evidence.

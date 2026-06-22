@@ -2258,3 +2258,30 @@ Addressed round-41 high finding. A supplied `RuntimeTaskJoinReport` is now check
 
 ### Remaining blind spots
 - Component-level coverage is still coarse: final async runtime should derive concrete expected task names from spawned handles rather than only checking that each component has at least one outcome.
+
+## 2026-06-22 — Add bounded TUN packet loop task outcome
+
+### Commands run
+- `cargo fmt` — applied formatting for TUN packet-loop report changes.
+- `cargo test -p foxprox-core tun::tests::tun_packet_loop --all-targets --all-features` — passed, 2 packet-loop tests.
+- `cargo test -p foxprox-core tun::tests --all-targets --all-features` — passed, 11 TUN tests.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 137 core tests, 3 device tests, 38 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed again after full tests.
+
+### Evidence excerpts
+- `tun::tests::tun_packet_loop_reports_read_failure_task_outcome ... ok`
+- `tun::tests::tun_packet_loop_reports_idle_completion ... ok`
+- `tun::tests::tun_read_failure_is_audited_fail_closed ... ok`
+
+### Interpretation
+Added `TunPacketLoopReport` and `TunPacketHarness::process_packet_loop(...)` as a bounded platform-independent packet-loop proof. Idle completion reports `RuntimeTaskStatus::Completed`; device read/write failure reports `RuntimeTaskStatus::Failed` and preserves existing structured device-error audit evidence; exhausting the caller-supplied packet budget reports `RuntimeTaskStatus::Cancelled` rather than overclaiming completion. This connects packet-loop behavior to the runtime task-join evidence model.
+
+### Changed files
+- `crates/foxprox-core/src/tun.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The loop is still synchronous and caller-driven. Final runtime must attach it to real async TUN fd readiness, smoltcp polling, global audit fan-in, and lifecycle cleanup.
