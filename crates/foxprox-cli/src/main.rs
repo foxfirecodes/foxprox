@@ -17,7 +17,9 @@ use foxprox_core::origin::{
 use foxprox_core::policy::{
     Cidr, PolicyConfig, PolicyEngine, PolicyRequest, PolicyRule, RuleAction,
 };
-use foxprox_core::runtime::{TransparentTcpRuntime, TransparentUdpRuntime};
+use foxprox_core::runtime::{
+    TransparentInspectionRuntime, TransparentTcpRuntime, TransparentUdpRuntime,
+};
 use foxprox_core::scenario::{run_scenario, ScenarioName};
 use foxprox_core::smoltcp_gate::{feed_tcp_syn_to_smoltcp_listener, SmoltcpTcpServerHarness};
 
@@ -1873,7 +1875,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
             "--",
             "/usr/bin/python3",
             "-c",
-            "import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.settimeout(5); s.connect(('203.0.113.22',8082)); s.sendall(b'probe'); data=s.recv(64); s.close(); sys.exit(0 if data==b'egress:probe' else 4)",
+            "import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.settimeout(5); s.connect(('203.0.113.22',80)); req=b'GET /public HTTP/1.1\\r\\nHost: example.com\\r\\n\\r\\n'; s.sendall(req); data=s.recv(128); s.close(); sys.exit(0 if data.startswith(b'egress:GET /public') else 4)",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1890,10 +1892,19 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
             PolicyRule::new("allow-tcp-bridge-smoke", RuleAction::Allow)
                 .protocol(Protocol::Tcp)
                 .destination(Cidr::host(std::net::IpAddr::V4(bridge_destination)))
-                .port(8082),
+                .port(80),
         ),
     );
-    let mut stack = SmoltcpTcpServerHarness::listen(bridge_destination, 8082)?;
+    let inspect_policy = PolicyEngine::new(
+        PolicyConfig::deny_by_default().with_rule(
+            PolicyRule::new("allow-transparent-http-bridge", RuleAction::Allow)
+                .protocol(Protocol::Http)
+                .hostname("example.com")
+                .http_path_prefix("/public"),
+        ),
+    );
+    let mut inspect_runtime = TransparentInspectionRuntime::new(inspect_policy);
+    let mut stack = SmoltcpTcpServerHarness::listen(bridge_destination, 80)?;
     let mut buf = [0_u8; 4096];
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut packets_read = 0_u64;
@@ -1902,6 +1913,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
     let mut response_written = false;
     let mut policy_allowed = false;
     let mut policy_audit = None;
+    let mut inspect_audit = None;
     while Instant::now() < deadline {
         match fd_handoff::read_fd(fd, &mut buf) {
             Ok(0) => {}
@@ -1912,7 +1924,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
                     if let Ok(parsed) = foxprox_core::packet::parse_ipv4(packet) {
                         if parsed.protocol_number == 6 {
                             if let Ok(tcp) = foxprox_core::packet::parse_tcp(parsed.payload) {
-                                if tcp.destination_port == 8082 && tcp.syn && !tcp.ack {
+                                if tcp.destination_port == 80 && tcp.syn && !tcp.ack {
                                     let source = std::net::SocketAddr::new(
                                         std::net::IpAddr::V4(parsed.source),
                                         tcp.source_port,
@@ -1954,6 +1966,28 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
                 }
                 if !policy_allowed {
                     continue;
+                }
+                if inspect_audit.is_none() {
+                    if let Ok(parsed) = foxprox_core::packet::parse_ipv4(packet) {
+                        if parsed.protocol_number == 6 {
+                            if let Ok(tcp) = foxprox_core::packet::parse_tcp(parsed.payload) {
+                                if tcp.destination_port == 80 && !tcp.payload.is_empty() {
+                                    inspect_runtime
+                                        .inspect_ipv4_tcp_payload("tcp-bridge-smoke", packet)?;
+                                    inspect_audit = inspect_runtime.audit.last().cloned();
+                                    if !inspect_audit
+                                        .as_ref()
+                                        .is_some_and(|audit| audit.decision.is_allow())
+                                    {
+                                        return Err(
+                                            "transparent HTTP inspection denied TCP bridge payload"
+                                                .to_string(),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 stack.receive_packet(packet.to_vec())?;
                 for emitted in stack.drain_emitted_packets() {
@@ -2030,8 +2064,11 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
     let runtime_audit = policy_audit.clone();
     let success = output.status.success()
         && response_written
-        && bridged_bytes == b"probe".len()
-        && policy_allowed;
+        && bridged_bytes == b"GET /public HTTP/1.1\r\nHost: example.com\r\n\r\n".len()
+        && policy_allowed
+        && inspect_audit
+            .as_ref()
+            .is_some_and(|audit| audit.decision.is_allow());
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let mut record = AuditRecord::new(
@@ -2064,6 +2101,15 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
             .with_metadata("runtime_audit", audit.to_json_line());
         if let Some(rule_id) = audit.rule_id {
             record = record.with_metadata("rule_id", rule_id);
+        }
+    }
+    if let Some(audit) = inspect_audit {
+        record = record
+            .with_metadata("inspection_decision", audit.decision.as_str())
+            .with_metadata("inspection_reason", audit.reason.clone())
+            .with_metadata("inspection_audit", audit.to_json_line());
+        if let Some(rule_id) = audit.rule_id {
+            record = record.with_metadata("inspection_rule_id", rule_id);
         }
     }
     if !stdout.is_empty() {

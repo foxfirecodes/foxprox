@@ -587,3 +587,27 @@
 - Interpretation: explicit proxy networking now has allow, deny, and malformed/unsupported smoke coverage across HTTP, HTTPS CONNECT, and SOCKS5 TCP CONNECT scope.
 - Next verification gap: wire transparent HTTP inspection into an environment smoke through the smoltcp TCP bridge, or add audit backpressure/resource-limit modeling for robustness.
 - Commit hash after commit: pending.
+
+## 2026-06-22T01:43:00Z — denied proxy smoke commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs progress.md && git commit -m "Add denied proxy smoke"`
+- Environment assumptions: denied/malformed proxy smoke and workspace tests above were verified before commit.
+- Expected result: commit captures explicit proxy deny/fail-closed smoke and README update, plus prior transparent-inspection commit ledger note.
+- Observed result: commit `d3d84bd` created with 3 files changed.
+- Relevant output excerpt: `[harness-lab d3d84bd] Add denied proxy smoke`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: explicit proxy negative-path checkpoint is preserved.
+- Next verification gap: transparent HTTP environment smoke through smoltcp bridge or robustness/resource-limit modeling.
+- Commit hash after commit: d3d84bd.
+
+## 2026-06-22T02:00:00Z — Transparent HTTP inspection in TCP bridge smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run tcp-bridge-smoke`
+- Environment assumptions: bwrap/TUN fd handoff works locally; sandbox Python sends a plaintext HTTP request to a routed TCP destination; smoltcp bridge receives application bytes and calls the transparent inspection runtime before host egress.
+- Expected result: existing tests remain green; TCP bridge smoke still forwards bytes through host-owned TCP egress and now records a transparent HTTP inspection allow audit for Host/path metadata before egress response.
+- Observed result: pass. Workspace tests remained green (`foxprox-core` 44, `foxprox-cli` 2, `foxproxsetup` 7). `tcp-bridge-smoke` emitted `decision":"allow"`, `inspection_decision":"allow"`, `inspection_rule_id":"allow-transparent-http-bridge"`, and a nested `http_request` inspection audit with `attribution_source":"http_host"`.
+- Relevant output excerpt: `"destination":"203.0.113.22:80","hostname":"example.com","rule_id":"allow-transparent-http-bridge"`; `"bridged_bytes":"43"`; `"status":"exit status: 0"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: transparent plaintext HTTP Host/path inspection is now proven in an environment-dependent bwrap/TUN TCP bridge, not only deterministic unit/scenario fixtures.
+- Next verification gap: robustness/resource-limit modeling such as audit backpressure, or UDP/QUIC policy smoke with DNS attribution and configurable timeout evidence.
+- Commit hash after commit: pending.
