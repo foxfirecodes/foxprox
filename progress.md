@@ -844,3 +844,27 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * denied requests receive bounded local proxy responses; if response bounds are too small, the helper drops rather than allocating beyond the configured limit.
 * Audit evidence: proxy handler tests assert audit kind, frontend, allow/deny/fail-closed decisions, denial reasons, rule IDs, hostname attribution, requested ports, and HTTP method/path fields.
 * Residual risk: no async listener, host TCP egress, CONNECT tunnel byte bridging, or response write-loop backpressure exists yet; this is the pure core decision/response boundary for future proxy frontend wiring.
+
+## 2026-06-21 - SOCKS5 proxy decision helper
+
+* Invariant under work: SOCKS5 negotiation and TCP CONNECT handling must reject unsupported auth/commands/address forms, use shared policy/audit for validated CONNECT metadata, and synthesize bounded SOCKS replies for denied or malformed paths.
+* Threat or failure mode addressed: future SOCKS listener code could accept unsupported SOCKS features, skip IP-only-vs-domain attribution distinctions, or fail to audit denied/malformed CONNECT requests.
+* Planned verification: add pure SOCKS handler tests for no-auth greeting success/failure, allowed domain CONNECT, denied IP CONNECT, malformed/unsupported request fail-closed, response-size bound drops, then run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - SOCKS5 proxy decision helper results
+
+* Tests added/updated:
+  * SOCKS5 greeting helper accepts only no-auth negotiation and rejects unsupported methods with bounded method-selection responses.
+  * allowed SOCKS domain CONNECT requests use strict parser metadata, shared policy decisions, original wire preservation, and SocksConnect audit with explicit-proxy hostname attribution and requested port.
+  * denied SOCKS IP CONNECT requests return bounded SOCKS failure replies and preserve IP-only attribution, destination endpoint, and default-deny audit evidence.
+  * malformed or unsupported SOCKS CONNECT commands fail closed before policy metadata is created, even with broad IP allow rules configured.
+  * too-small SOCKS response bounds produce drop outcomes while preserving boxed audit decision state and avoiding large enum variants under clippy.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` passed tests but clippy flagged large enum variants.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 124 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * only SOCKS5 TCP CONNECT is represented as a forwardable outcome; unsupported commands/auth/address forms remain fail-closed parser errors.
+  * domain SOCKS destinations can satisfy domain rules with explicit-proxy/high-confidence attribution, while IP destinations remain IP-only and cannot satisfy domain policy.
+  * denial and malformed replies are bounded; when bounds are too small, the helper drops rather than allocating or emitting partial untracked data.
+* Audit evidence: SOCKS handler tests assert allow, deny, and fail-closed audit decisions, rule IDs, denial reasons, frontend/protocol, endpoint, hostname attribution, and requested-port behavior.
+* Residual risk: no async SOCKS listener, state machine sequencing between greeting and CONNECT, host TCP egress, or stream bridging/backpressure exists yet; this is the pure core decision boundary.

@@ -153,3 +153,7 @@ DNS handler forward outcomes should carry the exact bounded wire bytes that were
 ## 2026-06-21 - Proxy frontends need a pure decision boundary before IO
 
 Explicit HTTP and CONNECT handlers should parse bounded headers, normalize into shared policy requests, build audit records, and synthesize bounded local denial/error responses before any runtime socket forwarding. This keeps malformed requests and policy denials out of egress code and avoids per-listener ad hoc parsing.
+
+## 2026-06-21 - SOCKS helpers must keep IP-only attribution distinct
+
+SOCKS domain CONNECT requests can be high-confidence explicit-proxy hostname evidence, but SOCKS IP CONNECT requests must remain IP-only/low-confidence and should not satisfy domain rules. The handler boundary should preserve that distinction in both policy requests and audit records.

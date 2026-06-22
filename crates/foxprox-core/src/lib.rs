@@ -17,6 +17,7 @@ pub mod policy;
 pub mod proxy_handler;
 pub mod quic;
 pub mod socks;
+pub mod socks_handler;
 pub mod tls;
 pub mod types;
 
@@ -58,6 +59,10 @@ pub use quic::{
 pub use socks::{
     parse_socks5_connect_request, parse_socks5_greeting, Socks5AuthMethod, Socks5ConnectMetadata,
     Socks5Destination, Socks5Greeting, Socks5ParseError,
+};
+pub use socks_handler::{
+    handle_socks5_connect, handle_socks5_greeting, Socks5ConnectOutcome, Socks5Context,
+    Socks5GreetingOutcome, Socks5ResponseError,
 };
 pub use tls::{parse_tls_client_hello, TlsClientHelloMetadata, TlsParseError};
 pub use types::{
