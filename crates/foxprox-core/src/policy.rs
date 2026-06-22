@@ -1019,4 +1019,28 @@ mod tests {
             }
         );
     }
+
+    #[test]
+    fn duplicate_rule_ids_fail_closed_before_policy_use() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(PolicyRule::allow_ip(
+            "ambiguous",
+            Cidr::host(ip([203, 0, 113, 10])),
+            Some(443),
+        ));
+        config.rules.push(PolicyRule::allow_domain(
+            "ambiguous",
+            HostMatcher::exact("example.com").unwrap(),
+            Some(443),
+        ));
+        let request = PolicyRequest::new(Protocol::Tcp)
+            .with_destination(Endpoint::tcp(ip([203, 0, 113, 10]), 443));
+
+        assert_eq!(
+            PolicyEngine::decide(&config, &request),
+            Decision::FailClosed {
+                reason: DenialReason::InvalidConfig,
+            }
+        );
+    }
 }

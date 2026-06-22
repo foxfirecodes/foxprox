@@ -21,9 +21,15 @@ pub struct PolicyConfig {
 
 impl PolicyConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
-        for rule in &self.rules {
+        for (index, rule) in self.rules.iter().enumerate() {
             if rule.id.trim().is_empty() {
                 return Err(ConfigError::EmptyRuleId);
+            }
+            if self.rules[..index]
+                .iter()
+                .any(|previous| previous.id == rule.id)
+            {
+                return Err(ConfigError::DuplicateRuleId);
             }
             if rule
                 .request
@@ -251,6 +257,7 @@ impl fmt::Display for Cidr {
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ConfigError {
     EmptyRuleId,
+    DuplicateRuleId,
     InvalidCidrAddress,
     InvalidCidrPrefixText,
     InvalidCidrPrefix { prefix: u8, max: u8 },
@@ -357,5 +364,22 @@ mod tests {
             config.validate(),
             Err(ConfigError::InvalidHttpPathPrefixMatcher)
         );
+    }
+
+    #[test]
+    fn duplicate_rule_ids_are_rejected() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(PolicyRule::allow_ip(
+            "duplicate",
+            "192.0.2.0/24".parse().unwrap(),
+            Some(80),
+        ));
+        config.rules.push(PolicyRule::allow_domain(
+            "duplicate",
+            HostMatcher::exact("example.com").unwrap(),
+            Some(80),
+        ));
+
+        assert_eq!(config.validate(), Err(ConfigError::DuplicateRuleId));
     }
 }

@@ -567,3 +567,23 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Residual risk: UDP forwarding, response routing, and automatic runtime coupling between `expire_collect` and audit sinks remain future work.
 
 * Commit hash: be30b6b return auditable udp expirations.
+
+## 2026-06-21 - Duplicate policy rule ID rejection
+
+* Invariant under work: policy configuration must reject duplicate rule IDs before evaluation so audit `rule_id` fields identify a single deterministic rule and cannot hide ambiguous allow/deny provenance.
+* Threat or failure mode addressed: duplicate rule IDs could make audit records ambiguous even when first-match rule ordering is deterministic, weakening review of why traffic was allowed or denied.
+* Planned verification: add config validation and policy fail-closed tests for duplicate rule IDs, preserving deterministic first-match behavior for unique IDs; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Duplicate policy rule ID rejection results
+
+* Tests added/updated:
+  * config validation rejects duplicate rule IDs.
+  * policy evaluation fail-closes with `InvalidConfig` when duplicate IDs are present, before any allow rule can match.
+  * existing deterministic first-match behavior remains covered for unique rule IDs.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 93 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * ambiguous rule provenance is rejected at validation time.
+  * invalid policy configuration cannot authorize traffic.
+* Audit evidence: rule IDs emitted in audit records now have a validation invariant that they identify at most one configured rule.
+* Residual risk: config file parsing/loading and broader normalization of externally supplied configs remain future work.

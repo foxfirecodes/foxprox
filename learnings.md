@@ -97,3 +97,7 @@ A flow table that only reports an expiration count cannot emit complete expirati
 ## 2026-06-21 - Expiration APIs should return consumed state for audit
 
 For bounded state tables, auditability and cleanup should be linked: returning expired entries lets the runtime log exact flow data while removing stale state immediately, instead of choosing between complete audit records and bounded memory.
+
+## 2026-06-21 - Rule IDs are part of audit integrity
+
+Policy rule IDs are not just labels; audit records depend on them for provenance. Duplicate IDs should be invalid configuration, even when first-match evaluation would still be deterministic.
