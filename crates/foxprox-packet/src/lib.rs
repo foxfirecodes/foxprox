@@ -167,6 +167,8 @@ pub enum PacketBuildError {
     NotIcmp { protocol: u8 },
     IcmpEchoTooShort { actual: usize },
     NotEchoRequest { icmp_type: u8, icmp_code: u8 },
+    NotUdp { protocol: u8 },
+    UdpResponseTooLarge { total_length: usize },
     ReplyTooLarge { total_length: usize },
 }
 
@@ -183,6 +185,10 @@ impl fmt::Display for PacketBuildError {
                 f,
                 "not-icmp-echo-request: type={icmp_type} code={icmp_code}"
             ),
+            Self::NotUdp { protocol } => write!(f, "not-udp: protocol={protocol}"),
+            Self::UdpResponseTooLarge { total_length } => {
+                write!(f, "udp-response-too-large: total_length={total_length}")
+            }
             Self::ReplyTooLarge { total_length } => {
                 write!(f, "icmp-echo-reply-too-large: total_length={total_length}")
             }
@@ -742,6 +748,63 @@ pub fn synthesize_icmp_echo_reply(request_packet: &[u8]) -> Result<Vec<u8>, Pack
     Ok(reply)
 }
 
+/// Synthesize one IPv4 UDP response packet for a received IPv4 UDP datagram.
+///
+/// This is the minimal transparent UDP write-back primitive. It reverses IPv4
+/// source/destination addresses and UDP source/destination ports, inserts the
+/// supplied payload, recomputes the IPv4 header checksum, and leaves the IPv4
+/// UDP checksum as zero (permitted by IPv4).
+pub fn synthesize_ipv4_udp_response(
+    request_packet: &[u8],
+    response_payload: &[u8],
+) -> Result<Vec<u8>, PacketBuildError> {
+    let request_header = Ipv4Header::parse(request_packet)?;
+    if request_header.protocol != 17 {
+        return Err(PacketBuildError::NotUdp {
+            protocol: request_header.protocol,
+        });
+    }
+    let request_udp = &request_packet[request_header.header_length..request_header.total_length];
+    if request_udp.len() < 8 {
+        return Err(PacketParseError::UdpHeaderTooShort {
+            actual: request_udp.len(),
+        }
+        .into());
+    }
+    let request_udp_length = u16::from_be_bytes([request_udp[4], request_udp[5]]) as usize;
+    if request_udp_length < 8 || request_udp_length > request_udp.len() {
+        return Err(PacketParseError::InvalidUdpLength {
+            udp_length: request_udp_length,
+            actual: request_udp.len(),
+        }
+        .into());
+    }
+
+    let total_length = 20 + 8 + response_payload.len();
+    if total_length > usize::from(u16::MAX) {
+        return Err(PacketBuildError::UdpResponseTooLarge { total_length });
+    }
+
+    let mut response = vec![0_u8; total_length];
+    response[0] = 0x45;
+    response[2..4].copy_from_slice(&(total_length as u16).to_be_bytes());
+    response[6..8].copy_from_slice(&0x4000_u16.to_be_bytes());
+    response[8] = 64;
+    response[9] = 17;
+    response[12..16].copy_from_slice(&request_header.destination.octets());
+    response[16..20].copy_from_slice(&request_header.source.octets());
+
+    response[20..22].copy_from_slice(&request_udp[2..4]);
+    response[22..24].copy_from_slice(&request_udp[0..2]);
+    response[24..26].copy_from_slice(&((8 + response_payload.len()) as u16).to_be_bytes());
+    response[26..28].copy_from_slice(&0_u16.to_be_bytes());
+    response[28..].copy_from_slice(response_payload);
+
+    let ipv4_checksum = internet_checksum(&response[..20]);
+    response[10..12].copy_from_slice(&ipv4_checksum.to_be_bytes());
+    Ok(response)
+}
+
 fn internet_checksum(bytes: &[u8]) -> u16 {
     let mut sum = 0_u32;
     for chunk in bytes.chunks(2) {
@@ -1073,6 +1136,41 @@ mod tests {
                 reason: "unsupported-network-event: ipv4-packet-too-short: actual=4 minimum=20"
                     .to_owned()
             }
+        );
+    }
+
+    #[test]
+    fn synthesizes_ipv4_udp_response_with_reversed_addresses_and_ports() {
+        let mut udp = Vec::new();
+        udp.extend_from_slice(&49152_u16.to_be_bytes());
+        udp.extend_from_slice(&5353_u16.to_be_bytes());
+        udp.extend_from_slice(&10_u16.to_be_bytes());
+        udp.extend_from_slice(&0_u16.to_be_bytes());
+        udp.extend_from_slice(b"hi");
+        let request = ipv4_packet(17, [10, 0, 0, 2], [10, 0, 0, 1], &udp);
+
+        let response = synthesize_ipv4_udp_response(&request, b"ok").unwrap();
+
+        assert_eq!(response[0] >> 4, 4);
+        assert_eq!(u16::from_be_bytes([response[2], response[3]]), 30);
+        assert_eq!(internet_checksum(&response[..20]), 0);
+        assert_eq!(response[9], 17);
+        assert_eq!(&response[12..16], &[10, 0, 0, 1]);
+        assert_eq!(&response[16..20], &[10, 0, 0, 2]);
+        assert_eq!(u16::from_be_bytes([response[20], response[21]]), 5353);
+        assert_eq!(u16::from_be_bytes([response[22], response[23]]), 49152);
+        assert_eq!(u16::from_be_bytes([response[24], response[25]]), 10);
+        assert_eq!(u16::from_be_bytes([response[26], response[27]]), 0);
+        assert_eq!(&response[28..], b"ok");
+    }
+
+    #[test]
+    fn refuses_to_synthesize_udp_response_from_non_udp_packet() {
+        let request = ipv4_packet(1, [10, 0, 0, 2], [10, 0, 0, 1], &[0_u8; 8]);
+
+        assert_eq!(
+            synthesize_ipv4_udp_response(&request, b"ok"),
+            Err(PacketBuildError::NotUdp { protocol: 1 })
         );
     }
 

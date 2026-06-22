@@ -1279,3 +1279,25 @@
 - What this proves: in a real bwrap namespace, broker-side code can receive the live TUN fd, read target traffic, write an IP packet back to the same fd, and have the unprivileged target process receive it.
 - What remains unproven: production broker integration for live TUN packet loops, DNS/UDP forwarding semantics through live TUN, and TCP forwarding via a userspace stack.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — reusable IPv4 UDP write-back builder slice
+
+- Slice attempted: promote the live-smoke-only IPv4 UDP response builder into the packet crate so UDP/TUN forwarding can reuse it.
+- Why next: the live write-back proof worked, but its packet synthesis lived inside an ignored test; production UDP forwarding needs reusable, tested packet construction outside test code.
+- Verification plan: add a public IPv4 UDP response builder with parser validation and checksum tests in `foxprox-packet`, update the live bwrap smoke test to use it, then run focused packet/live tests plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — reusable IPv4 UDP write-back builder
+
+- Slice attempted: promote the live-smoke-only IPv4 UDP response builder into the packet crate so UDP/TUN forwarding can reuse it.
+- Why next: the live write-back proof worked, but its packet synthesis lived inside an ignored test; production UDP forwarding needs reusable, tested packet construction outside test code.
+- What changed: `foxprox-packet` now exposes `synthesize_ipv4_udp_response`, which validates a received IPv4 UDP datagram, reverses IPv4 addresses and UDP ports, inserts a response payload, computes the IPv4 header checksum, and leaves the IPv4 UDP checksum at zero. The live bwrap smoke test now uses this production packet builder instead of local helper code.
+- Verification:
+  - Focused packet checks passed: `cargo test -p foxprox-packet udp_response -- --nocapture`.
+  - Explicit live smoke still passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 17 `foxprox-packet` tests and the ignored live smoke compiled by default.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; moving the helper clarified that IPv4 UDP write-back is a packet primitive, not just live-test glue.
+- What remains unproven: forwarding a TUN UDP payload through a host UDP egress socket and writing the host response back through TUN.
+- Commit: this commit.

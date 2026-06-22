@@ -236,3 +236,7 @@ For bwrap/TUN proofs that depend on host kernel features and `/dev/net/tun`, add
 ## 2026-06-22 — minimal IPv4 UDP write-back is enough for live TUN proof
 
 For live TUN write-back smoke tests, a broker can parse the target's IPv4 UDP packet, swap IPs/ports, write a reply with a valid IPv4 header checksum, and set UDP checksum to zero. Linux accepts zero UDP checksum for IPv4, letting an unprivileged target socket prove end-to-end TUN write-back without raw socket privileges.
+
+## 2026-06-22 — move live-smoke packet builders into packet primitives
+
+If an ignored live smoke test needs to synthesize a valid packet, promote that code into `foxprox-packet` with focused unit tests. Live tests should exercise production packet builders rather than carrying their own unchecked protocol helpers.
