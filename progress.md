@@ -1157,3 +1157,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: integrated state is still not driven by smoltcp or a live TUN event loop.
 - Exact next step: commit integrated TCP flow runtime, then add initial smoltcp adapter crate boundary or dependency-gated adapter scaffold for future TUN TCP forwarding.
+
+## 2026-06-22T21:50:02Z
+- Current objective: continue after integrated TCP flow runtime toward the documented smoltcp TCP forwarding gate.
+- Git status summary: clean worktree after commit `8edf294` plus subsequent verified runtime-state commits through `c545eb1`; current worktree clean before this cycle.
+- Intended slice: add a small `foxprox-smoltcp` adapter crate with a deterministic IP-medium loopback interface proof, keeping smoltcp types out of core policy.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`; dependency version must respect the workspace Rust 1.80 requirement.
+- Files expected to change: `Cargo.toml`, `Cargo.lock`, `crates/foxprox-smoltcp/*`, `progress.md`, and `learnings.md` if smoltcp API constraints affect the adapter plan.
+- Remaining risks: this is an adapter proof, not TCP forwarding; real TUN fd feeding and stream bridging remain later work.
+- Exact next step: add smoltcp 0.12 with IP-medium loopback construction tests.
+
+## 2026-06-22T21:51:42Z
+- Current objective: add the initial smoltcp adapter crate boundary.
+- Files changed: `Cargo.toml`, `Cargo.lock`, `crates/foxprox-smoltcp/Cargo.toml`, `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially passed after formatting; later one test assertion needed `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings` (initially failed because `unwrap_err` required `SmoltcpIpLoopback: Debug`; fixed with `matches!`)
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 2 smoltcp adapter tests passed. New crate uses `smoltcp` 0.12 with IP medium loopback, validates IPv4 prefix length fail-early, constructs an IP-medium interface, and polls once without exposing smoltcp types to core policy.
+- Commit hash when committed: pending.
+- Remaining risks: this is only an adapter construction proof; it does not feed TUN packets into smoltcp sockets, detect TCP connect attempts, or bridge streams.
+- Exact next step: commit the smoltcp adapter boundary, then add a smoltcp TCP socket proof that a socket can be allocated/listened without unsafe code and with explicit buffer sizing.

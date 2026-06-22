@@ -38,3 +38,6 @@
 
 ## 2026-06-22T01:33:05Z
 - The verification-kernel implementation approach now explicitly forbids user-facing checkpoint summaries after successful commits; a clean commit or verification run is never a stop condition by itself.
+
+## 2026-06-22T21:51:42Z
+- `smoltcp` latest 0.13.x requires Rust 1.91, which is above this workspace's Rust 1.80 MSRV; use `smoltcp` 0.12.x for the alpha adapter unless the workspace MSRV changes.

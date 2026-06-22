@@ -6,6 +6,7 @@ members = [
     "crates/foxprox-launcher",
     "crates/foxprox-setup",
     "crates/foxprox-runtime",
+    "crates/foxprox-smoltcp",
 ]
 resolver = "2"
 
