@@ -617,7 +617,8 @@ pub mod fd_handoff {
     use std::fmt;
     use std::io::{IoSlice, IoSliceMut};
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-    use std::os::unix::net::UnixStream;
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::path::{Path, PathBuf};
 
     use nix::cmsg_space;
     use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
@@ -668,6 +669,67 @@ pub mod fd_handoff {
         pub marker: Vec<u8>,
         pub fd: OwnedFd,
     }
+
+    /// Host-side broker control listener for setup-helper fd handoff.
+    #[derive(Debug)]
+    pub struct BrokerControlListener {
+        path: PathBuf,
+        listener: UnixListener,
+    }
+
+    impl BrokerControlListener {
+        pub fn bind(path: impl Into<PathBuf>) -> Result<Self, BrokerControlError> {
+            let path = path.into();
+            let listener = UnixListener::bind(&path).map_err(|error| BrokerControlError::Bind {
+                path: path.clone(),
+                error: error.to_string(),
+            })?;
+            Ok(Self { path, listener })
+        }
+
+        pub fn path(&self) -> &Path {
+            &self.path
+        }
+
+        pub fn accept_setup_fd(&self) -> Result<ReceivedFd, BrokerControlError> {
+            let (socket, _) =
+                self.listener
+                    .accept()
+                    .map_err(|error| BrokerControlError::Accept {
+                        path: self.path.clone(),
+                        error: error.to_string(),
+                    })?;
+            receive_setup_fd(&socket).map_err(BrokerControlError::Handoff)
+        }
+    }
+
+    /// Host-side broker control listener errors.
+    #[derive(Debug)]
+    pub enum BrokerControlError {
+        Bind { path: PathBuf, error: String },
+        Accept { path: PathBuf, error: String },
+        Handoff(FdHandoffError),
+    }
+
+    impl fmt::Display for BrokerControlError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Bind { path, error } => {
+                    write!(f, "broker-control-bind-error: {}: {error}", path.display())
+                }
+                Self::Accept { path, error } => {
+                    write!(
+                        f,
+                        "broker-control-accept-error: {}: {error}",
+                        path.display()
+                    )
+                }
+                Self::Handoff(error) => write!(f, "broker-control-handoff-error: {error}"),
+            }
+        }
+    }
+
+    impl std::error::Error for BrokerControlError {}
 
     /// Errors from SCM_RIGHTS setup fd handoff.
     #[derive(Debug)]
@@ -1109,6 +1171,46 @@ mod tests {
         ));
         assert!(!resolv_conf.exists());
         assert!(fd_handoff::receive_setup_fd(&broker_socket).is_err());
+        remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broker_control_listener_accepts_setup_fd_handoff() {
+        use std::fs::{create_dir_all, remove_dir_all, File, OpenOptions};
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+        use std::thread;
+
+        let dir = unique_test_dir("broker-control");
+        create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("setup.sock");
+        let listener = fd_handoff::BrokerControlListener::bind(&socket_path).unwrap();
+        assert_eq!(listener.path(), socket_path.as_path());
+        let path_for_setup = socket_path.clone();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(dir.join("tun-fd-standin"))
+            .unwrap();
+        file.write_all(b"broker-control-fd").unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let setup_thread = thread::spawn(move || {
+            let socket = UnixStream::connect(path_for_setup).unwrap();
+            fd_handoff::send_setup_fd(&socket, file.as_raw_fd()).unwrap();
+        });
+
+        let received = listener.accept_setup_fd().unwrap();
+        setup_thread.join().unwrap();
+        let mut received_file = File::from(received.fd);
+        let mut contents = String::new();
+        received_file.read_to_string(&mut contents).unwrap();
+
+        assert_eq!(received.marker, b"foxprox-fd".to_vec());
+        assert_eq!(contents, "broker-control-fd");
         remove_dir_all(dir).unwrap();
     }
 

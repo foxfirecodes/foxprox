@@ -224,3 +224,7 @@ Once a setup helper has a real CLI parser, the bwrap plan must construct that ex
 ## 2026-06-22 — live setup proof should use unprivileged UDP, not ping
 
 After `foxproxsetup` drops setup capabilities, `ping` may fail because the target lacks raw-socket privileges. For live TUN ingress proof, use a normal UDP socket from the target namespace and read the resulting IPv4 UDP packet from the broker's received TUN fd.
+
+## 2026-06-22 — fd handoff tests need read/write fd stand-ins
+
+SCM_RIGHTS can transfer a write-only descriptor successfully, but broker-side read evidence will fail with `Bad file descriptor`. Use read/write fd stand-ins when the test needs to verify the broker can consume received setup fds.

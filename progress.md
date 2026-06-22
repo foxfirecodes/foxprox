@@ -1215,3 +1215,24 @@
 - What this proves: bwrap can grant temporary `CAP_NET_ADMIN` to `foxproxsetup`; `/dev/net/tun` is usable; setup creates/configures TUN and route; resolver config is written; fd handoff works across the process boundary; setup drops capabilities before exec; and target traffic appears on the broker's received TUN fd.
 - What remains unproven: broker process automation around launching bwrap, continuous packet processing of the live received fd, synthetic reply write-back into the live namespace, and TCP forwarding via a userspace stack.
 - Commit: this evidence-only commit.
+
+## 2026-06-22 Session Continue — broker control listener for setup fd slice
+
+- Slice attempted: replace ad-hoc broker-side setup socket handling with a reusable Rust control listener that binds the setup socket and accepts the `foxproxsetup` fd handoff.
+- Why next: live evidence used a Python listener; the host-side broker/launcher still needs a first-class Rust boundary for receiving the setup fd before feeding it to `TunPacketIo`.
+- Verification plan: add a broker control listener to the fd handoff module, test bind/connect/SCM_RIGHTS receive with a TUN-like fd stand-in, then run focused integration tests plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — broker control listener for setup fd
+
+- Slice attempted: replace ad-hoc broker-side setup socket handling with a reusable Rust control listener that binds the setup socket and accepts the `foxproxsetup` fd handoff.
+- Why next: live evidence used a Python listener; the host-side broker/launcher still needed a first-class Rust boundary for receiving the setup fd before feeding it to `TunPacketIo`.
+- What changed: `foxprox-integrations::fd_handoff` now exposes `BrokerControlListener` and `BrokerControlError`. The listener binds a Unix socket path, reports its path for setup-helper args, accepts one setup connection, and returns the received `OwnedFd` via the existing SCM_RIGHTS validation path.
+- Verification:
+  - Focused check passed: `cargo test -p foxprox-integrations broker_control -- --nocapture` verified bind/connect/SCM_RIGHTS receive with a TUN-like fd stand-in and confirmed the broker side can read from the received fd.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 14 `foxprox-integrations` tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: the fd stand-in must be opened read/write before handoff; a write-only file descriptor transfers successfully but fails broker-side readback.
+- What remains unproven: spawning bwrap from a Rust launcher while the listener is active, and directly connecting the accepted live TUN fd to the broker packet loop in-process.
+- Commit: this commit.
