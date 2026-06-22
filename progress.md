@@ -659,3 +659,27 @@
 - Interpretation: transparent QUIC candidate handling now has a reusable policy/audit/egress boundary in the UDP runtime instead of being only a standalone classifier fixture.
 - Next verification gap: optional end-to-end bwrap/TUN QUIC smoke, or final alpha coverage review if no more local gaps are high-value.
 - Commit hash after commit: pending.
+
+## 2026-06-22T02:31:00Z — QUIC runtime commit recorded
+
+- Command executed: `git add crates/foxprox-core/src/runtime.rs progress.md && git commit -m "Classify QUIC in UDP runtime"`
+- Environment assumptions: QUIC runtime test and full workspace checks above were verified before commit.
+- Expected result: commit captures QUIC candidate policy/audit handling and prior audit-backpressure commit ledger note.
+- Observed result: commit `eca2940` created with 2 files changed.
+- Relevant output excerpt: `[harness-lab eca2940] Classify QUIC in UDP runtime`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: QUIC runtime checkpoint is preserved.
+- Next verification gap: deterministic ICMP policy/write-back runtime or optional end-to-end bwrap/TUN QUIC smoke.
+- Commit hash after commit: eca2940.
+
+## 2026-06-22T02:45:00Z — Deterministic ICMP policy/write-back runtime
+
+- Command executed: `cargo fmt --all && cargo test --all`
+- Environment assumptions: deterministic IPv4/ICMP echo fixtures; real sandbox `ping` remains environment-blocked by missing `CAP_NET_RAW` after capability drop, so this cycle avoids requiring privileged ping.
+- Expected result: ICMP echo requests are policy-gated by `allow_ping`, allowed requests synthesize a valid echo reply, and default-denied requests do not produce a reply.
+- Observed result: pass. `foxprox-core` increased to 48 tests; `foxprox-cli` ran 2 tests; `foxproxsetup` ran 7 tests.
+- Relevant output excerpt: `runtime::tests::icmp_echo_reply_requires_ping_policy ... ok`; `runtime::tests::icmp_echo_denied_without_ping_policy ... ok`.
+- Changed files: `crates/foxprox-core/src/policy.rs`, `crates/foxprox-core/src/runtime.rs`, `progress.md`.
+- Interpretation: ICMP basics now have a reusable core runtime boundary for ping allow/deny and packet write-back, while the environment limitation for invoking system ping remains recorded in `learnings.md`.
+- Next verification gap: final alpha coverage review; remaining gaps are productionization/refactoring rather than additional small harness proofs.
+- Commit hash after commit: pending.

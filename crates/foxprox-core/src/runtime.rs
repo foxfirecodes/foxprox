@@ -6,7 +6,10 @@ use crate::audit::{
 use crate::dns::DnsCache;
 use crate::egress::{EgressBackend, EgressRequest};
 use crate::origin::{parse_http_request, parse_tls_client_hello};
-use crate::packet::{parse_ipv4, parse_tcp, parse_udp, synthesize_udp_reply};
+use crate::packet::{
+    parse_icmp_echo_request, parse_ipv4, parse_tcp, parse_udp, synthesize_icmp_echo_reply,
+    synthesize_udp_reply,
+};
 use crate::policy::{PolicyEngine, PolicyRequest};
 
 /// Minimal transparent TUN UDP runtime boundary used by the harness and future broker runtime.
@@ -270,6 +273,103 @@ impl<B: EgressBackend> TransparentTcpRuntime<B> {
         }
         self.audit.push(record);
         Ok(())
+    }
+}
+
+/// Minimal transparent ICMP runtime for echo-request policy and write-back.
+#[derive(Debug)]
+pub struct TransparentIcmpRuntime {
+    pub policy: PolicyEngine,
+    pub audit: Vec<AuditRecord>,
+}
+
+impl TransparentIcmpRuntime {
+    pub fn new(policy: PolicyEngine) -> Self {
+        Self {
+            policy,
+            audit: Vec::new(),
+        }
+    }
+
+    pub fn handle_ipv4_packet(
+        &mut self,
+        sandbox_id: impl Into<String>,
+        packet: &[u8],
+    ) -> Result<Option<Vec<u8>>, String> {
+        let sandbox_id = sandbox_id.into();
+        let parsed = match parse_ipv4(packet) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                self.audit.push(
+                    AuditRecord::new(
+                        EventKind::UnsupportedNetworkEvent,
+                        sandbox_id,
+                        Decision::FailClosed,
+                        format!("malformed IPv4 packet fails closed: {err}"),
+                    )
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(Protocol::Unsupported),
+                );
+                return Ok(None);
+            }
+        };
+        if parsed.protocol_number != 1 {
+            self.audit.push(
+                AuditRecord::new(
+                    EventKind::UnsupportedNetworkEvent,
+                    sandbox_id,
+                    Decision::FailClosed,
+                    "transparent ICMP runtime received non-ICMP packet",
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(parsed.protocol()),
+            );
+            return Ok(None);
+        }
+        let echo = match parse_icmp_echo_request(parsed.payload) {
+            Ok(echo) => echo,
+            Err(err) => {
+                self.audit.push(
+                    AuditRecord::new(
+                        EventKind::IcmpMessage,
+                        sandbox_id,
+                        Decision::FailClosed,
+                        format!("unsupported ICMP message fails closed: {err}"),
+                    )
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(Protocol::Icmp),
+                );
+                return Ok(None);
+            }
+        };
+        let source = SocketAddr::new(IpAddr::V4(parsed.source), 0);
+        let destination = SocketAddr::new(IpAddr::V4(parsed.destination), 0);
+        let request = PolicyRequest::new(&sandbox_id, Frontend::Tun, Protocol::Icmp)
+            .with_source(source.ip(), source.port())
+            .with_destination(destination.ip(), destination.port());
+        let outcome = self.policy.evaluate(&request);
+        let record = AuditRecord::new(
+            EventKind::IcmpMessage,
+            &sandbox_id,
+            outcome.decision,
+            &outcome.reason,
+        )
+        .with_frontend(Frontend::Tun)
+        .with_protocol(Protocol::Icmp)
+        .with_addresses(Some(source), Some(destination))
+        .with_rule(outcome.rule_id)
+        .with_metadata("icmp_type", "echo_request")
+        .with_metadata("identifier", echo.identifier.to_string())
+        .with_metadata("sequence", echo.sequence.to_string())
+        .with_bytes(parsed.payload.len() as u64, 0);
+        if !outcome.decision.is_allow() {
+            self.audit.push(record);
+            return Ok(None);
+        }
+        let reply = synthesize_icmp_echo_reply(packet)?;
+        self.audit
+            .push(record.with_bytes(parsed.payload.len() as u64, reply.len() as u64));
+        Ok(Some(reply))
     }
 }
 
@@ -700,6 +800,30 @@ mod tests {
     }
 
     #[test]
+    fn icmp_echo_reply_requires_ping_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::deny_by_default().allow_ping(true));
+        let mut runtime = TransparentIcmpRuntime::new(policy);
+        let packet = icmp_echo_packet();
+        let reply = runtime.handle_ipv4_packet("lab", &packet).unwrap().unwrap();
+        let parsed = parse_ipv4(&reply).unwrap();
+        assert_eq!(parsed.source, Ipv4Addr::new(10, 0, 2, 1));
+        assert_eq!(parsed.destination, Ipv4Addr::new(10, 0, 2, 2));
+        assert_eq!(runtime.audit[0].kind, EventKind::IcmpMessage);
+        assert_eq!(runtime.audit[0].decision, Decision::Allow);
+        assert_eq!(runtime.audit[0].bytes_out, reply.len() as u64);
+    }
+
+    #[test]
+    fn icmp_echo_denied_without_ping_policy() {
+        let policy = PolicyEngine::new(PolicyConfig::deny_by_default());
+        let mut runtime = TransparentIcmpRuntime::new(policy);
+        let packet = icmp_echo_packet();
+        let reply = runtime.handle_ipv4_packet("lab", &packet).unwrap();
+        assert!(reply.is_none());
+        assert_eq!(runtime.audit[0].decision, Decision::DenyIcmpUnreachable);
+    }
+
+    #[test]
     fn transparent_http_host_path_rule_is_audited() {
         let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 80)), 80);
         let policy = PolicyEngine::new(
@@ -799,6 +923,24 @@ mod tests {
         packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
         packet[32] = 5 << 4;
         packet[33] = 0x02;
+        packet
+    }
+
+    fn icmp_echo_packet() -> Vec<u8> {
+        let mut icmp = vec![8, 0, 0, 0, 0x12, 0x34, 0, 1, b'p', b'i', b'n', b'g'];
+        let icmp_sum = checksum(&icmp);
+        icmp[2..4].copy_from_slice(&icmp_sum.to_be_bytes());
+        let total_len = 20 + icmp.len();
+        let mut packet = vec![0_u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 1;
+        packet[12..16].copy_from_slice(&[10, 0, 2, 2]);
+        packet[16..20].copy_from_slice(&[10, 0, 2, 1]);
+        packet[20..].copy_from_slice(&icmp);
+        let sum = checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&sum.to_be_bytes());
         packet
     }
 

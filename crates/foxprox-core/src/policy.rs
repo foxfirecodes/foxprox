@@ -294,6 +294,11 @@ impl PolicyConfig {
         self.allow_quic = allow;
         self
     }
+
+    pub fn allow_ping(mut self, allow: bool) -> Self {
+        self.allow_ping = allow;
+        self
+    }
 }
 
 /// Stateless deterministic policy engine.
@@ -355,6 +360,9 @@ impl PolicyEngine {
                 "QUIC candidate denied by configuration",
                 None,
             );
+        }
+        if request.protocol == Protocol::Icmp && self.config.allow_ping {
+            return PolicyOutcome::allow("ICMP ping allowed by configuration", None);
         }
 
         for rule in &self.config.rules {
