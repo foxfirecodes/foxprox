@@ -2317,3 +2317,30 @@ Addressed round-43 validation highs by directly testing every `TunPacketHarness:
 
 ### Remaining blind spots
 - Named expectations are still declared by harness code. A final async runtime must derive them from actual spawned task handles and feed real join/cancel results into lifecycle exit and audit fan-in.
+
+## 2026-06-22 — Add smoltcp bridge loop task outcome
+
+### Commands run
+- `cargo fmt` — applied formatting for smoltcp bridge-loop report changes.
+- `cargo test -p foxprox-stack smoltcp_tun_bridge_loop --all-targets --all-features` — passed.
+- `cargo test -p foxprox-stack smoltcp_tun_bridge_read_failure_is_audited_and_reported --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 140 core tests, 3 device tests, 38 egress tests, and 10 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::smoltcp_tun_bridge_read_failure_is_audited_and_reported ... ok`
+- `tests::smoltcp_tun_bridge_loop_reports_budget_cancellation ... ok`
+- `tests::smoltcp_tun_bridge_audits_and_writes_stack_output ... ok`
+- `tests::smoltcp_tun_bridge_audits_tcp_response_write_failure ... ok`
+
+### Interpretation
+Added `SmoltcpBridgeLoopReport` and `SmoltcpTunBridge::process_packet_loop(...)` to mirror the TUN packet-loop task model for the userspace stack bridge. Device read failures now emit structured `broker_error` evidence with `stack=smoltcp`, `direction=from_sandbox`, and `device_io_error=read_failed`, and the loop returns a failed `RuntimeTaskOutcome`. Budget exhaustion returns a cancelled smoltcp bridge task outcome instead of claiming completion.
+
+### Changed files
+- `crates/foxprox-stack/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The smoltcp loop is still synchronous/caller-bounded. Final runtime must drive it from actual TUN readiness and smoltcp timers and join it through the named task expectation model.

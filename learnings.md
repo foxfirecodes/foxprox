@@ -214,3 +214,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 
 - Component-level task coverage can still hide missing spawned handles when one component owns multiple tasks. Runtime lifecycle start should be able to record expected task names, and exit should compare task outcomes against those names when provided.
 - Progress claims for packet-loop terminal states should have direct tests for each branch: idle completion, bounded cancellation, read failure, and write failure.
+
+## 2026-06-22 — smoltcp bridge loops need the same task/outcome contract as TUN
+
+- Userspace stack bridges can stop before packet parsing when the device read fails. smoltcp/TUN bridge loops should emit structured read-failure audit evidence and return `RuntimeTaskOutcome` so lifecycle exit can explain stack-loop shutdown.

@@ -10,7 +10,7 @@
 use foxprox_core::{
     AuditKind, AuditRecord, BrokerCore, ByteCounts, Decision, DenialReason, DeviceIoError,
     Frontend, NetworkEndpoint, PacketDevice, ParsedIpPacket, PolicyDecision, PolicyRequest,
-    TcpEgress, TcpEgressError,
+    RuntimeComponent, RuntimeTaskOutcome, RuntimeTaskStatus, TcpEgress, TcpEgressError,
 };
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -303,6 +303,13 @@ pub struct SmoltcpTunBridgeResult {
     pub reason: Option<DenialReason>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SmoltcpBridgeLoopReport {
+    pub processed_packets: usize,
+    pub error: Option<DeviceIoError>,
+    pub task_outcome: RuntimeTaskOutcome,
+}
+
 pub struct SmoltcpTunBridge<D> {
     sandbox_id: String,
     broker: BrokerCore,
@@ -329,8 +336,13 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         &mut self,
         now_ms: i64,
     ) -> Result<Option<SmoltcpTunBridgeResult>, DeviceIoError> {
-        let Some(packet) = self.device.read_packet()? else {
-            return Ok(None);
+        let packet = match self.device.read_packet() {
+            Ok(Some(packet)) => packet,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                self.record_device_read_failure(now_ms);
+                return Err(error);
+            }
         };
         let parsed = match ParsedIpPacket::parse(&packet) {
             Ok(parsed) => parsed,
@@ -461,6 +473,57 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
             decision: policy_decision.decision,
             reason: policy_decision.reason,
         }))
+    }
+
+    pub fn process_packet_loop(
+        &mut self,
+        now_ms: i64,
+        max_packets: usize,
+    ) -> SmoltcpBridgeLoopReport {
+        let mut processed_packets = 0usize;
+        while processed_packets < max_packets {
+            match self.process_next_packet(now_ms) {
+                Ok(Some(_)) => processed_packets += 1,
+                Ok(None) => {
+                    return SmoltcpBridgeLoopReport {
+                        processed_packets,
+                        error: None,
+                        task_outcome: smoltcp_task_outcome(RuntimeTaskStatus::Completed),
+                    };
+                }
+                Err(error) => {
+                    return SmoltcpBridgeLoopReport {
+                        processed_packets,
+                        error: Some(error),
+                        task_outcome: smoltcp_task_outcome(RuntimeTaskStatus::Failed),
+                    };
+                }
+            }
+        }
+        SmoltcpBridgeLoopReport {
+            processed_packets,
+            error: None,
+            task_outcome: smoltcp_task_outcome(RuntimeTaskStatus::Cancelled),
+        }
+    }
+
+    fn record_device_read_failure(&mut self, now_ms: i64) {
+        let request = PolicyRequest::unsupported(
+            self.sandbox_id.clone(),
+            Frontend::Tun,
+            DenialReason::SetupFailed,
+        );
+        let audit = AuditRecord::new_at(
+            AuditKind::BrokerError,
+            self.sandbox_id.clone(),
+            now_ms as u128,
+        )
+        .with_frontend(Frontend::Tun)
+        .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+        .with_detail("stack", "smoltcp")
+        .with_detail("direction", "from_sandbox")
+        .with_detail("device_io_error", "read_failed");
+        let _ = self.broker.append_audit_for(&request, audit);
     }
 
     pub fn broker(&self) -> &BrokerCore {
@@ -666,6 +729,14 @@ fn tcp_egress_error_detail(error: &TcpEgressError) -> &'static str {
     }
 }
 
+fn smoltcp_task_outcome(status: RuntimeTaskStatus) -> RuntimeTaskOutcome {
+    RuntimeTaskOutcome::new(
+        RuntimeComponent::SmoltcpStack,
+        "smoltcp_tun_bridge_loop",
+        status,
+    )
+}
+
 fn bridge_result(
     inbound_observed: bool,
     stack: StackPollEvidence,
@@ -797,6 +868,56 @@ mod tests {
         assert_eq!(records[1].kind, AuditKind::IcmpDecision);
         assert_eq!(records[1].decision, Some(Decision::DenyDrop));
         assert_eq!(records[1].reason, Some(DenialReason::IcmpUnsupported));
+    }
+
+    #[test]
+    fn smoltcp_tun_bridge_read_failure_is_audited_and_reported() {
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 4);
+        let stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, FailingReadPacketDevice);
+
+        let report = bridge.process_packet_loop(2_750, 8);
+
+        assert_eq!(report.processed_packets, 0);
+        assert_eq!(report.error, Some(DeviceIoError::ReadFailed));
+        assert_eq!(
+            report.task_outcome.component,
+            RuntimeComponent::SmoltcpStack
+        );
+        assert_eq!(report.task_outcome.task_name, "smoltcp_tun_bridge_loop");
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Failed);
+        let records: Vec<_> = bridge.broker().audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::BrokerError);
+        assert_eq!(records[0].decision, Some(Decision::FailClosed));
+        assert_eq!(records[0].details["stack"], "smoltcp");
+        assert_eq!(records[0].details["direction"], "from_sandbox");
+        assert_eq!(records[0].details["device_io_error"], "read_failed");
+    }
+
+    #[test]
+    fn smoltcp_tun_bridge_loop_reports_budget_cancellation() {
+        let packet = ipv4_icmp_echo_request();
+        let device = InMemoryPacketDevice::with_inbound([packet.clone(), packet]);
+        let config = PolicyConfig {
+            allow_ping: true,
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 16);
+        let stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+
+        let report = bridge.process_packet_loop(2_800, 1);
+
+        assert_eq!(report.processed_packets, 1);
+        assert_eq!(report.error, None);
+        assert_eq!(
+            report.task_outcome.component,
+            RuntimeComponent::SmoltcpStack
+        );
+        assert_eq!(report.task_outcome.task_name, "smoltcp_tun_bridge_loop");
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Cancelled);
     }
 
     #[test]
@@ -994,6 +1115,19 @@ mod tests {
     const TCP_SYN: u8 = 0x02;
     const TCP_PSH: u8 = 0x08;
     const TCP_ACK: u8 = 0x10;
+
+    #[derive(Clone, Debug, Default)]
+    struct FailingReadPacketDevice;
+
+    impl PacketDevice for FailingReadPacketDevice {
+        fn read_packet(&mut self) -> Result<Option<Vec<u8>>, DeviceIoError> {
+            Err(DeviceIoError::ReadFailed)
+        }
+
+        fn write_packet(&mut self, _packet: &[u8]) -> Result<(), DeviceIoError> {
+            Ok(())
+        }
+    }
 
     #[derive(Clone, Debug, Default)]
     struct FailingWritePacketDevice;
