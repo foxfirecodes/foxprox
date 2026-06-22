@@ -985,3 +985,25 @@
 - What failed or surprised the agent: no behavior failures; ordering matters because sending the fd before route/DNS setup succeeds would let the broker proceed while the sandbox network is only partially configured.
 - What remains unproven: real TUN fd creation feeding this sequence, execution inside bwrap, capability drop, target exec, cleanup of partially applied real network state, and live sandbox packet logs are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — real TUN create → setup sequence handoff slice
+
+- Slice attempted: connect the Linux TUN creation primitive to the setup sequence so a real created TUN fd can be configured and handed to the broker, while failing before commands/handoff when TUN creation fails.
+- Why next: the setup sequence works with an existing fd, and device creation works independently; alpha setup needs these combined before `foxproxsetup` can be meaningful.
+- Verification plan: add a Linux-only integration helper that calls `foxprox_device::create_tun` then runs the existing configure/resolver/fd-handoff sequence; verify a missing TUN path fails before fake `ip` commands, resolver writes, or fd handoff; run formatting, clippy, focused integration tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — real TUN create → setup sequence handoff
+
+- Slice attempted: connect the Linux TUN creation primitive to the ordered setup configuration and fd handoff sequence.
+- Why next: setup sequence worked only with an already-existing fd, while `foxprox-device` could create a TUN fd independently; alpha setup needs one production-shaped helper path that creates the TUN and only then configures/routes/resolver/handoff.
+- What changed: `foxprox-integrations` now depends on `foxprox-device` on Linux and exposes `fd_handoff::run_linux_tun_setup_sequence`, which calls `foxprox_device::create_tun` and then runs interface configuration, resolver writing, and fd handoff. `SetupSequenceError` now distinguishes TUN creation failure from later setup failures.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in the new Linux setup test; `cargo fmt` was run.
+  - Focused check passed: `cargo test -p foxprox-integrations linux_tun_setup_sequence -- --nocapture` verified a missing TUN path fails at TUN creation before fake `ip` commands, resolver writes, or fd handoff.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 11 `foxprox-integrations` tests and all existing workspace tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; failing before any setup side effects is important because a missing/unauthorized TUN device should not leave partial routes or resolver state behind.
+- What remains unproven: successful privileged TUN creation/configuration/handoff in bwrap, capability drop, target exec, broker read loop over received fd, and live sandbox packet logs are still absent.
+- Commit: this commit.

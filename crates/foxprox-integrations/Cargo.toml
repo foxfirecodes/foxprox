@@ -11,3 +11,6 @@ path = "src/lib.rs"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.30", features = ["socket", "uio"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+foxprox-device = { path = "../foxprox-device" }

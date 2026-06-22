@@ -180,3 +180,7 @@ Have setup write a minimal generated resolver file pointing at the broker namese
 ## 2026-06-21 — setup fd handoff should be last after network config succeeds
 
 In the setup helper sequence, configure the interface and resolver before sending the fd to the broker. If setup fails first, the broker never receives a fd and cannot treat a partially configured sandbox network as ready.
+
+## 2026-06-21 — create TUN before mutating sandbox network config
+
+The production setup sequence should create the TUN fd first, then configure interface state, resolver, and handoff. If TUN creation fails, do not run `ip` commands or write resolver files; this avoids partial sandbox network setup with no broker fd.
