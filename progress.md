@@ -1741,3 +1741,13 @@
   - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
   - Dependency checks passed: `cargo tree -p foxprox-core`, `cargo tree -p foxprox-net`, `cargo tree -p foxprox-proxy`, `cargo tree -p foxprox-cli`; `foxprox-core` remains dependency-free and parser/policy/audit code was not moved into it.
 - Removed transient review artifacts before commit.
+
+## 2026-06-22T22:10:31Z — committed explicit HTTP proxy TUN bridge
+
+- Commit created: `bd29926` (`bridge explicit proxy over tun`).
+- Commit contents: optional combined-runtime HTTP proxy bridge, TCP egress override for local service raw bridging, HTTP proxy proof ready callback, `proof-transparent` proxy CLI flags, loopback-only backend validation, focused tests, and ledger updates.
+- Review: final blocker (non-loopback backend exposure) fixed before commit.
+- Verification evidence: full fmt/check/test/clippy/doc and dependency tree checks passed immediately before commit.
+- Current git status after commit: clean.
+- Remaining alpha reassessment: major previously tracked gaps now reduced to the shared host egress backend being only partially represented by core traits/proxy TCP proof boundary; transparent TCP/UDP/DNS still open std sockets directly in runtime code, and SOCKS proxy is still only separately CLI-runnable rather than exposed via the combined TUN path.
+- Next exact action: choose and start the next smallest alpha slice. Candidate: introduce concrete std host egress adapters in `foxprox-net`/`foxprox-proxy` so transparent TCP and proxy TCP use the same policy-checked egress opening path without moving runtime dependencies into `foxprox-core`.
