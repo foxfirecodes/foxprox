@@ -176,3 +176,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Signal and supervision-error paths need explicit evidence
 
 - A blocking child supervisor should preserve Unix signal status when available, and spawn/wait failures should be converted into structured lifecycle/broker-error evidence instead of only returning an error. Tests should start the lifecycle before launching the child so session records bracket the child lifetime.
+
+## 2026-06-22 — Child sessions require terminal status and fan-in needs backpressure proof
+
+- If a runtime session includes `child_process`, exiting without child status is not clean; it must emit `child_status=unknown` and fail closed. A runtime-level audit fan-in contract should ingest records by per-source sequence and surface fan-in backpressure as structured `audit_backpressure` evidence.

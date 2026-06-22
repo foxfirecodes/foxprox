@@ -2067,3 +2067,31 @@ Addressed round-34 supervision concerns. Blocking child supervisor tests now sta
 
 ### Remaining blind spots
 - Wait-failure is still difficult to trigger deterministically in the blocking proof. Final runtime still needs async child supervision, task cancellation/join ordering, and unified audit backpressure across all runtime tasks.
+
+## 2026-06-22 — Runtime audit fan-in contract and child-status terminality
+
+### Commands run
+- `cargo fmt` — applied formatting for runtime audit fan-in and child-status terminality fixes.
+- `cargo test -p foxprox-core runtime::tests --all-targets --all-features` — passed, 17 runtime tests.
+- `cargo test -p foxprox-egress blocking_child_supervisor --all-targets --all-features` — passed, 4 blocking child supervisor tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 130 core tests, 3 device tests, 34 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_lifecycle_child_process_without_status_is_fail_closed ... ok`
+- `runtime::tests::runtime_audit_fan_in_ingests_sequence_ordered_sources ... ok`
+- `runtime::tests::runtime_audit_fan_in_backpressure_is_observable ... ok`
+- `foxprox_egress::tests::blocking_child_supervisor_signal_exit_is_fail_closed_in_lifecycle ... ok`
+
+### Interpretation
+Addressed round-36 child-session terminality. If `RuntimeComponent::ChildProcess` is part of a session, exit without `RuntimeChildExit` now records `child_status=unknown` and fails closed. Added `RuntimeAuditFanIn` as a platform-independent contract for a future unified audit output path: it ingests per-source records by audit sequence, skips duplicates, and emits structured `audit_backpressure` evidence with source and attempted kind when the fan-in ledger is full.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- `RuntimeAuditFanIn` is still an in-memory contract, not a concrete async writer shared by runtime tasks. Final runtime must wire lifecycle, listener, TUN/smoltcp, child, and cleanup tasks into one supervised sink with real backpressure propagation.

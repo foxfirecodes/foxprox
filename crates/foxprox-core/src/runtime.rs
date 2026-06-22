@@ -1,6 +1,7 @@
 use crate::audit::{AuditError, AuditRecord, BoundedAuditLedger};
 use crate::types::{AuditKind, Decision, DenialReason, Frontend, Protocol};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -169,6 +170,94 @@ pub enum RuntimeLifecycleError {
     NotStarted,
     AlreadyRunning,
     AlreadyExited,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeAuditFanInError {
+    AuditBackpressure {
+        source: String,
+        attempted_kind: AuditKind,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeAuditIngestReport {
+    pub source: String,
+    pub accepted_records: usize,
+    pub last_source_sequence: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeAuditFanIn {
+    sandbox_id: String,
+    audit: BoundedAuditLedger,
+    last_source_sequences: BTreeMap<String, u64>,
+}
+
+impl RuntimeAuditFanIn {
+    pub fn new(sandbox_id: impl Into<String>, audit_capacity: usize) -> Self {
+        Self {
+            sandbox_id: sandbox_id.into(),
+            audit: BoundedAuditLedger::new(audit_capacity),
+            last_source_sequences: BTreeMap::new(),
+        }
+    }
+
+    pub fn ingest<'a>(
+        &mut self,
+        source: impl Into<String>,
+        records: impl IntoIterator<Item = &'a AuditRecord>,
+    ) -> Result<RuntimeAuditIngestReport, RuntimeAuditFanInError> {
+        let source = source.into();
+        let mut last_sequence = *self.last_source_sequences.get(&source).unwrap_or(&0);
+        let mut accepted_records = 0usize;
+        for record in records {
+            if record.sequence <= last_sequence {
+                continue;
+            }
+            match self.audit.append(record.clone()) {
+                Ok(_) => {
+                    last_sequence = record.sequence;
+                    accepted_records += 1;
+                }
+                Err(AuditError::BufferFull { attempted_kind, .. }) => {
+                    self.audit.append_lossy(
+                        AuditRecord::new(AuditKind::AuditBackpressure, self.sandbox_id.clone())
+                            .with_frontend(Frontend::Core)
+                            .with_decision(
+                                Decision::FailClosed,
+                                Some(DenialReason::AuditBackpressure),
+                            )
+                            .with_detail("source", source.clone())
+                            .with_detail(
+                                "attempted_kind",
+                                format!("{attempted_kind:?}").to_ascii_lowercase(),
+                            )
+                            .with_detail("source_sequence", record.sequence.to_string()),
+                    );
+                    return Err(RuntimeAuditFanInError::AuditBackpressure {
+                        source,
+                        attempted_kind,
+                    });
+                }
+            }
+        }
+        self.last_source_sequences
+            .insert(source.clone(), last_sequence);
+        Ok(RuntimeAuditIngestReport {
+            source,
+            accepted_records,
+            last_source_sequence: last_sequence,
+        })
+    }
+
+    pub fn audit(&self) -> &BoundedAuditLedger {
+        &self.audit
+    }
+
+    pub fn last_source_sequence(&self, source: &str) -> u64 {
+        *self.last_source_sequences.get(source).unwrap_or(&0)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -368,9 +457,13 @@ impl RuntimeLifecycleHarness {
                 );
             }
         };
+        let missing_child_status =
+            self.components.contains(&RuntimeComponent::ChildProcess) && child_exit.is_none();
         let (decision, reason) = if !cleanup.failed.is_empty() {
             (Decision::FailClosed, Some(DenialReason::SetupFailed))
-        } else if child_exit.as_ref().is_some_and(RuntimeChildExit::is_failed) {
+        } else if missing_child_status
+            || child_exit.as_ref().is_some_and(RuntimeChildExit::is_failed)
+        {
             (Decision::FailClosed, Some(DenialReason::RuntimeState))
         } else {
             match status {
@@ -399,6 +492,9 @@ impl RuntimeLifecycleHarness {
             cleanup_action_list(&cleanup.failed),
         )
         .with_detail("failed_cleanup_count", cleanup.failed.len().to_string());
+        if missing_child_status {
+            audit = audit.with_detail("child_status", "unknown");
+        }
         if let Some(child_exit) = child_exit {
             audit = audit.with_detail("child_status", child_exit.status_detail());
             if let Some(process_id) = child_exit.process_id {
@@ -529,6 +625,49 @@ fn component_list(components: &[RuntimeComponent]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_audit_fan_in_ingests_sequence_ordered_sources() {
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+        let mut start = AuditRecord::new_at(AuditKind::NetworkSessionStart, "s1", 1_000);
+        start.sequence = 1;
+        let mut dns = AuditRecord::new_at(AuditKind::DnsQueryDecision, "s1", 1_010);
+        dns.sequence = 2;
+        let source_records = vec![start, dns];
+        let report = fan_in.ingest("dns", &source_records).unwrap();
+        assert_eq!(report.accepted_records, 2);
+        assert_eq!(report.last_source_sequence, 2);
+        let duplicate = fan_in.ingest("dns", &source_records).unwrap();
+        assert_eq!(duplicate.accepted_records, 0);
+        let records: Vec<_> = fan_in.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::NetworkSessionStart);
+        assert_eq!(records[1].kind, AuditKind::DnsQueryDecision);
+    }
+
+    #[test]
+    fn runtime_audit_fan_in_backpressure_is_observable() {
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 1);
+        let mut start = AuditRecord::new_at(AuditKind::NetworkSessionStart, "s1", 1_000);
+        start.sequence = 1;
+        let mut dns = AuditRecord::new_at(AuditKind::DnsQueryDecision, "s1", 1_010);
+        dns.sequence = 2;
+        let source_records = vec![start, dns];
+        let error = fan_in.ingest("dns", &source_records).unwrap_err();
+        assert_eq!(
+            error,
+            RuntimeAuditFanInError::AuditBackpressure {
+                source: "dns".to_string(),
+                attempted_kind: AuditKind::DnsQueryDecision,
+            }
+        );
+        let records: Vec<_> = fan_in.audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::AuditBackpressure);
+        assert_eq!(records[0].decision, Some(Decision::FailClosed));
+        assert_eq!(records[0].details["source"], "dns");
+        assert_eq!(records[0].details["source_sequence"], "2");
+    }
 
     #[test]
     fn runtime_lifecycle_records_start_and_clean_exit() {
@@ -802,6 +941,31 @@ mod tests {
         assert_eq!(records[1].details["child_status"], "signaled");
         assert_eq!(records[1].details["child_process_id"], "43");
         assert_eq!(records[1].details["child_signal"], "15");
+    }
+
+    #[test]
+    fn runtime_lifecycle_child_process_without_status_is_fail_closed() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start(vec![RuntimeComponent::ChildProcess], 1_000)
+            .unwrap();
+        runtime
+            .exit_with_cleanup(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::ChildProcess]),
+                1_250,
+            )
+            .unwrap();
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["child_status"], "unknown");
+        assert!(!records[1].details.contains_key("child_process_id"));
+        assert!(!records[1].details.contains_key("child_exit_code"));
+        assert!(!records[1].details.contains_key("child_signal"));
     }
 
     #[test]
