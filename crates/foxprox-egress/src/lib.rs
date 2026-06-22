@@ -1121,6 +1121,91 @@ mod tests {
     }
 
     #[test]
+    fn blocking_explicit_proxy_socks_domain_uses_frontend_broker_dns_resolution() {
+        let host_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let host_addr = host_listener.local_addr().unwrap();
+        let host_server = thread::spawn(move || host_listener.accept().unwrap().1);
+        let mut cache = DnsCache::default();
+        cache.observe(
+            "proxy-egress-sandbox",
+            "Broker.TEST",
+            "A",
+            vec![host_addr.ip()],
+            4_000,
+            1_000,
+        );
+
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-socks-domain")
+                .frontend(Frontend::Socks5Proxy)
+                .protocol(Protocol::Socks)
+                .hostname("broker.test")
+                .destination_port(host_addr.port()),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let frontend = ExplicitProxyFrontend::new(
+            "proxy-egress-sandbox",
+            broker,
+            BlockingExplicitProxyEgress::new(Duration::from_secs(1), Duration::from_secs(1), 1024),
+        )
+        .with_dns_cache(cache);
+        let mut proxy_server = BlockingSocks5ProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            frontend,
+            Duration::from_secs(1),
+            4096,
+        )
+        .unwrap();
+        let mut response = Vec::new();
+        let request = [
+            0x05,
+            0x01,
+            0x00,
+            0x03,
+            11,
+            b'b',
+            b'r',
+            b'o',
+            b'k',
+            b'e',
+            b'r',
+            b'.',
+            b't',
+            b'e',
+            b's',
+            b't',
+            (host_addr.port() >> 8) as u8,
+            host_addr.port() as u8,
+        ];
+
+        let step = proxy_server
+            .handle_socks5_connect_request(
+                "127.0.0.1:43210".parse().unwrap(),
+                3,
+                &request,
+                &mut response,
+                4_100,
+            )
+            .unwrap();
+        assert_eq!(step.decision, Decision::Allow);
+        assert!(step.forwarded);
+        assert_eq!(step.reply_code, 0x00);
+        assert_eq!(response, socks5_connect_response(0x00));
+        assert_eq!(host_server.join().unwrap().ip(), host_addr.ip());
+        let records: Vec<_> = proxy_server.frontend().broker().audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::ProxyDestinationResolved);
+        assert_eq!(records[0].details["resolution_source"], "broker_dns");
+        assert_eq!(records[0].details["selected_ip"], "127.0.0.1");
+        assert_eq!(records[1].kind, AuditKind::SocksConnectDecision);
+        assert_eq!(
+            records[1].destination.as_ref().unwrap().ip,
+            Some(host_addr.ip())
+        );
+    }
+
+    #[test]
     fn blocking_explicit_proxy_socks_egress_opens_host_socket_after_policy() {
         let host_listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let host_addr = host_listener.local_addr().unwrap();

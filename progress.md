@@ -1616,3 +1616,28 @@ The round-19 compile/format blocker is fixed and the proxy domain path is now im
 
 ### Remaining blind spots
 - The DNS cache is still passed into the frontend as a snapshot for these proofs. Final runtime must wire the live delivered-response DNS cache into proxy frontends and keep the per-request resolution audit/backpressure boundary while handling continuous expiry/retry/lifecycle.
+
+## 2026-06-22 — Proxy DNS resolution backpressure and SOCKS egress proof
+
+### Commands run
+- `cargo fmt` — applied formatting for proxy DNS resolution hardening.
+- `cargo test -p foxprox-core --all-targets --all-features` — passed, 110 core tests.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 25 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 110 core tests, 3 device tests, 25 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_core::proxy_frontend::tests::proxy_dns_resolution_backpressure_fails_closed_before_egress ... ok`
+- `foxprox_egress::tests::blocking_explicit_proxy_socks_domain_uses_frontend_broker_dns_resolution ... ok`
+
+### Interpretation
+The audit-gated proxy DNS path now proves backpressure behavior and SOCKS host egress as well as HTTP. If `proxy_destination_resolved` cannot be appended, the frontend returns `audit_backpressure` and does not call egress. SOCKS domain CONNECT now reaches concrete blocking host egress only when the frontend resolves via broker DNS cache and first records selected-IP/source/TTL evidence; no-cache SOCKS domain egress remains fail-closed.
+
+### Changed files
+- `crates/foxprox-core/src/proxy_frontend.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `progress.md`
+
+### Remaining blind spots
+- Live runtime still needs shared mutable DNS-cache wiring across the DNS listener and explicit proxy frontends rather than snapshot cache injection.

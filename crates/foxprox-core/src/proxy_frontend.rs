@@ -489,6 +489,47 @@ mod tests {
     }
 
     #[test]
+    fn proxy_dns_resolution_backpressure_fails_closed_before_egress() {
+        let mut cache = DnsCache::default();
+        cache.commit_observation(crate::flow::DnsObservation::new(
+            "example.com",
+            "A",
+            vec!["93.184.216.34".parse().unwrap()],
+            1_000,
+            500,
+        ));
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 1);
+        let mut frontend =
+            ExplicitProxyFrontend::new("s1", broker, InMemoryExplicitProxyEgress::default())
+                .with_dns_cache(cache);
+
+        let first = frontend
+            .handle_http_proxy_bytes(b"GET http://127.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .unwrap();
+        assert_eq!(first.decision, Decision::Allow);
+        let second = frontend
+            .handle_http_proxy_bytes_at(
+                b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n",
+                1_100,
+            )
+            .unwrap();
+        assert_eq!(second.decision, Decision::FailClosed);
+        assert_eq!(second.reason, Some(DenialReason::AuditBackpressure));
+        assert_eq!(frontend.egress().forwarded_http().len(), 1);
+        let records: Vec<_> = frontend.broker().audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::AuditBackpressure);
+        assert_eq!(
+            records[0].details["attempted_kind"],
+            "proxydestinationresolved"
+        );
+    }
+
+    #[test]
     fn socks_domain_resolution_is_audited_before_egress() {
         let mut cache = DnsCache::default();
         cache.commit_observation(crate::flow::DnsObservation::new(
