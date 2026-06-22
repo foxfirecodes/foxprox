@@ -950,3 +950,16 @@
 - Recent structural commit hashes: capability helper extraction `d3cf7d3`; explicit proxy forwarding migration `e1fc3a0`; core CONNECT parsing `579fb4a`; egress crate extraction `cb9e664`.
 - Next verification gap: commit this sweep record; if continuing, the next production step should be moving the Linux TUN ioctl configurator out of setup into `foxprox-device` with tests and handoff-smoke verification.
 - Commit hash after commit: pending.
+
+## 2026-06-22T08:25:00Z — Linux TUN configurator moved to device crate
+
+- Command executed: `cargo fmt --all && cargo test --all`; `cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run handoff-smoke`
+- Environment assumptions: Linux `/dev/net/tun`, ioctl setup, capability handling, and SCM_RIGHTS handoff are available for the handoff smoke.
+- Expected result: move low-level Linux TUN ioctl configuration and related tests out of `foxproxsetup` into `foxprox-device::linux_tun`, leaving setup responsible for argument parsing, environment emission, fd send, capability drop, and target exec.
+- Observed result: pass. Workspace tests passed with TUN ioctl unit coverage now under `foxprox-device` (`foxprox-device` 5 tests, `foxprox-core` 59, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). `handoff-smoke` emitted `"fd_valid_after_helper_exit":"true"`.
+- Relevant output excerpt: `linux_tun::tests::rejects_overlong_interface_names ... ok`; `linux_tun::tests::sockaddr_v4_places_ipv4_octets_after_port ... ok`; handoff `"decision":"allow"`.
+- Changed files: `crates/foxprox-device/src/lib.rs`, `crates/foxprox-setup/src/main.rs`, `progress.md`.
+- Interpretation: the broker/device split is now more concrete: Linux TUN fd creation/configuration, fd handoff helpers, and capability helpers live in `foxprox-device`, while `foxproxsetup` is a thin setup executable wrapper.
+- Recent verification record commit hash: `bfe8bd4`.
+- Next verification gap: commit TUN configurator extraction; then run a final status sweep and identify remaining async long-lived broker integration as the main non-alpha production gap.
+- Commit hash after commit: pending.
