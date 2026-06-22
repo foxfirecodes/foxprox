@@ -1390,3 +1390,38 @@ Round-15 high findings are fixed. HTTP proxy listener client-response write fail
 
 ### Remaining blind spots
 - Explicit proxy runtime still lacks SOCKS5 TCP listener/tunnel proof, streaming HTTP response/CONNECT tunneling, and async lifecycle supervision.
+
+## 2026-06-22 — Blocking SOCKS5 listener proof cycle
+
+### Behavior under work
+Add a concrete single-step TCP listener proof for SOCKS5 CONNECT traffic: accept a sandbox-reachable TCP connection, complete the no-auth method handshake, parse the CONNECT request through `ExplicitProxyFrontend`, return a client-visible SOCKS5 reply, and expose structured listener step evidence.
+
+### Expected evidence
+- Allowed SOCKS5 domain CONNECT reaches shared policy/audit, forwards through proxy egress, and returns a success reply.
+- Denied SOCKS5 CONNECT returns a failure reply and does not forward.
+- Malformed/unsupported SOCKS paths fail closed with structured step evidence.
+
+## 2026-06-22 — Blocking SOCKS5 listener proof
+
+### Commands run
+- `cargo fmt` — applied formatting for blocking SOCKS5 listener proof.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 17 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 103 core tests, 3 device tests, 17 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_socks5_proxy_server_handles_allowed_connect ... ok`
+- `foxprox_egress::tests::blocking_socks5_proxy_server_denies_without_forwarding ... ok`
+- `foxprox_egress::tests::blocking_socks5_proxy_server_rejects_unsupported_greeting ... ok`
+
+### Interpretation
+The egress crate now includes a concrete single-step blocking SOCKS5 proxy listener proof. A local TCP client can complete the no-auth method handshake, send a SOCKS5 CONNECT request, route through shared `ExplicitProxyFrontend` policy/audit, and receive a SOCKS5 reply. Allowed domain CONNECTs forward through configured proxy egress and emit `socks_connect_decision`; denied IP CONNECTs return connection-not-allowed without forwarding; unsupported greetings fail closed with structured listener step evidence. Step evidence includes client address, greeting length, request length, response length, reply code, send status, decision, reason, and forwarded flag.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Explicit proxy listeners are still blocking single-step proofs. Final runtime still needs bidirectional CONNECT stream tunneling, HTTP response streaming, asynchronous accept loops, and lifecycle supervision integrated with sandbox setup.

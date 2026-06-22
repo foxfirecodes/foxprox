@@ -91,3 +91,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Explicit proxy listener proof boundary
 
 - A concrete proxy listener can remain bounded and observable by handling one TCP request at a time, delegating parse/policy/egress to `ExplicitProxyFrontend`, and returning a structured listener step result with client address, request/response lengths, status code, send status, decision, and forwarded flag.
+
+## 2026-06-22 — SOCKS5 listener proof boundary
+
+- A bounded SOCKS5 listener proof should separate the method handshake from CONNECT policy evaluation: only the CONNECT request enters `ExplicitProxyFrontend`, while the listener step records greeting length, request length, reply code, send status, decision, and forwarding status.
