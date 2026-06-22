@@ -1535,3 +1535,15 @@
 - Commit hash when committed: pending.
 - Remaining risks: host bytes are injected by a test helper rather than a real `TcpFlowRuntime` host-read pump; no continuous TUN writer loop or TCP close packet lifecycle exists.
 - Exact next step: commit host-to-sandbox smoltcp packet emission, then add a small integrated pump that combines host-read bytes from `TcpFlowRuntime` with `send_to_sandbox_on_flow` and writes emitted packets to a TUN-like writer.
+
+## 2026-06-22T22:32:20Z
+- Current objective: combine host-read bridge bytes with smoltcp sandbox packet emission.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on wrapped `StdTcpStreamBridge::new` and chained access; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 25 smoltcp adapter tests passed. `TcpFlowRuntime<StdTcpStreamBridge<_>>` now exposes a host-read pump into its sandbox writer, and the smoltcp regression verifies those host bytes can be injected into the accepted flow and emitted as a sandbox-bound TCP/IP packet.
+- Commit hash when committed: pending.
+- Remaining risks: the sandbox writer is still an intermediate buffer in the test path; a continuous session type must join TUN reads, policy gating, host bridge reads/writes, smoltcp polling, and lifecycle auditing.
+- Exact next step: commit host-read-to-smoltcp packet emission, then introduce a small TCP transparent session harness that owns smoltcp adapter + TCP flow runtime and executes one sandbox-to-host pump step after policy-open.

@@ -546,10 +546,10 @@ mod tests {
     };
     use foxprox_runtime::{
         build_runtime_components, BrokerRuntimeConfig, EgressError, HostEgress, StdTcpStreamBridge,
-        TcpBridgeError, TcpConnectRequest, TcpFlowRuntime, TcpStackOutcome, TcpStackRuntime,
-        TcpStreamBridge, UdpDatagramRequest,
+        TcpBridgeError, TcpConnectRequest, TcpFlowRuntime, TcpHostReadOutcome, TcpStackOutcome,
+        TcpStackRuntime, TcpStreamBridge, UdpDatagramRequest,
     };
-    use std::io::{Cursor, Read};
+    use std::io::{Cursor, Read, Write};
     use std::net::{TcpListener, TcpStream};
 
     #[derive(Default)]
@@ -997,6 +997,62 @@ mod tests {
                 assert_eq!(segment.destination_port, 50001);
                 assert!(segment.ack);
                 assert_eq!(segment.payload, b"host-response");
+            }
+            other => panic!("expected TCP payload packet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn host_read_from_tcp_flow_runtime_emits_packet_pumped_sandbox_packet() {
+        let (mut adapter, payload) = packet_pumped_adapter_with_payload(b"sandbox-request");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"host-via-runtime").unwrap();
+        });
+        let host_stream = TcpStream::connect(listen_addr).unwrap();
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("packet-pumped-host-read").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let bridge =
+            StdTcpStreamBridge::new(payload.flow.clone(), host_stream, Vec::new()).unwrap();
+        let mut flow_runtime = TcpFlowRuntime::new(&components, bridge);
+        flow_runtime.mark_opened(payload.flow.clone()).unwrap();
+
+        let host_read = flow_runtime
+            .pump_host_once_to_sandbox_writer(&payload.flow, 64)
+            .unwrap();
+        let sandbox_bytes = flow_runtime.bridge().bridge().sandbox_writer().clone();
+        let sent = adapter
+            .send_to_sandbox_on_flow(&payload.flow, &sandbox_bytes)
+            .unwrap();
+        adapter.poll_once(4);
+        let outbound = adapter
+            .next_outbound_ip_packet()
+            .expect("host runtime bytes should emit a sandbox packet");
+        server.join().unwrap();
+
+        assert_eq!(
+            host_read,
+            TcpHostReadOutcome::Bytes {
+                count: b"host-via-runtime".len()
+            }
+        );
+        assert_eq!(sent, b"host-via-runtime".len());
+        match parse_ip_packet(&outbound).unwrap() {
+            ParsedIpPacket::Tcpv4Segment(segment) => {
+                assert_eq!(segment.source, Ipv4Addr::new(10, 66, 0, 1));
+                assert_eq!(segment.destination, Ipv4Addr::new(10, 66, 0, 2));
+                assert_eq!(segment.source_port, 8080);
+                assert_eq!(segment.destination_port, 50001);
+                assert_eq!(segment.payload, b"host-via-runtime");
             }
             other => panic!("expected TCP payload packet, got {other:?}"),
         }

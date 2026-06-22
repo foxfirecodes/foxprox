@@ -1329,6 +1329,18 @@ impl<B: TcpStreamBridge> TcpFlowRuntime<B> {
     }
 }
 
+impl<W: Write> TcpFlowRuntime<StdTcpStreamBridge<W>> {
+    pub fn pump_host_once_to_sandbox_writer(
+        &mut self,
+        flow: &FlowKey,
+        max_host_bytes: usize,
+    ) -> Result<TcpHostReadOutcome, TcpBridgeError> {
+        self.bridge
+            .pump_open_flow_once(flow, &[], max_host_bytes)
+            .map(|outcome| outcome.host_read)
+    }
+}
+
 pub struct BrokerDnsRuntime<'a, S> {
     pub sandbox_id: SandboxId,
     pub resolver: &'a StaticDnsResolver,
