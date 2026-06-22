@@ -162,6 +162,47 @@ impl AuditRecord {
             "flow_duration_millis",
         ]
     }
+
+    /// Serialize this record as one stable JSON line using only normalized audit
+    /// schema fields. This avoids frontend-specific log formatting and keeps
+    /// audit output reviewable before adding an async/file sink.
+    pub fn to_json_line(&self) -> String {
+        let fields = vec![
+            format!("\"sequence\":{}", self.sequence),
+            format!("\"timestamp_millis\":{}", self.timestamp_millis),
+            json_field("sandbox_id", self.sandbox_id.as_str()),
+            json_field("kind", audit_kind_name(self.kind)),
+            json_field("frontend", frontend_name(self.frontend)),
+            json_field("protocol", protocol_name(self.protocol)),
+            json_optional_string("source", self.source.as_deref()),
+            json_optional_string("destination", self.destination.as_deref()),
+            json_optional_string("hostname", self.hostname.as_ref().map(Hostname::as_str)),
+            json_optional_string(
+                "hostname_attribution_source",
+                self.hostname_attribution_source.map(hostname_source_name),
+            ),
+            json_optional_string(
+                "hostname_confidence",
+                self.hostname_confidence.map(hostname_confidence_name),
+            ),
+            json_optional_string(
+                "http_method",
+                self.http_method.as_ref().map(http_method_name),
+            ),
+            json_optional_string("http_scheme", self.http_scheme.map(http_scheme_name)),
+            json_optional_string("http_path_query", self.http_path_query.as_deref()),
+            json_optional_string(
+                "hostname_mismatch",
+                self.hostname_mismatch.map(mismatch_name),
+            ),
+            json_field("decision", audit_decision_name(self.decision)),
+            json_optional_string("rule_id", self.rule_id.as_deref()),
+            json_optional_string("reason", self.reason.as_ref().map(DecisionReason::as_str)),
+            json_byte_counts("byte_counts", self.byte_counts),
+            json_optional_u64("flow_duration_millis", self.flow_duration_millis),
+        ];
+        format!("{{{}}}\n", fields.join(","))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -175,6 +216,162 @@ pub struct FlowClosedAudit {
     pub destination: SocketAddr,
     pub byte_counts: ByteCounts,
     pub duration: Duration,
+}
+
+fn json_field(name: &str, value: &str) -> String {
+    format!("\"{name}\":{}", json_string(value))
+}
+
+fn json_optional_string(name: &str, value: Option<&str>) -> String {
+    match value {
+        Some(value) => json_field(name, value),
+        None => format!("\"{name}\":null"),
+    }
+}
+
+fn json_optional_u64(name: &str, value: Option<u64>) -> String {
+    match value {
+        Some(value) => format!("\"{name}\":{value}"),
+        None => format!("\"{name}\":null"),
+    }
+}
+
+fn json_byte_counts(name: &str, value: Option<ByteCounts>) -> String {
+    match value {
+        Some(value) => format!(
+            "\"{name}\":{{\"ingress\":{},\"egress\":{}}}",
+            value.ingress, value.egress
+        ),
+        None => format!("\"{name}\":null"),
+    }
+}
+
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => out.push_str(&format!("\\u{:04x}", ch as u32)),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn audit_kind_name(value: AuditKind) -> &'static str {
+    match value {
+        AuditKind::NetworkSessionStart => "network_session_start",
+        AuditKind::BrokerStart => "broker_start",
+        AuditKind::TunConfigured => "tun_configured",
+        AuditKind::ProxyListenerConfigured => "proxy_listener_configured",
+        AuditKind::DnsQuery => "dns_query",
+        AuditKind::TcpConnect => "tcp_connect",
+        AuditKind::UdpFlow => "udp_flow",
+        AuditKind::QuicCandidateFlow => "quic_candidate_flow",
+        AuditKind::HttpRequest => "http_request",
+        AuditKind::HttpsConnect => "https_connect",
+        AuditKind::TlsClientHello => "tls_client_hello",
+        AuditKind::SocksConnect => "socks_connect",
+        AuditKind::IcmpMessage => "icmp_message",
+        AuditKind::UnsupportedNetworkEvent => "unsupported_network_event",
+        AuditKind::FlowClosed => "flow_closed",
+        AuditKind::PolicyReload => "policy_reload",
+        AuditKind::BrokerError => "broker_error",
+        AuditKind::NetworkSessionExit => "network_session_exit",
+    }
+}
+
+fn audit_decision_name(value: AuditDecision) -> &'static str {
+    match value {
+        AuditDecision::Allow => "allow",
+        AuditDecision::DenyDrop => "deny_drop",
+        AuditDecision::DenyReset => "deny_reset",
+        AuditDecision::DenyIcmpUnreachable => "deny_icmp_unreachable",
+        AuditDecision::RequireBrokerDns => "require_broker_dns",
+        AuditDecision::FailClosed => "fail_closed",
+    }
+}
+
+fn frontend_name(value: FrontendKind) -> &'static str {
+    match value {
+        FrontendKind::Tun => "tun",
+        FrontendKind::HttpProxy => "http_proxy",
+        FrontendKind::Socks5 => "socks5",
+        FrontendKind::SetupHelper => "setup_helper",
+        FrontendKind::ExternalNamespace => "external_namespace",
+    }
+}
+
+fn protocol_name(value: Protocol) -> &'static str {
+    match value {
+        Protocol::Tcp => "tcp",
+        Protocol::Udp => "udp",
+        Protocol::Dns => "dns",
+        Protocol::Icmp => "icmp",
+        Protocol::Http => "http",
+        Protocol::HttpsConnect => "https_connect",
+        Protocol::TlsClientHello => "tls_client_hello",
+        Protocol::SocksConnect => "socks_connect",
+        Protocol::QuicCandidate => "quic_candidate",
+        Protocol::Unsupported => "unsupported",
+    }
+}
+
+fn hostname_source_name(value: HostnameAttributionSource) -> &'static str {
+    match value {
+        HostnameAttributionSource::BrokerDns => "broker_dns",
+        HostnameAttributionSource::HttpHostHeader => "http_host_header",
+        HostnameAttributionSource::TlsSni => "tls_sni",
+        HostnameAttributionSource::QuicTlsMetadata => "quic_tls_metadata",
+        HostnameAttributionSource::ExplicitProxyDestination => "explicit_proxy_destination",
+        HostnameAttributionSource::IpOnly => "ip_only",
+    }
+}
+
+fn hostname_confidence_name(value: HostnameConfidence) -> &'static str {
+    match value {
+        HostnameConfidence::Unknown => "unknown",
+        HostnameConfidence::Low => "low",
+        HostnameConfidence::Medium => "medium",
+        HostnameConfidence::High => "high",
+    }
+}
+
+fn http_method_name(value: &HttpMethod) -> &str {
+    match value {
+        HttpMethod::Get => "GET",
+        HttpMethod::Post => "POST",
+        HttpMethod::Put => "PUT",
+        HttpMethod::Patch => "PATCH",
+        HttpMethod::Delete => "DELETE",
+        HttpMethod::Head => "HEAD",
+        HttpMethod::Options => "OPTIONS",
+        HttpMethod::Trace => "TRACE",
+        HttpMethod::Connect => "CONNECT",
+        HttpMethod::Other(method) => method.as_str(),
+    }
+}
+
+fn http_scheme_name(value: HttpScheme) -> &'static str {
+    match value {
+        HttpScheme::Http => "http",
+        HttpScheme::Https => "https",
+    }
+}
+
+fn mismatch_name(value: HostnameMismatch) -> &'static str {
+    match value {
+        HostnameMismatch::Matches => "matches",
+        HostnameMismatch::Mismatch => "mismatch",
+        HostnameMismatch::Unavailable => "unavailable",
+        HostnameMismatch::NotChecked => "not_checked",
+    }
 }
 
 impl From<&PolicyDecision> for AuditDecision {
@@ -420,6 +617,33 @@ mod tests {
         assert_eq!(record.http_method, Some(HttpMethod::Post));
         assert_eq!(record.http_scheme, Some(HttpScheme::Http));
         assert_eq!(record.http_path_query.as_deref(), Some("/submit?x=1"));
+    }
+
+    #[test]
+    fn audit_record_serializes_stable_json_line() {
+        let event = NormalizedEvent::HttpRequest(HttpRequest {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::HttpProxy,
+            method: HttpMethod::Post,
+            scheme: HttpScheme::Http,
+            host: DestinationHost::Hostname(Hostname::new("example.com").unwrap()),
+            port: 80,
+            path_query: "/submit?x=\"quoted\"".to_string(),
+        });
+        let decision = PolicyDecision::Allow(foxprox_core::AllowDecision {
+            rule_id: None,
+            timeout_override: None,
+            reason: Some("allowed".into()),
+        });
+
+        let line = AuditRecord::from_event(8, 1234, &event, &decision).to_json_line();
+        assert!(line.ends_with('\n'));
+        assert!(line.contains("\"kind\":\"http_request\""));
+        assert!(line.contains("\"frontend\":\"http_proxy\""));
+        assert!(line.contains("\"decision\":\"allow\""));
+        assert!(line.contains("\"http_method\":\"POST\""));
+        assert!(line.contains("\"http_path_query\":\"/submit?x=\\\"quoted\\\"\""));
+        assert!(line.contains("\"byte_counts\":null"));
     }
 
     #[test]

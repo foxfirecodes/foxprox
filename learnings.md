@@ -148,3 +148,8 @@
 
 - SOCKS reply-code selection can depend on normalized `PolicyDecision` in the frontend crate, but policy must stay unaware of SOCKS wire values.
 - Denied and broker-DNS-required SOCKS CONNECT attempts should map to `ConnectionNotAllowed`; fail-closed parser/runtime cases should map to `GeneralFailure`.
+
+## 2026-06-21 — Audit JSON serialization boundary
+
+- Audit JSON serialization can be implemented in `foxprox-audit` from the stable normalized schema without introducing serde or frontend-specific dependencies.
+- Enum values in audit output should use explicit stable snake-case labels rather than Debug formatting so log consumers do not depend on Rust variant spelling.

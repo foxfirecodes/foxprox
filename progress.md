@@ -633,3 +633,22 @@
   - `cargo tree -p foxprox-frontends` — frontends depend only on `foxprox-core`.
 - Commit hash after commit: 5addd51.
 - Remaining boundary risks: egress-error-to-reply mapping, production SOCKS listener state machine, read timeouts, and CONNECT stream bridging remain.
+
+## 2026-06-21 — Boundary objective: audit JSON line serialization contract
+
+- Boundary under work: stable structured audit record emission as JSON lines from normalized audit schema fields.
+- Allowed dependency direction: `foxprox-audit` serializes its own normalized `AuditRecord`; it must not parse frontend/raw packet data or depend on policy/frontends/egress crates.
+- Dependency-risk assessment: audit output is a first-class alpha feature, and leaving records only as Rust structs delays log compatibility testing. Serialization should stay schema-driven and avoid ad-hoc frontend-specific fields.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo tree -p foxprox-audit`.
+- Observed results: added `AuditRecord::to_json_line` with stable schema field emission, JSON escaping, explicit enum label mapping, byte-count objects, and snapshot coverage for HTTP audit output. All verification passed.
+- Changed files:
+  - `crates/foxprox-audit/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 73 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: file/stdout sinks, async audit backpressure integration, and schema versioning remain.
