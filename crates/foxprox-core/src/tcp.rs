@@ -1,9 +1,12 @@
 use crate::audit::AuditRecord;
 use crate::broker::BrokerCore;
-use crate::flow::FlowKey;
+use crate::flow::{DnsCache, FlowKey};
+use crate::inspect::{
+    parse_plaintext_http_request, parse_tls_client_hello_sni, TlsClientHelloError,
+};
 use crate::policy::{PolicyDecision, PolicyRequest};
 use crate::types::{
-    AuditKind, ByteCounts, Decision, DenialReason, Frontend, NetworkEndpoint, Protocol,
+    AuditKind, ByteCounts, Decision, DenialReason, Frontend, NetworkEndpoint, Origin, Protocol,
 };
 use serde::{Deserialize, Serialize};
 
@@ -52,7 +55,7 @@ impl<E: TcpEgress> TcpForwarder<E> {
         opened_at_ms: u64,
         closed_at_ms: u64,
     ) -> Result<TcpForwardResult, TcpEgressError> {
-        let request = self.request_for_key(&key);
+        let request = self.request_for_key(&key, from_sandbox, None, opened_at_ms);
         let decision = self.broker.evaluate(&request);
         if decision.decision.is_deny() {
             return Ok(result_from_decision(decision, false, ByteCounts::ZERO));
@@ -102,6 +105,62 @@ impl<E: TcpEgress> TcpForwarder<E> {
         })
     }
 
+    pub fn connect_and_bridge_with_dns_cache(
+        &mut self,
+        key: FlowKey,
+        from_sandbox: &[u8],
+        opened_at_ms: u64,
+        closed_at_ms: u64,
+        dns_cache: &DnsCache,
+    ) -> Result<TcpForwardResult, TcpEgressError> {
+        let request = self.request_for_key(&key, from_sandbox, Some(dns_cache), opened_at_ms);
+        let decision = self.broker.evaluate(&request);
+        if decision.decision.is_deny() {
+            return Ok(result_from_decision(decision, false, ByteCounts::ZERO));
+        }
+        let to_sandbox = match self
+            .egress
+            .connect_and_exchange(key.destination(), from_sandbox)
+        {
+            Ok(to_sandbox) => to_sandbox,
+            Err(error) => {
+                let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(Protocol::Tcp)
+                    .with_source(key.source())
+                    .with_destination(key.destination())
+                    .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+                    .with_detail("error", tcp_egress_error_detail(&error));
+                let _ = self.broker.append_audit_for(&request, audit);
+                return Err(error);
+            }
+        };
+        let byte_counts = ByteCounts {
+            from_sandbox: from_sandbox.len() as u64,
+            to_sandbox: to_sandbox.len() as u64,
+        };
+        let close_audit = AuditRecord::new_at(
+            AuditKind::TcpFlowClosed,
+            self.sandbox_id.clone(),
+            closed_at_ms as u128,
+        )
+        .with_frontend(Frontend::Tun)
+        .with_protocol(Protocol::Tcp)
+        .with_source(key.source())
+        .with_destination(key.destination())
+        .with_byte_counts(byte_counts.clone())
+        .with_duration_ms(closed_at_ms.saturating_sub(opened_at_ms));
+        if let Err(decision) = self.broker.append_audit_for(&request, close_audit) {
+            return Ok(result_from_decision(decision, true, byte_counts));
+        }
+        Ok(TcpForwardResult {
+            decision: Decision::Allow,
+            reason: None,
+            opened_egress: true,
+            byte_counts,
+        })
+    }
+
     pub fn broker(&self) -> &BrokerCore {
         &self.broker
     }
@@ -114,7 +173,13 @@ impl<E: TcpEgress> TcpForwarder<E> {
         (self.broker, self.egress)
     }
 
-    fn request_for_key(&self, key: &FlowKey) -> PolicyRequest {
+    fn request_for_key(
+        &self,
+        key: &FlowKey,
+        from_sandbox: &[u8],
+        dns_cache: Option<&DnsCache>,
+        now_ms: u64,
+    ) -> PolicyRequest {
         let mut request = PolicyRequest::tcp_connect(
             self.sandbox_id.clone(),
             Frontend::Tun,
@@ -122,6 +187,36 @@ impl<E: TcpEgress> TcpForwarder<E> {
             key.destination(),
         );
         request.protocol = Protocol::Tcp;
+        match key.destination_port {
+            80 => {
+                if let Ok(http) = parse_plaintext_http_request(from_sandbox) {
+                    request = request
+                        .with_attribution(http.attribution)
+                        .with_origin(Origin::new("http", http.host, http.port))
+                        .with_http(http.method, http.path_query);
+                }
+            }
+            443 => match parse_tls_client_hello_sni(from_sandbox) {
+                Ok(attribution) => {
+                    let sni_hostname = attribution.hostname.clone();
+                    request = request
+                        .with_attribution(attribution)
+                        .with_tls_sni(sni_hostname.clone());
+                    if let Some(dns_hostname) = dns_cache
+                        .and_then(|cache| cache.attribution_for(key.destination_ip, now_ms))
+                        .map(|attribution| attribution.hostname)
+                    {
+                        request = request.with_dns_correlated_hostname(dns_hostname.clone());
+                        request.sni_dns_mismatch = dns_hostname != sni_hostname;
+                    }
+                }
+                Err(TlsClientHelloError::MissingSni) => {
+                    request.hidden_sni = true;
+                }
+                Err(_) => {}
+            },
+            _ => {}
+        }
         request
     }
 }
@@ -231,6 +326,158 @@ mod tests {
     }
 
     #[test]
+    fn transparent_http_bytes_gate_egress_with_origin_policy() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-transparent-http")
+                .protocol(Protocol::Http)
+                .hostname("example.com")
+                .http_method("GET")
+                .http_path_prefix("/ok"),
+        );
+        let key = FlowKey::tcp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.42".parse().unwrap(),
+            80,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut forwarder = TcpForwarder::new(
+            "s1",
+            broker,
+            InMemoryTcpEgress::with_scripted_reply(b"HTTP/1.1 200 OK\r\n\r\n".to_vec()),
+        );
+
+        let result = forwarder
+            .connect_and_bridge(
+                key,
+                b"GET /ok HTTP/1.1\r\nHost: Example.COM\r\n\r\n",
+                1_000,
+                1_010,
+            )
+            .unwrap();
+        assert_eq!(result.decision, Decision::Allow);
+        assert!(result.opened_egress);
+        let records: Vec<_> = forwarder.broker().audit().records().collect();
+        assert_eq!(records[0].kind, AuditKind::TransparentHttpDecision);
+        assert_eq!(records[0].details["http_method"], "GET");
+        assert_eq!(records[0].details["http_path"], "/ok");
+        assert_eq!(records[0].hostname.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn transparent_http_policy_denial_prevents_egress() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-get")
+                .protocol(Protocol::Http)
+                .hostname("example.com")
+                .http_method("GET"),
+        );
+        let key = FlowKey::tcp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.42".parse().unwrap(),
+            80,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut forwarder = TcpForwarder::new(
+            "s1",
+            broker,
+            InMemoryTcpEgress::with_scripted_reply(Vec::new()),
+        );
+
+        let result = forwarder
+            .connect_and_bridge(
+                key,
+                b"POST /ok HTTP/1.1\r\nHost: Example.COM\r\n\r\n",
+                1_000,
+                1_010,
+            )
+            .unwrap();
+        assert_eq!(result.decision, Decision::DenyDrop);
+        assert!(!result.opened_egress);
+        assert!(forwarder.egress().opened().is_empty());
+        let record = forwarder.broker().audit().records().next().unwrap();
+        assert_eq!(record.kind, AuditKind::TransparentHttpDecision);
+        assert_eq!(record.details["http_method"], "POST");
+    }
+
+    #[test]
+    fn tls_sni_dns_mismatch_from_stream_bytes_denies_before_egress() {
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let key = FlowKey::tcp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.42".parse().unwrap(),
+            443,
+        );
+        let mut dns_cache = DnsCache::default();
+        dns_cache.observe(
+            "s1",
+            "example.com",
+            "A",
+            vec!["203.0.113.42".parse().unwrap()],
+            1_000,
+            60_000,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut forwarder = TcpForwarder::new(
+            "s1",
+            broker,
+            InMemoryTcpEgress::with_scripted_reply(Vec::new()),
+        );
+
+        let result = forwarder
+            .connect_and_bridge_with_dns_cache(
+                key,
+                &test_client_hello("evil.test"),
+                2_000,
+                2_010,
+                &dns_cache,
+            )
+            .unwrap();
+        assert_eq!(result.decision, Decision::DenyReset);
+        assert_eq!(result.reason, Some(DenialReason::SniDnsMismatch));
+        assert!(forwarder.egress().opened().is_empty());
+        let record = forwarder.broker().audit().records().next().unwrap();
+        assert_eq!(record.kind, AuditKind::SniDnsMismatchDenied);
+        assert_eq!(record.hostname.as_deref(), Some("evil.test"));
+    }
+
+    #[test]
+    fn tls_client_hello_missing_sni_is_hidden_sni_denied() {
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let key = FlowKey::tcp(
+            "10.0.2.15".parse().unwrap(),
+            40000,
+            "203.0.113.42".parse().unwrap(),
+            443,
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut forwarder = TcpForwarder::new(
+            "s1",
+            broker,
+            InMemoryTcpEgress::with_scripted_reply(Vec::new()),
+        );
+
+        let result = forwarder
+            .connect_and_bridge(key, &test_client_hello_without_sni(), 2_000, 2_010)
+            .unwrap();
+        assert_eq!(result.decision, Decision::DenyReset);
+        assert_eq!(result.reason, Some(DenialReason::HiddenSni));
+        assert!(forwarder.egress().opened().is_empty());
+        let record = forwarder.broker().audit().records().next().unwrap();
+        assert_eq!(record.kind, AuditKind::HiddenSniDenied);
+    }
+
+    #[test]
     fn denied_tcp_connect_does_not_open_egress() {
         let key = FlowKey::tcp(
             "10.0.2.15".parse().unwrap(),
@@ -297,6 +544,55 @@ mod tests {
         assert_eq!(records[0].kind, AuditKind::TcpConnectDecision);
         assert_eq!(records[1].kind, AuditKind::BrokerError);
         assert_eq!(records[1].details["error"], "tcp_egress_connect_failed");
+    }
+
+    fn test_client_hello(hostname: &str) -> Vec<u8> {
+        let mut sni_ext = Vec::new();
+        let hostname_bytes = hostname.as_bytes();
+        let server_name_len = 1 + 2 + hostname_bytes.len();
+        sni_ext.extend_from_slice(&(server_name_len as u16).to_be_bytes());
+        sni_ext.push(0);
+        sni_ext.extend_from_slice(&(hostname_bytes.len() as u16).to_be_bytes());
+        sni_ext.extend_from_slice(hostname_bytes);
+
+        let mut extensions = Vec::new();
+        extensions.extend_from_slice(&0u16.to_be_bytes());
+        extensions.extend_from_slice(&(sni_ext.len() as u16).to_be_bytes());
+        extensions.extend_from_slice(&sni_ext);
+        test_client_hello_with_extensions(&extensions)
+    }
+
+    fn test_client_hello_without_sni() -> Vec<u8> {
+        test_client_hello_with_extensions(&[])
+    }
+
+    fn test_client_hello_with_extensions(extensions: &[u8]) -> Vec<u8> {
+        let mut hello = Vec::new();
+        hello.extend_from_slice(&0x0303u16.to_be_bytes());
+        hello.extend_from_slice(&[7u8; 32]);
+        hello.push(0);
+        hello.extend_from_slice(&2u16.to_be_bytes());
+        hello.extend_from_slice(&0x1301u16.to_be_bytes());
+        hello.push(1);
+        hello.push(0);
+        hello.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        hello.extend_from_slice(extensions);
+
+        let mut handshake = Vec::new();
+        handshake.push(1);
+        handshake.extend_from_slice(&[
+            ((hello.len() >> 16) & 0xff) as u8,
+            ((hello.len() >> 8) & 0xff) as u8,
+            (hello.len() & 0xff) as u8,
+        ]);
+        handshake.extend_from_slice(&hello);
+
+        let mut record = Vec::new();
+        record.push(22);
+        record.extend_from_slice(&0x0303u16.to_be_bytes());
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
     }
 
     #[test]

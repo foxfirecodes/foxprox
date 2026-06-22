@@ -499,3 +499,35 @@ Second review findings were addressed for DNS response validation, stale UDP flo
 
 ### Remaining blind spots
 - Transparent HTTP/TLS inspection is still parser/policy-unit coverage rather than a reachable TCP harness path. Real smoltcp/socket runtime remains outside the platform-independent harness layer.
+
+## 2026-06-21 — Transparent TCP inspection integration cycle
+
+### Behavior under work
+Connect transparent HTTP/TLS byte inspection to the TCP forwarding harness so direct TCP stream bytes can enrich policy decisions instead of only standalone parser tests.
+
+### Expected evidence
+- Direct plaintext HTTP request bytes on TCP/80 produce `transparent_http_decision` audit with Host/method/path and gate egress through HTTP policy rules.
+- TLS ClientHello SNI on TCP/443 can be compared against DNS cache attribution; mismatches deny before egress with `sni_dns_mismatch_denied` evidence.
+- TLS ClientHello without SNI is treated as hidden-SNI and denied before egress unless policy explicitly allows an IP/port path.
+
+### Commands run
+- `cargo fmt` — applied formatting for transparent TCP inspection integration.
+- `cargo test --all-targets --all-features` — passed, 86 unit tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tcp::tests::transparent_http_bytes_gate_egress_with_origin_policy ... ok`
+- `tcp::tests::transparent_http_policy_denial_prevents_egress ... ok`
+- `tcp::tests::tls_sni_dns_mismatch_from_stream_bytes_denies_before_egress ... ok`
+- `tcp::tests::tls_client_hello_missing_sni_is_hidden_sni_denied ... ok`
+
+### Interpretation
+Transparent TCP byte inspection now reaches the forwarding harness. Direct HTTP request bytes on TCP/80 are parsed into Host/method/path attribution before policy evaluation and egress. TLS ClientHello bytes on TCP/443 can produce SNI attribution, compare against DNS cache attribution, deny SNI/DNS mismatches before egress, and treat ClientHello-without-SNI as hidden-SNI denial evidence.
+
+### Changed files
+- `crates/foxprox-core/src/tcp.rs`
+- `progress.md`
+
+### Remaining blind spots
+- The harness still represents a deterministic stream chunk, not full smoltcp stream reassembly or async socket bridging. TLS/HTTP parsers are connected to the harness but not yet to a real TUN TCP stack.
