@@ -37,3 +37,8 @@
 ## 2026-06-21 — Unix socket path limits in bwrap smokes
 
 - Long handoff socket paths under the nested worktree can exceed `SUN_LEN` for Unix domain sockets. Use short names under the already-mounted `target/debug` directory (for example `fxdns-<pid>/s`) for new environment smokes that need host/sandbox Unix sockets.
+
+## 2026-06-22 — smoltcp IP-medium gate pattern
+
+- `smoltcp` 0.13 can be driven deterministically with a custom `Device` whose capabilities use `Medium::Ip` and `HardwareAddress::Ip`. This matches TUN-shaped IP packets and avoids Ethernet/TAP assumptions in the TCP stack gate.
+- smoltcp validates TCP checksums for inbound SYN packets, so synthetic TCP fixtures need a correct IPv4 pseudo-header checksum; the earlier parser-only TCP fixtures with zero TCP checksums are not sufficient for stack-level tests.

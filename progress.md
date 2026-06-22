@@ -347,3 +347,27 @@
 - Interpretation: the harness now proves real TCP connect attempts reach the broker-owned TUN fd and enter the policy/audit/egress boundary. This is still not the smoltcp TCP forwarding gate because no SYN-ACK, stream lifecycle, or byte bridging is implemented.
 - Next verification gap: implement a userspace TCP stack/forwarding proof (smoltcp or equivalent) that responds to the sandbox TCP handshake and bridges bytes to a local host TCP fixture.
 - Commit hash after commit: pending.
+
+## 2026-06-22T00:08:00Z — TCP SYN smoke commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs progress.md && git commit -m "Add TCP SYN environment smoke"`
+- Environment assumptions: TCP SYN smoke and deterministic tests above were verified before commit.
+- Expected result: commit captures the environment proof that sandbox TCP SYN packets reach the handed-off TUN fd and invoke the transparent TCP policy/audit/egress boundary.
+- Observed result: commit `3cfd9dd` created with 3 files changed.
+- Relevant output excerpt: `[harness-lab 3cfd9dd] Add TCP SYN environment smoke`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: TCP SYN arrival and policy-gated egress checkpoint is preserved.
+- Next verification gap: userspace TCP stack/forwarding proof that completes the sandbox handshake and bridges bytes to a host TCP fixture.
+- Commit hash after commit: 3cfd9dd.
+
+## 2026-06-22T00:25:00Z — Deterministic smoltcp TCP gate
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run stack`
+- Environment assumptions: deterministic in-memory smoltcp IP-medium device; no Linux namespace, TUN fd, or external network required. The fixture uses a valid IPv4/TCP SYN with TCP pseudo-header checksum.
+- Expected result: smoltcp consumes a TUN-shaped IPv4/TCP SYN, a listening TCP socket becomes active, and smoltcp emits a SYN-ACK IP packet that the future TUN frontend can write back.
+- Observed result: pass. `foxprox-core` ran 40 tests, `foxprox-cli` ran 2 tests, `foxproxsetup` ran 7 tests. `foxprox-lab run stack` emitted a `tcp_connect_attempt` audit record with `decision":"allow"`, `socket_active_after_poll":"true"`, and `emitted_packets":"1"`.
+- Relevant output excerpt: `smoltcp_gate::tests::smoltcp_consumes_tun_shaped_tcp_syn_and_emits_syn_ack ... ok`; `"reason":"smoltcp consumed a TUN-shaped TCP SYN and emitted a SYN-ACK"`.
+- Changed files: `Cargo.toml`, `Cargo.lock`, `crates/foxprox-core/src/{lib.rs,packet.rs,scenario.rs,smoltcp_gate.rs}`, `README.md`, `progress.md`.
+- Interpretation: the project now has a reusable deterministic smoltcp gate proving that the selected userspace TCP/IP stack can operate on IP-medium/TUN-shaped packets. This still needs to be wired to the handed-off TUN fd and host TCP byte bridging for the full Milestone 2 forwarding proof.
+- Next verification gap: build a TUN-fd smoltcp smoke that writes the emitted SYN-ACK back to the sandbox, then extend it into local TCP byte bridging.
+- Commit hash after commit: pending.

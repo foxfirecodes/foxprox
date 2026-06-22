@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::audit::{
     AttributionConfidence, AttributionSource, AuditRecord, Decision, EventKind, Frontend, Protocol,
@@ -9,9 +9,10 @@ use crate::origin::{
     classify_quic_candidate, parse_connect_target, parse_http_request, parse_socks5_connect_request,
 };
 use crate::packet::{
-    parse_icmp_echo_request, parse_ipv4, parse_tcp, parse_udp, synthesize_icmp_echo_reply,
+    checksum, parse_icmp_echo_request, parse_ipv4, parse_tcp, parse_udp, synthesize_icmp_echo_reply,
 };
 use crate::policy::{PolicyConfig, PolicyEngine, PolicyRequest, PolicyRule, RuleAction};
+use crate::smoltcp_gate::feed_tcp_syn_to_smoltcp_listener;
 
 /// Named deterministic harness scenario.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +23,7 @@ pub enum ScenarioName {
     Proxy,
     Packets,
     Flows,
+    Stack,
 }
 
 impl ScenarioName {
@@ -33,12 +35,13 @@ impl ScenarioName {
             "proxy" => Ok(Self::Proxy),
             "packets" => Ok(Self::Packets),
             "flows" => Ok(Self::Flows),
+            "stack" => Ok(Self::Stack),
             other => Err(format!("unknown scenario '{other}'")),
         }
     }
 
     pub fn list() -> &'static [&'static str] {
-        &["all", "policy", "dns", "proxy", "packets", "flows"]
+        &["all", "policy", "dns", "proxy", "packets", "flows", "stack"]
     }
 }
 
@@ -53,6 +56,7 @@ pub fn run_scenario(name: ScenarioName) -> Vec<AuditRecord> {
                 ScenarioName::Proxy,
                 ScenarioName::Packets,
                 ScenarioName::Flows,
+                ScenarioName::Stack,
             ] {
                 records.extend(run_scenario(child));
             }
@@ -63,6 +67,7 @@ pub fn run_scenario(name: ScenarioName) -> Vec<AuditRecord> {
         ScenarioName::Proxy => scenario_proxy(),
         ScenarioName::Packets => scenario_packets(),
         ScenarioName::Flows => scenario_flows(),
+        ScenarioName::Stack => scenario_stack(),
     }
 }
 
@@ -312,6 +317,54 @@ fn scenario_flows() -> Vec<AuditRecord> {
     ]
 }
 
+fn scenario_stack() -> Vec<AuditRecord> {
+    let listen_ip = Ipv4Addr::new(203, 0, 113, 20);
+    let source_ip = Ipv4Addr::new(10, 0, 2, 2);
+    let syn = tcp_syn_packet(source_ip, listen_ip, 49152, 8080);
+    let result = feed_tcp_syn_to_smoltcp_listener(syn, listen_ip, 8080)
+        .expect("smoltcp TCP gate fixture should poll successfully");
+    let emitted_syn_ack = result.emitted_packets.iter().any(|packet| {
+        let Ok(ipv4) = parse_ipv4(packet) else {
+            return false;
+        };
+        let Ok(tcp) = parse_tcp(ipv4.payload) else {
+            return false;
+        };
+        ipv4.source == listen_ip
+            && ipv4.destination == source_ip
+            && tcp.source_port == 8080
+            && tcp.destination_port == 49152
+            && tcp.syn
+            && tcp.ack
+    });
+
+    vec![AuditRecord::new(
+        EventKind::TcpConnectAttempt,
+        "lab",
+        if emitted_syn_ack {
+            Decision::Allow
+        } else {
+            Decision::FailClosed
+        },
+        if emitted_syn_ack {
+            "smoltcp consumed a TUN-shaped TCP SYN and emitted a SYN-ACK"
+        } else {
+            "smoltcp did not emit the expected SYN-ACK"
+        },
+    )
+    .with_frontend(Frontend::Tun)
+    .with_protocol(Protocol::Tcp)
+    .with_addresses(
+        Some(sock("10.0.2.2:49152")),
+        Some(sock("203.0.113.20:8080")),
+    )
+    .with_metadata(
+        "socket_active_after_poll",
+        result.socket_active_after_poll.to_string(),
+    )
+    .with_metadata("emitted_packets", result.emitted_packets.len().to_string())]
+}
+
 fn record_policy(
     kind: EventKind,
     protocol: Protocol,
@@ -358,6 +411,49 @@ fn ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
     let sum = crate::packet::checksum(&packet[..20]);
     packet[10..12].copy_from_slice(&sum.to_be_bytes());
     packet
+}
+
+fn tcp_syn_packet(
+    source: Ipv4Addr,
+    destination: Ipv4Addr,
+    source_port: u16,
+    destination_port: u16,
+) -> Vec<u8> {
+    let total_len = 40;
+    let mut packet = vec![0_u8; total_len];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 6;
+    packet[12..16].copy_from_slice(&source.octets());
+    packet[16..20].copy_from_slice(&destination.octets());
+    let ip_sum = checksum(&packet[..20]);
+    packet[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+
+    let tcp = &mut packet[20..];
+    tcp[0..2].copy_from_slice(&source_port.to_be_bytes());
+    tcp[2..4].copy_from_slice(&destination_port.to_be_bytes());
+    tcp[4..8].copy_from_slice(&1_u32.to_be_bytes());
+    tcp[12] = 5 << 4;
+    tcp[13] = 0x02;
+    tcp[14..16].copy_from_slice(&64240_u16.to_be_bytes());
+    let tcp_sum = tcp_checksum_ipv4(source, destination, tcp);
+    tcp[16..18].copy_from_slice(&tcp_sum.to_be_bytes());
+    packet
+}
+
+fn tcp_checksum_ipv4(source: Ipv4Addr, destination: Ipv4Addr, tcp_segment: &[u8]) -> u16 {
+    let mut pseudo = Vec::with_capacity(12 + tcp_segment.len() + 1);
+    pseudo.extend_from_slice(&source.octets());
+    pseudo.extend_from_slice(&destination.octets());
+    pseudo.push(0);
+    pseudo.push(6);
+    pseudo.extend_from_slice(&(tcp_segment.len() as u16).to_be_bytes());
+    pseudo.extend_from_slice(tcp_segment);
+    if pseudo.len() % 2 != 0 {
+        pseudo.push(0);
+    }
+    checksum(&pseudo)
 }
 
 fn icmp_echo_request_packet() -> Vec<u8> {

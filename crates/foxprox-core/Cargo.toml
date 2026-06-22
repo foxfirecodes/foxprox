@@ -10,3 +10,4 @@ rust-version.workspace = true
 path = "src/lib.rs"
 
 [dependencies]
+smoltcp = { version = "0.13.1", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp"] }

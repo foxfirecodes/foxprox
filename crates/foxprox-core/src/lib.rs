@@ -17,6 +17,7 @@ pub mod packet;
 pub mod policy;
 pub mod runtime;
 pub mod scenario;
+pub mod smoltcp_gate;
 
 /// Stable crate marker used by scaffold tests and downstream workspace checks.
 pub const CRATE_NAME: &str = "foxprox-core";
