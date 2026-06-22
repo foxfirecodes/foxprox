@@ -1525,3 +1525,63 @@
 - Files changed: `crates/foxprox-cli/src/main.rs`, `progress.md`.
 - Current git status summary: CLI/progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit setup socket cleanup robustness, then compare remaining alpha gaps.
+
+## 2026-06-22T01:21:11Z — DNS response answer audit pending review
+
+- Current objective: close the P2 audit gap where broker DNS response observations updated cache state but did not emit structured response metadata.
+- Changes implemented:
+  - DNS worker results now carry the parsed `DnsResponseObservation` alongside cache entries.
+  - Standalone UDP/DNS and combined transparent runtimes pass the bounded audit buffer into worker result handling.
+  - Successful broker DNS responses now enqueue structured `AuditEventKind::DnsQuery` audit records with protocol `Dns`, hostname, query type, rcode, answer IPs, and allow rule `broker-dns-response` before the response is sent back to the sandbox.
+  - DNS response audit backpressure fails closed for the response path by dropping/withholding the DNS response instead of sending unaudited answer metadata to the sandbox.
+  - Added regression coverage for response rcode/answers audit metadata.
+- Subagents/reviews requested: `dns-lifecycle-audit-final` is running as a read-only blocker review of the current diff.
+- Verification commands and outcomes:
+  - `cargo test -p foxprox-net -- --nocapture` passed: 38 net tests.
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 8 CLI tests, 51 core tests, 9 device tests, 38 net tests, 28 proxy tests, 2 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-net/src/udp.rs`, `crates/foxprox-net/src/combined.rs`, `progress.md`.
+- Current git status summary: UDP/combined/progress modified; review artifact pending.
+- Next exact action: read DNS lifecycle audit review, fix blockers if any, then commit.
+
+## 2026-06-22T01:23:25Z — DNS response audit fail-closed ordering hardened
+
+- Current objective: commit DNS response answer audit after read-only review.
+- Additional self-review fix:
+  - Moved DNS cache insertion until after response audit enqueue succeeds and after the DNS response is successfully queued back to the sandbox.
+  - Rationale: audit backpressure should not leave unaudited DNS answer state in the shared cache where it could later influence transparent TCP/TLS attribution/policy.
+- Verification commands and outcomes after ordering fix:
+  - `cargo test -p foxprox-net -- --nocapture` passed: 38 net tests.
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 8 CLI tests, 51 core tests, 9 device tests, 38 net tests, 28 proxy tests, 2 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-net/src/udp.rs`, `crates/foxprox-net/src/combined.rs`, `progress.md`.
+- Current git status summary: UDP/combined/progress modified; `dns-lifecycle-audit-final` still running.
+- Next exact action: read DNS lifecycle audit review, fix blockers if any, then commit.
+
+## 2026-06-22T01:25:29Z — DNS response audit blocker fixed and verified
+
+- Current objective: commit structured broker DNS response answer audit.
+- Review result: `dns-lifecycle-audit-final` found one blocker: DNS cache entries were inserted before DNS response audit/send completion, so audit backpressure could drop the DNS response while leaving unaudited answer state available for later UDP/TCP attribution in standalone and combined runtimes.
+- Accepted fix:
+  - `handle_worker_results` now parses/receives cache entries but inserts them only after `emit_dns_response_audit` succeeds and `send_udp_response` successfully queues the response to the sandbox.
+  - On DNS response audit backpressure, the response is withheld and the shared DNS cache remains unchanged.
+  - Added `dns_response_audit_backpressure_keeps_cache_empty_and_sends_no_response` regression coverage for full audit buffer behavior.
+- Verification commands and outcomes after blocker fix:
+  - `cargo test -p foxprox-net -- --nocapture` passed: 39 net tests.
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 8 CLI tests, 51 core tests, 9 device tests, 39 net tests, 28 proxy tests, 2 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-net/src/udp.rs`, `crates/foxprox-net/src/combined.rs`, `progress.md`.
+- Current git status summary: UDP/combined/progress modified; review artifact summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit DNS response answer audit, then reassess remaining alpha gaps.

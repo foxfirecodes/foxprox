@@ -6,9 +6,10 @@
 
 use foxprox_core::{
     classify_udp_candidate, parse_dns_query, parse_dns_response, Attribution, AuditBackpressure,
-    AuditBuffer, AuditEvent, AuditEventKind, Decision, DnsCache, DnsCacheEntry, FlowKey,
-    FlowTimeoutClass, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, Protocol, SandboxId,
-    TransportEndpoint, UdpFlowRecord, UdpFlowTable, UnsupportedReason,
+    AuditBuffer, AuditEvent, AuditEventKind, Decision, DnsCache, DnsCacheEntry,
+    DnsResponseObservation, FlowKey, FlowTimeoutClass, Frontend, NetworkEvent, PolicyEngine,
+    PolicyRuleSet, Protocol, SandboxId, TransportEndpoint, UdpFlowRecord, UdpFlowTable,
+    UnsupportedReason,
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, PacketMeta, TunTapInterface};
@@ -131,6 +132,7 @@ pub(crate) enum UdpWorkerResult {
         metadata: udp::UdpMetadata,
         source: TransportEndpoint,
         response: io::Result<Vec<u8>>,
+        response_observation: Option<DnsResponseObservation>,
         cache_entries: Vec<DnsCacheEntry>,
     },
     Forward {
@@ -237,6 +239,7 @@ where
             &config,
             &mut cache,
             &mut udp_flows,
+            &mut audit,
             &mut sockets,
             dns_handle,
             &worker_rx,
@@ -304,6 +307,7 @@ where
             &config,
             &mut cache,
             &mut udp_flows,
+            &mut audit,
             &mut sockets,
             dns_handle,
             &worker_rx,
@@ -341,6 +345,7 @@ pub(crate) fn handle_worker_results(
     config: &UdpDnsProofConfig,
     cache: &mut DnsCache,
     flows: &mut UdpFlowTable,
+    audit: &mut AuditBuffer,
     sockets: &mut SocketSet<'_>,
     dns_handle: smoltcp::iface::SocketHandle,
     worker_rx: &Receiver<UdpWorkerResult>,
@@ -351,16 +356,9 @@ pub(crate) fn handle_worker_results(
                 metadata,
                 source,
                 response,
+                response_observation,
                 cache_entries,
             } => {
-                for entry in cache_entries {
-                    eprintln!(
-                        "foxprox-net: dns cache host={} answers={:?}",
-                        entry.hostname.as_str(),
-                        entry.addresses
-                    );
-                    cache.insert(entry);
-                }
                 let response = match response {
                     Ok(response) => response,
                     Err(error) => {
@@ -368,6 +366,12 @@ pub(crate) fn handle_worker_results(
                         continue;
                     }
                 };
+                if let Some(observation) = response_observation.as_ref() {
+                    if let Err(error) = emit_dns_response_audit(audit, config, observation) {
+                        eprintln!("foxprox-net: dns response audit failed: {error}");
+                        continue;
+                    }
+                }
                 if let Err(error) = send_udp_response(
                     sockets,
                     dns_handle,
@@ -377,6 +381,14 @@ pub(crate) fn handle_worker_results(
                 ) {
                     eprintln!("foxprox-net: dns response send failed: {error}");
                     continue;
+                }
+                for entry in cache_entries {
+                    eprintln!(
+                        "foxprox-net: dns cache host={} answers={:?}",
+                        entry.hostname.as_str(),
+                        entry.addresses
+                    );
+                    cache.insert(entry);
                 }
                 eprintln!(
                     "foxprox-net: dns response sandbox={}:{} len={} cache_entries={}",
@@ -504,18 +516,21 @@ pub(crate) fn handle_dns_datagram(
     std::thread::spawn(move || {
         let _permit = permit;
         let response = forward_dns_query(&payload, upstream, timeout);
-        let cache_entries = response
+        let response_observation = response
             .as_ref()
             .ok()
-            .and_then(|response| parse_dns_response(response, Some(&question)).ok())
+            .and_then(|response| parse_dns_response(response, Some(&question)).ok());
+        let cache_entries = response_observation
+            .as_ref()
             .map(|observation| {
-                DnsCacheEntry::from_response(sandbox_id, &observation, SystemTime::now(), true)
+                DnsCacheEntry::from_response(sandbox_id, observation, SystemTime::now(), true)
             })
             .unwrap_or_default();
         let _ = worker_tx.send(UdpWorkerResult::Dns {
             metadata,
             source,
             response,
+            response_observation,
             cache_entries,
         });
     });
@@ -627,6 +642,33 @@ fn audit_backpressure_error(error: AuditBackpressure) -> io::Error {
         io::ErrorKind::WouldBlock,
         format!("audit queue backpressure: {error:?}"),
     )
+}
+
+fn emit_dns_response_audit(
+    audit: &mut AuditBuffer,
+    config: &UdpDnsProofConfig,
+    observation: &DnsResponseObservation,
+) -> io::Result<()> {
+    let mut event = AuditEvent::new(Frontend::Tun, AuditEventKind::DnsQuery)
+        .with_sandbox_id(config.sandbox_id.clone());
+    event.protocol = Some(Protocol::Dns);
+    event.hostname = observation.hostname.clone();
+    event.dns_query_type = observation
+        .query_type
+        .as_ref()
+        .map(|query_type| query_type.as_str().to_string());
+    event.dns_rcode = Some(observation.rcode);
+    event.dns_answers = observation
+        .answers
+        .iter()
+        .map(|answer| answer.address)
+        .collect();
+    event.decision = Some(Decision::allow("broker-dns-response"));
+    audit
+        .try_push(event.clone())
+        .map_err(audit_backpressure_error)?;
+    eprintln!("foxprox-net: udp audit event={event:?}");
+    Ok(())
 }
 
 pub(crate) fn expire_udp_flows_with_audit(
@@ -873,8 +915,8 @@ fn set_nonblocking(fd: i32) -> io::Result<()> {
 mod tests {
     use super::*;
     use foxprox_core::{
-        AttributionConfidence, AttributionSource, DecisionAction, DnsObservation, DnsQueryType,
-        Hostname,
+        AttributionConfidence, AttributionSource, DecisionAction, DnsAddressRecord, DnsObservation,
+        DnsQueryType, Hostname,
     };
 
     #[test]
@@ -1052,6 +1094,100 @@ mod tests {
         assert_eq!(audit.destination.unwrap().port, 443);
         assert_eq!(audit.destination_port, Some(443));
         assert!(audit.decision.unwrap().is_allowed());
+    }
+
+    #[test]
+    fn dns_response_audit_records_rcode_and_answers() {
+        let config = UdpDnsProofConfig::new(SandboxId::new("test").unwrap());
+        let observation = DnsResponseObservation {
+            transaction_id: 7,
+            hostname: Some(Hostname::parse("example.com").unwrap()),
+            query_type: Some(DnsQueryType::A),
+            rcode: 0,
+            truncated: false,
+            answers: vec![DnsAddressRecord {
+                hostname: Hostname::parse("example.com").unwrap(),
+                address: IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+                ttl: Duration::from_secs(60),
+            }],
+        };
+        let mut audit = audit_buffer(8).unwrap();
+
+        emit_dns_response_audit(&mut audit, &config, &observation).unwrap();
+        let event = audit.pop_front().unwrap();
+
+        assert_eq!(event.kind, AuditEventKind::DnsQuery);
+        assert_eq!(event.protocol, Some(Protocol::Dns));
+        assert_eq!(event.hostname.unwrap().as_str(), "example.com");
+        assert_eq!(event.dns_query_type.as_deref(), Some("A"));
+        assert_eq!(event.dns_rcode, Some(0));
+        assert_eq!(
+            event.dns_answers,
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
+        );
+        assert!(event.decision.unwrap().is_allowed());
+    }
+
+    #[test]
+    fn dns_response_audit_backpressure_keeps_cache_empty_and_sends_no_response() {
+        let mut config = UdpDnsProofConfig::new(SandboxId::new("test").unwrap());
+        config.udp_packet_capacity = 1;
+        let observation = DnsResponseObservation {
+            transaction_id: 7,
+            hostname: Some(Hostname::parse("example.com").unwrap()),
+            query_type: Some(DnsQueryType::A),
+            rcode: 0,
+            truncated: false,
+            answers: vec![DnsAddressRecord {
+                hostname: Hostname::parse("example.com").unwrap(),
+                address: IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+                ttl: Duration::from_secs(60),
+            }],
+        };
+        let cache_entries = DnsCacheEntry::from_response(
+            config.sandbox_id.clone(),
+            &observation,
+            SystemTime::now(),
+            true,
+        );
+        assert!(!cache_entries.is_empty());
+        let mut cache = DnsCache::default();
+        let mut flows = UdpFlowTable::default();
+        let mut audit = audit_buffer(1).unwrap();
+        audit
+            .try_push(AuditEvent::new(Frontend::Tun, AuditEventKind::DnsQuery))
+            .unwrap();
+        let mut socket = udp_socket(&config).unwrap();
+        socket.bind(config.dns_port).unwrap();
+        let mut sockets = SocketSet::new(vec![]);
+        let dns_handle = sockets.add(socket);
+        let (worker_tx, worker_rx) = std::sync::mpsc::channel();
+        worker_tx
+            .send(UdpWorkerResult::Dns {
+                metadata: udp_metadata(Ipv4Addr::new(10, 255, 0, 2), 44444, config.broker_ip),
+                source: TransportEndpoint {
+                    ip: IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)),
+                    port: 44444,
+                },
+                response: Ok(vec![0_u8; 12]),
+                response_observation: Some(observation),
+                cache_entries,
+            })
+            .unwrap();
+
+        handle_worker_results(
+            &config,
+            &mut cache,
+            &mut flows,
+            &mut audit,
+            &mut sockets,
+            dns_handle,
+            &worker_rx,
+        );
+
+        assert_eq!(cache.len(), 0);
+        let socket = sockets.get_mut::<udp::Socket>(dns_handle);
+        assert!(socket.can_send());
     }
 
     #[test]
