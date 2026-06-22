@@ -391,6 +391,20 @@ impl<B> TcpStreamBridgeRuntime<B> {
         self.open_flows.remove(flow)
     }
 
+    pub fn close_as_lifecycle_event(
+        &mut self,
+        flow: &FlowKey,
+        duration: Duration,
+    ) -> Result<TcpStackLifecycleEvent, TcpBridgeError> {
+        let closed = self.mark_closed(flow).ok_or(TcpBridgeError::FlowNotOpen)?;
+        Ok(TcpStackLifecycleEvent::FlowClosed {
+            flow: closed.key,
+            bytes_from_sandbox: closed.bytes_from_sandbox,
+            bytes_from_host: closed.bytes_from_host,
+            duration,
+        })
+    }
+
     pub fn into_parts(self) -> (B, HashMap<FlowKey, OpenTcpFlow>) {
         (self.bridge, self.open_flows)
     }
@@ -2136,6 +2150,42 @@ mod tests {
         let closed = bridge.mark_closed(&flow).unwrap();
         assert_eq!(closed.bytes_from_sandbox, 7);
         assert!(bridge.open_flows().is_empty());
+    }
+
+    #[test]
+    fn tcp_stream_bridge_close_produces_auditable_lifecycle_counts() {
+        let flow = tcp_flow_key();
+        let mut bridge = TcpStreamBridgeRuntime::new(FakeTcpBridge::default());
+        bridge.mark_opened(flow.clone()).unwrap();
+        bridge.send_sandbox_bytes_to_host(&flow, b"client").unwrap();
+        bridge
+            .send_host_bytes_to_sandbox(&flow, b"server-reply")
+            .unwrap();
+
+        let lifecycle = bridge
+            .close_as_lifecycle_event(&flow, Duration::from_millis(99))
+            .unwrap();
+        let audit =
+            tcp_lifecycle_audit_event(SandboxId::new("bridge-close").unwrap(), 300, &lifecycle)
+                .unwrap();
+
+        assert!(bridge.open_flows().is_empty());
+        assert_eq!(audit.kind, AuditEventKind::TcpFlowClosed);
+        assert_eq!(audit.bytes_in, 6);
+        assert_eq!(audit.bytes_out, 12);
+        assert_eq!(audit.flow_duration, Some(Duration::from_millis(99)));
+    }
+
+    #[test]
+    fn tcp_stream_bridge_close_rejects_unknown_flow() {
+        let flow = tcp_flow_key();
+        let mut bridge = TcpStreamBridgeRuntime::new(FakeTcpBridge::default());
+
+        let error = bridge
+            .close_as_lifecycle_event(&flow, Duration::from_millis(1))
+            .unwrap_err();
+
+        assert_eq!(error, TcpBridgeError::FlowNotOpen);
     }
 
     #[test]

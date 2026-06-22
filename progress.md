@@ -905,3 +905,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: this is not a live TCP stream bridge; no smoltcp stream, real host socket splitting, backpressure, half-close handling, or lifecycle audit integration is wired to this bridge yet.
 - Exact next step: commit TCP stream-bridge boundary, then connect bridge close accounting to TCP lifecycle audit events so byte counts can be logged when a verified open flow is closed.
+
+## 2026-06-22T21:28:54Z
+- Current objective: continue after TCP stream-bridge boundary commit toward auditable TCP close accounting.
+- Git status summary: clean worktree after commit `13e852a`.
+- Intended slice: connect verified TCP stream bridge byte counters to TCP lifecycle audit event construction when a flow closes.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`, and `learnings.md` if close accounting reveals a lifecycle invariant.
+- Remaining risks: this remains fake-bridge/lifecycle wiring; no live smoltcp stream or host socket bridge exists yet.
+- Exact next step: add a helper that closes an opened bridge flow into a `TcpStackLifecycleEvent::FlowClosed` carrying byte counts and duration, then verify the existing lifecycle audit path records those counts.
+
+## 2026-06-22T21:30:18Z
+- Current objective: connect TCP stream bridge close accounting to lifecycle audit event construction.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on formatting for the new close-accounting test; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 72 runtime tests, and 7 setup tests passed. New tests prove closing an opened TCP bridge flow produces a `TcpStackLifecycleEvent::FlowClosed` with byte counts and duration that the audit path records, and unknown flow close attempts fail before lifecycle emission.
+- Commit hash when committed: pending.
+- Remaining risks: close accounting is still driven by fake bridge state; live smoltcp streams and host TCP socket half-close/error handling are not implemented.
+- Exact next step: commit TCP bridge close accounting, then add real host TCP stream bridge boundary tests using loopback sockets and in-memory sandbox-side IO.
