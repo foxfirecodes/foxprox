@@ -261,7 +261,11 @@ fn parse_dns_response_addresses_inner(
         }
         let answer_type =
             read_u16(packet, &mut cursor).map_err(DnsResponseValidationError::Parse)?;
-        let _class = read_u16(packet, &mut cursor).map_err(DnsResponseValidationError::Parse)?;
+        let answer_class =
+            read_u16(packet, &mut cursor).map_err(DnsResponseValidationError::Parse)?;
+        if expected_query.is_some() && answer_class != question_class {
+            return Err(DnsResponseValidationError::Mismatch);
+        }
         let ttl_seconds =
             read_u32(packet, &mut cursor).map_err(DnsResponseValidationError::Parse)?;
         let rdlen =
@@ -519,6 +523,39 @@ mod tests {
             .is_none());
         let records: Vec<_> = handler.broker().audit().records().collect();
         assert_eq!(records[1].kind, AuditKind::DnsQueryDecision);
+        assert_eq!(
+            records[1].details["dns_upstream_error"],
+            "malformed_response"
+        );
+    }
+
+    #[test]
+    fn wrong_answer_class_fails_closed_without_cache_update() {
+        let query = dns_query(0x7777, "Example.COM", 1);
+        let mut response = dns_a_response(&query, [93, 184, 216, 34], 30);
+        let answer_class_offset = response.len() - 12;
+        response[answer_class_offset..answer_class_offset + 2].copy_from_slice(&3u16.to_be_bytes());
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-example-dns")
+                .protocol(Protocol::Dns)
+                .hostname("example.com"),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut handler = DnsBrokerHandler::new(
+            broker,
+            MockUpstream { response, calls: 0 },
+            "10.0.2.3".parse().unwrap(),
+        );
+
+        let result = handler.handle_query("s1", &query, 1_000);
+        assert_eq!(result.decision.decision, Decision::FailClosed);
+        assert_eq!(result.response.unwrap()[3] & 0x0f, 5);
+        assert!(handler
+            .cache()
+            .attribution_for("93.184.216.34".parse().unwrap(), 2_000)
+            .is_none());
+        let records: Vec<_> = handler.broker().audit().records().collect();
         assert_eq!(
             records[1].details["dns_upstream_error"],
             "malformed_response"

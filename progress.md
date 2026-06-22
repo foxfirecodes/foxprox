@@ -763,3 +763,32 @@ The workspace now has concrete host-socket TCP and UDP egress implementations ou
 
 ### Remaining blind spots
 - TCP egress is a blocking proof that writes one sandbox byte slice and reads until EOF/limit; it is not the final async smoltcp stream bridge.
+
+## 2026-06-21 — Reviewer round 5 DNS answer-class fix cycle
+
+### Behavior under work
+Fix DNS upstream response validation so answer resource-record classes must match the validated question class before returned A/AAAA addresses can be audited or cached for hostname attribution.
+
+### Expected evidence
+- Upstream response with matching transaction/question/name but wrong answer class returns REFUSED/fail-closed, appends `dns_upstream_error=malformed_response`, and leaves DNS cache empty.
+- Valid IN-class A responses still parse and cache as before.
+
+### Commands run
+- `cargo fmt` — applied formatting for DNS answer-class validation.
+- `cargo test --all-targets --all-features` — passed, 4 CLI tests, 99 core tests, and 3 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `dns_handler::tests::wrong_answer_class_fails_closed_without_cache_update ... ok`
+- `dns_handler::tests::allowed_query_returns_upstream_response_and_observes_addresses ... ok`
+
+### Interpretation
+DNS upstream validation now rejects answer RRs whose class differs from the validated question class before returned addresses can be audited or committed to attribution cache. This prevents false hostname attribution from same-name, wrong-class answers while preserving valid IN-class response handling.
+
+### Changed files
+- `crates/foxprox-core/src/dns_handler.rs`
+- `progress.md`
+
+### Remaining blind spots
+- DNS validation still handles the subset of A/AAAA response metadata needed for alpha attribution; richer RRsets and CNAME chains remain future DNS resolver work.
