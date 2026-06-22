@@ -29,6 +29,9 @@ pub enum SmoltcpAdapterError {
     InvalidTcpBufferSize,
     TcpListenRejected,
     TcpConnectRejected,
+    NoMatchingTcpSocket,
+    TcpSendRejected,
+    TcpRecvRejected,
 }
 
 pub struct SmoltcpIpLoopback {
@@ -151,6 +154,44 @@ impl SmoltcpIpLoopback {
             let socket = self.sockets.get::<tcp::Socket>(*handle);
             socket.is_active() && socket_matches_attempt(socket, attempt)
         })
+    }
+
+    pub fn send_on_connect_attempt(
+        &mut self,
+        attempt: &TcpStackConnectAttempt,
+        bytes: &[u8],
+    ) -> Result<usize, SmoltcpAdapterError> {
+        for handle in &self.tcp_handles {
+            let socket = self.sockets.get_mut::<tcp::Socket>(*handle);
+            if socket_matches_attempt(socket, attempt) {
+                return socket
+                    .send_slice(bytes)
+                    .map_err(|_| SmoltcpAdapterError::TcpSendRejected);
+            }
+        }
+        Err(SmoltcpAdapterError::NoMatchingTcpSocket)
+    }
+
+    pub fn recv_on_listener_port(
+        &mut self,
+        port: u16,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, SmoltcpAdapterError> {
+        for handle in &self.tcp_handles {
+            let socket = self.sockets.get_mut::<tcp::Socket>(*handle);
+            if socket
+                .local_endpoint()
+                .is_some_and(|endpoint| endpoint.port == port)
+            {
+                let mut bytes = vec![0; max_bytes];
+                let count = socket
+                    .recv_slice(&mut bytes)
+                    .map_err(|_| SmoltcpAdapterError::TcpRecvRejected)?;
+                bytes.truncate(count);
+                return Ok(bytes);
+            }
+        }
+        Err(SmoltcpAdapterError::NoMatchingTcpSocket)
     }
 
     pub fn active_tcp_connect_attempts(&mut self) -> Vec<TcpStackConnectAttempt> {
@@ -364,6 +405,43 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))
         );
         assert_eq!(attempts[0].destination.port, 8080);
+    }
+
+    #[test]
+    fn smoltcp_loopback_moves_client_payload_to_listener_socket() {
+        let mut adapter = connected_adapter();
+        let attempt = adapter.next_connect_attempt().unwrap();
+
+        let mut sent = None;
+        for millis in 20..60 {
+            match adapter.send_on_connect_attempt(&attempt, b"hello-smoltcp") {
+                Ok(count) => {
+                    sent = Some(count);
+                    break;
+                }
+                Err(SmoltcpAdapterError::TcpSendRejected) => adapter.poll_once(millis),
+                Err(error) => panic!("unexpected send error: {error:?}"),
+            }
+        }
+        let sent = sent.expect("client socket should become send-ready");
+        let mut received = None;
+        for millis in 60..100 {
+            adapter.poll_once(millis);
+            match adapter.recv_on_listener_port(8080, 64) {
+                Ok(bytes) if !bytes.is_empty() => {
+                    received = Some(bytes);
+                    break;
+                }
+                Ok(_) | Err(SmoltcpAdapterError::TcpRecvRejected) => {}
+                Err(error) => panic!("unexpected recv error: {error:?}"),
+            }
+        }
+
+        assert_eq!(sent, b"hello-smoltcp".len());
+        assert_eq!(
+            received.expect("listener should receive payload"),
+            b"hello-smoltcp".to_vec()
+        );
     }
 
     #[test]

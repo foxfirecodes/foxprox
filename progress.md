@@ -1304,3 +1304,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: aborting the smoltcp socket is not yet connected to writing a TCP reset packet back to a real TUN peer.
 - Exact next step: commit smoltcp reset abort behavior, then add smoltcp socket byte send/receive proof to prepare for bridging accepted streams.
+
+## 2026-06-22T22:05:04Z
+- Current objective: continue after smoltcp reset abort behavior toward stream byte bridging proof.
+- Git status summary: clean worktree after commit `d2380f1`.
+- Intended slice: prove bytes can be sent from the smoltcp client socket and received by the smoltcp listener-side socket inside the adapter, with typed errors for missing sockets or smoltcp send/recv rejection.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: this is still internal smoltcp loopback byte movement, not host socket bridge integration.
+- Exact next step: add send/receive helpers and a deterministic loopback payload test.
+
+## 2026-06-22T22:07:08Z
+- Current objective: prove smoltcp loopback TCP payload movement.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on a wrapped `is_some_and` expression; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features` (initially failed because active did not imply send-ready; fixed by polling/retrying typed `TcpSendRejected`)
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 12 smoltcp adapter tests passed. New helpers send bytes on a normalized connect attempt and receive them on the listener port, proving internal smoltcp loopback payload movement with typed send/recv/no-socket errors.
+- Commit hash when committed: pending.
+- Remaining risks: payload movement is still inside smoltcp loopback; host socket bridging and TUN packet IO are not joined to it.
+- Exact next step: commit smoltcp byte movement proof, then add an adapter-level receive helper that exports listener bytes alongside the normalized connect attempt flow key for bridge integration.

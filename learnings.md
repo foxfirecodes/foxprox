@@ -44,3 +44,6 @@
 
 ## 2026-06-22T22:03:40Z
 - In smoltcp loopback tests, the client socket can become active before the listener-side socket is counted active; reset tests should compare against the pre-reset active count rather than assuming exactly two active sockets.
+
+## 2026-06-22T22:07:08Z
+- A smoltcp TCP socket can be active before `send_slice` accepts payload data; adapter tests should poll/retry on `TcpSendRejected` instead of assuming active implies send-ready.
