@@ -420,3 +420,23 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: 7de4f01.
 - Remaining boundary risks: DoH identification by hostname/IP intelligence, DNS-over-QUIC classification, and production TLS metadata wiring remain.
+
+## 2026-06-21 — Boundary objective: flow resource limit contract
+
+- Boundary under work: normalized runtime resource limit for maximum tracked flows and flow-table enforcement.
+- Allowed dependency direction: config validation normalizes resource limits into `foxprox-core`; `foxprox-net` enforces typed limits without parsing config strings or importing policy/frontends.
+- Dependency-risk assessment: unbounded flow state violates alpha robustness and can become a cross-layer shortcut if limits live only in launcher code. The limit should be a core runtime contract and enforced at the flow table boundary.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: all verification passed.
+- Changed files:
+  - `crates/foxprox-core/src/lib.rs`
+  - `crates/foxprox-config/src/lib.rs`
+  - `crates/foxprox-net/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 61 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: per-backend socket/file-descriptor limits, per-sandbox byte/flow-rate accounting, production timer cleanup, and memory budgeting for stream buffers remain.

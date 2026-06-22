@@ -701,6 +701,7 @@ pub struct RuntimeConfig {
     pub quic_policy: QuicPolicy,
     pub broker_dns_addrs: Vec<IpAddr>,
     pub udp_timeouts: UdpTimeouts,
+    pub resource_limits: ResourceLimits,
     pub rules: Vec<PolicyRule>,
 }
 
@@ -713,6 +714,7 @@ impl RuntimeConfig {
             quic_policy: QuicPolicy::DenyByDefault,
             broker_dns_addrs: Vec::new(),
             udp_timeouts: UdpTimeouts::default(),
+            resource_limits: ResourceLimits::default(),
             rules: Vec::new(),
         }
     }
@@ -765,6 +767,18 @@ impl Default for UdpTimeouts {
             quic: Duration::from_secs(180),
             ntp_like: Duration::from_secs(10),
         }
+    }
+}
+
+/// Runtime resource limits enforced by broker subsystems.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ResourceLimits {
+    pub max_flows: usize,
+}
+
+impl Default for ResourceLimits {
+    fn default() -> Self {
+        Self { max_flows: 4096 }
     }
 }
 

@@ -14,7 +14,7 @@ use foxprox_core::{
     DefaultPolicy, DenialAction, DestinationMatcher, DirectDnsPolicy, DomainSuffix,
     HostnameConfidence, HttpMethod, HttpMethodMatcher, HttpPathMatcher, HttpScheme,
     HttpSchemeMatcher, IpCidr, PolicyRule, PortMatcher, Protocol, ProtocolMatcher, QuicPolicy,
-    RuleId, RuntimeConfig, UdpTimeouts,
+    ResourceLimits, RuleId, RuntimeConfig, UdpTimeouts,
 };
 
 /// User-facing alpha policy config document.
@@ -26,6 +26,7 @@ pub struct ConfigDocument {
     pub quic_policy: Option<QuicPolicyConfig>,
     pub broker_dns_addrs: Vec<IpAddr>,
     pub udp_timeouts: Option<UdpTimeoutsConfig>,
+    pub resource_limits: Option<ResourceLimitsConfig>,
     pub rules: Vec<RuleConfig>,
 }
 
@@ -58,6 +59,9 @@ impl ConfigDocument {
         runtime.broker_dns_addrs = self.broker_dns_addrs;
         if let Some(timeouts) = self.udp_timeouts {
             runtime.udp_timeouts = timeouts.validate()?;
+        }
+        if let Some(resource_limits) = self.resource_limits {
+            runtime.resource_limits = resource_limits.validate()?;
         }
         runtime.rules = self
             .rules
@@ -123,6 +127,34 @@ fn nonzero_duration(seconds: u64, field: &'static str) -> Result<Duration, Confi
         return Err(ConfigError::InvalidTimeout { field });
     }
     Ok(Duration::from_secs(seconds))
+}
+
+/// User-facing resource limits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResourceLimitsConfig {
+    pub max_flows: usize,
+}
+
+impl Default for ResourceLimitsConfig {
+    fn default() -> Self {
+        let defaults = ResourceLimits::default();
+        Self {
+            max_flows: defaults.max_flows,
+        }
+    }
+}
+
+impl ResourceLimitsConfig {
+    fn validate(self) -> Result<ResourceLimits, ConfigError> {
+        if self.max_flows == 0 {
+            return Err(ConfigError::InvalidResourceLimit {
+                field: "resource_limits.max_flows",
+            });
+        }
+        Ok(ResourceLimits {
+            max_flows: self.max_flows,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -314,6 +346,7 @@ pub enum ConfigError {
     InvalidTimeout { field: &'static str },
     InvalidPortRange { start: u16, end: u16 },
     InvalidHttpPath,
+    InvalidResourceLimit { field: &'static str },
 }
 
 impl fmt::Display for ConfigError {
@@ -325,6 +358,7 @@ impl fmt::Display for ConfigError {
                 write!(f, "invalid port range {start}-{end}: start exceeds end")
             }
             Self::InvalidHttpPath => f.write_str("HTTP path matchers must start with '/'"),
+            Self::InvalidResourceLimit { field } => write!(f, "{field} must be greater than zero"),
         }
     }
 }
@@ -345,6 +379,7 @@ mod tests {
             quic_policy: Some(QuicPolicyConfig::DenyByDefault),
             broker_dns_addrs: vec!["10.255.0.1".parse().unwrap()],
             udp_timeouts: Some(UdpTimeoutsConfig::default()),
+            resource_limits: Some(ResourceLimitsConfig { max_flows: 128 }),
             rules: vec![RuleConfig {
                 id: "allow-api".to_string(),
                 action: RuleActionConfig::Allow,
@@ -365,6 +400,7 @@ mod tests {
             runtime.broker_dns_addrs,
             vec!["10.255.0.1".parse::<IpAddr>().unwrap()]
         );
+        assert_eq!(runtime.resource_limits.max_flows, 128);
         assert_eq!(runtime.rules.len(), 1);
         assert_eq!(
             runtime.rules[0].protocol,
@@ -428,6 +464,17 @@ mod tests {
             bad_timeout.validate(),
             Err(ConfigError::InvalidTimeout {
                 field: "udp_timeouts.dns_seconds"
+            })
+        ));
+
+        let bad_resource_limit = ConfigDocument {
+            resource_limits: Some(ResourceLimitsConfig { max_flows: 0 }),
+            ..ConfigDocument::default()
+        };
+        assert!(matches!(
+            bad_resource_limit.validate(),
+            Err(ConfigError::InvalidResourceLimit {
+                field: "resource_limits.max_flows"
             })
         ));
     }

@@ -87,3 +87,8 @@
 
 - DNS-over-TLS bypass prevention can be expressed as a normalized destination-port policy guard for TCP/853; policy does not need raw TLS or DNS parser inputs to deny this identifiable case by default.
 - The guard must run before default allow but after explicit configured rules are checked for that candidate, preserving a deliberate escape hatch for test resolvers or future broker-owned encrypted DNS endpoints.
+
+## 2026-06-21 — Flow resource limits
+
+- Flow count limits belong in the normalized runtime config, not launcher-specific code, so the network flow table can enforce bounded state for transparent and proxy paths consistently.
+- Flow-table replacement of an existing key should remain allowed at capacity; otherwise refreshing byte counts or timeout state could be blocked by the same limit meant to prevent new flow growth.

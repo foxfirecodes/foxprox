@@ -110,6 +110,19 @@ impl FlowTable {
         self.flows.insert(state.key.clone(), state);
     }
 
+    /// Insert or replace a flow while enforcing a caller-provided maximum.
+    /// Replacing an existing key is allowed even when the table is at capacity.
+    pub fn try_upsert(&mut self, state: FlowState, max_flows: usize) -> Result<(), FlowLimitError> {
+        if max_flows == 0 {
+            return Err(FlowLimitError::ZeroLimit);
+        }
+        if self.flows.len() >= max_flows && !self.flows.contains_key(&state.key) {
+            return Err(FlowLimitError::LimitReached { max_flows });
+        }
+        self.upsert(state);
+        Ok(())
+    }
+
     pub fn get(&self, key: &FlowKey) -> Option<&FlowState> {
         self.flows.get(key)
     }
@@ -192,6 +205,23 @@ impl DnsAttributionCache {
         ))
     }
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum FlowLimitError {
+    ZeroLimit,
+    LimitReached { max_flows: usize },
+}
+
+impl fmt::Display for FlowLimitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ZeroLimit => f.write_str("flow limit must be greater than zero"),
+            Self::LimitReached { max_flows } => write!(f, "flow limit {max_flows} reached"),
+        }
+    }
+}
+
+impl std::error::Error for FlowLimitError {}
 
 #[derive(Clone, Debug)]
 struct DnsAttribution {
@@ -420,6 +450,53 @@ mod tests {
         let expired = table.expire_by_flow_timeout(now + Duration::from_secs(5));
         assert_eq!(expired.len(), 1);
         assert!(table.is_empty());
+    }
+
+    #[test]
+    fn flow_table_enforces_configured_resource_limit() {
+        let now = Instant::now();
+        let mut table = FlowTable::default();
+        let decision = PolicyDecision::Allow(foxprox_core::AllowDecision {
+            rule_id: None,
+            timeout_override: None,
+            reason: Some("test".into()),
+        });
+        let first = FlowState {
+            key: FlowKey {
+                source: "10.0.0.2:50000".parse().unwrap(),
+                destination: "203.0.113.10:443".parse().unwrap(),
+                protocol: FlowProtocol::Tcp,
+            },
+            hostname: None,
+            created_at: now,
+            last_seen: now,
+            idle_timeout: Duration::from_secs(60),
+            byte_counts: foxprox_core::ByteCounts::default(),
+            decision: decision.clone(),
+        };
+        let mut replacement = first.clone();
+        replacement.byte_counts = foxprox_core::ByteCounts::new(10, 20);
+        let second = FlowState {
+            key: FlowKey {
+                source: "10.0.0.2:50001".parse().unwrap(),
+                destination: "203.0.113.11:443".parse().unwrap(),
+                protocol: FlowProtocol::Tcp,
+            },
+            decision,
+            ..first.clone()
+        };
+        let max_flows = RuntimeConfig::deny_by_default()
+            .resource_limits
+            .max_flows
+            .min(1);
+
+        table.try_upsert(first.clone(), max_flows).unwrap();
+        table.try_upsert(replacement, max_flows).unwrap();
+        assert_eq!(table.get(&first.key).unwrap().byte_counts.ingress, 10);
+        assert_eq!(
+            table.try_upsert(second, max_flows),
+            Err(FlowLimitError::LimitReached { max_flows })
+        );
     }
 
     #[test]
