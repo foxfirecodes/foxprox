@@ -156,3 +156,7 @@ For HTTPS CONNECT, perform policy and egress setup first, write the `200 Connect
 ## 2026-06-21 — SOCKS5 listener state joins unaudited greeting to audited CONNECT
 
 The SOCKS5 listener should treat method negotiation as protocol state, write the no-auth response first, then parse CONNECT and hand that request to the shared policy/audit/egress path. Only CONNECT represents network intent worthy of policy audit.
+
+## 2026-06-21 — bwrap command shape belongs outside broker core
+
+Keep bwrap-specific flags, `foxproxsetup -- target` wrapping, `/dev/net/tun` exposure, and proxy env injection in an integrations crate. The broker core should continue to see only normalized sessions, policy, audit, and device/egress abstractions.

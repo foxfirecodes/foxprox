@@ -853,3 +853,25 @@
 - What failed or surprised the agent: no behavior failures; the listener can keep greeting negotiation unaudited while CONNECT preflight still emits policy/audit evidence.
 - What remains unproven: long-running/concurrent SOCKS listener loop, listener close-audit emission, cancellation/resource limits, proxy environment injection, and transparent TUN forwarding are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — bwrap setup command contract slice
+
+- Slice attempted: encode the documented bwrap-compatible network setup command shape as validated integration-backend output.
+- Why next: proxy/DNS listener slices now provide sandbox-reachable services, but alpha setup still lacks a verified backend contract for launching `foxproxsetup` under bwrap with temporary `CAP_NET_ADMIN`, `/dev/net/tun`, and proxy environment injection.
+- Verification plan: add a `foxprox-integrations` crate with a bwrap command planner, validate required target/setup arguments, verify command args include `--unshare-user`, `--unshare-net`, `--cap-add CAP_NET_ADMIN`, `/dev/net/tun`, `foxproxsetup -- target`, and proxy env vars; run formatting, clippy, focused integration tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — bwrap setup command contract
+
+- Slice attempted: verified bwrap-compatible setup command planning for `foxproxsetup` network setup.
+- Why next: DNS/proxy services now have live listener proofs, but alpha setup needs a documented launch contract that grants temporary `CAP_NET_ADMIN`, exposes `/dev/net/tun`, runs `foxproxsetup -- target`, and injects proxy environment values without tying broker core to bwrap.
+- What changed: added `crates/foxprox-integrations` with `ProxyEnvironment`, `BwrapSetupConfig`, `CommandPlan`, `IntegrationPlanError`, and `plan_bwrap_setup`; the planner validates required programs/target argv and emits the documented bwrap argument shape including `--unshare-user`, `--unshare-net`, `--cap-add CAP_NET_ADMIN`, `/dev/net/tun` dev-bind, proxy `--setenv` values, and setup-helper delimiter.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in the new crate; `cargo fmt` was run.
+  - Focused checks passed: `cargo test -p foxprox-integrations -- --nocapture` ran 2 tests covering command shape and validation failures.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed including the new `foxprox-integrations` crate: 3 audit, 7 broker, 4 cli, 7 config, 16 core, 6 dns, 5 egress, 6 flow, 20 inspect, 2 integrations, 15 packet, 23 proxy tests, and doc tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; the command contract can be verified without executing bwrap, keeping bwrap semantics isolated in an integration crate.
+- What remains unproven: actual `foxproxsetup` helper execution, TUN creation/configuration, fd handoff, capability drop, bwrap process lifecycle, and live sandbox packet logs are still absent.
+- Commit: this commit.

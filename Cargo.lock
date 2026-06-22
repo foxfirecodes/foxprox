@@ -87,6 +87,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "foxprox-integrations"
+version = "0.1.0"
+
+[[package]]
 name = "foxprox-packet"
 version = "0.1.0"
 dependencies = [
