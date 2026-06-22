@@ -213,3 +213,7 @@ For direct plaintext HTTP over TUN, malformed or incomplete request-head metadat
 ## 2026-06-21 - Packet-level DNS attribution must not weaken DNS bypass checks
 
 DNS cache attribution can safely enrich ordinary transparent TCP/UDP policy requests, but DNS-classified packets must keep direct-bypass denial precedence and ignore supplied attribution. Otherwise resolver traffic could be disguised as domain-authorized application traffic.
+
+## 2026-06-21 - Shared-IP DNS cache lookups need an explicit ambiguity state
+
+DNS cache APIs should not force callers to choose the first hostname for an IP. Returning `Ambiguous` for shared-IP mappings makes the false-deny tradeoff explicit and avoids accidental domain authorization based on cache insertion order.

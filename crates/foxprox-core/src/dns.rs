@@ -95,6 +95,20 @@ impl DnsAttributionCache {
             .collect()
     }
 
+    pub fn lookup_unique(&mut self, address: IpAddr, now_millis: u64) -> DnsAttributionLookup {
+        let attributions = self.lookup(address, now_millis);
+        match attributions.len() {
+            0 => DnsAttributionLookup::NotFound,
+            1 => DnsAttributionLookup::Unique(
+                attributions
+                    .into_iter()
+                    .next()
+                    .expect("exactly one attribution is present"),
+            ),
+            candidates => DnsAttributionLookup::Ambiguous { candidates },
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }
@@ -116,6 +130,13 @@ impl DnsAttributionCache {
         self.entries
             .retain(|entry| entry.address != address || &entry.hostname != hostname);
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DnsAttributionLookup {
+    NotFound,
+    Unique(HostAttribution),
+    Ambiguous { candidates: usize },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -894,6 +915,44 @@ mod tests {
         assert!(attributions
             .iter()
             .all(|attribution| attribution.confidence == HostnameConfidence::Medium));
+    }
+
+    #[test]
+    fn unique_lookup_refuses_missing_or_ambiguous_dns_attribution() {
+        let mut cache = DnsAttributionCache::new(8, 60_000);
+        cache
+            .observe("unique.example", [ip([203, 0, 113, 10])], 0, 60)
+            .unwrap();
+        cache
+            .observe("shared-a.example", [ip([203, 0, 113, 20])], 0, 60)
+            .unwrap();
+        cache
+            .observe("shared-b.example", [ip([203, 0, 113, 20])], 0, 60)
+            .unwrap();
+
+        let DnsAttributionLookup::Unique(attribution) =
+            cache.lookup_unique(ip([203, 0, 113, 10]), 1)
+        else {
+            panic!("expected unique attribution");
+        };
+        assert_eq!(
+            attribution.hostname.as_ref().unwrap().as_str(),
+            "unique.example"
+        );
+        assert_eq!(attribution.confidence, HostnameConfidence::Medium);
+
+        assert_eq!(
+            cache.lookup_unique(ip([203, 0, 113, 20]), 1),
+            DnsAttributionLookup::Ambiguous { candidates: 2 }
+        );
+        assert_eq!(
+            cache.lookup_unique(ip([203, 0, 113, 30]), 1),
+            DnsAttributionLookup::NotFound
+        );
+        assert_eq!(
+            cache.lookup_unique(ip([203, 0, 113, 10]), 60_000),
+            DnsAttributionLookup::NotFound
+        );
     }
 
     #[test]

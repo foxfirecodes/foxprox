@@ -36,9 +36,9 @@ pub use config::{Cidr, ConfigError, HostMatcher, PolicyConfig, PolicyRule, RuleA
 pub use dns::{
     build_dns_address_response, build_dns_empty_response, parse_dns_address_response,
     parse_dns_query, DnsAddressResponseMetadata, DnsAttributionCache, DnsAttributionEntry,
-    DnsBuildError, DnsParseError, DnsQueryMetadata, DnsQueryType, DnsResponseCode,
-    DnsResponseObserveOutcome, DnsTransactionError, ObserveOutcome, PendingDnsObserveOutcome,
-    PendingDnsObserveStatus, PendingDnsQuery, PendingDnsQueryTable,
+    DnsAttributionLookup, DnsBuildError, DnsParseError, DnsQueryMetadata, DnsQueryType,
+    DnsResponseCode, DnsResponseObserveOutcome, DnsTransactionError, ObserveOutcome,
+    PendingDnsObserveOutcome, PendingDnsObserveStatus, PendingDnsQuery, PendingDnsQueryTable,
 };
 pub use dns_handler::{
     handle_broker_dns_query, handle_broker_dns_query_with_pending, handle_broker_dns_response,

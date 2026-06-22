@@ -1154,3 +1154,23 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * forwarded packet outcomes preserve the original packet wire bytes after policy allow.
 * Audit evidence: packet handler tests assert allow decision/rule ID, hostname and dns_attribution fields for DNS-attributed TCP, and null hostname fields on DNS-bypass denial.
 * Residual risk: the live flow layer must still perform bounded DNS cache lookup and choose when attribution is safe to supply; packet handler accepts only one already-selected hostname and does not resolve ambiguity among multiple cached hostnames.
+
+## 2026-06-21 - Conservative DNS attribution selection helper
+
+* Invariant under work: flow code must have a deterministic bounded helper for converting DNS cache lookups into a single policy attribution only when the address maps to exactly one current hostname.
+* Threat or failure mode addressed: a runtime caller could accidentally pick the first hostname for a shared IP and allow traffic based on arbitrary cache ordering, hiding ambiguity in audit records.
+* Planned verification: add DNS cache lookup tests for unique attribution, miss after expiry, and ambiguous shared-IP results that do not yield a single hostname; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Conservative DNS attribution selection helper results
+
+* Tests added/updated:
+  * DNS cache `lookup_unique` returns medium-confidence unique attribution for a single current hostname.
+  * expired/missing addresses return `NotFound` instead of stale attribution.
+  * shared-IP addresses with multiple current hostnames return `Ambiguous` with a bounded candidate count instead of an arbitrary hostname.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 160 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * runtime flow code now has an explicit conservative choice point for whether DNS cache evidence is safe to attach to packet-level policy requests.
+  * ambiguous DNS cache state can be denied or handled separately instead of silently authorizing by FIFO cache order.
+* Audit evidence: no new audit event in this helper; it protects the attribution selected before existing packet/TLS/QUIC audit builders run.
+* Residual risk: callers must still wire `lookup_unique` into the live flow path; multi-host shared-IP policy semantics remain conservative false-deny rather than attempting request-level disambiguation.
