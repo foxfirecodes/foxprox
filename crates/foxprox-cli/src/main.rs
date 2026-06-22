@@ -752,7 +752,15 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
                 .port(5354),
         ),
     );
-    let mut runtime = TransparentUdpRuntime::new(policy, LocalUdpEgress::new(echo_addr)?);
+    let mut broker = TransparentBroker::new(
+        "10.0.2.1:53".parse().expect("static broker DNS addr valid"),
+        [],
+        policy,
+        LocalUdpEgress::new(echo_addr)?,
+        PolicyEngine::new(PolicyConfig::deny_by_default()),
+        MockEgressBackend::new(),
+        PolicyEngine::new(PolicyConfig::deny_by_default()),
+    );
     let mut buf = [0_u8; 2048];
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut packets_read = 0_u64;
@@ -763,9 +771,12 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
-                if let Some(reply) = runtime.handle_ipv4_packet("udp-forward-smoke", packet)? {
+                let step = broker.handle_ipv4_packet("udp-forward-smoke", packet)?;
+                for reply in step.packets_to_device {
                     fd.write_packet(&reply)?;
                     forwarded = true;
+                }
+                if forwarded {
                     break;
                 }
             }
@@ -811,7 +822,12 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
         .map_err(|_| "host UDP echo fixture thread panicked".to_string())?;
     echo_result?;
 
-    let runtime_audit = runtime.audit.last().cloned();
+    let runtime_audit = broker
+        .audit
+        .iter()
+        .rev()
+        .find(|audit| audit.kind == EventKind::UdpFlowCreated)
+        .cloned();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let mut record = AuditRecord::new(

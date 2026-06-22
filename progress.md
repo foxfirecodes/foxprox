@@ -1067,3 +1067,16 @@
 - Recent structural commit hash: broker crate `f1acf95`.
 - Next verification gap: commit broker smoke integration; if continuing, consider migrating UDP forward or ICMP writeback smokes onto `TransparentBroker`, or run a final full sweep first.
 - Commit hash after commit: pending.
+
+## 2026-06-22T11:10:00Z — UDP forward smoke uses broker orchestration crate
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run udp-forward-smoke`
+- Environment assumptions: bwrap/TUN fd handoff works locally; UDP egress is a loopback fixture.
+- Expected result: migrate the UDP forward environment smoke from direct `TransparentUdpRuntime` coordination to `foxprox-broker::TransparentBroker`, proving the broker crate handles non-DNS UDP dispatch and device write-back in the Linux harness.
+- Observed result: pass. Workspace tests passed (`foxprox-broker` 2, `foxprox-core` 64, `foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). `udp-forward-smoke` emitted `"forwarded":"true"` with an allow runtime audit from the broker-owned UDP runtime.
+- Relevant output excerpt: UDP forward `"decision":"allow"`, `"rule_id":"allow-udp-forward-smoke"`, `"runtime_audit":"{...\"event\":\"udp_flow_created\"...}"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: the transparent broker crate now backs both broker-DNS-plus-attributed-UDP and direct transparent UDP environment smokes.
+- Recent broker integration commit hash: `0a04eb2`.
+- Next verification gap: commit UDP broker migration; consider migrating ICMP writeback or denied UDP onto the broker, then run a final full sweep.
+- Commit hash after commit: pending.
