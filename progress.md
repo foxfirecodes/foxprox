@@ -492,5 +492,5 @@
   - `cargo check --workspace` — passed.
   - `cargo test --workspace` — passed, 64 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
-- Commit hash after commit: pending.
+- Commit hash after commit: 7e22cf3.
 - Remaining boundary risks: production SOCKS listener state machine, handshake/read timeouts, CONNECT stream bridging, and policy-to-reply-code mapping remain.
