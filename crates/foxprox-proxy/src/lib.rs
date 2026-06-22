@@ -172,6 +172,52 @@ pub struct Socks5ConnectTunnel {
     pub egress_error: Option<EgressError>,
 }
 
+/// Result of serving one SOCKS5 TCP connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Socks5ServeOneResult {
+    pub peer: SocketAddr,
+    pub greeting: Socks5GreetingPreflight,
+    pub preflight: Option<Socks5ConnectPreflight>,
+    pub outcome: Socks5ServeOutcome,
+    pub egress_error: Option<EgressError>,
+}
+
+/// Runtime outcome for one SOCKS5 connection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Socks5ServeOutcome {
+    GreetingRejected,
+    Responded(Socks5Response),
+    Bridged(TcpBridgeStats),
+}
+
+/// SOCKS5 one-connection runtime errors.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Socks5ServeError {
+    MalformedGreeting,
+    UnsupportedAddressType { atyp: u8 },
+    Io(String),
+}
+
+impl std::fmt::Display for Socks5ServeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MalformedGreeting => f.write_str("socks5-malformed-greeting"),
+            Self::UnsupportedAddressType { atyp } => {
+                write!(f, "socks5-unsupported-address-type: atyp={atyp}")
+            }
+            Self::Io(error) => write!(f, "socks5-io-error: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for Socks5ServeError {}
+
+impl From<std::io::Error> for Socks5ServeError {
+    fn from(value: std::io::Error) -> Self {
+        Self::Io(value.to_string())
+    }
+}
+
 /// Client-visible SOCKS5 response bytes for the preflight decision.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Socks5Response {
@@ -518,6 +564,68 @@ pub fn serve_one_http_connect_connection<E: TcpEgress>(
     })
 }
 
+/// Accept and serve one SOCKS5 connection from a TCP listener.
+pub fn serve_one_socks5_connection<E: TcpEgress>(
+    listener: &TcpListener,
+    handler: &Socks5Preflight,
+    egress: &E,
+    sandbox_id: SandboxId,
+) -> Result<Socks5ServeOneResult, Socks5ServeError> {
+    let (mut client, peer) = listener.accept().map_err(Socks5ServeError::from)?;
+    let greeting_bytes = read_socks5_greeting(&mut client)?;
+    let greeting = handler.handle_greeting(&greeting_bytes);
+    client
+        .write_all(greeting.response.as_bytes())
+        .map_err(Socks5ServeError::from)?;
+    if !greeting.accepted {
+        return Ok(Socks5ServeOneResult {
+            peer,
+            greeting,
+            preflight: None,
+            outcome: Socks5ServeOutcome::GreetingRejected,
+            egress_error: None,
+        });
+    }
+
+    let request = read_socks5_connect_request(&mut client)?;
+    let mut tunnel = handler.establish_connect_tunnel(sandbox_id, &request, egress);
+    client
+        .write_all(tunnel.preflight.response.as_bytes())
+        .map_err(Socks5ServeError::from)?;
+    if tunnel.preflight.response != Socks5Response::Succeeded {
+        let response = tunnel.preflight.response;
+        return Ok(Socks5ServeOneResult {
+            peer,
+            greeting,
+            preflight: Some(tunnel.preflight),
+            outcome: Socks5ServeOutcome::Responded(response),
+            egress_error: tunnel.egress_error,
+        });
+    }
+
+    let Some(connection) = tunnel.connection.take() else {
+        return Ok(Socks5ServeOneResult {
+            peer,
+            greeting,
+            preflight: Some(tunnel.preflight),
+            outcome: Socks5ServeOutcome::Responded(Socks5Response::GeneralFailure),
+            egress_error: Some(EgressError::InvalidTarget(
+                "missing SOCKS5 egress connection after success response".to_owned(),
+            )),
+        });
+    };
+    let stats = bridge_tcp_streams(client, connection)
+        .map_err(|error| Socks5ServeError::Io(format!("socks5-bridge-error: {error}")))?;
+
+    Ok(Socks5ServeOneResult {
+        peer,
+        greeting,
+        preflight: Some(tunnel.preflight),
+        outcome: Socks5ServeOutcome::Bridged(stats),
+        egress_error: None,
+    })
+}
+
 /// Minimal SOCKS5 frontend preflight handler for CONNECT requests after method
 /// negotiation.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -645,6 +753,64 @@ fn read_http_request_head(
             break;
         }
         request.push(byte[0]);
+    }
+    Ok(request)
+}
+
+fn read_socks5_greeting(stream: &mut std::net::TcpStream) -> Result<Vec<u8>, Socks5ServeError> {
+    let mut header = [0_u8; 2];
+    stream
+        .read_exact(&mut header)
+        .map_err(Socks5ServeError::from)?;
+    let method_count = usize::from(header[1]);
+    if method_count == 0 {
+        return Ok(header.to_vec());
+    }
+    let mut greeting = header.to_vec();
+    let mut methods = vec![0_u8; method_count];
+    stream
+        .read_exact(&mut methods)
+        .map_err(Socks5ServeError::from)?;
+    greeting.extend_from_slice(&methods);
+    Ok(greeting)
+}
+
+fn read_socks5_connect_request(
+    stream: &mut std::net::TcpStream,
+) -> Result<Vec<u8>, Socks5ServeError> {
+    let mut header = [0_u8; 4];
+    stream
+        .read_exact(&mut header)
+        .map_err(Socks5ServeError::from)?;
+    let mut request = header.to_vec();
+    match header[3] {
+        1 => {
+            let mut rest = [0_u8; 6];
+            stream
+                .read_exact(&mut rest)
+                .map_err(Socks5ServeError::from)?;
+            request.extend_from_slice(&rest);
+        }
+        3 => {
+            let mut length = [0_u8; 1];
+            stream
+                .read_exact(&mut length)
+                .map_err(Socks5ServeError::from)?;
+            request.push(length[0]);
+            let mut rest = vec![0_u8; usize::from(length[0]) + 2];
+            stream
+                .read_exact(&mut rest)
+                .map_err(Socks5ServeError::from)?;
+            request.extend_from_slice(&rest);
+        }
+        4 => {
+            let mut rest = [0_u8; 18];
+            stream
+                .read_exact(&mut rest)
+                .map_err(Socks5ServeError::from)?;
+            request.extend_from_slice(&rest);
+        }
+        atyp => return Err(Socks5ServeError::UnsupportedAddressType { atyp }),
     }
     Ok(request)
 }
@@ -1293,6 +1459,65 @@ mod tests {
             tunnel.egress_error,
             Some(EgressError::Connect { .. })
         ));
+    }
+
+    #[test]
+    fn socks5_listener_serves_one_connect_tunnel_and_bridges_bytes() {
+        let upstream_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream = thread::spawn(move || {
+            let (mut stream, _) = upstream_listener.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            stream.write_all(b"pong").unwrap();
+            request
+        });
+        let proxy_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let proxy_addr = proxy_listener.local_addr().unwrap();
+        let handler = Socks5Preflight::new(PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        }));
+        let egress = HostTcpEgress::new(Duration::from_secs(1)).unwrap();
+        let server = thread::spawn(move || {
+            serve_one_socks5_connection(&proxy_listener, &handler, &egress, sandbox_id()).unwrap()
+        });
+
+        let mut client = std::net::TcpStream::connect(proxy_addr).unwrap();
+        client.write_all(b"\x05\x01\x00").unwrap();
+        let mut greeting_response = [0_u8; 2];
+        client.read_exact(&mut greeting_response).unwrap();
+        assert_eq!(
+            &greeting_response,
+            Socks5GreetingResponse::NoAuthenticationRequired.as_bytes()
+        );
+        client
+            .write_all(&socks5_ipv4_connect(
+                Ipv4Addr::LOCALHOST,
+                upstream_addr.port(),
+            ))
+            .unwrap();
+        let mut connect_response = [0_u8; 10];
+        client.read_exact(&mut connect_response).unwrap();
+        assert_eq!(&connect_response, Socks5Response::Succeeded.as_bytes());
+        client.write_all(b"ping").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+
+        let served = server.join().unwrap();
+        let upstream_request = upstream.join().unwrap();
+        assert_eq!(&upstream_request, b"ping");
+        assert_eq!(&response, b"pong");
+        assert!(served.greeting.accepted);
+        assert!(matches!(
+            served.outcome,
+            Socks5ServeOutcome::Bridged(TcpBridgeStats {
+                client_to_target_bytes: 4,
+                target_to_client_bytes: 4,
+            })
+        ));
+        assert_eq!(served.egress_error, None);
     }
 
     #[test]

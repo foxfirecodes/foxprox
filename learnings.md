@@ -152,3 +152,7 @@ A blocking one-request TCP listener is enough to prove explicit proxy reachabili
 ## 2026-06-21 — CONNECT listeners should send the proxy response before bridging
 
 For HTTPS CONNECT, perform policy and egress setup first, write the `200 Connection Established` response to the client, and only then hand the client stream plus egress connection to the bidirectional bridge. This keeps proxy handshake bytes out of tunnel byte counts.
+
+## 2026-06-21 — SOCKS5 listener state joins unaudited greeting to audited CONNECT
+
+The SOCKS5 listener should treat method negotiation as protocol state, write the no-auth response first, then parse CONNECT and hand that request to the shared policy/audit/egress path. Only CONNECT represents network intent worthy of policy audit.

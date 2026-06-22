@@ -831,3 +831,25 @@
 - What failed or surprised the agent: no behavior failures; writing the CONNECT response before starting the bridge keeps client-visible proxy semantics separate from tunnel byte copying.
 - What remains unproven: SOCKS5 listener runtime, close-audit emission from listener completion, concurrent listener loops, cancellation/resource limits, and transparent TUN TCP forwarding are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — SOCKS5 listener tunnel runtime slice
+
+- Slice attempted: serve one SOCKS5 TCP connection through a real listener, method negotiation, CONNECT policy/egress, success response, and bidirectional bridge.
+- Why next: SOCKS5 greeting, CONNECT preflight/egress, and generic bridging are proven separately; alpha SOCKS5 support still needs a listener-facing state machine that joins those boundaries.
+- Verification plan: add `serve_one_socks5_connection`, read and validate greeting/request bytes, verify a loopback client negotiates no-auth, receives success, tunnels `ping`/`pong` to an upstream server, and returns bridge stats; run formatting, clippy, focused proxy tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — SOCKS5 listener tunnel runtime
+
+- Slice attempted: serve one SOCKS5 connection through listener accept, no-auth greeting, CONNECT request, shared egress, SOCKS success response, and bidirectional bridge.
+- Why next: SOCKS5 greeting, CONNECT policy/egress, and TCP bridging existed separately, but alpha SOCKS5 support needed a listener-facing state machine that joins them.
+- What changed: added `Socks5ServeOneResult`, `Socks5ServeOutcome`, `Socks5ServeError`, SOCKS greeting/request readers, and `serve_one_socks5_connection`; it accepts one TCP client, negotiates no-auth only, reads CONNECT requests for IPv4/domain/IPv6 targets, establishes egress after policy allow, writes SOCKS response bytes, and bridges tunnel traffic with stats.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in the new SOCKS listener test/helper code; `cargo fmt` was run.
+  - Focused check passed: `cargo test -p foxprox-proxy socks5_listener -- --nocapture` verified a loopback client negotiated no-auth, received SOCKS success, sent `ping` through the proxy to an upstream server, received `pong`, and the listener returned 4-byte bridge stats in both directions.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 6 `foxprox-dns` tests, 5 `foxprox-egress` tests, 6 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 23 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; the listener can keep greeting negotiation unaudited while CONNECT preflight still emits policy/audit evidence.
+- What remains unproven: long-running/concurrent SOCKS listener loop, listener close-audit emission, cancellation/resource limits, proxy environment injection, and transparent TUN forwarding are still absent.
+- Commit: this commit.
