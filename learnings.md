@@ -187,3 +187,9 @@
 
 - DNS serving must pass through the same normalized policy/audit path as transparent flows; otherwise broker DNS can become a policy bypass.
 - `HostEgress::resolve_dns` is the right shared boundary for allowed DNS lookups, while `foxprox-dns` remains the only crate constructing DNS wire responses.
+
+## 2026-06-22 — smoltcp adapter dependency proof
+
+- `smoltcp` 0.12.0 is the newest version compatible with the workspace Rust 1.80 contract; 0.13.1 requires Rust 1.91.
+- For TUN/L3 integration, smoltcp must be configured with `medium-ip` and `HardwareAddress::Ip`; adapter tests can prove ICMP write-back while keeping smoltcp interface/device/socket types private.
+- The stack adapter can initially return no normalized flow events while still proving bounded packet ingress and opaque outbound packet emission; TCP stream extraction remains a separate boundary expansion.

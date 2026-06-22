@@ -799,3 +799,27 @@
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
 - Commit hash after commit: 651a917.
 - Remaining boundary risks: real UDP DNS socket loop, upstream wire forwarding, response caching integration, TCP DNS, and negative caching remain.
+
+## 2026-06-22 — Boundary objective: smoltcp adapter dependency proof
+
+- Boundary under work: userspace network stack adapter proof using `smoltcp` behind the existing `StackAdapter` contract.
+- Allowed dependency direction: a stack-specific adapter crate may depend on `smoltcp`, `foxprox-core`, and `foxprox-net`; policy, audit, frontend, device, DNS, and egress crates must not import or expose smoltcp types.
+- Dependency-risk assessment: smoltcp is the highest-leverage alpha unknown because it shapes TCP/UDP packet ingress, outbound packet write-back, and eventual flow lifecycle. The first proof should keep smoltcp types private and only return normalized/opaque adapter outputs.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency tree checks for the smoltcp adapter plus policy/audit.
+- Observed results: added `foxprox-smoltcp` using `smoltcp` 0.12.0 behind `foxprox-net::StackAdapter`. Implemented a private queued IP-medium smoltcp `Device`, public stack-neutral `SmoltcpAdapterConfig`, and `SmoltcpStackAdapter` that ingests opaque IP packets and emits opaque outbound packets. Test proves smoltcp processes an ICMP echo request and emits a valid echo reply without exposing smoltcp types. Initial clippy found a useless conversion in the IP address setup; removing it made all verification pass.
+- Changed files:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `crates/foxprox-smoltcp/Cargo.toml`
+  - `crates/foxprox-smoltcp/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 87 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed after the IP conversion fix noted above.
+  - `cargo tree -p foxprox-smoltcp` — smoltcp is isolated in the adapter crate; dev-only packet dependency is used for checksum fixtures.
+  - `cargo tree -p foxprox-policy` — policy depends only on `foxprox-core`.
+  - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: TCP stream event extraction, host socket bridging, async polling, and real TUN integration remain.
