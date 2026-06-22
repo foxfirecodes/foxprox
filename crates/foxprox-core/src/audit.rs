@@ -4,6 +4,7 @@ use crate::types::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
+use std::io::{self, Write};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +129,45 @@ impl AuditRecord {
     }
 }
 
+#[derive(Debug)]
+pub struct JsonLineAuditSink<W> {
+    writer: W,
+    records_written: u64,
+}
+
+impl<W: Write> JsonLineAuditSink<W> {
+    pub fn new(writer: W) -> Self {
+        Self {
+            writer,
+            records_written: 0,
+        }
+    }
+
+    pub fn append(&mut self, record: &AuditRecord) -> Result<(), AuditSinkError> {
+        let line = record.to_json_line().map_err(AuditSinkError::Serialize)?;
+        self.writer
+            .write_all(line.as_bytes())
+            .and_then(|_| self.writer.write_all(b"\n"))
+            .map_err(AuditSinkError::Write)?;
+        self.records_written += 1;
+        Ok(())
+    }
+
+    pub fn records_written(&self) -> u64 {
+        self.records_written
+    }
+
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
+#[derive(Debug)]
+pub enum AuditSinkError {
+    Serialize(serde_json::Error),
+    Write(io::Error),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuditError {
     BufferFull {
@@ -247,6 +287,48 @@ mod tests {
         assert_eq!(value["hostname_attribution"]["source"], "broker_dns");
         assert_eq!(value["decision"], "allow");
         assert_eq!(value["rule_id"], "allow-example");
+    }
+
+    #[test]
+    fn json_line_audit_sink_appends_stable_records_in_order() {
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+        sink.append(&AuditRecord::new_at(AuditKind::BrokerStarted, "s1", 10))
+            .unwrap();
+        sink.append(&AuditRecord::new_at(AuditKind::PolicyReload, "s1", 11))
+            .unwrap();
+        assert_eq!(sink.records_written(), 2);
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+        let lines: Vec<_> = output.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(first["kind"], "broker_started");
+        assert_eq!(first["timestamp_ms"], 10);
+        assert_eq!(second["kind"], "policy_reload");
+        assert_eq!(second["timestamp_ms"], 11);
+    }
+
+    #[derive(Debug)]
+    struct FailingWriter;
+
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("sink unavailable"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn json_line_audit_sink_surfaces_write_errors() {
+        let mut sink = JsonLineAuditSink::new(FailingWriter);
+        let error = sink
+            .append(&AuditRecord::new_at(AuditKind::BrokerStarted, "s1", 10))
+            .unwrap_err();
+        assert!(matches!(error, AuditSinkError::Write(_)));
+        assert_eq!(sink.records_written(), 0);
     }
 
     #[test]

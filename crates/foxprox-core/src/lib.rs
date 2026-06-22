@@ -25,7 +25,7 @@ pub mod tun;
 pub mod types;
 pub mod udp;
 
-pub use audit::{AuditError, AuditRecord, BoundedAuditLedger};
+pub use audit::{AuditError, AuditRecord, AuditSinkError, BoundedAuditLedger, JsonLineAuditSink};
 pub use broker::BrokerCore;
 pub use config::{
     BrokerRuntimeConfig, ProxyListenerConfig, ResourceLimitConfig, RuntimeConfigError,

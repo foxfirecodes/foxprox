@@ -661,3 +661,34 @@ Transparent QUIC candidate decisions can now consume DNS-cache attribution befor
 
 ### Remaining blind spots
 - QUIC metadata parsing remains best-effort candidate classification by UDP/443/payload shape; no full QUIC/TLS metadata parser or HTTP/3 semantic inspection is implemented.
+
+## 2026-06-21 — Append-only audit sink observability cycle
+
+### Behavior under work
+Add a replaceable append-only JSON-lines audit sink abstraction so bounded in-memory decisions can also be durably serialized through a stable sink contract.
+
+### Expected evidence
+- Audit records written to a JSONL sink produce one structured JSON object per line with stable fields.
+- Sink write failures return structured errors instead of silently dropping audit output.
+- Multiple records preserve append order in the sink output.
+
+### Commands run
+- `cargo fmt` — applied formatting for audit sink changes.
+- `cargo test --all-targets --all-features` — passed, 4 CLI tests and 94 core tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `audit::tests::json_line_audit_sink_appends_stable_records_in_order ... ok`
+- `audit::tests::json_line_audit_sink_surfaces_write_errors ... ok`
+
+### Interpretation
+Audit output now has a replaceable append-only JSON-lines sink contract in addition to the bounded in-memory ledger. Tests prove stable one-record-per-line serialization, append order, and visible write errors for sink failures.
+
+### Changed files
+- `crates/foxprox-core/src/audit.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `progress.md`
+
+### Remaining blind spots
+- The sink is a generic `Write` abstraction; CLI/runtime file path wiring and sink backpressure policy remain future runtime integration work.
