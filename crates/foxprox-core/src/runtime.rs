@@ -192,6 +192,10 @@ impl<B: EgressBackend> TransparentUdpRuntime<B> {
             }
         }
     }
+
+    pub fn flush_audit_to(&mut self, sink: &mut BoundedAuditBuffer) -> Result<usize, String> {
+        flush_audit_to_buffer(&mut self.audit, sink)
+    }
 }
 
 /// Reusable explicit proxy policy/audit runtime.
@@ -361,6 +365,10 @@ impl ExplicitProxyRuntime {
         );
         Ok(allowed.then_some(parsed))
     }
+
+    pub fn flush_audit_to(&mut self, sink: &mut BoundedAuditBuffer) -> Result<usize, String> {
+        flush_audit_to_buffer(&mut self.audit, sink)
+    }
 }
 
 /// Minimal broker-local DNS runtime for transparent UDP/53 packets.
@@ -502,6 +510,10 @@ impl TransparentDnsRuntime {
         );
         Ok(Some(reply))
     }
+
+    pub fn flush_audit_to(&mut self, sink: &mut BoundedAuditBuffer) -> Result<usize, String> {
+        flush_audit_to_buffer(&mut self.audit, sink)
+    }
 }
 
 /// Minimal transparent TUN TCP connect runtime boundary.
@@ -615,6 +627,10 @@ impl<B: EgressBackend> TransparentTcpRuntime<B> {
         }
         self.audit.push(record);
         Ok(())
+    }
+
+    pub fn flush_audit_to(&mut self, sink: &mut BoundedAuditBuffer) -> Result<usize, String> {
+        flush_audit_to_buffer(&mut self.audit, sink)
     }
 }
 
@@ -880,6 +896,10 @@ impl TransparentIcmpRuntime {
             .push(record.with_bytes(parsed.payload.len() as u64, reply.len() as u64));
         Ok(Some(reply))
     }
+
+    pub fn flush_audit_to(&mut self, sink: &mut BoundedAuditBuffer) -> Result<usize, String> {
+        flush_audit_to_buffer(&mut self.audit, sink)
+    }
 }
 
 /// Transparent TCP payload inspection for HTTP and TLS metadata.
@@ -1112,6 +1132,10 @@ impl TransparentInspectionRuntime {
             .with_metadata("sni_dns_mismatch", mismatch.to_string()),
         );
         Ok(())
+    }
+
+    pub fn flush_audit_to(&mut self, sink: &mut BoundedAuditBuffer) -> Result<usize, String> {
+        flush_audit_to_buffer(&mut self.audit, sink)
     }
 }
 
@@ -1392,6 +1416,38 @@ mod tests {
         assert!(reply.is_none());
         assert!(runtime.egress.requests.is_empty());
         assert_eq!(runtime.audit[0].decision, Decision::DenyDrop);
+    }
+
+    #[test]
+    fn udp_runtime_flushes_audit_to_bounded_sink() {
+        let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)), 5354);
+        let policy = PolicyEngine::new(PolicyConfig::deny_by_default());
+        let egress = MockEgressBackend::new();
+        let mut runtime = TransparentUdpRuntime::new(policy, egress);
+        let packet = udp_probe_packet(destination.ip(), destination.port(), b"probe");
+        runtime.handle_ipv4_packet("lab", &packet).unwrap();
+        let mut sink = BoundedAuditBuffer::new(1);
+        assert_eq!(runtime.flush_audit_to(&mut sink).unwrap(), 1);
+        assert_eq!(runtime.audit.len(), 0);
+        assert_eq!(sink.len(), 1);
+    }
+
+    #[test]
+    fn explicit_proxy_runtime_flushes_audit_to_bounded_sink() {
+        let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8080);
+        let policy = PolicyEngine::new(PolicyConfig::deny_by_default());
+        let mut runtime = ExplicitProxyRuntime::new(policy);
+        runtime
+            .evaluate_http_request(
+                "lab",
+                b"GET /blocked HTTP/1.1\r\nHost: example.com\r\n\r\n",
+                destination,
+            )
+            .unwrap();
+        let mut sink = BoundedAuditBuffer::new(1);
+        assert_eq!(runtime.flush_audit_to(&mut sink).unwrap(), 1);
+        assert_eq!(runtime.audit.len(), 0);
+        assert_eq!(sink.len(), 1);
     }
 
     #[test]

@@ -851,3 +851,15 @@
 - Interpretation: core runtime factoring has preserved the harness-backed alpha behavior across transparent and explicit proxy paths.
 - Next verification gap: commit verification evidence; remaining next step is structural crate decomposition or production async/device integration beyond the current core/CLI split.
 - Commit hash after commit: pending.
+
+## 2026-06-22T06:05:00Z — Bounded audit flush across reusable runtimes
+
+- Command executed: `cargo fmt --all && cargo test --all`
+- Environment assumptions: deterministic in-memory runtime checks; no Linux/TUN required.
+- Expected result: reusable runtime types beyond the TCP bridge can flush audit records into a bounded sink and surface backpressure consistently.
+- Observed result: pass. `foxprox-core` increased to 58 tests; `foxprox-cli` ran 2 tests; `foxproxsetup` ran 7 tests.
+- Relevant output excerpt: `runtime::tests::udp_runtime_flushes_audit_to_bounded_sink ... ok`; `runtime::tests::explicit_proxy_runtime_flushes_audit_to_bounded_sink ... ok`; previous TCP bridge bounded flush tests still passed.
+- Changed files: `crates/foxprox-core/src/runtime.rs`, `progress.md`.
+- Interpretation: audit backpressure plumbing is now consistently available across reusable runtime boundaries, not only the TCP bridge.
+- Next verification gap: commit this audit flush improvement; remaining larger work is crate decomposition and production async/device integration.
+- Commit hash after commit: pending.
