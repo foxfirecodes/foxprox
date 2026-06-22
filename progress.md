@@ -1049,3 +1049,22 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * audit records no longer rely solely on `HiddenSni` denial reason to expose hidden-name state.
 * Audit evidence: unit tests assert hidden-SNI preservation and JSON output for an IP-allowed hidden-SNI request.
 * Residual risk: QUIC visible TLS/ECH extraction is still not implemented; QUIC candidate audit remains limited to protocol classification and DNS attribution.
+
+## 2026-06-21 - QUIC candidate audit metadata
+
+* Invariant under work: QUIC candidate audit records must preserve bounded parsed header metadata without implying hostname or HTTP/3 visibility.
+* Threat or failure mode addressed: auditing UDP/443 only as a generic QUIC candidate hides version/header evidence needed to review unsupported QUIC versions or malformed classification behavior.
+* Planned verification: add audit fields/builder/JSON tests for QUIC header form, long packet type, version support, connection-ID lengths, and no hostname attribution; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - QUIC candidate audit metadata results
+
+* Tests added/updated:
+  * QUIC candidate audit builder preserves header form, long packet type, version, version support status, destination/source connection-ID lengths, endpoints, requested port, decision, and rule ID.
+  * JSON serialization now includes QUIC metadata fields while retaining `hostname: null` and no hostname confidence, making clear that QUIC header parsing did not provide domain attribution.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 146 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * QUIC candidate audit records carry bounded parser evidence without inventing hostname or HTTP/3 visibility.
+  * unsupported or unknown QUIC versions can be audited through explicit version/support fields in future runtime paths.
+* Audit evidence: unit tests assert QUIC audit fields and deterministic JSON fragments for form/type/version/connection-ID lengths and null hostname.
+* Residual risk: QUIC TLS CRYPTO frame parsing, SNI/ECH extraction, and runtime UDP/QUIC handler integration remain future work.

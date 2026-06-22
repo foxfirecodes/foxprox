@@ -193,3 +193,7 @@ For SNI/DNS mismatch review, logging only the selected hostname and denial reaso
 ## 2026-06-21 - Hidden-SNI state is audit-relevant even on allowed flows
 
 When policy explicitly allows hidden-SNI traffic by IP/CIDR, the audit record must still show that SNI/ECH hid hostname attribution. A denial reason alone is not enough because allowed hidden-SNI flows would otherwise lose that evidence.
+
+## 2026-06-21 - QUIC audit should separate header evidence from attribution
+
+QUIC candidate audit records should include bounded header metadata such as form, type, version, support status, and connection-ID lengths, but should keep hostname attribution null unless future QUIC/TLS parsing safely extracts it.

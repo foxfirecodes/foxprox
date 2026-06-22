@@ -7,6 +7,7 @@ use crate::dns::{DnsAddressResponseMetadata, DnsQueryMetadata, DnsQueryType, Dns
 use crate::flow::{TcpFlowEntry, UdpFlowClass, UdpFlowEntry};
 use crate::packet::PacketParseError;
 use crate::policy::{Decision, DenialReason, DenyBehavior, PolicyRequest};
+use crate::quic::{QuicHeaderForm, QuicLongPacketType, QuicPacketMetadata};
 use crate::types::{Endpoint, Frontend, HostnameConfidence, HostnameSource, Protocol, SandboxId};
 
 /// Structured audit event. Serialization is intentionally left to outer crates;
@@ -25,6 +26,12 @@ pub struct AuditEvent {
     pub presented_hostname: Option<Hostname>,
     pub dns_attribution: Option<Hostname>,
     pub hidden_sni: bool,
+    pub quic_header_form: Option<QuicHeaderForm>,
+    pub quic_long_packet_type: Option<QuicLongPacketType>,
+    pub quic_version: Option<u32>,
+    pub quic_version_supported: Option<bool>,
+    pub quic_destination_connection_id_len: Option<u8>,
+    pub quic_source_connection_id_len: Option<u8>,
     pub hostname_source: HostnameSource,
     pub hostname_confidence: HostnameConfidence,
     pub dns_query_type: Option<DnsQueryType>,
@@ -54,6 +61,12 @@ pub struct AuditPolicyContext {
     pub presented_hostname: Option<Hostname>,
     pub dns_attribution: Option<Hostname>,
     pub hidden_sni: bool,
+    pub quic_header_form: Option<QuicHeaderForm>,
+    pub quic_long_packet_type: Option<QuicLongPacketType>,
+    pub quic_version: Option<u32>,
+    pub quic_version_supported: Option<bool>,
+    pub quic_destination_connection_id_len: Option<u8>,
+    pub quic_source_connection_id_len: Option<u8>,
     pub hostname_source: HostnameSource,
     pub hostname_confidence: HostnameConfidence,
     pub dns_query_type: Option<DnsQueryType>,
@@ -80,6 +93,12 @@ impl AuditPolicyContext {
             presented_hostname: request.presented_hostname.clone(),
             dns_attribution: request.dns_attribution.clone(),
             hidden_sni: request.hidden_sni,
+            quic_header_form: None,
+            quic_long_packet_type: None,
+            quic_version: None,
+            quic_version_supported: None,
+            quic_destination_connection_id_len: None,
+            quic_source_connection_id_len: None,
             hostname_source: request.attribution.source,
             hostname_confidence: request.attribution.confidence,
             dns_query_type: request.dns_query_type,
@@ -109,6 +128,12 @@ impl AuditEvent {
             presented_hostname: None,
             dns_attribution: None,
             hidden_sni: false,
+            quic_header_form: None,
+            quic_long_packet_type: None,
+            quic_version: None,
+            quic_version_supported: None,
+            quic_destination_connection_id_len: None,
+            quic_source_connection_id_len: None,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -145,6 +170,12 @@ impl AuditEvent {
             presented_hostname: None,
             dns_attribution: None,
             hidden_sni: false,
+            quic_header_form: None,
+            quic_long_packet_type: None,
+            quic_version: None,
+            quic_version_supported: None,
+            quic_destination_connection_id_len: None,
+            quic_source_connection_id_len: None,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -177,6 +208,12 @@ impl AuditEvent {
             presented_hostname: context.presented_hostname,
             dns_attribution: context.dns_attribution,
             hidden_sni: context.hidden_sni,
+            quic_header_form: None,
+            quic_long_packet_type: None,
+            quic_version: None,
+            quic_version_supported: None,
+            quic_destination_connection_id_len: None,
+            quic_source_connection_id_len: None,
             hostname_source: context.hostname_source,
             hostname_confidence: context.hostname_confidence,
             dns_query_type: context.dns_query_type,
@@ -217,6 +254,12 @@ impl AuditEvent {
             presented_hostname: None,
             dns_attribution: None,
             hidden_sni: false,
+            quic_header_form: None,
+            quic_long_packet_type: None,
+            quic_version: None,
+            quic_version_supported: None,
+            quic_destination_connection_id_len: None,
+            quic_source_connection_id_len: None,
             hostname_source: HostnameSource::BrokerDnsQuery,
             hostname_confidence: HostnameConfidence::High,
             dns_query_type: Some(metadata.query_type),
@@ -257,12 +300,64 @@ impl AuditEvent {
             presented_hostname: None,
             dns_attribution: None,
             hidden_sni: false,
+            quic_header_form: None,
+            quic_long_packet_type: None,
+            quic_version: None,
+            quic_version_supported: None,
+            quic_destination_connection_id_len: None,
+            quic_source_connection_id_len: None,
             hostname_source: HostnameSource::DnsCache,
             hostname_confidence: HostnameConfidence::Medium,
             dns_query_type: Some(metadata.query_type),
             dns_response_code: Some(metadata.response_code),
             dns_answer_count: Some(metadata.addresses.len()),
             dns_min_ttl_seconds: metadata.min_ttl_seconds,
+            decision: audit_decision,
+            rule_id,
+            reason,
+            http_method: None,
+            http_path_query: None,
+            byte_count: None,
+            flow_duration_millis: None,
+        }
+    }
+
+    pub fn from_quic_candidate_metadata(
+        timestamp_millis: u64,
+        sandbox_id: SandboxId,
+        frontend: Frontend,
+        source: Option<Endpoint>,
+        destination: Option<Endpoint>,
+        metadata: &QuicPacketMetadata,
+        decision: &Decision,
+    ) -> Self {
+        let (audit_decision, rule_id, reason) = audit_decision_fields(decision);
+
+        Self {
+            timestamp_millis,
+            sandbox_id,
+            kind: AuditEventKind::QuicCandidateFlowCreated,
+            frontend: Some(frontend),
+            protocol: Some(Protocol::QuicCandidate),
+            source,
+            destination,
+            requested_port: destination.and_then(|endpoint| endpoint.port),
+            hostname: None,
+            presented_hostname: None,
+            dns_attribution: None,
+            hidden_sni: false,
+            quic_header_form: Some(metadata.header_form),
+            quic_long_packet_type: metadata.long_packet_type,
+            quic_version: metadata.version,
+            quic_version_supported: Some(metadata.version_supported),
+            quic_destination_connection_id_len: metadata.destination_connection_id_len,
+            quic_source_connection_id_len: metadata.source_connection_id_len,
+            hostname_source: HostnameSource::None,
+            hostname_confidence: HostnameConfidence::None,
+            dns_query_type: None,
+            dns_response_code: None,
+            dns_answer_count: None,
+            dns_min_ttl_seconds: None,
             decision: audit_decision,
             rule_id,
             reason,
@@ -298,6 +393,12 @@ impl AuditEvent {
             presented_hostname: None,
             dns_attribution: None,
             hidden_sni: false,
+            quic_header_form: None,
+            quic_long_packet_type: None,
+            quic_version: None,
+            quic_version_supported: None,
+            quic_destination_connection_id_len: None,
+            quic_source_connection_id_len: None,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -333,6 +434,12 @@ impl AuditEvent {
             presented_hostname: None,
             dns_attribution: None,
             hidden_sni: false,
+            quic_header_form: None,
+            quic_long_packet_type: None,
+            quic_version: None,
+            quic_version_supported: None,
+            quic_destination_connection_id_len: None,
+            quic_source_connection_id_len: None,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -372,6 +479,12 @@ impl AuditEvent {
             presented_hostname: None,
             dns_attribution: None,
             hidden_sni: false,
+            quic_header_form: None,
+            quic_long_packet_type: None,
+            quic_version: None,
+            quic_version_supported: None,
+            quic_destination_connection_id_len: None,
+            quic_source_connection_id_len: None,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -427,6 +540,37 @@ impl AuditEvent {
             false,
         );
         push_json_bool_field(&mut out, "hidden_sni", self.hidden_sni, false);
+        push_json_option_string_field(
+            &mut out,
+            "quic_header_form",
+            self.quic_header_form.map(quic_header_form_name),
+            false,
+        );
+        push_json_option_string_field(
+            &mut out,
+            "quic_long_packet_type",
+            self.quic_long_packet_type.map(quic_long_packet_type_name),
+            false,
+        );
+        push_json_option_u32_field(&mut out, "quic_version", self.quic_version, false);
+        push_json_option_bool_field(
+            &mut out,
+            "quic_version_supported",
+            self.quic_version_supported,
+            false,
+        );
+        push_json_option_u8_field(
+            &mut out,
+            "quic_destination_connection_id_len",
+            self.quic_destination_connection_id_len,
+            false,
+        );
+        push_json_option_u8_field(
+            &mut out,
+            "quic_source_connection_id_len",
+            self.quic_source_connection_id_len,
+            false,
+        );
         push_json_string_field(
             &mut out,
             "hostname_source",
@@ -583,6 +727,24 @@ fn push_json_option_u16_field(out: &mut String, key: &str, value: Option<u16>, f
     }
 }
 
+fn push_json_option_u8_field(out: &mut String, key: &str, value: Option<u8>, first: bool) {
+    push_json_key(out, key, first);
+    if let Some(value) = value {
+        write!(out, "{value}").expect("writing to String cannot fail");
+    } else {
+        out.push_str("null");
+    }
+}
+
+fn push_json_option_bool_field(out: &mut String, key: &str, value: Option<bool>, first: bool) {
+    push_json_key(out, key, first);
+    if let Some(value) = value {
+        out.push_str(if value { "true" } else { "false" });
+    } else {
+        out.push_str("null");
+    }
+}
+
 fn push_json_bool_field(out: &mut String, key: &str, value: bool, first: bool) {
     push_json_key(out, key, first);
     out.push_str(if value { "true" } else { "false" });
@@ -701,6 +863,22 @@ fn protocol_name(protocol: Protocol) -> &'static str {
         Protocol::Socks => "socks",
         Protocol::QuicCandidate => "quic_candidate",
         Protocol::Unsupported(_) => "unsupported",
+    }
+}
+
+fn quic_header_form_name(form: QuicHeaderForm) -> &'static str {
+    match form {
+        QuicHeaderForm::Long => "long",
+        QuicHeaderForm::Short => "short",
+    }
+}
+
+fn quic_long_packet_type_name(packet_type: QuicLongPacketType) -> &'static str {
+    match packet_type {
+        QuicLongPacketType::Initial => "initial",
+        QuicLongPacketType::ZeroRtt => "zero_rtt",
+        QuicLongPacketType::Handshake => "handshake",
+        QuicLongPacketType::Retry => "retry",
     }
 }
 
@@ -926,6 +1104,12 @@ mod tests {
                 presented_hostname: None,
                 dns_attribution: None,
                 hidden_sni: false,
+                quic_header_form: None,
+                quic_long_packet_type: None,
+                quic_version: None,
+                quic_version_supported: None,
+                quic_destination_connection_id_len: None,
+                quic_source_connection_id_len: None,
                 hostname_source: HostnameSource::None,
                 hostname_confidence: HostnameConfidence::None,
                 dns_query_type: None,
@@ -1375,6 +1559,12 @@ mod tests {
                 presented_hostname: None,
                 dns_attribution: None,
                 hidden_sni: false,
+                quic_header_form: None,
+                quic_long_packet_type: None,
+                quic_version: None,
+                quic_version_supported: None,
+                quic_destination_connection_id_len: None,
+                quic_source_connection_id_len: None,
                 hostname_source: HostnameSource::None,
                 hostname_confidence: HostnameConfidence::None,
                 dns_query_type: None,
@@ -1389,6 +1579,53 @@ mod tests {
         assert!(event
             .to_json_line()
             .contains("\"protocol\":\"unsupported:99\""));
+    }
+
+    #[test]
+    fn quic_candidate_audit_preserves_bounded_header_metadata_without_hostname() {
+        let metadata = QuicPacketMetadata {
+            header_form: QuicHeaderForm::Long,
+            long_packet_type: Some(QuicLongPacketType::Initial),
+            version: Some(1),
+            version_supported: true,
+            destination_connection_id_len: Some(8),
+            source_connection_id_len: Some(4),
+        };
+        let event = AuditEvent::from_quic_candidate_metadata(
+            150,
+            SandboxId::new("sandbox-quic"),
+            Frontend::Tun,
+            Some(Endpoint::udp(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 40000)),
+            Some(Endpoint::udp(
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+                443,
+            )),
+            &metadata,
+            &Decision::Allow {
+                rule_id: Some("allow-quic".into()),
+            },
+        );
+
+        assert_eq!(event.kind, AuditEventKind::QuicCandidateFlowCreated);
+        assert_eq!(event.protocol, Some(Protocol::QuicCandidate));
+        assert_eq!(event.hostname, None);
+        assert_eq!(event.hostname_confidence, HostnameConfidence::None);
+        assert_eq!(event.quic_header_form, Some(QuicHeaderForm::Long));
+        assert_eq!(
+            event.quic_long_packet_type,
+            Some(QuicLongPacketType::Initial)
+        );
+        assert_eq!(event.quic_version, Some(1));
+        assert_eq!(event.quic_version_supported, Some(true));
+        assert_eq!(event.quic_destination_connection_id_len, Some(8));
+        assert_eq!(event.quic_source_connection_id_len, Some(4));
+        let line = event.to_json_line();
+        assert!(line.contains("\"quic_header_form\":\"long\""));
+        assert!(line.contains("\"quic_long_packet_type\":\"initial\""));
+        assert!(line.contains("\"quic_version\":1"));
+        assert!(line.contains("\"quic_version_supported\":true"));
+        assert!(line.contains("\"quic_destination_connection_id_len\":8"));
+        assert!(line.contains("\"hostname\":null"));
     }
 
     #[test]
