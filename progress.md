@@ -821,5 +821,5 @@
   - `cargo tree -p foxprox-smoltcp` — smoltcp is isolated in the adapter crate; dev-only packet dependency is used for checksum fixtures.
   - `cargo tree -p foxprox-policy` — policy depends only on `foxprox-core`.
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
-- Commit hash after commit: pending.
+- Commit hash after commit: 2dbb247.
 - Remaining boundary risks: TCP stream event extraction, host socket bridging, async polling, and real TUN integration remain.
