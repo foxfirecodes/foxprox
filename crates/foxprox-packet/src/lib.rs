@@ -9,8 +9,9 @@ use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use foxprox_core::{
-    classify_udp_destination, FrontendKind, IcmpMessage, NormalizedEvent, SandboxId,
-    TcpConnectAttempt, UdpFlowAttempt, UnsupportedNetworkEvent, UnsupportedReason,
+    classify_udp_destination, DenialAction, FrontendKind, IcmpMessage, NormalizedEvent,
+    PolicyDecision, SandboxId, TcpConnectAttempt, UdpFlowAttempt, UnsupportedNetworkEvent,
+    UnsupportedReason,
 };
 
 /// Result of inspecting one inbound IP packet.
@@ -243,6 +244,23 @@ fn synthesize_echo_reply(bytes: &[u8], header: Ipv4Header) -> Vec<u8> {
     reply
 }
 
+/// Synthesize a packet-level denial response when the normalized policy decision
+/// requests one.
+///
+/// Policy chooses the denial action; packet code owns the raw IPv4/ICMP bytes.
+/// Drop/reset decisions intentionally produce no packet response here.
+pub fn synthesize_ipv4_denial_response(
+    original_packet: &[u8],
+    decision: &PolicyDecision,
+) -> Result<Option<SyntheticIpPacket>, PacketError> {
+    match decision {
+        PolicyDecision::Deny(deny) if deny.action == DenialAction::IcmpUnreachable => {
+            synthesize_ipv4_icmp_unreachable(original_packet, 13).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
 /// Synthesize an IPv4 ICMP destination-unreachable response for denied traffic.
 ///
 /// Callers choose the ICMP code (for example, 3 for port unreachable or 13 for
@@ -429,6 +447,31 @@ mod tests {
             panic!("expected unsupported");
         };
         assert_eq!(event.reason, UnsupportedReason::UnsupportedFragmentation);
+    }
+
+    #[test]
+    fn policy_icmp_unreachable_decision_synthesizes_denial_response() {
+        let denied = udp_packet(53000, 12345, &[1, 2, 3, 4]);
+        let decision = PolicyDecision::Deny(foxprox_core::DenyDecision {
+            action: DenialAction::IcmpUnreachable,
+            rule_id: None,
+            reason: "blocked".into(),
+        });
+
+        let response = synthesize_ipv4_denial_response(&denied, &decision)
+            .unwrap()
+            .unwrap();
+        assert_eq!(response.bytes()[20], 3);
+        assert_eq!(response.bytes()[21], 13);
+
+        let drop = PolicyDecision::Deny(foxprox_core::DenyDecision {
+            action: DenialAction::Drop,
+            rule_id: None,
+            reason: "blocked".into(),
+        });
+        assert!(synthesize_ipv4_denial_response(&denied, &drop)
+            .unwrap()
+            .is_none());
     }
 
     #[test]

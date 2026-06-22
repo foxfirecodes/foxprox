@@ -112,3 +112,8 @@
 
 - SNI/DNS mismatch needs a stable audit field instead of relying on denial reason strings; otherwise reviewers cannot reliably distinguish mismatch, unavailable attribution, and unchecked TLS cases.
 - Audit can safely expose the normalized `HostnameMismatch` enum because TLS parser internals and raw ClientHello bytes still terminate in the inspect boundary.
+
+## 2026-06-21 — Policy-driven denial synthesis
+
+- Mapping `Deny(IcmpUnreachable)` to ICMP bytes belongs in the packet crate, not policy or audit; policy should choose only the normalized denial action.
+- Drop and reset decisions intentionally produce no packet-level synthetic response from the IPv4 packet helper, preserving explicit denial semantics.

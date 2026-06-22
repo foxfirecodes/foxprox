@@ -512,3 +512,22 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: 0998dc8.
 - Remaining boundary risks: audit serialization compatibility, hidden-SNI/ECH audit detail, and production TLS stream reassembly remain.
+
+## 2026-06-21 — Boundary objective: policy-driven packet denial synthesis
+
+- Boundary under work: packet-boundary helper that turns normalized `Deny(IcmpUnreachable)` decisions into opaque IPv4 ICMP unreachable bytes.
+- Allowed dependency direction: `foxprox-packet` depends only on `foxprox-core`; policy chooses denial action but never imports packet synthesis or raw IP types.
+- Dependency-risk assessment: denial write-back can tempt policy or net orchestration to learn packet headers. Mapping the decision to bytes inside the packet crate preserves the boundary while making ICMP-unreachable denial behavior testable.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo tree -p foxprox-packet`.
+- Observed results: all verification passed.
+- Changed files:
+  - `crates/foxprox-packet/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 66 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-packet` — packet crate depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: net/device orchestration must call this helper with the original packet, IPv6 ICMP unreachable synthesis is not implemented, and TCP reset denial synthesis remains behind the future stack adapter.
