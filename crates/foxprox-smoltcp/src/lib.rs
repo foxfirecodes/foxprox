@@ -188,6 +188,18 @@ impl SmoltcpIpLoopback {
         })
     }
 
+    pub fn has_active_socket_for_attempt_either_direction(
+        &mut self,
+        attempt: &TcpStackConnectAttempt,
+    ) -> bool {
+        self.tcp_handles.iter().any(|handle| {
+            let socket = self.sockets.get::<tcp::Socket>(*handle);
+            socket.is_active()
+                && (socket_matches_attempt(socket, attempt)
+                    || socket_matches_attempt_reversed(socket, attempt))
+        })
+    }
+
     pub fn send_on_connect_attempt(
         &mut self,
         attempt: &TcpStackConnectAttempt,
@@ -838,6 +850,56 @@ mod tests {
                 .action,
             DecisionAction::Allow
         );
+    }
+
+    #[test]
+    fn denied_tun_ingressed_syn_aborts_and_suppresses_accepted_socket() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.set_connect_report_mode(TcpConnectReportMode::AcceptedListenerSockets);
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        let syn = ipv4_tcp_syn_packet(
+            Ipv4Addr::new(10, 66, 0, 2),
+            Ipv4Addr::new(10, 66, 0, 1),
+            50001,
+            8080,
+            7,
+        );
+        let mut reader = Cursor::new(syn);
+        let mut writer = Vec::new();
+        let mut buffer = vec![0; 1500];
+        pump_one_tun_packet(&mut adapter, &mut reader, &mut writer, &mut buffer, 1).unwrap();
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = TcpStackRuntime::new(
+            adapter,
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("smoltcp-tun-deny").unwrap(),
+        );
+
+        let outcome = runtime.handle_next_connect(2).unwrap();
+        let (mut adapter, egress, kernel) = runtime.into_parts();
+        let attempt = match outcome {
+            TcpStackOutcome::DeniedReset { decision, attempt } => {
+                assert_eq!(decision.action, DecisionAction::DenyDrop);
+                attempt
+            }
+            other => panic!("expected denied reset, got {other:?}"),
+        };
+
+        assert_eq!(egress.tcp_attempts, 0);
+        assert_eq!(kernel.audit_sink().events().len(), 1);
+        assert!(!adapter.has_active_socket_for_attempt_either_direction(&attempt));
+        assert!(adapter.next_connect_attempt().is_none());
     }
 
     #[test]

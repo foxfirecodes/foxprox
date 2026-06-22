@@ -53,3 +53,6 @@
 
 ## 2026-06-22T22:25:10Z
 - smoltcp TUN-ingressed TCP connects surface on accepted listener-side sockets, while earlier loopback proofs used active client-side sockets; the adapter needs an explicit connect-report mode so tests do not conflate the two orientations.
+
+## 2026-06-22T22:27:04Z
+- `TcpStackRuntime` can perform an adapter reset callback even when the policy decision action is the default `DenyDrop`; tests should distinguish the audited policy decision from the runtime's TCP cleanup behavior.

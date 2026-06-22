@@ -1451,3 +1451,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: denied accepted-listener reset is only indirectly supported, and accepted payloads are not yet linked to host bridges in the same packet-pumped session.
 - Exact next step: commit packet-pumped connect gating, then add a denied TUN-ingressed SYN regression proving `TcpStackRuntime` reset callbacks suppress and abort accepted listener sockets.
+
+## 2026-06-22T22:25:45Z
+- Current objective: continue after packet-pumped connect gating by proving denied TUN-ingressed connects are reset/suppressed.
+- Git status summary: clean worktree after commit `4e03ea5`.
+- Intended slice: add a denied raw-SYN regression showing `TcpStackRuntime` invokes the smoltcp reset callback for accepted listener sockets, suppresses duplicate reporting, and aborts the matching socket.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: reset is still adapter-local; no verified TCP RST packet synthesis to the sandbox peer yet.
+- Exact next step: add an orientation-agnostic active-socket check and denied packet-pumped SYN test.
+
+## 2026-06-22T22:27:04Z
+- Current objective: prove denied TUN-ingressed smoltcp connects are reset/suppressed.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features` (initially failed because the test expected audited `DenyReset` instead of the default policy's `DenyDrop`; fixed to assert runtime cleanup separately from policy action)
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 21 smoltcp adapter tests passed. New regression proves a default-denied raw SYN reaches `TcpStackRuntime`, emits no host egress, records one audit event, aborts the accepted smoltcp socket, and suppresses duplicate reporting.
+- Commit hash when committed: pending.
+- Remaining risks: reset is still adapter-local and not asserted as a specific outbound TCP RST packet to the sandbox; full ACK/data bridge from a TUN peer remains unimplemented.
+- Exact next step: commit denied packet-pumped SYN reset proof, then add a helper/test for completing the packet-pumped TCP handshake so sandbox-to-host payload can flow through the same accepted listener socket path.
