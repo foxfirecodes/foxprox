@@ -828,3 +828,32 @@ The workspace now has a concrete TUN-like packet IO adapter outside `foxprox-cor
 
 ### Remaining blind spots
 - This is a TUN-like IO adapter, not Linux `/dev/net/tun` creation or namespace configuration. OS-specific TUN opening/handoff remains a runtime integration gap.
+
+## 2026-06-21 — bwrap setup plan CLI observability cycle
+
+### Behavior under work
+Expose the existing bwrap-compatible setup plan through the `foxprox` CLI so callers can inspect the exact bwrap/setup command contract and setup audit evidence before attempting privileged runtime execution.
+
+### Expected evidence
+- `foxprox plan-bwrap <config> -- <target...>` emits structured JSON containing bwrap args, `foxproxsetup` command, proxy environment, and setup audit record.
+- Missing target separator/command and invalid config emit fail-closed audit JSON rather than panicking.
+
+### Commands run
+- `cargo fmt` — applied formatting for bwrap plan CLI changes.
+- `cargo test --all-targets --all-features` — passed, 6 CLI tests, 99 core tests, 3 device tests, and 3 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_cli::tests::plan_bwrap_prints_plan_and_setup_audit ... ok`
+- `foxprox_cli::tests::plan_bwrap_missing_target_prints_fail_closed_audit ... ok`
+
+### Interpretation
+The `foxprox` CLI can now emit an inspectable bwrap-compatible setup plan from runtime config and target command, including the exact `foxproxsetup` command, bwrap args, proxy environment, and `setup_plan_created` audit record. Invalid invocation paths produce fail-closed audit JSON.
+
+### Changed files
+- `crates/foxprox-cli/src/lib.rs`
+- `progress.md`
+
+### Remaining blind spots
+- The CLI still does not execute bwrap or configure TUN; it exposes the setup contract for inspection before privileged runtime work.

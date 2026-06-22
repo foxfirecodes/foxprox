@@ -1,4 +1,7 @@
-use foxprox_core::{AuditKind, AuditRecord, BrokerRuntimeConfig, Decision, DenialReason, Frontend};
+use foxprox_core::{
+    AuditKind, AuditRecord, BrokerRuntimeConfig, BwrapSetupPlan, Decision, DenialReason, Frontend,
+};
+use serde_json::json;
 use std::fs;
 use std::path::Path;
 
@@ -10,6 +13,9 @@ pub struct CliOutput {
 }
 
 pub fn run_args(args: &[String]) -> CliOutput {
+    if args.first().is_some_and(|command| command == "plan-bwrap") {
+        return plan_bwrap_args(&args[1..]);
+    }
     match args {
         [command, path] if command == "validate-config" => validate_config_path(path),
         [command, sandbox_id] if command == "default-config" => default_config(sandbox_id),
@@ -35,6 +41,48 @@ pub fn validate_config_text(text: &str) -> CliOutput {
     }
 }
 
+fn plan_bwrap_args(args: &[String]) -> CliOutput {
+    let Some(separator) = args.iter().position(|arg| arg == "--") else {
+        return error_output(
+            "plan_bwrap_missing_separator",
+            "expected: plan-bwrap <config> -- <target...>".to_string(),
+        );
+    };
+    if separator != 1 || args.len() <= separator + 1 {
+        return error_output(
+            "plan_bwrap_missing_target",
+            "expected non-empty target command after --".to_string(),
+        );
+    }
+    let config_path = &args[0];
+    let target = &args[separator + 1..];
+    let text = match fs::read_to_string(config_path) {
+        Ok(text) => text,
+        Err(error) => return error_output("config_io_error", error.to_string()),
+    };
+    let config = match serde_json::from_str::<BrokerRuntimeConfig>(&text) {
+        Ok(config) => config,
+        Err(error) => return error_output("config_parse_error", error.to_string()),
+    };
+    let validation = config.validation_audit();
+    if validation.decision != Some(Decision::Allow) {
+        return audit_output(2, validation);
+    }
+    let plan = BwrapSetupPlan::new(config.setup.clone(), target);
+    let output = json!({
+        "plan": plan,
+        "audit": plan.audit_record(),
+    });
+    match serde_json::to_string(&output) {
+        Ok(json) => CliOutput {
+            exit_code: 0,
+            stdout: format!("{json}\n"),
+            stderr: String::new(),
+        },
+        Err(error) => error_output("plan_bwrap_serialize_error", error.to_string()),
+    }
+}
+
 fn default_config(sandbox_id: &str) -> CliOutput {
     match serde_json::to_string_pretty(&BrokerRuntimeConfig::alpha_default(sandbox_id)) {
         Ok(json) => CliOutput {
@@ -50,7 +98,7 @@ fn usage_output() -> CliOutput {
     CliOutput {
         exit_code: 64,
         stdout: String::new(),
-        stderr: "usage: foxprox validate-config <path> | default-config <sandbox-id>\n".to_string(),
+        stderr: "usage: foxprox validate-config <path> | default-config <sandbox-id> | plan-bwrap <config> -- <target...>\n".to_string(),
     }
 }
 
@@ -121,6 +169,51 @@ mod tests {
         let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
         assert_eq!(value["kind"], "broker_error");
         assert_eq!(value["details"]["error_codes"], "config_parse_error");
+    }
+
+    #[test]
+    fn plan_bwrap_prints_plan_and_setup_audit() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-config-{}-{}.json",
+            std::process::id(),
+            "plan"
+        ));
+        let config = BrokerRuntimeConfig::alpha_default("s1");
+        std::fs::write(&path, serde_json::to_string(&config).unwrap()).unwrap();
+        let output = run_args(&[
+            "plan-bwrap".to_string(),
+            path.to_string_lossy().to_string(),
+            "--".to_string(),
+            "curl".to_string(),
+            "http://example.com".to_string(),
+        ]);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(output.exit_code, 0);
+        let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
+        assert_eq!(value["plan"]["setup_command"][0], "foxproxsetup");
+        assert_eq!(
+            value["plan"]["setup_command"]
+                .as_array()
+                .unwrap()
+                .last()
+                .unwrap(),
+            "http://example.com"
+        );
+        assert_eq!(value["audit"]["kind"], "setup_plan_created");
+        assert_eq!(value["audit"]["details"]["tun_name"], "foxprox0");
+    }
+
+    #[test]
+    fn plan_bwrap_missing_target_prints_fail_closed_audit() {
+        let output = run_args(&[
+            "plan-bwrap".to_string(),
+            "config.json".to_string(),
+            "--".to_string(),
+        ]);
+        assert_eq!(output.exit_code, 1);
+        let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
+        assert_eq!(value["kind"], "broker_error");
+        assert_eq!(value["details"]["error_codes"], "plan_bwrap_missing_target");
     }
 
     #[test]
