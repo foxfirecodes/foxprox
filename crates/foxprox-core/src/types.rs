@@ -82,6 +82,7 @@ impl Endpoint {
 pub enum HostnameSource {
     None,
     IpOnly,
+    BrokerDnsQuery,
     DnsCache,
     PlaintextHttpHost,
     TlsSni,

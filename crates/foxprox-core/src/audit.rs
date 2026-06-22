@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::net::IpAddr;
 
 use crate::attribution::Hostname;
+use crate::dns::{DnsQueryMetadata, DnsQueryType};
 use crate::policy::{Decision, DenialReason, DenyBehavior, PolicyRequest};
 use crate::types::{Endpoint, Frontend, HostnameConfidence, HostnameSource, Protocol, SandboxId};
 
@@ -20,6 +21,7 @@ pub struct AuditEvent {
     pub hostname: Option<Hostname>,
     pub hostname_source: HostnameSource,
     pub hostname_confidence: HostnameConfidence,
+    pub dns_query_type: Option<DnsQueryType>,
     pub decision: Option<AuditDecision>,
     pub rule_id: Option<String>,
     pub reason: Option<DenialReason>,
@@ -71,23 +73,7 @@ impl AuditPolicyContext {
 
 impl AuditEvent {
     pub fn from_policy_decision(context: AuditPolicyContext, decision: &Decision) -> Self {
-        let (audit_decision, rule_id, reason) = match decision {
-            Decision::Allow { rule_id } => (Some(AuditDecision::Allow), rule_id.clone(), None),
-            Decision::Deny {
-                behavior,
-                reason,
-                rule_id,
-            } => (
-                Some(AuditDecision::Deny {
-                    behavior: *behavior,
-                }),
-                rule_id.clone(),
-                Some(*reason),
-            ),
-            Decision::FailClosed { reason } => {
-                (Some(AuditDecision::FailClosed), None, Some(*reason))
-            }
-        };
+        let (audit_decision, rule_id, reason) = audit_decision_fields(decision);
 
         Self {
             timestamp_millis: context.timestamp_millis,
@@ -101,6 +87,7 @@ impl AuditEvent {
             hostname: context.hostname,
             hostname_source: context.hostname_source,
             hostname_confidence: context.hostname_confidence,
+            dns_query_type: None,
             decision: audit_decision,
             rule_id,
             reason,
@@ -108,6 +95,59 @@ impl AuditEvent {
             http_path_query: context.http_path_query,
             byte_count: None,
         }
+    }
+
+    pub fn from_dns_query_metadata(
+        timestamp_millis: u64,
+        sandbox_id: SandboxId,
+        frontend: Frontend,
+        source: Option<Endpoint>,
+        destination: Option<Endpoint>,
+        metadata: &DnsQueryMetadata,
+        decision: &Decision,
+    ) -> Self {
+        let (audit_decision, rule_id, reason) = audit_decision_fields(decision);
+
+        Self {
+            timestamp_millis,
+            sandbox_id,
+            kind: AuditEventKind::DnsQuery,
+            frontend: Some(frontend),
+            protocol: Some(Protocol::Dns),
+            source,
+            destination,
+            requested_port: destination.and_then(|endpoint| endpoint.port),
+            hostname: Some(metadata.hostname.clone()),
+            hostname_source: HostnameSource::BrokerDnsQuery,
+            hostname_confidence: HostnameConfidence::High,
+            dns_query_type: Some(metadata.query_type),
+            decision: audit_decision,
+            rule_id,
+            reason,
+            http_method: None,
+            http_path_query: None,
+            byte_count: None,
+        }
+    }
+}
+
+fn audit_decision_fields(
+    decision: &Decision,
+) -> (Option<AuditDecision>, Option<String>, Option<DenialReason>) {
+    match decision {
+        Decision::Allow { rule_id } => (Some(AuditDecision::Allow), rule_id.clone(), None),
+        Decision::Deny {
+            behavior,
+            reason,
+            rule_id,
+        } => (
+            Some(AuditDecision::Deny {
+                behavior: *behavior,
+            }),
+            rule_id.clone(),
+            Some(*reason),
+        ),
+        Decision::FailClosed { reason } => (Some(AuditDecision::FailClosed), None, Some(*reason)),
     }
 }
 
@@ -160,7 +200,9 @@ impl BoundedAuditBuffer {
 
     pub fn push(&mut self, event: AuditEvent) -> PushOutcome {
         if self.capacity == 0 || self.queue.len() == self.capacity {
-            return PushOutcome::Backpressure { event };
+            return PushOutcome::Backpressure {
+                event: Box::new(event),
+            };
         }
         self.queue.push_back(event);
         PushOutcome::Accepted
@@ -186,7 +228,7 @@ impl BoundedAuditBuffer {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PushOutcome {
     Accepted,
-    Backpressure { event: AuditEvent },
+    Backpressure { event: Box<AuditEvent> },
 }
 
 /// Utility for audit callers that need to record a destination IP without a
@@ -258,7 +300,9 @@ mod tests {
         });
         assert_eq!(
             buffer.push(rejected.clone()),
-            PushOutcome::Backpressure { event: rejected }
+            PushOutcome::Backpressure {
+                event: Box::new(rejected)
+            }
         );
         assert_eq!(buffer.len(), 1);
         assert_eq!(buffer.capacity(), 1);
@@ -299,6 +343,7 @@ mod tests {
         assert_eq!(event.hostname.as_ref().unwrap().as_str(), "www.example.com");
         assert_eq!(event.hostname_source, HostnameSource::PlaintextHttpHost);
         assert_eq!(event.hostname_confidence, HostnameConfidence::High);
+        assert_eq!(event.dns_query_type, None);
         assert_eq!(event.http_method.as_deref(), Some("GET"));
         assert_eq!(
             event.http_path_query.as_deref(),
@@ -306,5 +351,44 @@ mod tests {
         );
         assert_eq!(event.reason, Some(DenialReason::RuleDeny));
         assert_eq!(event.rule_id.as_deref(), Some("deny-debug"));
+    }
+
+    #[test]
+    fn dns_query_audit_preserves_query_type_and_endpoints() {
+        let metadata = crate::dns::parse_dns_query(
+            &[
+                0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'e',
+                b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, 0x00, 0x1c, 0x00,
+                0x01,
+            ],
+            512,
+        )
+        .unwrap();
+        let source = Endpoint::udp(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 40000);
+        let destination = Endpoint::udp(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 3)), 53);
+
+        let event = AuditEvent::from_dns_query_metadata(
+            99,
+            SandboxId::new("sandbox-dns"),
+            Frontend::Tun,
+            Some(source),
+            Some(destination),
+            &metadata,
+            &Decision::Allow { rule_id: None },
+        );
+
+        assert_eq!(event.timestamp_millis, 99);
+        assert_eq!(event.sandbox_id.as_str(), "sandbox-dns");
+        assert_eq!(event.kind, AuditEventKind::DnsQuery);
+        assert_eq!(event.protocol, Some(Protocol::Dns));
+        assert_eq!(event.source, Some(source));
+        assert_eq!(event.destination, Some(destination));
+        assert_eq!(event.requested_port, Some(53));
+        assert_eq!(event.hostname.as_ref().unwrap().as_str(), "example.com");
+        assert_eq!(event.hostname_source, HostnameSource::BrokerDnsQuery);
+        assert_eq!(event.hostname_confidence, HostnameConfidence::High);
+        assert_eq!(event.dns_query_type, Some(crate::dns::DnsQueryType::Aaaa));
+        assert_eq!(event.decision, Some(AuditDecision::Allow));
+        assert_eq!(event.reason, None);
     }
 }

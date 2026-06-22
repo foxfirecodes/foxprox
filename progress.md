@@ -477,3 +477,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Residual risk: DNS audit event fields, actual upstream forwarding, response synthesis, retry behavior, and DNS handler socket integration remain future work.
 
 * Commit hash: 6663d5d gate dns attribution cache by transactions.
+
+## 2026-06-21 - DNS audit metadata preservation
+
+* Invariant under work: DNS query audit records must preserve the validated query type and hostname/source endpoints so DNS allow, deny, and fail-closed decisions are reviewable without re-parsing packet bytes.
+* Threat or failure mode addressed: DNS policy and cache decisions could be audited only as generic protocol events, hiding whether A/AAAA/unsupported query types were allowed or denied and weakening security review of direct-DNS and attribution behavior.
+* Planned verification: extend audit schema and tests to preserve `DnsQueryType` in policy-derived and DNS-metadata-derived audit events; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - DNS audit metadata preservation results
+
+* Tests added/updated:
+  * DNS query audit events built from validated query metadata preserve query type, hostname, source endpoint, destination endpoint, requested port, frontend, protocol, and decision.
+  * policy-derived audit events explicitly preserve no DNS query type unless DNS metadata is present.
+  * bounded audit backpressure remains enforced after schema expansion; backpressured events are returned boxed to keep `PushOutcome` size bounded under clippy.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` passed tests but clippy flagged `PushOutcome` as a large enum variant after the audit schema grew.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 85 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * DNS audit records now distinguish validated query types instead of logging DNS only as a generic protocol.
+  * audit backpressure continues to reject the new event without increasing queue capacity.
+* Audit evidence: unit tests assert DNS query type/hostname/endpoints and bounded-buffer behavior.
+* Residual risk: DNS response audit fields, serialized sink output, audit drain/backpressure policy in async runtime, and actual DNS socket handler integration remain future work.
