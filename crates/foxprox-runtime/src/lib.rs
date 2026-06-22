@@ -278,7 +278,7 @@ pub enum TcpStackLifecycleOutcome {
     },
 }
 
-fn tcp_lifecycle_audit_event(
+pub fn tcp_lifecycle_audit_event(
     sandbox_id: SandboxId,
     timestamp_millis: u128,
     lifecycle: &TcpStackLifecycleEvent,

@@ -66,6 +66,8 @@ pub enum SmoltcpTunPumpOutcome {
 pub enum SmoltcpTcpBridgeSessionError {
     Adapter(SmoltcpAdapterError),
     Bridge(TcpBridgeError),
+    Audit(foxprox_core::AuditError),
+    InvalidLifecycle,
     TunWrite,
 }
 
@@ -127,6 +129,26 @@ impl<B> SmoltcpTcpBridgeSession<B> {
         duration: Duration,
     ) -> Result<TcpStackLifecycleEvent, TcpBridgeError> {
         self.flow_runtime.close_flow(flow, duration)
+    }
+
+    pub fn close_and_audit_flow<S: foxprox_core::AuditSink>(
+        &mut self,
+        flow: &FlowKey,
+        duration: Duration,
+        kernel: &mut foxprox_core::VerificationKernel<S>,
+        sandbox_id: foxprox_core::SandboxId,
+        timestamp_millis: u128,
+    ) -> Result<TcpStackLifecycleEvent, SmoltcpTcpBridgeSessionError> {
+        let lifecycle = self
+            .close_flow(flow, duration)
+            .map_err(SmoltcpTcpBridgeSessionError::Bridge)?;
+        let audit_event =
+            foxprox_runtime::tcp_lifecycle_audit_event(sandbox_id, timestamp_millis, &lifecycle)
+                .map_err(|_| SmoltcpTcpBridgeSessionError::InvalidLifecycle)?;
+        kernel
+            .emit_audit_event(audit_event)
+            .map_err(SmoltcpTcpBridgeSessionError::Audit)?;
+        Ok(lifecycle)
     }
 }
 
@@ -1402,6 +1424,65 @@ mod tests {
                 bytes_from_host: b"close-reply".len() as u64,
                 duration: Duration::from_millis(25)
             }
+        );
+    }
+
+    #[test]
+    fn bridge_session_close_emits_lifecycle_audit_event() {
+        let mut adapter = packet_pumped_adapter_with_unread_payload(b"audit-close");
+        let attempt = adapter.accepted_tcp_connect_attempts().remove(0);
+        let flow = FlowKey::new(Protocol::Tcp, attempt.source, attempt.destination);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = vec![0; b"audit-close".len()];
+            stream.read_exact(&mut received).unwrap();
+            received
+        });
+        let host_stream = TcpStream::connect(listen_addr).unwrap();
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("audit-close-components").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let bridge = StdTcpStreamBridge::new(flow.clone(), host_stream, Vec::new()).unwrap();
+        let mut flow_runtime = TcpFlowRuntime::new(&components, bridge);
+        flow_runtime.mark_opened(flow.clone()).unwrap();
+        let mut session = SmoltcpTcpBridgeSession::new(adapter, flow_runtime);
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(8),
+        );
+
+        session.forward_sandbox_payload_once(8080, 64).unwrap();
+        let lifecycle = session
+            .close_and_audit_flow(
+                &flow,
+                Duration::from_millis(30),
+                &mut kernel,
+                SandboxId::new("audit-close").unwrap(),
+                42,
+            )
+            .unwrap();
+
+        assert_eq!(server.join().unwrap(), b"audit-close".to_vec());
+        assert!(matches!(
+            lifecycle,
+            TcpStackLifecycleEvent::FlowClosed { .. }
+        ));
+        assert_eq!(kernel.audit_sink().events().len(), 1);
+        assert_eq!(
+            kernel.audit_sink().events()[0].sandbox_id.as_str(),
+            "audit-close"
+        );
+        assert_eq!(
+            kernel.audit_sink().events()[0].flow_duration,
+            Some(Duration::from_millis(30))
         );
     }
 

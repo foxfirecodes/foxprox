@@ -1631,3 +1631,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: `TcpStackRuntime` still uses fake host egress in this proof; production host stream creation is not yet unified with policy-open handling.
 - Exact next step: commit policy-open session helper, then add audit emission for session close lifecycle events through `VerificationKernel::emit_audit_event`.
+
+## 2026-06-22T22:40:25Z
+- Current objective: continue after policy-open session helper by auditing session close lifecycle events.
+- Git status summary: clean worktree after commit `421326c`.
+- Intended slice: expose the runtime TCP lifecycle audit-event formatter and add a smoltcp session helper that closes a flow and emits the resulting lifecycle event through `VerificationKernel::emit_audit_event`.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: this will audit explicit session close calls, not yet automatically detect FIN/RST close from live packet streams.
+- Exact next step: make lifecycle audit formatting reusable and add close-and-audit regression.
+
+## 2026-06-22T22:41:15Z
+- Current objective: emit audit records for smoltcp session close lifecycle events.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on wrapped lifecycle audit call and assertions; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 30 smoltcp adapter tests passed. Runtime lifecycle audit formatting is now reusable, and `SmoltcpTcpBridgeSession::close_and_audit_flow` closes a flow, formats the lifecycle audit event, emits it through `VerificationKernel::emit_audit_event`, and returns typed audit/bridge/session errors.
+- Commit hash when committed: pending.
+- Remaining risks: close auditing is explicit-call based; automatic FIN/RST close detection and continuous live TUN session orchestration are still absent.
+- Exact next step: commit session close audit emission, then assess the remaining Milestone 2 gap: replacing fake host egress in policy-open with real host stream construction inside a unified TCP session factory.
