@@ -989,3 +989,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: no poller/async runtime exists yet; the bridge only exposes a typed one-shot no-data outcome for a future loop.
 - Exact next step: commit nonblocking host-read outcome, then add a bridge pump helper that combines sandbox-to-host writes and host-to-sandbox reads for one opened flow with explicit outcomes.
+
+## 2026-06-22T21:36:12Z
+- Current objective: continue after typed nonblocking TCP reads toward a one-flow bridge pump helper.
+- Git status summary: clean worktree after commit `7e63efb`.
+- Intended slice: add a one-shot TCP bridge pump helper that writes available sandbox bytes to the host and then reads bounded host bytes back to sandbox IO for an already-opened flow.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with loopback TCP.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this remains synchronous and one-flow-at-a-time; no smoltcp integration or readiness poller yet.
+- Exact next step: implement the pump outcome and a loopback request/response test with byte accounting.
+
+## 2026-06-22T21:37:48Z
+- Current objective: add a one-shot TCP bridge pump for an opened flow.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on one chained host-read call; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 78 runtime tests, and 7 setup tests passed. New loopback tests prove the pump writes one sandbox request to a host TCP stream, reads one host response into sandbox IO, updates byte accounting, and rejects unopened flows before IO.
+- Commit hash when committed: pending.
+- Remaining risks: pump is synchronous and one-flow-at-a-time; it does not yet consume smoltcp stream buffers, poll readiness, or enforce resource limits beyond opened-flow gating.
+- Exact next step: commit TCP bridge pump, then add TCP bridge resource limits for maximum open flows to prevent unbounded state growth.

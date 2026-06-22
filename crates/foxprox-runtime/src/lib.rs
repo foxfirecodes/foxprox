@@ -448,6 +448,12 @@ impl OpenTcpFlow {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TcpBridgePumpOutcome {
+    pub sandbox_bytes_written: usize,
+    pub host_read: TcpHostReadOutcome,
+}
+
 #[derive(Debug)]
 pub struct TcpStreamBridgeRuntime<B> {
     bridge: B,
@@ -526,6 +532,36 @@ impl<B: TcpStreamBridge> TcpStreamBridgeRuntime<B> {
         self.bridge.write_to_sandbox(flow, bytes)?;
         open_flow.bytes_from_host += bytes.len() as u64;
         Ok(())
+    }
+}
+
+impl<W: Write> TcpStreamBridgeRuntime<StdTcpStreamBridge<W>> {
+    pub fn pump_open_flow_once(
+        &mut self,
+        flow: &FlowKey,
+        sandbox_bytes: &[u8],
+        max_host_bytes: usize,
+    ) -> Result<TcpBridgePumpOutcome, TcpBridgeError> {
+        if !self.open_flows.contains_key(flow) {
+            return Err(TcpBridgeError::FlowNotOpen);
+        }
+        if !sandbox_bytes.is_empty() {
+            self.send_sandbox_bytes_to_host(flow, sandbox_bytes)?;
+        }
+        let host_read = self
+            .bridge
+            .read_host_once_to_sandbox(flow, max_host_bytes)?;
+        if let TcpHostReadOutcome::Bytes { count } = &host_read {
+            let open_flow = self
+                .open_flows
+                .get_mut(flow)
+                .ok_or(TcpBridgeError::FlowNotOpen)?;
+            open_flow.bytes_from_host += *count as u64;
+        }
+        Ok(TcpBridgePumpOutcome {
+            sandbox_bytes_written: sandbox_bytes.len(),
+            host_read,
+        })
     }
 }
 
@@ -2296,6 +2332,61 @@ mod tests {
         server.join().unwrap();
         assert_eq!(outcome, TcpHostReadOutcome::Bytes { count: 9 });
         assert_eq!(bridge.sandbox_writer(), &b"from-host".to_vec());
+    }
+
+    #[test]
+    fn tcp_stream_bridge_pump_moves_one_loopback_request_response() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4];
+            stream.read_exact(&mut request).unwrap();
+            stream.write_all(b"pong").unwrap();
+            request
+        });
+        let flow = FlowKey::new(
+            Protocol::Tcp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            Endpoint::new(listen_addr.ip(), listen_addr.port()),
+        );
+        let host_stream = TcpStream::connect(listen_addr).unwrap();
+        let bridge = StdTcpStreamBridge::new(flow.clone(), host_stream, Vec::new()).unwrap();
+        let mut runtime = TcpStreamBridgeRuntime::new(bridge);
+        runtime.mark_opened(flow.clone()).unwrap();
+
+        let outcome = runtime.pump_open_flow_once(&flow, b"ping", 16).unwrap();
+
+        assert_eq!(server.join().unwrap(), *b"ping");
+        assert_eq!(outcome.sandbox_bytes_written, 4);
+        assert_eq!(outcome.host_read, TcpHostReadOutcome::Bytes { count: 4 });
+        assert_eq!(runtime.bridge().sandbox_writer(), &b"pong".to_vec());
+        let open = runtime.open_flows().get(&flow).unwrap();
+        assert_eq!(open.bytes_from_sandbox, 4);
+        assert_eq!(open.bytes_from_host, 4);
+    }
+
+    #[test]
+    fn tcp_stream_bridge_pump_rejects_unopened_flow_before_io() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+        });
+        let flow = FlowKey::new(
+            Protocol::Tcp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            Endpoint::new(listen_addr.ip(), listen_addr.port()),
+        );
+        let host_stream = TcpStream::connect(listen_addr).unwrap();
+        let bridge = StdTcpStreamBridge::new(flow.clone(), host_stream, Vec::new()).unwrap();
+        let mut runtime = TcpStreamBridgeRuntime::new(bridge);
+
+        let error = runtime.pump_open_flow_once(&flow, b"ping", 16).unwrap_err();
+
+        assert_eq!(error, TcpBridgeError::FlowNotOpen);
+        assert!(runtime.bridge().sandbox_writer().is_empty());
+        server.join().unwrap();
     }
 
     #[test]
