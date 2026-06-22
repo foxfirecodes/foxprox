@@ -1,0 +1,21 @@
+[package]
+name = "foxprox-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+foxprox-core = { path = "../foxprox-core" }
+serde_json = "1"
+
+[dev-dependencies]
+pretty_assertions = "1"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "foxprox"
+path = "src/main.rs"

@@ -561,3 +561,39 @@ The core now exposes a serde-compatible alpha runtime configuration schema for s
 
 ### Remaining blind spots
 - Config loading from CLI/files is still not implemented; this commit provides the schema and validation contract that CLI/runtime layers must use.
+
+## 2026-06-21 — CLI config validation observability cycle
+
+### Behavior under work
+Add a minimal `foxprox` CLI crate that can validate a runtime JSON config file and emit the same structured audit line the runtime would use before startup.
+
+### Expected evidence
+- Valid config JSON exits success and prints a `broker_started` audit JSON line.
+- Invalid config JSON exits with a validation failure code and prints a fail-closed `broker_error` audit JSON line with stable error codes.
+- Malformed JSON exits with parse-error evidence rather than panicking.
+
+### Commands run
+- `cargo fmt` — applied formatting for `foxprox-cli`.
+- `cargo test --all-targets --all-features` — passed, 4 CLI tests and 88 core tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_cli::tests::validate_config_text_prints_broker_started_audit_for_valid_config ... ok`
+- `foxprox_cli::tests::validate_config_text_prints_fail_closed_audit_for_invalid_config ... ok`
+- `foxprox_cli::tests::malformed_config_json_prints_parse_error_audit ... ok`
+- `foxprox_cli::tests::default_config_prints_json_config ... ok`
+
+### Interpretation
+The workspace now includes a minimal `foxprox` CLI surface for config validation/default generation. Config validation emits machine-readable audit JSON on success and fail-closed config errors, including malformed JSON parse errors, so startup config issues are externally visible before runtime networking starts.
+
+### Changed files
+- `Cargo.toml`
+- `Cargo.lock`
+- `crates/foxprox-cli/Cargo.toml`
+- `crates/foxprox-cli/src/lib.rs`
+- `crates/foxprox-cli/src/main.rs`
+- `progress.md`
+
+### Remaining blind spots
+- CLI currently validates/generates config only; it does not launch bwrap, open TUN, or start runtime forwarding listeners.
