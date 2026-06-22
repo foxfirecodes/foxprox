@@ -105,3 +105,7 @@ Policy rule IDs are not just labels; audit records depend on them for provenance
 ## 2026-06-21 - DNS response audit must distinguish cache confidence
 
 DNS response audit records should preserve response code, answer count, and TTL data, but they must not imply high-confidence domain attribution. Even correlated DNS answers feed the attribution cache at medium confidence, so response audit builders should reflect DNS-cache semantics instead of broker-query or explicit-host semantics.
+
+## 2026-06-21 - Packet checksum validation protects policy metadata
+
+Packet parsing should validate IPv4 header and transport checksums before exposing ports, DNS/QUIC classification, or ICMP type/code to policy. IPv4 UDP checksum zero is a protocol-permitted exception, but IPv6 UDP checksum zero should fail closed.

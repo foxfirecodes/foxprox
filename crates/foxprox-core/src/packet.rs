@@ -42,12 +42,14 @@ pub enum PacketParseError {
     TruncatedIpHeader,
     InvalidIpv4HeaderLength,
     InvalidIpv4TotalLength,
+    InvalidIpv4HeaderChecksum,
     UnsupportedIpv4Fragmentation,
     UnsupportedIpv6ExtensionHeader(u8),
     UnsupportedProtocol(u8),
     TruncatedTransportHeader,
     InvalidTcpHeaderLength,
     InvalidUdpLength,
+    InvalidTransportChecksum,
 }
 
 pub fn parse_ip_packet(packet: &[u8]) -> Result<PacketSummary, PacketParseError> {
@@ -81,6 +83,9 @@ fn parse_ipv4_packet(packet: &[u8]) -> Result<PacketSummary, PacketParseError> {
     }
     if packet.len() < total_len {
         return Err(PacketParseError::TruncatedIpHeader);
+    }
+    if internet_checksum(&packet[..ihl]) != 0 {
+        return Err(PacketParseError::InvalidIpv4HeaderChecksum);
     }
 
     let flags_fragment = u16::from_be_bytes([packet[6], packet[7]]);
@@ -145,6 +150,9 @@ fn parse_tcp(
     if payload.len() < 20 {
         return Err(PacketParseError::TruncatedTransportHeader);
     }
+    if transport_checksum(source, destination, 6, payload) != 0 {
+        return Err(PacketParseError::InvalidTransportChecksum);
+    }
     let source_port = u16::from_be_bytes([payload[0], payload[1]]);
     let destination_port = u16::from_be_bytes([payload[2], payload[3]]);
     let data_offset = usize::from(payload[12] >> 4) * 4;
@@ -176,6 +184,15 @@ fn parse_udp(
     if udp_len < 8 || udp_len > payload.len() {
         return Err(PacketParseError::InvalidUdpLength);
     }
+    let udp_payload = &payload[..udp_len];
+    let udp_checksum = u16::from_be_bytes([payload[6], payload[7]]);
+    if udp_checksum == 0 {
+        if matches!(source, IpAddr::V6(_)) || matches!(destination, IpAddr::V6(_)) {
+            return Err(PacketParseError::InvalidTransportChecksum);
+        }
+    } else if transport_checksum(source, destination, 17, udp_payload) != 0 {
+        return Err(PacketParseError::InvalidTransportChecksum);
+    }
 
     Ok(PacketSummary {
         source,
@@ -195,6 +212,14 @@ fn parse_icmp(
 ) -> Result<PacketSummary, PacketParseError> {
     if payload.len() < 4 {
         return Err(PacketParseError::TruncatedTransportHeader);
+    }
+
+    if ipv6 {
+        if transport_checksum(source, destination, 58, payload) != 0 {
+            return Err(PacketParseError::InvalidTransportChecksum);
+        }
+    } else if internet_checksum(payload) != 0 {
+        return Err(PacketParseError::InvalidTransportChecksum);
     }
 
     let icmp = if ipv6 {
@@ -227,6 +252,49 @@ fn is_ipv6_extension_header(next_header: u8) -> bool {
     matches!(next_header, 0 | 43 | 44 | 50 | 51 | 60 | 135 | 139 | 140)
 }
 
+fn transport_checksum(source: IpAddr, destination: IpAddr, protocol: u8, payload: &[u8]) -> u16 {
+    let mut sum = 0_u32;
+    match (source, destination) {
+        (IpAddr::V4(source), IpAddr::V4(destination)) => {
+            sum = add_bytes_to_sum(sum, &source.octets());
+            sum = add_bytes_to_sum(sum, &destination.octets());
+            sum += u32::from(protocol);
+            sum += payload.len() as u32;
+        }
+        (IpAddr::V6(source), IpAddr::V6(destination)) => {
+            sum = add_bytes_to_sum(sum, &source.octets());
+            sum = add_bytes_to_sum(sum, &destination.octets());
+            sum += ((payload.len() as u32) >> 16) & 0xffff;
+            sum += (payload.len() as u32) & 0xffff;
+            sum += u32::from(protocol);
+        }
+        _ => return 1,
+    }
+    checksum_from_sum(add_bytes_to_sum(sum, payload))
+}
+
+fn internet_checksum(bytes: &[u8]) -> u16 {
+    checksum_from_sum(add_bytes_to_sum(0, bytes))
+}
+
+fn add_bytes_to_sum(mut sum: u32, bytes: &[u8]) -> u32 {
+    let mut chunks = bytes.chunks_exact(2);
+    for chunk in &mut chunks {
+        sum += u32::from(u16::from_be_bytes([chunk[0], chunk[1]]));
+    }
+    if let Some(&byte) = chunks.remainder().first() {
+        sum += u32::from(byte) << 8;
+    }
+    sum
+}
+
+fn checksum_from_sum(mut sum: u32) -> u16 {
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
+}
+
 fn read_16_bytes(packet: &[u8], start: usize) -> [u8; 16] {
     let mut out = [0; 16];
     out.copy_from_slice(&packet[start..start + 16]);
@@ -238,6 +306,11 @@ mod tests {
     use super::*;
 
     fn ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
+        let source = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let destination = IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34));
+        let mut payload = payload.to_vec();
+        fill_transport_checksum(source, destination, protocol, &mut payload);
+
         let total_len = 20 + payload.len();
         let mut packet = vec![0u8; 20];
         packet[0] = 0x45;
@@ -246,11 +319,17 @@ mod tests {
         packet[9] = protocol;
         packet[12..16].copy_from_slice(&[10, 0, 0, 2]);
         packet[16..20].copy_from_slice(&[93, 184, 216, 34]);
-        packet.extend_from_slice(payload);
+        fill_ipv4_header_checksum(&mut packet);
+        packet.extend_from_slice(&payload);
         packet
     }
 
     fn ipv6_packet(next_header: u8, payload: &[u8]) -> Vec<u8> {
+        let source = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1));
+        let destination = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 2));
+        let mut payload = payload.to_vec();
+        fill_transport_checksum(source, destination, next_header, &mut payload);
+
         let mut packet = vec![0u8; 40];
         packet[0] = 0x60;
         packet[4..6].copy_from_slice(&(payload.len() as u16).to_be_bytes());
@@ -260,8 +339,35 @@ mod tests {
             .copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
         packet[24..40]
             .copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
-        packet.extend_from_slice(payload);
+        packet.extend_from_slice(&payload);
         packet
+    }
+
+    fn fill_ipv4_header_checksum(packet: &mut [u8]) {
+        packet[10..12].copy_from_slice(&0u16.to_be_bytes());
+        let checksum = internet_checksum(packet);
+        packet[10..12].copy_from_slice(&checksum.to_be_bytes());
+    }
+
+    fn fill_transport_checksum(
+        source: IpAddr,
+        destination: IpAddr,
+        protocol: u8,
+        payload: &mut [u8],
+    ) {
+        let checksum_range = match protocol {
+            1 | 58 if payload.len() >= 4 => 2..4,
+            6 if payload.len() >= 20 => 16..18,
+            17 if payload.len() >= 8 => 6..8,
+            _ => return,
+        };
+        payload[checksum_range.clone()].copy_from_slice(&0u16.to_be_bytes());
+        let checksum = if protocol == 1 {
+            internet_checksum(payload)
+        } else {
+            transport_checksum(source, destination, protocol, payload)
+        };
+        payload[checksum_range].copy_from_slice(&checksum.to_be_bytes());
     }
 
     fn tcp_header(source_port: u16, destination_port: u16) -> [u8; 20] {
@@ -353,6 +459,7 @@ mod tests {
 
         let mut fragment = ipv4_packet(17, &udp_header(1, 2));
         fragment[6..8].copy_from_slice(&0x2000u16.to_be_bytes());
+        fill_ipv4_header_checksum(&mut fragment[..20]);
         assert_eq!(
             parse_ip_packet(&fragment),
             Err(PacketParseError::UnsupportedIpv4Fragmentation)
@@ -361,6 +468,31 @@ mod tests {
         assert_eq!(
             parse_ip_packet(&ipv6_packet(0, &[])),
             Err(PacketParseError::UnsupportedIpv6ExtensionHeader(0))
+        );
+    }
+
+    #[test]
+    fn invalid_packet_checksums_fail_closed() {
+        let mut bad_ipv4 = ipv4_packet(6, &tcp_header(49152, 80));
+        bad_ipv4[10] ^= 0xff;
+        assert_eq!(
+            parse_ip_packet(&bad_ipv4),
+            Err(PacketParseError::InvalidIpv4HeaderChecksum)
+        );
+
+        let mut bad_tcp = ipv4_packet(6, &tcp_header(49152, 80));
+        bad_tcp[20 + 16] ^= 0xff;
+        assert_eq!(
+            parse_ip_packet(&bad_tcp),
+            Err(PacketParseError::InvalidTransportChecksum)
+        );
+
+        let mut bad_icmpv6 = ipv6_packet(58, &[128, 0, 0, 0]);
+        let checksum_offset = 40 + 2;
+        bad_icmpv6[checksum_offset] ^= 0xff;
+        assert_eq!(
+            parse_ip_packet(&bad_icmpv6),
+            Err(PacketParseError::InvalidTransportChecksum)
         );
     }
 

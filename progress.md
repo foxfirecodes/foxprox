@@ -611,3 +611,26 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: unit tests assert DNS response audit fields and JSON fragments for response code, answer count, and TTL.
 * Residual risk: actual DNS socket handler/upstream forwarding, DNS response synthesis, async audit drain/backpressure policy, and automatic response audit emission remain future work.
 * Commit hash: ad00a4b preserve dns response audit metadata.
+
+## 2026-06-21 - Packet checksum fail-closed validation
+
+* Invariant under work: validated packet metadata must reject invalid IPv4 header checksums and invalid TCP, UDP, ICMP, and ICMPv6 transport checksums before policy or forwarding sees the packet.
+* Threat or failure mode addressed: malformed packets with corrupted headers or transport metadata could otherwise be normalized into policy requests, causing audit and policy decisions to rely on packet fields that the network stack should have rejected.
+* Planned verification: add checksum validation to the IP packet parser, update packet fixtures to carry valid checksums, add negative checksum tests, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Packet checksum fail-closed validation results
+
+* Tests added/updated:
+  * packet fixtures now generate valid IPv4 header and TCP/UDP/ICMP/ICMPv6 checksums.
+  * invalid IPv4 header checksums fail closed with `InvalidIpv4HeaderChecksum`.
+  * invalid TCP and ICMPv6 transport checksums fail closed with `InvalidTransportChecksum`.
+  * existing metadata extraction, malformed length, unsupported protocol, fragmentation, and policy normalization tests continue to pass under checksum validation.
+* Commands run:
+  * `cargo fmt && cargo test` — passed: 95 tests passed.
+  * `cargo clippy --all-targets --all-features -- -D warnings` — completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * corrupted IPv4 headers are rejected before fragmentation/protocol metadata can be trusted.
+  * corrupted transport payloads are rejected before source/destination ports, DNS/QUIC classification, or ICMP type/code metadata can feed policy.
+  * IPv4 UDP checksum zero remains accepted according to protocol semantics; IPv6 UDP checksum zero fails closed.
+* Audit evidence: not applicable in this commit; checksum failures surface as parser errors that future runtime code should audit as fail-closed unsupported/malformed packet decisions.
+* Residual risk: packet parser still rejects IPv4 fragments and IPv6 extension headers rather than reassembling/processing them; no runtime TUN integration currently couples parser errors to audit sink emission.
