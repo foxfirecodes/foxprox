@@ -634,3 +634,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * IPv4 UDP checksum zero remains accepted according to protocol semantics; IPv6 UDP checksum zero fails closed.
 * Audit evidence: not applicable in this commit; checksum failures surface as parser errors that future runtime code should audit as fail-closed unsupported/malformed packet decisions.
 * Residual risk: packet parser still rejects IPv4 fragments and IPv6 extension headers rather than reassembling/processing them; no runtime TUN integration currently couples parser errors to audit sink emission.
+* Commit hash: 4e68422 fail closed on invalid packet checksums.
