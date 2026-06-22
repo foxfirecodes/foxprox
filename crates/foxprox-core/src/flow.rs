@@ -340,6 +340,17 @@ impl DnsCache {
         }
     }
 
+    pub fn rollback_observation(&mut self, observation: &DnsObservation) {
+        for address in &observation.addresses {
+            if let Some(observations) = self.by_ip.get_mut(address) {
+                observations.retain(|stored| stored != observation);
+                if observations.is_empty() {
+                    self.by_ip.remove(address);
+                }
+            }
+        }
+    }
+
     pub fn attribution_for(&self, ip: IpAddr, now_ms: u64) -> Option<HostnameAttribution> {
         self.by_ip.get(&ip).and_then(|observations| {
             observations

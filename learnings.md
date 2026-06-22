@@ -83,3 +83,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — DNS source mismatch deserves distinct audit evidence
 
 - Wrong-source DNS responses are not just generic upstream unavailability: they are attribution-safety failures. Model them as `DnsUpstreamError::SourceMismatch` so fail-closed audit records can distinguish spoofed/misdelivered replies from timeouts or socket errors.
+
+## 2026-06-22 — DNS client delivery gates attribution usefulness
+
+- DNS attribution should not outlive failed client delivery in listener paths. If a broker listener cannot send the DNS response back to the sandbox, rollback the just-committed observation and emit `dns_client_send_failed` broker-error evidence so cache state reflects what the sandbox could actually observe.

@@ -15,6 +15,7 @@ pub struct DnsHandlerResult {
     pub response: Option<Vec<u8>>,
     pub decision: PolicyDecision,
     pub observed_addresses: Vec<IpAddr>,
+    pub observation: Option<DnsObservation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -75,6 +76,7 @@ impl<U: DnsUpstream> DnsBrokerHandler<U> {
                     response: None,
                     decision,
                     observed_addresses: Vec::new(),
+                    observation: None,
                 };
             }
         };
@@ -91,6 +93,7 @@ impl<U: DnsUpstream> DnsBrokerHandler<U> {
                 response: build_refused_response(packet).ok(),
                 decision,
                 observed_addresses: Vec::new(),
+                observation: None,
             };
         }
 
@@ -122,14 +125,16 @@ impl<U: DnsUpstream> DnsBrokerHandler<U> {
                 response: build_refused_response(packet).ok(),
                 decision,
                 observed_addresses: Vec::new(),
+                observation: None,
             };
         }
-        self.cache.commit_observation(observation);
+        self.cache.commit_observation(observation.clone());
 
         DnsHandlerResult {
             response: Some(response),
             decision,
             observed_addresses: answers.addresses,
+            observation: Some(observation),
         }
     }
 
@@ -137,8 +142,16 @@ impl<U: DnsUpstream> DnsBrokerHandler<U> {
         &self.broker
     }
 
+    pub fn broker_mut(&mut self) -> &mut BrokerCore {
+        &mut self.broker
+    }
+
     pub fn cache(&self) -> &DnsCache {
         &self.cache
+    }
+
+    pub fn rollback_observation(&mut self, observation: &DnsObservation) {
+        self.cache.rollback_observation(observation);
     }
 
     pub fn into_parts(self) -> (BrokerCore, DnsCache, U) {
@@ -179,6 +192,7 @@ impl<U: DnsUpstream> DnsBrokerHandler<U> {
             response: build_refused_response(query_packet).ok(),
             decision,
             observed_addresses: Vec::new(),
+            observation: None,
         }
     }
 }

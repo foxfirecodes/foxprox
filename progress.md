@@ -1271,3 +1271,30 @@ Round-12 high finding is fixed: wrong-source DNS replies now map to `DnsUpstream
 
 ### Remaining blind spots
 - The DNS listener proof is blocking and single-step; final runtime still needs async lifecycle management, retry policy, and integration with sandbox setup/broker process supervision.
+
+## 2026-06-22 — Round-13 DNS listener send-failure fix
+
+### Commands run
+- `cargo fmt` — applied formatting for DNS listener send-failure handling.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 9 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 103 core tests, 3 device tests, 9 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_dns_broker_server_audits_send_failure_and_rolls_back_cache ... ok`
+- `foxprox_egress::tests::blocking_dns_broker_server_handles_one_allowed_query ... ok`
+- `foxprox_egress::tests::blocking_dns_broker_server_sends_refused_for_denied_query ... ok`
+
+### Interpretation
+Round-13 high finding is fixed. `BlockingDnsBrokerServer::handle_one` now reports response send failure as structured step evidence (`send_status=send_failed`, `sent_response=false`, fail-closed/resource-limit decision), appends a `broker_error` audit with `dns_client_send_failed`, and rolls back the just-committed DNS observation so attribution cache state only reflects responses delivered to the sandbox. Successful send paths still report `send_status=sent` and preserve handler audit/cache behavior.
+
+### Changed files
+- `crates/foxprox-core/src/flow.rs`
+- `crates/foxprox-core/src/dns_handler.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Send-failure rollback is implemented for the blocking listener proof; final async DNS runtime must preserve the same delivery-gated attribution behavior.
