@@ -10,7 +10,9 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
 
 use foxprox_core::{Endpoint, FlowKey, Protocol};
-use foxprox_runtime::{TcpStackAdapter, TcpStackConnectAttempt};
+use foxprox_runtime::{
+    TcpBridgeError, TcpFlowRuntime, TcpStackAdapter, TcpStackConnectAttempt, TcpStreamBridge,
+};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp;
@@ -56,6 +58,64 @@ pub enum SmoltcpTunPumpOutcome {
         outbound_packets: usize,
         outbound_bytes: usize,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SmoltcpTcpBridgeSessionError {
+    Adapter(SmoltcpAdapterError),
+    Bridge(TcpBridgeError),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SmoltcpTcpBridgeSessionOutcome {
+    pub flow: FlowKey,
+    pub bytes_forwarded: usize,
+}
+
+pub struct SmoltcpTcpBridgeSession<B> {
+    adapter: SmoltcpIpLoopback,
+    flow_runtime: TcpFlowRuntime<B>,
+}
+
+impl<B> SmoltcpTcpBridgeSession<B> {
+    pub fn new(adapter: SmoltcpIpLoopback, flow_runtime: TcpFlowRuntime<B>) -> Self {
+        Self {
+            adapter,
+            flow_runtime,
+        }
+    }
+
+    pub fn adapter(&self) -> &SmoltcpIpLoopback {
+        &self.adapter
+    }
+
+    pub fn flow_runtime(&self) -> &TcpFlowRuntime<B> {
+        &self.flow_runtime
+    }
+
+    pub fn into_parts(self) -> (SmoltcpIpLoopback, TcpFlowRuntime<B>) {
+        (self.adapter, self.flow_runtime)
+    }
+}
+
+impl<B: TcpStreamBridge> SmoltcpTcpBridgeSession<B> {
+    pub fn forward_sandbox_payload_once(
+        &mut self,
+        listener_port: u16,
+        max_bytes: usize,
+    ) -> Result<SmoltcpTcpBridgeSessionOutcome, SmoltcpTcpBridgeSessionError> {
+        let payload = self
+            .adapter
+            .recv_on_listener_port_with_flow(listener_port, max_bytes)
+            .map_err(SmoltcpTcpBridgeSessionError::Adapter)?;
+        self.flow_runtime
+            .send_sandbox_payload_to_host(&payload.flow, &payload.bytes)
+            .map_err(SmoltcpTcpBridgeSessionError::Bridge)?;
+        Ok(SmoltcpTcpBridgeSessionOutcome {
+            flow: payload.flow,
+            bytes_forwarded: payload.bytes.len(),
+        })
+    }
 }
 
 pub struct SmoltcpIpLoopback {
@@ -546,8 +606,8 @@ mod tests {
     };
     use foxprox_runtime::{
         build_runtime_components, BrokerRuntimeConfig, EgressError, HostEgress, StdTcpStreamBridge,
-        TcpBridgeError, TcpConnectRequest, TcpFlowRuntime, TcpHostReadOutcome, TcpStackOutcome,
-        TcpStackRuntime, TcpStreamBridge, UdpDatagramRequest,
+        TcpConnectRequest, TcpHostReadOutcome, TcpStackOutcome, TcpStackRuntime,
+        UdpDatagramRequest,
     };
     use std::io::{Cursor, Read, Write};
     use std::net::{TcpListener, TcpStream};
@@ -692,7 +752,7 @@ mod tests {
         adapter
     }
 
-    fn packet_pumped_adapter_with_payload(bytes: &[u8]) -> (SmoltcpIpLoopback, SmoltcpTcpPayload) {
+    fn packet_pumped_adapter_with_unread_payload(bytes: &[u8]) -> SmoltcpIpLoopback {
         let mut adapter = SmoltcpIpLoopback::new(
             SmoltcpIpConfig {
                 address: Ipv4Addr::new(10, 66, 0, 1),
@@ -741,6 +801,11 @@ mod tests {
             3,
         )
         .unwrap();
+        adapter
+    }
+
+    fn packet_pumped_adapter_with_payload(bytes: &[u8]) -> (SmoltcpIpLoopback, SmoltcpTcpPayload) {
+        let mut adapter = packet_pumped_adapter_with_unread_payload(bytes);
         let payload = adapter.recv_on_listener_port_with_flow(8080, 64).unwrap();
         (adapter, payload)
     }
@@ -974,6 +1039,46 @@ mod tests {
             .unwrap();
 
         assert_eq!(server.join().unwrap(), b"tun-host".to_vec());
+    }
+
+    #[test]
+    fn bridge_session_forwards_packet_pumped_payload_to_real_host() {
+        let mut adapter = packet_pumped_adapter_with_unread_payload(b"session-host");
+        let attempt = adapter.accepted_tcp_connect_attempts().remove(0);
+        let flow = FlowKey::new(Protocol::Tcp, attempt.source, attempt.destination);
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = vec![0; b"session-host".len()];
+            stream.read_exact(&mut received).unwrap();
+            received
+        });
+        let host_stream = TcpStream::connect(listen_addr).unwrap();
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("packet-pumped-session").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let bridge = StdTcpStreamBridge::new(flow.clone(), host_stream, Vec::new()).unwrap();
+        let mut flow_runtime = TcpFlowRuntime::new(&components, bridge);
+        flow_runtime.mark_opened(flow.clone()).unwrap();
+        let mut session = SmoltcpTcpBridgeSession::new(adapter, flow_runtime);
+
+        let outcome = session.forward_sandbox_payload_once(8080, 64).unwrap();
+
+        assert_eq!(
+            outcome,
+            SmoltcpTcpBridgeSessionOutcome {
+                flow,
+                bytes_forwarded: b"session-host".len()
+            }
+        );
+        assert_eq!(server.join().unwrap(), b"session-host".to_vec());
     }
 
     #[test]

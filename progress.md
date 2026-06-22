@@ -1547,3 +1547,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: the sandbox writer is still an intermediate buffer in the test path; a continuous session type must join TUN reads, policy gating, host bridge reads/writes, smoltcp polling, and lifecycle auditing.
 - Exact next step: commit host-read-to-smoltcp packet emission, then introduce a small TCP transparent session harness that owns smoltcp adapter + TCP flow runtime and executes one sandbox-to-host pump step after policy-open.
+
+## 2026-06-22T22:33:05Z
+- Current objective: continue after host-read smoltcp packet emission toward a small transparent TCP bridge session harness.
+- Git status summary: clean worktree after commit `9a14e54`.
+- Intended slice: add a smoltcp TCP bridge session object that owns an adapter plus `TcpFlowRuntime`, reads one accepted listener payload, and forwards it to the already-open host bridge with typed adapter/bridge errors.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: this will be one-direction/one-step and assume policy already opened the flow.
+- Exact next step: add the session harness and a packet-pumped payload-to-real-host regression through it.
+
+## 2026-06-22T22:34:25Z
+- Current objective: introduce a one-step transparent TCP bridge session harness.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 26 smoltcp adapter tests passed. `SmoltcpTcpBridgeSession` now owns a smoltcp adapter and `TcpFlowRuntime`, reads one accepted listener payload, forwards it to an already-open bridge, and returns typed adapter/bridge errors; the regression proves packet-pumped payload bytes reach a real localhost TCP listener through the session harness.
+- Commit hash when committed: pending.
+- Remaining risks: session assumes policy already opened the flow; it does not yet own `TcpStackRuntime`, host-read reverse pumping, TUN writer draining, or lifecycle close auditing.
+- Exact next step: commit one-step TCP bridge session, then add a complementary session method that pumps host bytes from `TcpFlowRuntime` back into smoltcp and drains emitted IP packets to a TUN-like writer.
