@@ -1985,3 +1985,29 @@ Addressed round-31 and round-32 high findings. Blocking runtime aggregate audit 
 
 ### Remaining blind spots
 - Aggregate ordering is proven for blocking single-step runtime calls. Final runtime still needs a single supervised async audit output path with global backpressure across lifecycle, DNS, proxy, TUN/smoltcp, child wait, task joins, and cleanup.
+
+## 2026-06-22 — Blocking child supervisor proof
+
+### Commands run
+- `cargo fmt` — applied formatting for blocking child supervisor proof.
+- `cargo test -p foxprox-egress blocking_child_supervisor --all-targets --all-features` — passed, clean and non-zero child supervision tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 125 core tests, 3 device tests, 31 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_child_supervisor_captures_clean_child_exit_for_lifecycle ... ok`
+- `foxprox_egress::tests::blocking_child_supervisor_nonzero_exit_is_fail_closed_in_lifecycle ... ok`
+- `runtime::tests::runtime_lifecycle_unknown_child_status_is_fail_closed ... ok`
+
+### Interpretation
+Added `BlockingChildSupervisor`, a concrete host process runner that spawns a child, waits for completion, and converts the observed process id/exit code into `RuntimeChildExit`. Regression tests feed real child process results into `RuntimeLifecycleHarness`: clean child exit produces structured allow evidence, while non-zero exit remains fail-closed. This complements the platform-independent child exit contract with a concrete blocking supervision proof.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The child supervisor is blocking and one-shot. Final runtime still needs async child wait integration, signal handling, task cancellation/join ordering, and unified audit backpressure across all runtime tasks.

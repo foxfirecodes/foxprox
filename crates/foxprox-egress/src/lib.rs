@@ -11,13 +11,15 @@ use foxprox_core::{
     malformed_proxy_request, AuditKind, AuditRecord, BrokerRuntimeConfig, Decision, DenialReason,
     DnsBrokerHandler, DnsQueryMetadata, DnsUpstream, DnsUpstreamError, ExplicitProxyEgress,
     ExplicitProxyFrontend, Frontend, HttpProxyRequestMetadata, NetworkEndpoint, PolicyRequest,
-    Protocol, ProxyEgressError, ProxyParseError, RuntimeCleanupAction, RuntimeCleanupReport,
-    RuntimeComponent, RuntimeExitStatus, RuntimeLifecycleError, RuntimeLifecycleHarness,
-    RuntimeListenerConfig, SharedDnsCache, SocksConnectMetadata, TcpEgress, TcpEgressError,
-    UdpEgress, UdpEgressError,
+    Protocol, ProxyEgressError, ProxyParseError, RuntimeChildExit, RuntimeCleanupAction,
+    RuntimeCleanupReport, RuntimeComponent, RuntimeExitStatus, RuntimeLifecycleError,
+    RuntimeLifecycleHarness, RuntimeListenerConfig, SharedDnsCache, SocksConnectMetadata,
+    TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
 };
+use std::ffi::OsStr;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -1430,6 +1432,43 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChildSupervisorError {
+    SpawnFailed,
+    WaitFailed,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct BlockingChildSupervisor;
+
+impl BlockingChildSupervisor {
+    pub fn run_to_exit<P, I, S>(
+        &mut self,
+        program: P,
+        args: I,
+    ) -> Result<RuntimeChildExit, ChildSupervisorError>
+    where
+        P: AsRef<OsStr>,
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| ChildSupervisorError::SpawnFailed)?;
+        let process_id = child.id();
+        let status = child.wait().map_err(|_| ChildSupervisorError::WaitFailed)?;
+        Ok(RuntimeChildExit {
+            process_id: Some(process_id),
+            exit_code: status.code(),
+            signal: None,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BlockingUdpEgress {
     bind_addr: SocketAddr,
@@ -1513,6 +1552,65 @@ mod tests {
         fn flush(&mut self) -> IoResult<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn blocking_child_supervisor_captures_clean_child_exit_for_lifecycle() {
+        let mut supervisor = BlockingChildSupervisor;
+        let child_exit = supervisor
+            .run_to_exit(std::env::current_exe().unwrap(), ["--list"])
+            .unwrap();
+        assert_eq!(child_exit.exit_code, Some(0));
+        assert!(child_exit.process_id.is_some());
+
+        let mut runtime = RuntimeLifecycleHarness::new("child-sandbox", 4);
+        runtime
+            .start(vec![RuntimeComponent::ChildProcess], 1_000)
+            .unwrap();
+        runtime
+            .exit_with_cleanup_and_child(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::ChildProcess]),
+                Some(child_exit),
+                1_100,
+            )
+            .unwrap();
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::Allow));
+        assert_eq!(records[1].details["child_status"], "clean");
+        assert_eq!(records[1].details["child_exit_code"], "0");
+    }
+
+    #[test]
+    fn blocking_child_supervisor_nonzero_exit_is_fail_closed_in_lifecycle() {
+        let mut supervisor = BlockingChildSupervisor;
+        let child_exit = supervisor
+            .run_to_exit(
+                std::env::current_exe().unwrap(),
+                ["--definitely-not-a-valid-test-harness-flag"],
+            )
+            .unwrap();
+        assert_ne!(child_exit.exit_code, Some(0));
+        assert!(child_exit.process_id.is_some());
+
+        let mut runtime = RuntimeLifecycleHarness::new("child-sandbox", 4);
+        runtime
+            .start(vec![RuntimeComponent::ChildProcess], 1_000)
+            .unwrap();
+        runtime
+            .exit_with_cleanup_and_child(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::ChildProcess]),
+                Some(child_exit),
+                1_100,
+            )
+            .unwrap();
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["child_status"], "failed");
     }
 
     #[test]

@@ -164,3 +164,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Runtime aggregate ledgers need capture-time ordering
 
 - Aggregating per-component audit ledgers after the fact can misrepresent interleaved runtime activity if records are grouped by component. Runtime proofs should archive new records immediately after each handled event so the aggregate evidence reflects capture order; unknown child status is not a clean exit and must fail closed.
+
+## 2026-06-22 — Child supervision proof can use a blocking process runner
+
+- A host-runtime proof should convert real `std::process::Command` results into `RuntimeChildExit` and feed that into lifecycle exit evidence. Test-harness subprocesses are a deterministic way to prove clean and non-zero child exits without depending on external binaries.

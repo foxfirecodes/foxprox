@@ -10,6 +10,7 @@ pub enum RuntimeComponent {
     DnsListener,
     HttpProxyListener,
     Socks5Listener,
+    ChildProcess,
 }
 
 impl RuntimeComponent {
@@ -20,6 +21,7 @@ impl RuntimeComponent {
             Self::DnsListener => "dns_listener",
             Self::HttpProxyListener => "http_proxy_listener",
             Self::Socks5Listener => "socks5_listener",
+            Self::ChildProcess => "child_process",
         }
     }
 }
@@ -444,7 +446,9 @@ fn frontend_for_component(component: RuntimeComponent) -> Frontend {
         RuntimeComponent::HttpProxyListener => Frontend::HttpProxy,
         RuntimeComponent::Socks5Listener => Frontend::Socks5Proxy,
         RuntimeComponent::TunDevice => Frontend::Tun,
-        RuntimeComponent::SmoltcpStack | RuntimeComponent::DnsListener => Frontend::Core,
+        RuntimeComponent::SmoltcpStack
+        | RuntimeComponent::DnsListener
+        | RuntimeComponent::ChildProcess => Frontend::Core,
     }
 }
 
@@ -453,7 +457,9 @@ fn protocol_for_component(component: RuntimeComponent) -> Protocol {
         RuntimeComponent::DnsListener => Protocol::Dns,
         RuntimeComponent::HttpProxyListener => Protocol::Http,
         RuntimeComponent::Socks5Listener => Protocol::Socks,
-        RuntimeComponent::TunDevice | RuntimeComponent::SmoltcpStack => Protocol::Unsupported,
+        RuntimeComponent::TunDevice
+        | RuntimeComponent::SmoltcpStack
+        | RuntimeComponent::ChildProcess => Protocol::Unsupported,
     }
 }
 
