@@ -37,6 +37,7 @@ pub struct SmoltcpIpLoopback {
     sockets: SocketSet<'static>,
     tcp_handles: Vec<SocketHandle>,
     listener_ports: Vec<u16>,
+    reported_connects: Vec<TcpStackConnectAttempt>,
     config: SmoltcpIpConfig,
 }
 
@@ -62,6 +63,7 @@ impl SmoltcpIpLoopback {
             sockets: SocketSet::new(Vec::new()),
             tcp_handles: Vec::new(),
             listener_ports: Vec::new(),
+            reported_connects: Vec::new(),
             config,
         })
     }
@@ -129,6 +131,12 @@ impl SmoltcpIpLoopback {
             .count()
     }
 
+    fn remember_reported(&mut self, attempt: &TcpStackConnectAttempt) {
+        if !self.reported_connects.contains(attempt) {
+            self.reported_connects.push(attempt.clone());
+        }
+    }
+
     pub fn active_tcp_connect_attempts(&mut self) -> Vec<TcpStackConnectAttempt> {
         self.tcp_handles
             .iter()
@@ -174,12 +182,18 @@ fn endpoint_to_foxprox(endpoint: smoltcp::wire::IpEndpoint) -> Option<Endpoint> 
 
 impl TcpStackAdapter for SmoltcpIpLoopback {
     fn next_connect_attempt(&mut self) -> Option<TcpStackConnectAttempt> {
-        self.active_tcp_connect_attempts().into_iter().next()
+        self.active_tcp_connect_attempts()
+            .into_iter()
+            .find(|attempt| !self.reported_connects.contains(attempt))
     }
 
-    fn reset_connect(&mut self, _attempt: &TcpStackConnectAttempt) {}
+    fn reset_connect(&mut self, attempt: &TcpStackConnectAttempt) {
+        self.remember_reported(attempt);
+    }
 
-    fn mark_connect_opened(&mut self, _attempt: &TcpStackConnectAttempt) {}
+    fn mark_connect_opened(&mut self, attempt: &TcpStackConnectAttempt) {
+        self.remember_reported(attempt);
+    }
 }
 
 #[cfg(test)]
@@ -360,6 +374,26 @@ mod tests {
                 .action,
             DecisionAction::Allow
         );
+    }
+
+    #[test]
+    fn smoltcp_adapter_suppresses_connect_after_open_callback() {
+        let mut adapter = connected_adapter();
+        let attempt = adapter.next_connect_attempt().unwrap();
+
+        adapter.mark_connect_opened(&attempt);
+
+        assert!(adapter.next_connect_attempt().is_none());
+    }
+
+    #[test]
+    fn smoltcp_adapter_suppresses_connect_after_reset_callback() {
+        let mut adapter = connected_adapter();
+        let attempt = adapter.next_connect_attempt().unwrap();
+
+        adapter.reset_connect(&attempt);
+
+        assert!(adapter.next_connect_attempt().is_none());
     }
 
     #[test]

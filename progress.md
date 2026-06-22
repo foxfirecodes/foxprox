@@ -1262,3 +1262,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: smoltcp adapter callbacks do not yet suppress duplicate connect reports or reset smoltcp sockets on denial.
 - Exact next step: commit smoltcp runtime gating, then add duplicate connect-attempt suppression after `mark_connect_opened` or `reset_connect` callbacks.
+
+## 2026-06-22T22:00:56Z
+- Current objective: continue after smoltcp runtime gating toward stable adapter event semantics.
+- Git status summary: clean worktree after commit `ea834b8`.
+- Intended slice: suppress duplicate smoltcp connect-attempt reports after runtime callbacks mark a connect opened or reset.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: suppression is adapter-state based; it still does not actively close/reset smoltcp sockets.
+- Exact next step: track reported attempts and add callback regression tests.
+
+## 2026-06-22T22:02:42Z
+- Current objective: suppress duplicate smoltcp connect-attempt reports after runtime callbacks.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 10 smoltcp adapter tests passed. New tests prove `mark_connect_opened` and `reset_connect` callbacks remember reported smoltcp attempts so `next_connect_attempt` does not repeatedly emit the same active socket.
+- Commit hash when committed: pending.
+- Remaining risks: `reset_connect` only suppresses reporting; it does not yet abort/close matching smoltcp sockets.
+- Exact next step: commit duplicate suppression, then make smoltcp `reset_connect` abort the matching socket and verify the active socket count drops after polling.
