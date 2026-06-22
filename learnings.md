@@ -177,3 +177,8 @@
 ## 2026-06-22 — Runtime pre-opened TUN verification
 
 - Runtime tests should exercise the semantic `PreopenedTunDevice` wrapper rather than only the generic blocking device, proving the accepted TUN endpoint type works with packet policy and write-back orchestration.
+
+## 2026-06-22 — DNS allowed response synthesis
+
+- Allowed DNS response construction belongs in `foxprox-dns` beside refusal response synthesis; runtime/DNS-serving code should provide addresses and original query bytes rather than constructing wire records.
+- A/AAAA response synthesis should filter supplied addresses by the original query type and return a valid no-answer response for unsupported query types instead of guessing.

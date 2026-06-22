@@ -758,3 +758,22 @@
   - `cargo tree -p foxprox-runtime` — runtime consumes device/net/policy/audit/egress contracts; policy/audit remain independent.
 - Commit hash after commit: 491a086.
 - Remaining boundary risks: actual pre-opened `File` integration in a launcher, raw fd handoff, async readiness, and Linux setup remain.
+
+## 2026-06-22 — Boundary objective: DNS allowed address response synthesis
+
+- Boundary under work: DNS subsystem response synthesis for allowed A/AAAA queries from normalized address data.
+- Allowed dependency direction: `foxprox-dns` owns DNS wire response construction and depends only on `foxprox-core`; policy/audit/net consume normalized DNS events/records and must not build DNS wire packets directly.
+- Dependency-risk assessment: DNS broker support needs allowed responses as well as refusal responses, but DNS packet details should remain contained in the DNS boundary. The response builder should accept IP address data and original query bytes, not policy/frontends/parser structs.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo tree -p foxprox-dns`.
+- Observed results: added `build_address_response` to synthesize successful A/AAAA DNS responses from original query bytes plus caller-supplied IP addresses, filtering answers by query type and returning valid no-answer responses for unsupported types. Initial test compile failed on ambiguous IP parse; specifying `IpAddr` fixed it. All verification passed.
+- Changed files:
+  - `crates/foxprox-dns/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 82 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-dns` — DNS depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: UDP socket serving, upstream DNS wire forwarding, TCP DNS, negative caching, and DNSSEC/authority metadata remain.

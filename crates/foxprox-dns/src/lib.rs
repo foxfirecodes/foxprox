@@ -313,6 +313,61 @@ pub fn build_refused_response(packet: &[u8]) -> Result<Vec<u8>, DnsError> {
     Ok(response)
 }
 
+/// Build a successful DNS response for the original first question using caller
+/// supplied address data. Only A and AAAA answers matching the query type are
+/// emitted; unsupported query types receive a valid no-answer response.
+pub fn build_address_response(
+    packet: &[u8],
+    addrs: impl IntoIterator<Item = IpAddr>,
+    ttl: Duration,
+) -> Result<Vec<u8>, DnsError> {
+    let parsed = parse_wire_query(packet)?;
+    let matching_addrs: Vec<IpAddr> = addrs
+        .into_iter()
+        .filter(|addr| {
+            matches!(
+                (&parsed.query_type, addr),
+                (DnsQueryType::A, IpAddr::V4(_)) | (DnsQueryType::Aaaa, IpAddr::V6(_))
+            )
+        })
+        .collect();
+    let mut response = Vec::with_capacity(parsed.question_end + matching_addrs.len() * 28);
+    response.extend_from_slice(&packet[..parsed.question_end]);
+
+    let request_flags = u16::from_be_bytes([packet[2], packet[3]]);
+    let opcode = request_flags & 0x7800;
+    let rd = request_flags & 0x0100;
+    let response_flags = 0x8000 | opcode | rd | 0x0080; // QR=1, RA=1, RCODE=0.
+    response[2..4].copy_from_slice(&response_flags.to_be_bytes());
+    response[4..6].copy_from_slice(&1_u16.to_be_bytes()); // qdcount
+    response[6..8].copy_from_slice(&(matching_addrs.len() as u16).to_be_bytes());
+    response[8..10].copy_from_slice(&0_u16.to_be_bytes()); // nscount
+    response[10..12].copy_from_slice(&0_u16.to_be_bytes()); // arcount
+
+    let ttl = ttl.as_secs().min(u64::from(u32::MAX)) as u32;
+    for addr in matching_addrs {
+        response.extend_from_slice(&0xc00c_u16.to_be_bytes()); // first QNAME pointer
+        match addr {
+            IpAddr::V4(addr) => {
+                response.extend_from_slice(&1_u16.to_be_bytes());
+                response.extend_from_slice(&1_u16.to_be_bytes());
+                response.extend_from_slice(&ttl.to_be_bytes());
+                response.extend_from_slice(&4_u16.to_be_bytes());
+                response.extend_from_slice(&addr.octets());
+            }
+            IpAddr::V6(addr) => {
+                response.extend_from_slice(&28_u16.to_be_bytes());
+                response.extend_from_slice(&1_u16.to_be_bytes());
+                response.extend_from_slice(&ttl.to_be_bytes());
+                response.extend_from_slice(&16_u16.to_be_bytes());
+                response.extend_from_slice(&addr.octets());
+            }
+        }
+    }
+
+    Ok(response)
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum DnsError {
     Malformed(&'static str),
@@ -400,6 +455,45 @@ mod tests {
             u16::from_be_bytes([response[2], response[3]]) & 0x800f,
             0x8005
         );
+        assert_eq!(&response[12..], &packet[12..]);
+    }
+
+    #[test]
+    fn builds_allowed_address_response_for_matching_query_type() {
+        let packet = dns_query_packet(0x1234, "example.com", 1);
+        let response = build_address_response(
+            &packet,
+            [
+                "203.0.113.10".parse().unwrap(),
+                "2001:db8::1".parse().unwrap(),
+            ],
+            Duration::from_secs(300),
+        )
+        .unwrap();
+
+        assert_eq!(&response[0..2], &[0x12, 0x34]);
+        assert_eq!(
+            u16::from_be_bytes([response[2], response[3]]) & 0x808f,
+            0x8080
+        );
+        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 1);
+        assert_eq!(
+            parse_address_records(&response).unwrap()[0].addr,
+            "203.0.113.10".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn address_response_for_unsupported_query_type_has_no_answers() {
+        let packet = dns_query_packet(0x1234, "example.com", 15);
+        let response = build_address_response(
+            &packet,
+            ["203.0.113.10".parse().unwrap()],
+            Duration::from_secs(300),
+        )
+        .unwrap();
+
+        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 0);
         assert_eq!(&response[12..], &packet[12..]);
     }
 
