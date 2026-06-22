@@ -1367,3 +1367,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: bridge integration remains fake-host; real `StdTcpStreamBridge` and TUN/smoltcp packet IO are not joined.
 - Exact next step: commit smoltcp payload-to-runtime handoff, then add a real `StdTcpStreamBridge` loopback handoff using a smoltcp-exported payload flow.
+
+## 2026-06-22T22:10:28Z
+- Current objective: continue after smoltcp payload-to-runtime handoff toward a concrete host TCP bridge proof.
+- Git status summary: clean worktree after commit `5471b5f`.
+- Intended slice: use a smoltcp-exported payload flow to drive `TcpFlowRuntime<StdTcpStreamBridge<_>>` and verify bytes reach a real loopback host TCP listener.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: the smoltcp and host sockets are still test-loopback objects, not a live TUN session.
+- Exact next step: add the concrete bridge handoff test.
+
+## 2026-06-22T22:11:20Z
+- Current objective: bridge smoltcp-exported payload flows to a real loopback host TCP stream.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on a wrapped `StdTcpStreamBridge::new` call; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 14 smoltcp adapter tests passed. New test proves a smoltcp-exported payload flow can be opened in `TcpFlowRuntime<StdTcpStreamBridge<_>>` and delivered to a real localhost TCP listener.
+- Commit hash when committed: pending.
+- Remaining risks: this still uses loopback test sockets and an in-memory smoltcp loopback adapter; no live TUN fd is feeding smoltcp yet.
+- Exact next step: commit concrete smoltcp-to-host bridge proof, then add an adapter-facing IP packet ingress queue so tests can feed raw IP packets toward smoltcp without exposing smoltcp device types to policy.
