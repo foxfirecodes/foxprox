@@ -257,12 +257,31 @@ pub fn synthesize_udp_ipv4_response(
     packet[20..22].copy_from_slice(&original_destination.port().to_be_bytes());
     packet[22..24].copy_from_slice(&original_source.port().to_be_bytes());
     packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
-    // UDP checksum is optional for IPv4. Keep it zero for this minimal response
-    // proof; checksum enforcement can be added without changing policy/audit.
     packet[28..].copy_from_slice(payload);
+    let udp_checksum = udp_checksum_ipv4(destination_ip, source_ip, &packet[20..]);
+    packet[26..28].copy_from_slice(&udp_checksum.to_be_bytes());
     let ip_checksum = internet_checksum(&packet[..20]);
     packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
     Ok(SyntheticIpPacket { bytes: packet })
+}
+
+fn udp_checksum_ipv4(source: Ipv4Addr, destination: Ipv4Addr, udp_segment: &[u8]) -> u16 {
+    let mut pseudo = Vec::with_capacity(12 + udp_segment.len() + 1);
+    pseudo.extend_from_slice(&source.octets());
+    pseudo.extend_from_slice(&destination.octets());
+    pseudo.push(0);
+    pseudo.push(17);
+    pseudo.extend_from_slice(&(udp_segment.len() as u16).to_be_bytes());
+    pseudo.extend_from_slice(udp_segment);
+    if pseudo.len() % 2 == 1 {
+        pseudo.push(0);
+    }
+    let checksum = internet_checksum(&pseudo);
+    if checksum == 0 {
+        0xffff
+    } else {
+        checksum
+    }
 }
 
 fn synthesize_echo_reply(bytes: &[u8], header: Ipv4Header) -> Vec<u8> {
@@ -509,6 +528,7 @@ mod tests {
         assert_eq!(&bytes[16..20], &[10, 0, 0, 2]);
         assert_eq!(u16::from_be_bytes([bytes[20], bytes[21]]), 12345);
         assert_eq!(u16::from_be_bytes([bytes[22], bytes[23]]), 53000);
+        assert_ne!(u16::from_be_bytes([bytes[26], bytes[27]]), 0);
         assert_eq!(&bytes[28..], b"pong");
     }
 

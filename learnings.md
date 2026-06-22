@@ -283,3 +283,8 @@
 
 - UDP bridge expiry bounds lifetime but not burst cardinality; keep a separate max-flow limit in runtime to bound retained host UDP handles.
 - Limit failures should surface through the existing egress-error path so policy/audit contracts do not grow resource-accounting details.
+
+## 2026-06-22 — UDP response checksums
+
+- UDP response checksum calculation should stay in `foxprox-packet` with IPv4 pseudo-header construction, keeping runtime response routing at the opaque-packet level.
+- Even though IPv4 permits a zero UDP checksum, emitting a real checksum improves compatibility without widening policy or audit contracts.

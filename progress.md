@@ -1216,3 +1216,22 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 6c16a08.
 - Remaining boundary risks: per-sandbox flow limits, rate limiting, ICMP error handling, and IPv6 remain.
+
+## 2026-06-22 — Boundary objective: UDP response checksum hardening
+
+- Boundary under work: IPv4 UDP response synthesis correctness inside the packet boundary.
+- Allowed dependency direction: UDP pseudo-header/checksum calculation stays in `foxprox-packet`; runtime receives opaque packet bytes only; policy/audit remain normalized-event only.
+- Dependency-risk assessment: the minimal UDP response proof used an IPv4-legal zero UDP checksum, but real forwarding should emit checksummed UDP responses when possible. Hardening this in packet code improves correctness without changing runtime or policy contracts.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency tree for packet.
+- Observed results: replaced zero-checksum UDP response synthesis with IPv4 pseudo-header UDP checksum calculation inside `foxprox-packet`, including the all-zero checksum to `0xffff` normalization. Updated the response synthesis test to assert a nonzero UDP checksum while preserving endpoint swapping and payload assertions. All verification passed.
+- Changed files:
+  - `crates/foxprox-packet/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 107 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-packet` — checksum logic remains packet/core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: IPv6 UDP responses, ICMP errors, and rate limiting remain.
