@@ -792,3 +792,39 @@ DNS upstream validation now rejects answer RRs whose class differs from the vali
 
 ### Remaining blind spots
 - DNS validation still handles the subset of A/AAAA response metadata needed for alpha attribution; richer RRsets and CNAME chains remain future DNS resolver work.
+
+## 2026-06-21 — TUN-like packet device IO adapter cycle
+
+### Behavior under work
+Add a concrete device crate with a TUN-like packet IO adapter that implements the core `PacketDevice` trait over replaceable `Read`/`Write` objects, preserving packet-boundary reads and bounded MTU buffers without putting OS-specific unsafe code in the core.
+
+### Expected evidence
+- Packet bytes read from a TUN-like IO object are processed by `TunPacketHarness` and produce structured `packet_observed` audit evidence.
+- ICMP write-back through the adapter writes reply bytes to the underlying sink after audit gating.
+- Read/write IO failures map to structured `DeviceIoError` values instead of panics.
+
+### Commands run
+- `cargo fmt` — applied formatting for `foxprox-device`.
+- `cargo test --all-targets --all-features` — passed, 4 CLI tests, 99 core tests, 3 device tests, and 3 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — initially failed on a test default-field reassignment; fixed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed after fix.
+
+### Evidence excerpts
+- `foxprox_device::tests::tun_io_device_feeds_packet_harness_observation ... ok`
+- `foxprox_device::tests::tun_io_device_writes_icmp_reply_after_audit ... ok`
+- `foxprox_device::tests::tun_io_device_maps_read_write_failures ... ok`
+
+### Interpretation
+The workspace now has a concrete TUN-like packet IO adapter outside `foxprox-core`. It implements the core `PacketDevice` trait over replaceable `Read`/`Write` objects, feeds packets into the audited TUN harness, writes ICMP replies after audit gating, and maps IO failures into structured device errors.
+
+### Changed files
+- `Cargo.toml`
+- `Cargo.lock`
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-device/Cargo.toml`
+- `crates/foxprox-device/src/lib.rs`
+- `progress.md`
+
+### Remaining blind spots
+- This is a TUN-like IO adapter, not Linux `/dev/net/tun` creation or namespace configuration. OS-specific TUN opening/handoff remains a runtime integration gap.

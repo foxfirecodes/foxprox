@@ -27,6 +27,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "foxprox-device"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+ "pretty_assertions",
+]
+
+[[package]]
 name = "foxprox-egress"
 version = "0.1.0"
 dependencies = [
