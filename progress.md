@@ -937,3 +937,16 @@
 - Recent structural commit hash: explicit proxy forwarding migration `e1fc3a0`.
 - Next verification gap: commit capability helper extraction; remaining production-factoring work is moving the actual Linux TUN ioctl configurator into `foxprox-device` or designing async long-lived broker loops.
 - Commit hash after commit: pending.
+
+## 2026-06-22T08:05:00Z — Post egress/device factoring verification sweep
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run all >/tmp/foxprox-all-egress-device.jsonl && cargo run -p foxprox-cli --bin foxprox-lab -- run robustness >/tmp/foxprox-robust-egress-device.jsonl && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run handoff-smoke >/tmp/foxprox-handoff-egress-device.jsonl && target/debug/foxprox-lab run dns-attribution-smoke >/tmp/foxprox-dns-attr-egress-device.jsonl && target/debug/foxprox-lab run tcp-bridge-smoke >/tmp/foxprox-tcp-bridge-egress-device.jsonl && target/debug/foxprox-lab run tcp-bridge-deny-smoke >/tmp/foxprox-tcp-bridge-deny-egress-device.jsonl && target/debug/foxprox-lab run http-proxy-smoke >/tmp/foxprox-http-egress-device.jsonl && target/debug/foxprox-lab run https-connect-smoke >/tmp/foxprox-connect-egress-device.jsonl && target/debug/foxprox-lab run socks5-smoke >/tmp/foxprox-socks-egress-device.jsonl && target/debug/foxprox-lab run proxy-deny-smoke >/tmp/foxprox-proxy-deny-egress-device.jsonl && echo OK`
+- Environment assumptions: deterministic scenario groups are local; environment smokes use local bwrap/TUN fd handoff and loopback fixtures only.
+- Expected result: recent egress crate, core CONNECT parsing, proxy forwarding, and device capability factoring preserve all deterministic alpha scenarios plus key environment smokes.
+- Observed result: pass. Workspace tests passed (`foxprox-core` 59, `foxprox-device` 3, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 6). `run all`, `run robustness`, handoff, DNS attribution, TCP bridge allow/deny, explicit proxy allow paths, and proxy deny all completed; command printed `OK`.
+- Relevant output excerpt: `caps::tests::net_admin_capability_bit_is_in_first_word ... ok`; `target/debug/foxprox-lab run all`; `target/debug/foxprox-lab run robustness`; final `OK`.
+- Changed files: `progress.md`.
+- Interpretation: the current factored structure is verified end-to-end across deterministic and selected Linux environment paths.
+- Recent structural commit hashes: capability helper extraction `d3cf7d3`; explicit proxy forwarding migration `e1fc3a0`; core CONNECT parsing `579fb4a`; egress crate extraction `cb9e664`.
+- Next verification gap: commit this sweep record; if continuing, the next production step should be moving the Linux TUN ioctl configurator out of setup into `foxprox-device` with tests and handoff-smoke verification.
+- Commit hash after commit: pending.
