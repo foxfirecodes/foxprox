@@ -1010,3 +1010,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: pump is synchronous and one-flow-at-a-time; it does not yet consume smoltcp stream buffers, poll readiness, or enforce resource limits beyond opened-flow gating.
 - Exact next step: commit TCP bridge pump, then add TCP bridge resource limits for maximum open flows to prevent unbounded state growth.
+
+## 2026-06-22T21:38:10Z
+- Current objective: continue after TCP bridge pump commit toward TCP bridge resource limits.
+- Git status summary: clean worktree after commit `2ecdb1d`.
+- Intended slice: add a deterministic maximum-open-flow limit to `TcpStreamBridgeRuntime` so future stream adapters cannot grow bridge state without bound.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this only bounds in-memory bridge flow records; it does not yet enforce byte-buffer or socket-fd limits globally.
+- Exact next step: add a limited constructor and fail-closed tests for opening beyond capacity.
+
+## 2026-06-22T21:38:55Z
+- Current objective: add TCP bridge resource limits for maximum open flows.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 80 runtime tests, and 7 setup tests passed. New tests prove `TcpStreamBridgeRuntime::with_max_open_flows` rejects new flows beyond capacity while allowing an existing flow key to be refreshed at capacity.
+- Commit hash when committed: pending.
+- Remaining risks: only open-flow map cardinality is bounded; per-flow buffers, socket fd counts, and total byte buffering limits still need runtime-level enforcement.
+- Exact next step: commit TCP bridge open-flow limits, then add runtime configuration for TCP bridge limits so limits are not hardcoded by callers.

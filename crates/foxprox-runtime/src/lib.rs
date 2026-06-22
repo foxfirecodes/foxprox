@@ -332,6 +332,7 @@ pub enum TcpBridgeError {
     FlowNotOpen,
     IoFailed,
     UnsupportedProtocol,
+    OpenFlowLimitReached { limit: usize },
 }
 
 pub trait TcpStreamBridge {
@@ -458,13 +459,19 @@ pub struct TcpBridgePumpOutcome {
 pub struct TcpStreamBridgeRuntime<B> {
     bridge: B,
     open_flows: HashMap<FlowKey, OpenTcpFlow>,
+    max_open_flows: usize,
 }
 
 impl<B> TcpStreamBridgeRuntime<B> {
     pub fn new(bridge: B) -> Self {
+        Self::with_max_open_flows(bridge, usize::MAX)
+    }
+
+    pub fn with_max_open_flows(bridge: B, max_open_flows: usize) -> Self {
         Self {
             bridge,
             open_flows: HashMap::new(),
+            max_open_flows,
         }
     }
 
@@ -476,8 +483,17 @@ impl<B> TcpStreamBridgeRuntime<B> {
         &self.open_flows
     }
 
+    pub fn max_open_flows(&self) -> usize {
+        self.max_open_flows
+    }
+
     pub fn mark_opened(&mut self, flow: FlowKey) -> Result<(), TcpBridgeError> {
         let open_flow = OpenTcpFlow::new(flow.clone())?;
+        if !self.open_flows.contains_key(&flow) && self.open_flows.len() >= self.max_open_flows {
+            return Err(TcpBridgeError::OpenFlowLimitReached {
+                limit: self.max_open_flows,
+            });
+        }
         self.open_flows.insert(flow, open_flow);
         Ok(())
     }
@@ -2469,6 +2485,36 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, TcpBridgeError::FlowNotOpen);
+    }
+
+    #[test]
+    fn tcp_stream_bridge_enforces_max_open_flow_limit() {
+        let flow_a = tcp_flow_key();
+        let flow_b = FlowKey::new(
+            Protocol::Tcp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 3)), 53001),
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 35)), 443),
+        );
+        let mut bridge = TcpStreamBridgeRuntime::with_max_open_flows(FakeTcpBridge::default(), 1);
+        bridge.mark_opened(flow_a.clone()).unwrap();
+
+        let error = bridge.mark_opened(flow_b).unwrap_err();
+
+        assert_eq!(error, TcpBridgeError::OpenFlowLimitReached { limit: 1 });
+        assert_eq!(bridge.open_flows().len(), 1);
+        assert!(bridge.open_flows().contains_key(&flow_a));
+    }
+
+    #[test]
+    fn tcp_stream_bridge_allows_reopening_existing_flow_at_capacity() {
+        let flow = tcp_flow_key();
+        let mut bridge = TcpStreamBridgeRuntime::with_max_open_flows(FakeTcpBridge::default(), 1);
+        bridge.mark_opened(flow.clone()).unwrap();
+
+        bridge.mark_opened(flow.clone()).unwrap();
+
+        assert_eq!(bridge.open_flows().len(), 1);
+        assert!(bridge.open_flows().contains_key(&flow));
     }
 
     #[test]
