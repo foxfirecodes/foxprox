@@ -19,9 +19,10 @@ pub use udp::{run_udp_dns_proof, run_udp_dns_proof_with_ready, UdpDnsProofConfig
 use foxprox_core::{
     parse_http_request_head, parse_tls_client_hello, Attribution, AttributionConfidence,
     AttributionSource, AuditBackpressure, AuditBuffer, AuditEvent, AuditEventKind, Decision,
-    DnsCache, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, Protocol, SandboxId,
-    TransportEndpoint, UnsupportedReason,
+    DnsCache, EgressContext, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, Protocol,
+    SandboxId, TcpEgressRequest, TransportEndpoint, UnsupportedReason,
 };
+use foxprox_egress::{egress_error_to_io, StdHostEgress};
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, TunTapInterface};
 use smoltcp::socket::tcp;
@@ -223,6 +224,50 @@ fn drain_audit_to_stderr(_audit: &mut AuditBuffer) -> io::Result<()> {
     Ok(())
 }
 
+fn egress_context(
+    sandbox_id: &SandboxId,
+    event: &NetworkEvent,
+    decision: Decision,
+) -> EgressContext {
+    EgressContext {
+        sandbox_id: sandbox_id.clone(),
+        frontend: Frontend::Tun,
+        decision,
+        attribution: egress_attribution(event),
+    }
+}
+
+fn egress_attribution(event: &NetworkEvent) -> Attribution {
+    match event {
+        NetworkEvent::TcpConnectAttempt { attribution, .. } => attribution.clone(),
+        NetworkEvent::HttpRequest { origin, .. } => Attribution {
+            hostname: Some(origin.host.clone()),
+            source: AttributionSource::HttpHostHeader,
+            confidence: AttributionConfidence::High,
+        },
+        NetworkEvent::TlsClientHello {
+            sni, dns_hostname, ..
+        } => {
+            if let Some(sni) = sni.clone() {
+                Attribution {
+                    hostname: Some(sni),
+                    source: AttributionSource::TlsSni,
+                    confidence: AttributionConfidence::High,
+                }
+            } else if let Some(dns_hostname) = dns_hostname.clone() {
+                Attribution {
+                    hostname: Some(dns_hostname),
+                    source: AttributionSource::DnsCache,
+                    confidence: AttributionConfidence::Medium,
+                }
+            } else {
+                Attribution::ip_only()
+            }
+        }
+        _ => Attribution::ip_only(),
+    }
+}
+
 fn transparent_tcp_audit_event(event: &NetworkEvent, decision: Decision) -> AuditEvent {
     let kind = match event {
         NetworkEvent::TcpConnectAttempt { .. } => AuditEventKind::TcpConnect,
@@ -355,6 +400,7 @@ impl TransparentTcpState {
                                 source,
                                 destination,
                                 override_destination,
+                                egress_context(&config.sandbox_id, &event, decision.clone()),
                                 config.connect_timeout,
                                 Vec::new(),
                             ))
@@ -366,6 +412,7 @@ impl TransparentTcpState {
                             FlowState::Connecting(ConnectingFlow::new(
                                 source,
                                 destination,
+                                egress_context(&config.sandbox_id, &event, decision.clone()),
                                 config.connect_timeout,
                             ))
                         },
@@ -561,6 +608,7 @@ impl InspectingHttpFlow {
         Ok(Some(ConnectingFlow::new_with_pending(
             self.source,
             self.destination,
+            egress_context(sandbox_id, &event, decision),
             connect_timeout,
             std::mem::take(&mut self.pending_to_host),
         )))
@@ -651,6 +699,7 @@ impl InspectingTlsFlow {
         Ok(Some(ConnectingFlow::new_with_pending(
             self.source,
             self.destination,
+            egress_context(&config.sandbox_id, &event, decision),
             config.connect_timeout,
             std::mem::take(&mut self.pending_to_host),
         )))
@@ -672,33 +721,51 @@ struct ConnectingFlow {
 }
 
 impl ConnectingFlow {
-    fn new(source: TransportEndpoint, destination: SocketAddr, timeout: Duration) -> Self {
-        Self::new_with_pending(source, destination, timeout, Vec::new())
+    fn new(
+        source: TransportEndpoint,
+        destination: SocketAddr,
+        context: EgressContext,
+        timeout: Duration,
+    ) -> Self {
+        Self::new_with_pending(source, destination, context, timeout, Vec::new())
     }
 
     fn new_with_pending(
         source: TransportEndpoint,
         destination: SocketAddr,
+        context: EgressContext,
         timeout: Duration,
         pending_to_host: Vec<u8>,
     ) -> Self {
-        Self::new_with_egress(source, destination, destination, timeout, pending_to_host)
+        Self::new_with_egress(
+            source,
+            destination,
+            destination,
+            context,
+            timeout,
+            pending_to_host,
+        )
     }
 
     fn new_with_egress(
         source: TransportEndpoint,
         requested_destination: SocketAddr,
         host_destination: SocketAddr,
+        context: EgressContext,
         timeout: Duration,
         pending_to_host: Vec<u8>,
     ) -> Self {
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
-            let result =
-                TcpStream::connect_timeout(&host_destination, timeout).and_then(|stream| {
-                    stream.set_nonblocking(true)?;
-                    Ok(stream)
-                });
+            let request = TcpEgressRequest {
+                context,
+                source: Some(source),
+                destination: TransportEndpoint::from(host_destination),
+                connect_timeout: Some(timeout),
+            };
+            let result = StdHostEgress::new()
+                .connect_tcp_nonblocking(request)
+                .map_err(egress_error_to_io);
             let _ = sender.send(result);
         });
         let now = StdInstant::now();

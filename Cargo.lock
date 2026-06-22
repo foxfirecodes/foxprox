@@ -112,10 +112,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "foxprox-egress"
+version = "0.1.0"
+dependencies = [
+ "foxprox-core",
+]
+
+[[package]]
 name = "foxprox-net"
 version = "0.1.0"
 dependencies = [
  "foxprox-core",
+ "foxprox-egress",
  "libc",
  "smoltcp",
 ]
@@ -125,6 +133,7 @@ name = "foxprox-proxy"
 version = "0.1.0"
 dependencies = [
  "foxprox-core",
+ "foxprox-egress",
 ]
 
 [[package]]

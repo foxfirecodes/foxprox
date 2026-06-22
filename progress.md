@@ -1751,3 +1751,44 @@
 - Current git status after commit: clean.
 - Remaining alpha reassessment: major previously tracked gaps now reduced to the shared host egress backend being only partially represented by core traits/proxy TCP proof boundary; transparent TCP/UDP/DNS still open std sockets directly in runtime code, and SOCKS proxy is still only separately CLI-runnable rather than exposed via the combined TUN path.
 - Next exact action: choose and start the next smallest alpha slice. Candidate: introduce concrete std host egress adapters in `foxprox-net`/`foxprox-proxy` so transparent TCP and proxy TCP use the same policy-checked egress opening path without moving runtime dependencies into `foxprox-core`.
+
+## 2026-06-22T22:13:34Z — start shared std egress backend slice
+
+- Current objective: introduce a concrete std host egress adapter and route proxy, transparent TCP, UDP, and broker DNS host socket opening through it while preserving the dependency-free `foxprox-core` boundary.
+- Planner result: `context-build/next-alpha-slice-after-proxy-bridge.md` recommends shared concrete TCP/UDP/DNS egress adapters before SOCKS-over-TUN or multi-port transparent TCP because direct host socket opening remains duplicated in `foxprox-net` and `foxprox-proxy`.
+- Accepted implementation plan: add `foxprox-egress` workspace crate depending only on `foxprox-core`; implement policy-checked TCP connect/nonblocking connect, UDP one-shot forwarding, DNS raw query forwarding, and host resolution helpers; refactor `foxprox-proxy` and `foxprox-net` to use it.
+- Verification plan: focused tests for `foxprox-egress`, affected net/proxy tests, then full fmt/check/test/clippy/doc and dependency-tree checks for `foxprox-core`, `foxprox-egress`, `foxprox-net`, and `foxprox-proxy`.
+- Expected commit boundary: shared std egress adapter plus runtime call-site refactors only; no parser/policy/audit moves into core, no SOCKS-over-TUN or multi-port TCP scope expansion.
+
+## 2026-06-22T22:20:03Z — shared egress adapter implemented, awaiting review
+
+- Implemented WIP shared std egress slice:
+  - Added `crates/foxprox-egress` workspace crate with `StdHostEgress`, config limits, TCP connect/nonblocking connect, one-shot UDP forwarding, raw DNS query forwarding, IPv4-preferred hostname resolution, and `EgressError` to `io::Error` mapping.
+  - Adapter enforces `EgressContext::is_allowed()` before TCP/UDP/DNS socket I/O; tests cover denied TCP/UDP/DNS plus loopback allowed TCP/UDP/DNS paths.
+  - Refactored `foxprox-proxy` HTTP, CONNECT, and SOCKS TCP host connects through `StdHostEgress` and shared resolver helper.
+  - Refactored transparent TCP connector workers through `StdHostEgress::connect_tcp_nonblocking`, carrying final policy decision/attribution in `EgressContext` while preserving requested vs override backend destinations.
+  - Refactored broker DNS and UDP forwarding workers through `StdHostEgress` raw DNS and one-shot UDP helpers; preserved audit-before-worker/flow-limit ordering and no cache/host-flow update on egress failure.
+- Focused verification passed:
+  - `cargo fmt --all`
+  - `cargo check --workspace`
+  - `cargo test -p foxprox-egress -p foxprox-net -p foxprox-proxy` (7 egress, 45 net, 28 proxy tests)
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+- Current status: WIP modified files include workspace manifests/lock, new `foxprox-egress`, net/proxy refactors, and this ledger; transient planner artifact remains under `context-build/`.
+- Next exact action: request blocker review focused on policy-before-egress ordering, adapter boundary, and dependency creep; fix blockers, then run full verification and commit.
+
+## 2026-06-22T22:24:31Z — shared std egress backend final review and verification
+
+- Review result: `reviews/shared-egress-final.md` reported no blockers.
+  - Confirmed `foxprox-core` remains dependency-free.
+  - Confirmed `foxprox-egress` only consumes normalized core request/context types and does not move parser/policy/audit code.
+  - Confirmed TCP/UDP/DNS helpers call `ensure_allowed` before socket I/O and denied-path tests cover fail-closed behavior.
+  - Confirmed transparent TCP passes final allowed decision/attribution into egress and preserves requested vs override backend destination semantics.
+  - Confirmed UDP/DNS audit/limit/egress ordering and no cache/host-response flow updates on egress failure.
+- Final verification after review and doc-safety attribute:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 9 CLI tests, 53 core tests, 9 device tests, 7 egress tests, 45 net tests, 28 proxy tests, 2 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - Dependency checks passed: `cargo tree -p foxprox-core`, `cargo tree -p foxprox-egress`, `cargo tree -p foxprox-net`, `cargo tree -p foxprox-proxy`.
+- Next action: remove transient review/context artifacts and commit `add shared std egress adapter`.

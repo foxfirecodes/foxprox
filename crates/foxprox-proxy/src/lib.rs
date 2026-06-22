@@ -2,8 +2,8 @@
 //!
 //! This crate contains dependency-light protocol parsers that turn explicit
 //! HTTP proxy, HTTPS CONNECT, and SOCKS5 CONNECT request bytes into the same
-//! normalized policy events used by transparent frontends. It does not open
-//! host sockets or perform forwarding.
+//! normalized policy events used by transparent frontends. Concrete host socket
+//! opening is delegated to `foxprox-egress`.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -11,13 +11,12 @@
 use foxprox_core::{
     Attribution, AuditBackpressure, AuditBuffer, AuditEvent, AuditEventKind, Decision,
     EgressContext, Frontend, Hostname, HttpMethod, NetworkEvent, Origin, PolicyEngine,
-    PolicyRuleSet, SandboxId, SocksDestination, TcpEgressRequest, TransportEndpoint,
+    PolicyRuleSet, SandboxId, SocksDestination, TcpEgress, TcpEgressRequest, TransportEndpoint,
     UnsupportedReason,
 };
+use foxprox_egress::{egress_error_to_io, resolve_host_port, StdHostEgress};
 use std::io::{self, Read, Write};
-use std::net::{
-    IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
-};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -512,7 +511,10 @@ fn socks_destination_socket_addr(
         NetworkEvent::SocksConnect {
             target: SocksDestination::Host { host, port },
             ..
-        } => resolve_host_port(host, *port, timeout),
+        } => {
+            let _ = timeout;
+            resolve_host_port(host, *port)
+        }
         NetworkEvent::SocksConnect {
             target: SocksDestination::Ip(endpoint),
             ..
@@ -618,7 +620,7 @@ fn handle_http_proxy_stream_with_audit(
     }
     match event {
         NetworkEvent::HttpRequest { ref origin, .. } => {
-            let destination = resolve_host_port(&origin.host, origin.port, config.connect_timeout)?;
+            let destination = resolve_host_port(&origin.host, origin.port)?;
             let mut upstream = connect_allowed_tcp(
                 &event,
                 &decision,
@@ -633,7 +635,7 @@ fn handle_http_proxy_stream_with_audit(
             tunnel_bidirectional(client, upstream)
         }
         NetworkEvent::HttpsConnect { ref host, port, .. } => {
-            let destination = resolve_host_port(host, port, config.connect_timeout)?;
+            let destination = resolve_host_port(host, port)?;
             let mut upstream = connect_allowed_tcp(
                 &event,
                 &decision,
@@ -713,13 +715,9 @@ fn connect_allowed_tcp(
         destination: TransportEndpoint::from(destination),
         connect_timeout: Some(connect_timeout),
     };
-    if !request.context.is_allowed() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "policy denied host egress",
-        ));
-    }
-    TcpStream::connect_timeout(&destination, connect_timeout)
+    StdHostEgress::new()
+        .connect_tcp(request)
+        .map_err(egress_error_to_io)
 }
 
 fn event_attribution(event: &NetworkEvent) -> Attribution {
@@ -735,16 +733,6 @@ fn event_attribution(event: &NetworkEvent) -> Attribution {
             .unwrap_or_else(Attribution::ip_only),
         _ => Attribution::ip_only(),
     }
-}
-
-fn resolve_host_port(host: &Hostname, port: u16, timeout: Duration) -> io::Result<SocketAddr> {
-    let _ = timeout;
-    let mut addrs: Vec<_> = (host.as_str(), port).to_socket_addrs()?.collect();
-    addrs.sort_by_key(|addr| !addr.is_ipv4());
-    addrs
-        .into_iter()
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::AddrNotAvailable, "host did not resolve"))
 }
 
 fn rewrite_http_request_for_origin(head: &[u8]) -> io::Result<Vec<u8>> {

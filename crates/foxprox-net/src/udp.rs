@@ -7,17 +7,18 @@
 use foxprox_core::{
     classify_udp_candidate, parse_dns_query, parse_dns_response, Attribution, AuditBackpressure,
     AuditBuffer, AuditEvent, AuditEventKind, Decision, DecisionAction, DenialReason, DnsCache,
-    DnsCacheEntry, DnsResponseObservation, FlowKey, FlowTimeoutClass, Frontend, NetworkEvent,
-    PolicyEngine, PolicyRuleSet, Protocol, SandboxId, TransportEndpoint, UdpFlowRecord,
-    UdpFlowTable, UnsupportedReason,
+    DnsCacheEntry, DnsEgressRequest, DnsResponseObservation, EgressContext, FlowKey,
+    FlowTimeoutClass, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, Protocol, SandboxId,
+    TransportEndpoint, UdpEgressRequest, UdpFlowRecord, UdpFlowTable, UnsupportedReason,
 };
+use foxprox_egress::{egress_error_to_io, StdHostEgress};
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, PacketMeta, TunTapInterface};
 use smoltcp::socket::udp;
 use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -517,9 +518,20 @@ pub(crate) fn handle_dns_datagram(
     let upstream = config.upstream_dns;
     let timeout = config.upstream_timeout;
     let sandbox_id = config.sandbox_id.clone();
+    let request = DnsEgressRequest {
+        context: EgressContext {
+            sandbox_id: sandbox_id.clone(),
+            frontend: Frontend::Tun,
+            decision: Decision::allow("broker-dns"),
+            attribution: Attribution::ip_only(),
+        },
+        hostname: question.hostname.clone(),
+        query_type: question.query_type.as_str().to_string(),
+        upstream: TransportEndpoint::from(upstream),
+    };
     std::thread::spawn(move || {
         let _permit = permit;
-        let response = forward_dns_query(&payload, upstream, timeout);
+        let response = forward_dns_query(request, &payload, timeout);
         let response_observation = response
             .as_ref()
             .ok()
@@ -609,16 +621,29 @@ pub(crate) fn handle_udp_forward_datagram(
         eprintln!("foxprox-net: drop UDP forward: worker limit reached");
         return Ok(());
     };
-    flows.record_sandbox_datagram(key, timeout_class, attribution, datagram.payload.len(), now);
+    flows.record_sandbox_datagram(
+        key,
+        timeout_class,
+        attribution.clone(),
+        datagram.payload.len(),
+        now,
+    );
 
     let timeout = config.udp_forward_timeout;
+    let request = UdpEgressRequest {
+        context: EgressContext {
+            sandbox_id: config.sandbox_id.clone(),
+            frontend: Frontend::Tun,
+            decision,
+            attribution,
+        },
+        source,
+        destination,
+        timeout_class,
+    };
     std::thread::spawn(move || {
         let _permit = permit;
-        let response = forward_udp_datagram(
-            &datagram.payload,
-            SocketAddr::new(destination.ip, destination.port),
-            timeout,
-        );
+        let response = forward_udp_datagram(request, &datagram.payload, timeout);
         let _ = worker_tx.send(UdpWorkerResult::Forward {
             handle: datagram.socket.handle,
             metadata: datagram.metadata,
@@ -869,55 +894,23 @@ fn send_udp_response(
 }
 
 fn forward_udp_datagram(
+    request: UdpEgressRequest,
     payload: &[u8],
-    destination: SocketAddr,
     timeout: Duration,
 ) -> io::Result<Option<Vec<u8>>> {
-    let bind_addr = if destination.is_ipv4() {
-        SocketAddr::from(([0, 0, 0, 0], 0))
-    } else {
-        SocketAddr::from(([0_u16; 8], 0))
-    };
-    let socket = UdpSocket::bind(bind_addr)?;
-    socket.set_read_timeout(Some(timeout))?;
-    socket.set_write_timeout(Some(timeout))?;
-    socket.send_to(payload, destination)?;
-    let mut response = vec![0_u8; 65_535];
-    match socket.recv(&mut response) {
-        Ok(len) => {
-            response.truncate(len);
-            Ok(Some(response))
-        }
-        Err(error)
-            if matches!(
-                error.kind(),
-                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-            ) =>
-        {
-            Ok(None)
-        }
-        Err(error) => Err(error),
-    }
+    StdHostEgress::new()
+        .forward_udp_once(request, payload, timeout)
+        .map_err(egress_error_to_io)
 }
 
 fn forward_dns_query(
+    request: DnsEgressRequest,
     payload: &[u8],
-    upstream: SocketAddr,
     timeout: Duration,
 ) -> io::Result<Vec<u8>> {
-    let bind_addr = if upstream.is_ipv4() {
-        SocketAddr::from(([0, 0, 0, 0], 0))
-    } else {
-        SocketAddr::from(([0_u16; 8], 0))
-    };
-    let socket = UdpSocket::bind(bind_addr)?;
-    socket.set_read_timeout(Some(timeout))?;
-    socket.set_write_timeout(Some(timeout))?;
-    socket.send_to(payload, upstream)?;
-    let mut response = vec![0_u8; 4096];
-    let len = socket.recv(&mut response)?;
-    response.truncate(len);
-    Ok(response)
+    StdHostEgress::new()
+        .query_dns_raw(request, payload, timeout)
+        .map_err(egress_error_to_io)
 }
 
 fn endpoint_to_transport(endpoint: smoltcp::wire::IpEndpoint) -> io::Result<TransportEndpoint> {
