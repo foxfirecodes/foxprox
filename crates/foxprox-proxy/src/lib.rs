@@ -7,6 +7,8 @@
 
 #![forbid(unsafe_code)]
 
+use std::io::Write;
+
 use foxprox_core::{
     AuditDecision, Endpoint, FrontendKind, NormalizedEvent, PolicyEngine, PolicyEvaluation,
     SandboxId, UnsupportedNetworkEvent,
@@ -21,6 +23,14 @@ use foxprox_inspect::{
 pub struct HttpRequestPreflight {
     pub evaluation: PolicyEvaluation,
     pub action: HttpProxyAction,
+}
+
+/// Result of attempting to forward an allowed plaintext HTTP proxy request.
+#[derive(Debug)]
+pub struct HttpRequestForward {
+    pub preflight: HttpRequestPreflight,
+    pub connection: Option<TcpEgressConnection>,
+    pub egress_error: Option<EgressError>,
 }
 
 /// Result of one HTTP CONNECT preflight evaluation.
@@ -119,21 +129,70 @@ impl HttpProxyPreflight {
         source: Option<Endpoint>,
         request_head: &[u8],
     ) -> HttpRequestPreflight {
-        let event = parse_http_proxy_request(
-            sandbox_id.clone(),
-            FrontendKind::HttpProxy,
-            source,
-            request_head,
-        )
-        .unwrap_or_else(|error| malformed_http_event(sandbox_id, source, error.to_string()));
-        let evaluation = self.policy.evaluate(&event);
-        let action = if evaluation.audit.decision == AuditDecision::Allowed {
-            HttpProxyAction::Forward
-        } else {
-            HttpProxyAction::Respond(HttpProxyResponse::Forbidden)
+        let (preflight, _, _) = self.evaluate_http_request(sandbox_id, source, request_head);
+        preflight
+    }
+
+    /// Parse, authorize, connect host TCP egress, and write one plaintext HTTP
+    /// proxy request head in origin-form to the upstream server.
+    ///
+    /// Policy denial or malformed input does not call egress. If policy allows
+    /// but target extraction, connection, or upstream write fails, the returned
+    /// preflight action is changed to `502 Bad Gateway` and the error is
+    /// retained for diagnostics.
+    pub fn forward_http_request<E: TcpEgress>(
+        &self,
+        sandbox_id: SandboxId,
+        source: Option<Endpoint>,
+        request_head: &[u8],
+        egress: &E,
+    ) -> HttpRequestForward {
+        let (mut preflight, target, rewritten_request) =
+            self.evaluate_http_request(sandbox_id, source, request_head);
+        if preflight.evaluation.audit.decision != AuditDecision::Allowed {
+            return HttpRequestForward {
+                preflight,
+                connection: None,
+                egress_error: None,
+            };
+        }
+
+        let (Some(target), Some(rewritten_request)) = (target, rewritten_request) else {
+            preflight.action = HttpProxyAction::Respond(HttpProxyResponse::BadGateway);
+            return HttpRequestForward {
+                preflight,
+                connection: None,
+                egress_error: Some(EgressError::InvalidTarget(
+                    "missing HTTP proxy target after allow".to_owned(),
+                )),
+            };
         };
 
-        HttpRequestPreflight { evaluation, action }
+        match egress.connect(&target) {
+            Ok(mut connection) => match connection.stream_mut().write_all(&rewritten_request) {
+                Ok(()) => HttpRequestForward {
+                    preflight,
+                    connection: Some(connection),
+                    egress_error: None,
+                },
+                Err(error) => {
+                    preflight.action = HttpProxyAction::Respond(HttpProxyResponse::BadGateway);
+                    HttpRequestForward {
+                        preflight,
+                        connection: None,
+                        egress_error: Some(EgressError::from(error)),
+                    }
+                }
+            },
+            Err(error) => {
+                preflight.action = HttpProxyAction::Respond(HttpProxyResponse::BadGateway);
+                HttpRequestForward {
+                    preflight,
+                    connection: None,
+                    egress_error: Some(error),
+                }
+            }
+        }
     }
 
     /// Parse and evaluate one HTTPS CONNECT request head.
@@ -200,6 +259,39 @@ impl HttpProxyPreflight {
                 }
             }
         }
+    }
+
+    fn evaluate_http_request(
+        &self,
+        sandbox_id: SandboxId,
+        source: Option<Endpoint>,
+        request_head: &[u8],
+    ) -> (HttpRequestPreflight, Option<TcpTarget>, Option<Vec<u8>>) {
+        let parsed = parse_http_proxy_request(
+            sandbox_id.clone(),
+            FrontendKind::HttpProxy,
+            source,
+            request_head,
+        );
+        let target = parsed.as_ref().ok().and_then(http_target_from_event);
+        let rewritten_request = parsed
+            .as_ref()
+            .ok()
+            .and_then(|event| rewrite_http_request_for_origin(event, request_head));
+        let event = parsed
+            .unwrap_or_else(|error| malformed_http_event(sandbox_id, source, error.to_string()));
+        let evaluation = self.policy.evaluate(&event);
+        let action = if evaluation.audit.decision == AuditDecision::Allowed {
+            HttpProxyAction::Forward
+        } else {
+            HttpProxyAction::Respond(HttpProxyResponse::Forbidden)
+        };
+
+        (
+            HttpRequestPreflight { evaluation, action },
+            target,
+            rewritten_request,
+        )
     }
 
     fn evaluate_connect_request(
@@ -342,6 +434,44 @@ fn connect_target_from_event(event: &NormalizedEvent) -> Option<TcpTarget> {
         },
         _ => None,
     }
+}
+
+fn http_target_from_event(event: &NormalizedEvent) -> Option<TcpTarget> {
+    match event {
+        NormalizedEvent::HttpRequest(request) => match request.destination {
+            Some(destination) => TcpTarget::new_ip(destination.ip, request.port).ok(),
+            None => TcpTarget::new_host(&request.host, request.port).ok(),
+        },
+        _ => None,
+    }
+}
+
+fn rewrite_http_request_for_origin(
+    event: &NormalizedEvent,
+    request_head: &[u8],
+) -> Option<Vec<u8>> {
+    let NormalizedEvent::HttpRequest(request) = event else {
+        return None;
+    };
+    let text = std::str::from_utf8(request_head).ok()?;
+    let line_end = text.find("\r\n").or_else(|| text.find('\n'))?;
+    let request_line = &text[..line_end];
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next()?;
+    let _absolute_uri = parts.next()?;
+    let version = parts.next()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let rest = &request_head[line_end..];
+    let mut rewritten = Vec::with_capacity(request_head.len());
+    rewritten.extend_from_slice(method.as_bytes());
+    rewritten.extend_from_slice(b" ");
+    rewritten.extend_from_slice(request.path_query.as_bytes());
+    rewritten.extend_from_slice(b" ");
+    rewritten.extend_from_slice(version.as_bytes());
+    rewritten.extend_from_slice(rest);
+    Some(rewritten)
 }
 
 fn malformed_http_event(
@@ -514,6 +644,107 @@ mod tests {
             result.action,
             HttpProxyAction::Respond(HttpProxyResponse::Forbidden)
         );
+    }
+
+    #[test]
+    fn allowed_http_proxy_forward_opens_host_egress_and_rewrites_origin_form() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !request.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                request.push(byte[0]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\npong")
+                .unwrap();
+            request
+        });
+        let handler = HttpProxyPreflight::new(PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        }));
+        let egress = HostTcpEgress::new(Duration::from_secs(1)).unwrap();
+        let request = format!(
+            "GET http://127.0.0.1:{}/public/index.html?x=1 HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+            addr.port(),
+            addr.port()
+        );
+
+        let mut forwarded =
+            handler.forward_http_request(sandbox_id(), Some(source()), request.as_bytes(), &egress);
+
+        assert_eq!(forwarded.preflight.action, HttpProxyAction::Forward);
+        assert_eq!(forwarded.egress_error, None);
+        let connection = forwarded
+            .connection
+            .as_mut()
+            .expect("egress connection exists");
+        let mut response = Vec::new();
+        connection.stream_mut().read_to_end(&mut response).unwrap();
+        let upstream_request = server.join().unwrap();
+        let upstream_request = String::from_utf8(upstream_request).unwrap();
+        assert!(upstream_request.starts_with("GET /public/index.html?x=1 HTTP/1.1\r\n"));
+        assert!(!upstream_request.contains("GET http://127.0.0.1"));
+        assert!(String::from_utf8(response).unwrap().contains("pong"));
+    }
+
+    #[test]
+    fn denied_http_proxy_forward_does_not_call_egress() {
+        struct PanicEgress;
+        impl TcpEgress for PanicEgress {
+            fn connect(&self, _target: &TcpTarget) -> Result<TcpEgressConnection, EgressError> {
+                panic!("egress must not be called for denied HTTP proxy request")
+            }
+        }
+
+        let handler = HttpProxyPreflight::new(allow_example_http_policy());
+        let forwarded = handler.forward_http_request(
+            sandbox_id(),
+            Some(source()),
+            b"POST http://api.example.com/private HTTP/1.1\r\nHost: api.example.com\r\n\r\n",
+            &PanicEgress,
+        );
+
+        assert_eq!(
+            forwarded.preflight.action,
+            HttpProxyAction::Respond(HttpProxyResponse::Forbidden)
+        );
+        assert!(forwarded.connection.is_none());
+        assert_eq!(forwarded.egress_error, None);
+    }
+
+    #[test]
+    fn allowed_http_proxy_forward_returns_bad_gateway_when_egress_connect_fails() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let addr = listener.local_addr().unwrap();
+        drop(listener);
+        let handler = HttpProxyPreflight::new(PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        }));
+        let egress = HostTcpEgress::new(Duration::from_millis(100)).unwrap();
+        let request = format!(
+            "GET http://127.0.0.1:{}/public HTTP/1.1\r\nHost: 127.0.0.1:{}\r\n\r\n",
+            addr.port(),
+            addr.port()
+        );
+
+        let forwarded =
+            handler.forward_http_request(sandbox_id(), Some(source()), request.as_bytes(), &egress);
+
+        assert_eq!(
+            forwarded.preflight.action,
+            HttpProxyAction::Respond(HttpProxyResponse::BadGateway)
+        );
+        assert!(forwarded.connection.is_none());
+        assert!(matches!(
+            forwarded.egress_error,
+            Some(EgressError::Connect { .. })
+        ));
     }
 
     #[test]

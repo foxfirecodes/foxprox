@@ -677,3 +677,25 @@
 - What failed or surprised the agent: broker DNS handling needed a small request parser separate from response parsing so malformed requests can still produce fail-closed audit and DNS error responses before any upstream egress is attempted.
 - What remains unproven: live UDP listener reachability from the sandbox, transaction matching beyond one datagram, UDP reply packet routing back to TUN, negative response handling, DNS cache limits, and runtime integration with packet/flow loops are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — HTTP proxy preflight → host TCP egress forwarding slice
+
+- Slice attempted: connect an allowed explicit HTTP proxy absolute-form request to the shared host TCP egress backend and write an origin-form request to the upstream server.
+- Why next: HTTP proxy policy preflight currently stops at a `Forward` action, while CONNECT and SOCKS already prove shared TCP egress; plaintext HTTP proxy forwarding is the next explicit-proxy alpha gap.
+- Verification plan: extend `foxprox-proxy` with an HTTP request forwarding helper that only opens egress after allow, rewrites absolute-form to origin-form, verifies loopback upstream receives the rewritten request and responds, verifies denial skips egress, then run formatting, clippy, focused proxy tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — HTTP proxy preflight → host TCP egress forwarding
+
+- Slice attempted: allowed explicit HTTP proxy requests now open shared host TCP egress and write origin-form request bytes upstream.
+- Why next: HTTP proxy preflight previously stopped at a `Forward` action, while CONNECT/SOCKS already used shared TCP egress; this closes the plaintext HTTP proxy egress gap for the explicit proxy path.
+- What changed: `foxprox-proxy` now has `HttpRequestForward` and `HttpProxyPreflight::forward_http_request`, extracts the HTTP proxy host/port target, rewrites absolute-form request lines to origin-form path/query for upstream servers, opens egress only after an allowed policy decision, returns 403 without egress on denial/malformed input, and returns 502 diagnostics on connect/write failures.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in `foxprox-proxy`; `cargo fmt` was run.
+  - Focused checks passed: `cargo test -p foxprox-proxy http_proxy_forward -- --nocapture` ran 3 tests covering loopback egress forwarding with origin-form rewrite, denied request without egress, and allowed request with failed egress returning Bad Gateway.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 5 `foxprox-dns` tests, 4 `foxprox-egress` tests, 5 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 18 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed after formatting.
+- What failed or surprised the agent: no behavior failures; the forwarding helper can reuse the parsed `HttpRequest` event as control state for target and path rewrite instead of reparsing the absolute URI separately.
+- What remains unproven: streaming response/body pump, hop-by-hop header handling, listener runtime, CONNECT/SOCKS bidirectional pumps, TCP flow close/byte-count audit, and TUN TCP forwarding are still absent.
+- Commit: this commit.

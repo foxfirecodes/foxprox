@@ -124,3 +124,7 @@ The DNS forwarder does not need to trust or retain the original query name to po
 ## 2026-06-21 — DNS broker denial should answer before egress
 
 A broker-owned DNS resolver needs a pre-egress request boundary: parse the question into a policy event, audit the decision, and synthesize REFUSED/FORMERR/SERVFAIL responses for denied, malformed, or upstream-failed queries. This prevents direct fallback behavior while keeping upstream UDP egress reserved for allowed queries only.
+
+## 2026-06-21 — HTTP proxy forwarding must rewrite before upstream egress
+
+Explicit HTTP proxy requests arrive in absolute-form, but origin servers expect origin-form request targets. Reuse the parsed `HttpRequest` event to choose the host egress target and rewrite only the request line to the normalized path/query before writing to the shared TCP egress connection.
