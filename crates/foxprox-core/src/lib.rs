@@ -17,7 +17,10 @@ pub mod frontend;
 pub mod inspection;
 pub mod policy;
 
-pub use audit::{AuditBackpressure, AuditBuffer, AuditEvent, AuditEventKind, AuditSinkConfig};
+pub use audit::{
+    audit_event_json_line, drain_audit_buffer_to_json_lines, AuditBackpressure, AuditBuffer,
+    AuditEvent, AuditEventKind, AuditSinkConfig,
+};
 pub use config::{
     BrokerConfig, DnsConfig, ProxyConfig, ProxyEnvironment, ResourceLimitConfig,
     ResourceLimitError, TunConfig, UdpTimeoutConfig,

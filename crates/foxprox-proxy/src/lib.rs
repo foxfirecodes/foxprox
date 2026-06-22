@@ -256,10 +256,25 @@ fn emit_proxy_audit(
         io::Error::other("audit queue lock poisoned while recording proxy decision")
     })?;
     let audit_event = proxy_audit_event(event, decision);
+    drain_audit_to_stderr(&mut buffer)?;
     buffer
         .try_push(audit_event.clone())
         .map_err(audit_backpressure_error)?;
+    drain_audit_to_stderr(&mut buffer)?;
     eprintln!("foxprox-proxy: audit event={audit_event:?}");
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn drain_audit_to_stderr(audit: &mut AuditBuffer) -> io::Result<()> {
+    let mut stderr = io::stderr();
+    foxprox_core::drain_audit_buffer_to_json_lines(audit, &mut stderr)
+        .map(|_| ())
+        .map_err(|error| io::Error::other(format!("audit sink write failed: {error}")))
+}
+
+#[cfg(test)]
+fn drain_audit_to_stderr(_audit: &mut AuditBuffer) -> io::Result<()> {
     Ok(())
 }
 

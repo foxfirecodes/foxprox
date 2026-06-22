@@ -153,9 +153,11 @@ fn emit_tcp_audit(
     decision: Decision,
 ) -> io::Result<()> {
     let audit_event = transparent_tcp_audit_event(event, decision);
+    drain_audit_to_stderr(audit)?;
     audit
         .try_push(audit_event.clone())
         .map_err(audit_backpressure_error)?;
+    drain_audit_to_stderr(audit)?;
     eprintln!("foxprox-net: audit event={audit_event:?}");
     Ok(())
 }
@@ -196,10 +198,25 @@ fn emit_tcp_flow_closed_audit(
     event.bytes_from_sandbox = active.bytes_to_host;
     event.bytes_to_sandbox = active.bytes_to_sandbox;
     event.flow_duration = Some(active.started_at.elapsed());
+    drain_audit_to_stderr(audit)?;
     audit
         .try_push(event.clone())
         .map_err(audit_backpressure_error)?;
+    drain_audit_to_stderr(audit)?;
     eprintln!("foxprox-net: audit event={event:?}");
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn drain_audit_to_stderr(audit: &mut AuditBuffer) -> io::Result<()> {
+    let mut stderr = io::stderr();
+    foxprox_core::drain_audit_buffer_to_json_lines(audit, &mut stderr)
+        .map(|_| ())
+        .map_err(|error| io::Error::other(format!("audit sink write failed: {error}")))
+}
+
+#[cfg(test)]
+fn drain_audit_to_stderr(_audit: &mut AuditBuffer) -> io::Result<()> {
     Ok(())
 }
 

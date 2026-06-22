@@ -5,8 +5,9 @@ use crate::event::{
 };
 use crate::policy::Decision;
 use std::collections::VecDeque;
+use std::io::{self, Write};
 use std::net::IpAddr;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Type of broker event recorded by audit output.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -253,6 +254,141 @@ impl AuditBuffer {
     }
 }
 
+/// Serializes one audit event as a dependency-free JSON line.
+pub fn audit_event_json_line(event: &AuditEvent) -> String {
+    let timestamp = event
+        .timestamp
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let mut fields = vec![
+        json_field("timestamp_secs", &timestamp.as_secs().to_string()),
+        json_field("timestamp_nanos", &timestamp.subsec_nanos().to_string()),
+        json_string_field("frontend", &format!("{:?}", event.frontend)),
+        json_string_field("kind", &format!("{:?}", event.kind)),
+    ];
+    if let Some(sandbox_id) = &event.sandbox_id {
+        fields.push(json_string_field("sandbox_id", sandbox_id.as_str()));
+    }
+    if let Some(protocol) = &event.protocol {
+        fields.push(json_string_field("protocol", &format!("{:?}", protocol)));
+    }
+    if let Some(source) = event.source {
+        fields.push(json_string_field(
+            "source",
+            &format!("{}:{}", source.ip, source.port),
+        ));
+    }
+    if let Some(destination) = event.destination {
+        fields.push(json_string_field(
+            "destination",
+            &format!("{}:{}", destination.ip, destination.port),
+        ));
+    }
+    if let Some(port) = event.destination_port {
+        fields.push(json_field("destination_port", &port.to_string()));
+    }
+    if let Some(hostname) = &event.hostname {
+        fields.push(json_string_field("hostname", hostname.as_str()));
+    }
+    if let Some(attribution) = &event.attribution {
+        fields.push(json_string_field(
+            "attribution",
+            &format!("{:?}", attribution),
+        ));
+    }
+    if let Some(origin) = &event.origin {
+        fields.push(json_string_field("origin", &format!("{:?}", origin)));
+    }
+    if let Some(method) = &event.http_method {
+        fields.push(json_string_field("http_method", method.as_str()));
+    }
+    if let Some(path) = &event.path_and_query {
+        fields.push(json_string_field("path_and_query", path));
+    }
+    if let Some(decision) = &event.decision {
+        fields.push(json_string_field("decision", &format!("{:?}", decision)));
+    }
+    if let Some(query_type) = &event.dns_query_type {
+        fields.push(json_string_field("dns_query_type", query_type));
+    }
+    if let Some(rcode) = event.dns_rcode {
+        fields.push(json_field("dns_rcode", &rcode.to_string()));
+    }
+    if !event.dns_answers.is_empty() {
+        let answers = event
+            .dns_answers
+            .iter()
+            .map(|answer| json_string(&answer.to_string()))
+            .collect::<Vec<_>>()
+            .join(",");
+        fields.push(format!("\"dns_answers\":[{answers}]"));
+    }
+    if event.bytes_from_sandbox != 0 {
+        fields.push(json_field(
+            "bytes_from_sandbox",
+            &event.bytes_from_sandbox.to_string(),
+        ));
+    }
+    if event.bytes_to_sandbox != 0 {
+        fields.push(json_field(
+            "bytes_to_sandbox",
+            &event.bytes_to_sandbox.to_string(),
+        ));
+    }
+    if let Some(duration) = event.flow_duration {
+        fields.push(json_field(
+            "flow_duration_ms",
+            &duration.as_millis().to_string(),
+        ));
+    }
+    if let Some(detail) = &event.detail {
+        fields.push(json_string_field("detail", detail));
+    }
+    format!("{{{}}}", fields.join(","))
+}
+
+/// Drains queued audit events to a JSON-lines writer.
+pub fn drain_audit_buffer_to_json_lines<W: Write>(
+    buffer: &mut AuditBuffer,
+    writer: &mut W,
+) -> io::Result<usize> {
+    let mut drained = 0;
+    while let Some(event) = buffer.queue.front() {
+        writeln!(writer, "{}", audit_event_json_line(event))?;
+        let _ = buffer.queue.pop_front();
+        drained += 1;
+    }
+    Ok(drained)
+}
+
+fn json_field(name: &str, value: &str) -> String {
+    format!("\"{name}\":{value}")
+}
+
+fn json_string_field(name: &str, value: &str) -> String {
+    format!("\"{name}\":{}", json_string(value))
+}
+
+fn json_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => {
+                escaped.push_str(&format!("\\u{:04x}", character as u32));
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
 /// Audit queue backpressure result.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum AuditBackpressure {
@@ -355,6 +491,51 @@ mod tests {
         assert_eq!(result, Err(AuditBackpressure::Full { capacity: 1 }));
         assert_eq!(buffer.len(), 1);
         assert_eq!(buffer.dropped_events(), 1);
+    }
+
+    #[test]
+    fn audit_buffer_drains_json_lines() {
+        let mut buffer = AuditBuffer::new(2);
+        let mut event = AuditEvent::new(Frontend::Tun, AuditEventKind::DnsQuery)
+            .with_sandbox_id(SandboxId::new("alpha").unwrap());
+        event.hostname = Some(Hostname::parse("example.com").unwrap());
+        event.detail = Some("quoted \"detail\"".to_string());
+        buffer.try_push(event).unwrap();
+        let mut output = Vec::new();
+
+        let drained = drain_audit_buffer_to_json_lines(&mut buffer, &mut output).unwrap();
+        let line = String::from_utf8(output).unwrap();
+
+        assert_eq!(drained, 1);
+        assert!(buffer.is_empty());
+        assert!(line.contains("\"kind\":\"DnsQuery\""));
+        assert!(line.contains("\"sandbox_id\":\"alpha\""));
+        assert!(line.contains("\\\"detail\\\""));
+    }
+
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "sink failed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn audit_drain_keeps_event_queued_when_sink_write_fails() {
+        let mut buffer = AuditBuffer::new(1);
+        buffer.try_push(tcp_audit_event()).unwrap();
+        let mut writer = FailingWriter;
+
+        let error = drain_audit_buffer_to_json_lines(&mut buffer, &mut writer).unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(buffer.pop_front().unwrap().kind, AuditEventKind::TcpConnect);
     }
 
     #[test]

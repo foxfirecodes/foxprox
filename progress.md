@@ -1635,3 +1635,53 @@
 - Files changed: `crates/foxprox-core/src/policy.rs`, `crates/foxprox-net/src/udp.rs`, `crates/foxprox-net/src/combined.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
 - Current git status summary: core policy/net UDP/combined/CLI/progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit UDP flow-limit enforcement, then pause as requested by the user.
+
+## 2026-06-22T21:37:29Z — audit JSON drain sink pending review
+
+- Current objective: close the P1 audit sink gap where bounded audit queues were enqueued but never drained in live proof runtimes.
+- Rationale: the alpha reassessment after `4dccef3` identified that `AuditBuffer` only queued events and proof runtimes used `try_push()` plus debug `eprintln!`; after capacity was reached, forwarding would fail closed forever. The smallest coherent slice is a dependency-free JSON-lines drain adapter in `foxprox-core` and production proof emitters that drain queued events to stderr after successful enqueue.
+- Changes implemented:
+  - Added dependency-free `audit_event_json_line` and `drain_audit_buffer_to_json_lines` helpers to `foxprox-core`, preserving the dependency-free boundary.
+  - Transparent TCP, UDP/DNS, ICMP, and explicit proxy audit emitters now drain queued audit events to stderr JSON lines after successful enqueue in non-test builds.
+  - Unit-test builds keep emit buffers inspectable/no-op draining so existing metadata/backpressure assertions remain focused on queue semantics; core has focused JSON drain coverage.
+  - Audit sink write failures surface as `io::Error::other("audit sink write failed: ...")` so live paths fail closed instead of silently losing audit output.
+- Verification commands and outcomes so far:
+  - `cargo test -p foxprox-core -p foxprox-net -p foxprox-proxy -p foxprox-cli -- --nocapture` passed: 52 core tests, 42 net tests, 28 proxy tests, 8 CLI tests.
+- Files changed: `crates/foxprox-core/src/audit.rs`, `crates/foxprox-core/src/lib.rs`, `crates/foxprox-net/src/lib.rs`, `crates/foxprox-net/src/udp.rs`, `crates/foxprox-proxy/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: core audit/lib, net TCP/UDP, proxy, CLI, and progress modified.
+- Next exact action: run full workspace verification, request/read audit drain sink blocker review, fix blockers if any, then commit.
+
+## 2026-06-22T21:43:05Z — audit drain sink blocker fixed; rereview pending
+
+- Current objective: commit audit JSON drain sink after rereview.
+- Review result: `audit-drain-sink-final` found one blocker: `drain_audit_buffer_to_json_lines` popped an event before confirming the sink write succeeded, so a write failure could lose the event even while callers failed closed. The reviewer also noted that emitters pushed before draining stale queued events, which could strand retained events after a recoverable sink outage and hit `Full` before retrying stale output.
+- Accepted fix:
+  - `drain_audit_buffer_to_json_lines` now writes from the front queued event and pops only after `writeln!` succeeds.
+  - Added `audit_drain_keeps_event_queued_when_sink_write_fails` with a failing writer to prove write failure leaves the event queued.
+  - TCP, UDP/DNS, ICMP, and proxy emitters now drain stale queued events before attempting to enqueue the current event, then drain again after successful enqueue.
+  - In live builds, a persistent audit sink failure propagates before enqueue/egress; in tests, drain remains a no-op so queue/backpressure assertions continue to exercise bounded-buffer behavior.
+- Verification commands and outcomes after fix:
+  - `cargo test -p foxprox-core -p foxprox-net -p foxprox-proxy -p foxprox-cli -- --nocapture` passed: 53 core tests, 42 net tests, 28 proxy tests, 8 CLI tests.
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 8 CLI tests, 53 core tests, 9 device tests, 42 net tests, 28 proxy tests, 2 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core`, `cargo tree -p foxprox-net`, `cargo tree -p foxprox-proxy`, and `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-core/src/audit.rs`, `crates/foxprox-core/src/lib.rs`, `crates/foxprox-net/src/lib.rs`, `crates/foxprox-net/src/udp.rs`, `crates/foxprox-proxy/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: audit drain sink files and progress modified; review artifacts pending rereview.
+- Next exact action: request/read audit drain sink rereview, fix blockers if any, then commit.
+
+## 2026-06-22T21:46:45Z — audit drain sink rereview passed
+
+- Current objective: commit audit JSON drain sink.
+- Rereview result: `audit-drain-sink-rereview` found no blockers.
+- Confirmed behavior:
+  - `drain_audit_buffer_to_json_lines` pops queued events only after successful sink writes.
+  - Failing writer coverage proves a failed sink write leaves the event queued.
+  - Live TCP, UDP/DNS, ICMP, and proxy audit emitters drain stale queued events before enqueue and drain again after successful enqueue.
+  - DNS response and UDP expiry audit paths retain fail-closed/non-lossy ordering.
+  - Verification evidence remains valid from prior entry; reviewer also ran `cargo test --workspace` successfully.
+- Files changed: `crates/foxprox-core/src/audit.rs`, `crates/foxprox-core/src/lib.rs`, `crates/foxprox-net/src/lib.rs`, `crates/foxprox-net/src/udp.rs`, `crates/foxprox-proxy/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: audit drain sink files and progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit audit drain sink, then reassess remaining alpha gaps.

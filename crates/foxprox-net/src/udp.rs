@@ -657,9 +657,11 @@ fn emit_udp_audit(
     decision: Decision,
 ) -> io::Result<()> {
     let audit_event = udp_audit_event(event, decision);
+    drain_audit_to_stderr(audit)?;
     audit
         .try_push(audit_event.clone())
         .map_err(audit_backpressure_error)?;
+    drain_audit_to_stderr(audit)?;
     eprintln!("foxprox-net: udp audit event={audit_event:?}");
     Ok(())
 }
@@ -691,10 +693,25 @@ fn emit_dns_response_audit(
         .map(|answer| answer.address)
         .collect();
     event.decision = Some(Decision::allow("broker-dns-response"));
+    drain_audit_to_stderr(audit)?;
     audit
         .try_push(event.clone())
         .map_err(audit_backpressure_error)?;
+    drain_audit_to_stderr(audit)?;
     eprintln!("foxprox-net: udp audit event={event:?}");
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn drain_audit_to_stderr(audit: &mut AuditBuffer) -> io::Result<()> {
+    let mut stderr = io::stderr();
+    foxprox_core::drain_audit_buffer_to_json_lines(audit, &mut stderr)
+        .map(|_| ())
+        .map_err(|error| io::Error::other(format!("audit sink write failed: {error}")))
+}
+
+#[cfg(test)]
+fn drain_audit_to_stderr(_audit: &mut AuditBuffer) -> io::Result<()> {
     Ok(())
 }
 
@@ -742,9 +759,11 @@ pub(crate) fn emit_udp_flow_expired_audit(
     event.bytes_from_sandbox = flow.bytes_from_sandbox;
     event.bytes_to_sandbox = flow.bytes_to_sandbox;
     event.flow_duration = flow.last_activity.duration_since(flow.created_at).ok();
+    drain_audit_to_stderr(audit)?;
     audit
         .try_push(event.clone())
         .map_err(audit_backpressure_error)?;
+    drain_audit_to_stderr(audit)?;
     eprintln!("foxprox-net: udp audit event={event:?}");
     Ok(())
 }
