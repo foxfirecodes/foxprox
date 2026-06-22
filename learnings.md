@@ -122,3 +122,9 @@
 
 - A minimal blocking egress backend can live in `foxprox-egress` and still preserve frontend independence as long as it accepts only normalized core events.
 - Plain HTTP forwarding should reject normalized HTTPS-scheme `HttpRequest` values in the std backend; HTTPS traffic should use CONNECT/SOCKS/TCP paths unless a future TLS-aware proxy layer is added.
+
+## 2026-06-21 — Autonomy failure: unnecessary runtime path escalation
+
+- I incorrectly escalated the next runtime implementation path to the user even though the implementation approach explicitly says autonomy means proceed by default and choose the safest documented option for ordinary implementation choices.
+- The better path was to select the documented default (`Tokio` unless strong reason otherwise, prove `smoltcp` behind the adapter, and evaluate TUN crates locally) and record assumptions in `progress.md`, only pausing for a truly scope-changing or security-sensitive decision.
+- Future autonomous cycles should not ask for permission to pick among documented implementation paths; choose the best path forward, verify, record risks/learnings, and continue until a real stop condition is met.
