@@ -445,3 +445,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: `StdHostEgress` opens a one-shot UDP socket per datagram and does not yet route host UDP responses back into TUN packets; TCP forwarding remains connect-only.
 - Exact next step: commit the standard UDP egress backend, then add a UDP response routing abstraction that can synthesize TUN UDP response packets from host replies.
+
+## 2026-06-22T00:07:10Z
+- Current objective: continue from the real UDP host egress checkpoint with the smallest response-routing proof.
+- Git status summary: clean worktree after commit `4f66dfe`.
+- Intended slice: add a deterministic UDP host-reply-to-TUN packet synthesis boundary keyed by the recorded UDP flow, without adding a long-running socket loop yet.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`, and `learnings.md` if route constraints reveal a new invariant.
+- Remaining risks: this will still be a synchronous synthesis proof, not a continuous UDP socket receive loop.
+- Exact next step: implement flow-keyed UDP response synthesis that rejects non-UDP and unsupported address-family routes fail-closed.
+
+## 2026-06-22T00:10:05Z
+- Current objective: add a deterministic UDP host-reply-to-TUN response synthesis boundary.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on `let else` formatting; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 49 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 29 runtime tests, and 7 setup tests passed. New tests prove a recorded IPv4 UDP flow can synthesize a valid reverse-direction TUN packet for host replies, and non-UDP or non-IPv4 routes are rejected instead of producing ambiguous packets.
+- Commit hash when committed: pending.
+- Remaining risks: response synthesis is not yet driven by a continuous host UDP receive loop or written through a live TUN session; IPv6 UDP synthesis remains unsupported and explicit fail-closed.
+- Exact next step: commit UDP response routing synthesis, then add a TUN session wrapper that records allowed UDP flows, sends allowed datagrams through host egress, and can write synthesized host replies back through its TUN writer.

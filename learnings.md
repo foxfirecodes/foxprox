@@ -17,3 +17,6 @@
 
 ## 2026-06-21T23:59:30Z
 - Broker-directed DNS tests must configure the same broker DNS IP in `PolicyConfig`; otherwise DNS policy correctly treats even broker-address packets as `RequireBrokerDns` direct-bypass attempts.
+
+## 2026-06-22T00:10:05Z
+- UDP host-reply routing must stay address-family explicit: the current packet synthesis boundary supports IPv4 only and should reject IPv6 routes until IPv6 packet synthesis has its own verified checksum tests.

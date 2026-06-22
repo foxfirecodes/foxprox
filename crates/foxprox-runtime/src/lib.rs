@@ -100,6 +100,33 @@ fn unspecified_socket_addr_for(destination: IpAddr) -> SocketAddr {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UdpResponseRouteError {
+    NonUdpFlow,
+    UnsupportedAddressFamily,
+}
+
+pub fn synthesize_tun_udp_response(
+    flow: &FlowKey,
+    payload: &[u8],
+) -> Result<Vec<u8>, UdpResponseRouteError> {
+    if flow.protocol != Protocol::Udp {
+        return Err(UdpResponseRouteError::NonUdpFlow);
+    }
+    let (IpAddr::V4(source), IpAddr::V4(destination)) = (flow.source.ip, flow.destination.ip)
+    else {
+        return Err(UdpResponseRouteError::UnsupportedAddressFamily);
+    };
+    let packet = Udpv4Packet {
+        source,
+        destination,
+        source_port: flow.source.port,
+        destination_port: flow.destination.port,
+        payload: &[],
+    };
+    Ok(synthesize_udpv4_response(&packet, payload))
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeOutcome {
     Denied {
         decision: Decision,
@@ -1191,6 +1218,49 @@ mod tests {
             .expire_udp(121_000, &UdpTimeouts::default())
             .is_empty());
         assert_eq!(table.expire_udp(181_000, &UdpTimeouts::default()).len(), 1);
+    }
+
+    #[test]
+    fn flow_keyed_udp_response_synthesis_routes_payload_back_to_sandbox() {
+        let flow = FlowKey::new(
+            Protocol::Udp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443),
+        );
+
+        let packet = synthesize_tun_udp_response(&flow, b"host-reply").unwrap();
+
+        let ParsedIpPacket::Udpv4Packet(response) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected UDP response packet");
+        };
+        assert_eq!(response.source, Ipv4Addr::new(93, 184, 216, 34));
+        assert_eq!(response.destination, Ipv4Addr::new(10, 66, 0, 2));
+        assert_eq!(response.source_port, 443);
+        assert_eq!(response.destination_port, 53000);
+        assert_eq!(response.payload, b"host-reply");
+    }
+
+    #[test]
+    fn udp_response_synthesis_rejects_non_udp_or_non_ipv4_routes() {
+        let non_udp = FlowKey::new(
+            Protocol::Tcp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443),
+        );
+        assert_eq!(
+            synthesize_tun_udp_response(&non_udp, b"nope"),
+            Err(UdpResponseRouteError::NonUdpFlow)
+        );
+
+        let ipv6 = FlowKey::new(
+            Protocol::Udp,
+            Endpoint::new(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), 53000),
+            Endpoint::new(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), 443),
+        );
+        assert_eq!(
+            synthesize_tun_udp_response(&ipv6, b"nope"),
+            Err(UdpResponseRouteError::UnsupportedAddressFamily)
+        );
     }
 
     #[test]
