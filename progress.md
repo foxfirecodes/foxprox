@@ -466,3 +466,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: response synthesis is not yet driven by a continuous host UDP receive loop or written through a live TUN session; IPv6 UDP synthesis remains unsupported and explicit fail-closed.
 - Exact next step: commit UDP response routing synthesis, then add a TUN session wrapper that records allowed UDP flows, sends allowed datagrams through host egress, and can write synthesized host replies back through its TUN writer.
+
+## 2026-06-22T00:12:10Z
+- Current objective: continue from UDP response synthesis toward a minimal UDP TUN session boundary.
+- Git status summary: clean worktree after commit `048175d`.
+- Intended slice: add a TUN-like UDP session wrapper that records allowed UDP flows, sends allowed datagrams through host egress, and can write synthesized host replies back through its TUN writer.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with fake TUN IO and fake egress.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this will still use fake IO; a real asynchronous UDP receive loop and live TUN fd wiring remain later work.
+- Exact next step: implement the session wrapper and deterministic tests for allow/deny/send/reply behavior.
+
+## 2026-06-22T00:17:00Z
+- Current objective: add a minimal policy-gated UDP TUN egress session wrapper.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on one formatted call; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 49 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 32 runtime tests, and 7 setup tests passed. New tests prove the UDP TUN session denies before host egress by default, records allowed UDP flows, sends allowed payloads to host egress, and writes synthesized host replies back to a TUN-like device.
+- Commit hash when committed: pending.
+- Remaining risks: the session is fake-IO and one-packet-at-a-time; it does not yet poll a real host UDP socket for replies, integrate with DNS/ICMP in one session type, or run against a live TUN fd.
+- Exact next step: commit the UDP TUN egress session, then add TCP packet parsing/normalized connect attempt handling as the next step toward the smoltcp TCP forwarding gate.
