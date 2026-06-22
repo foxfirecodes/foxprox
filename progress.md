@@ -1108,3 +1108,33 @@ Round-9 findings are fixed. The smoltcp TCP bridge now derives the accepted sand
 ### Remaining blind spots
 - Packet writes are still exercised through in-memory devices; real TUN fd IO and continuous async scheduling remain runtime integration work.
 - `foxproxsetup` remains plan-first and still does not execute privileged setup commands or fd passing.
+
+## 2026-06-21 — Round-10 TCP packet-device write failure audit cycle
+
+### Behavior under work
+Fix the round-10 high finding: smoltcp TCP response packet writes through `PacketDevice` must record structured broker error evidence before returning on device write failure.
+
+### Expected evidence
+- A failing packet device in `SmoltcpTunBridge::bridge_first_tcp_stream_to_egress` returns `TcpEgressError::BridgeFailed` only after appending `broker_error` with `device_io_error=write_failed`, `direction=to_sandbox`, `stack=smoltcp`, and TCP stream endpoint details.
+- Successful TCP response write path remains unchanged and continues to emit `packet_observed` write-attempt plus `tcp_flow_closed` byte-count audit.
+
+### Commands run
+- `cargo fmt` — applied formatting for round-10 write-failure audit fix.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 103 core tests, 3 device tests, 3 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — initially failed on default-constructing a unit test device; fixed by constructing the unit struct directly.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed after the test fix.
+
+### Evidence excerpts
+- `foxprox_stack::tests::smoltcp_tun_bridge_audits_tcp_response_write_failure ... ok`
+- `foxprox_stack::tests::smoltcp_tun_bridge_audits_tcp_egress_and_flow_close ... ok`
+
+### Interpretation
+Round-10 high finding is fixed. Smoltcp TCP response packet device write failures now append structured `broker_error` evidence with `device_io_error=write_failed`, `direction=to_sandbox`, `stack=smoltcp`, and TCP stream endpoint details before returning `TcpEgressError::BridgeFailed`. Successful TCP response writes continue to emit write-attempt packet audit and flow-close byte counts.
+
+### Changed files
+- `crates/foxprox-stack/src/lib.rs`
+- `progress.md`
+
+### Remaining blind spots
+- The failing write path is covered with an in-memory failing `PacketDevice`; real TUN fd write errors remain part of future runtime integration.

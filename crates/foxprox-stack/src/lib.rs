@@ -557,9 +557,25 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                     decision.reason,
                 ));
             }
-            self.device
-                .write_packet(&packet)
-                .map_err(|_| TcpEgressError::BridgeFailed)?;
+            if self.device.write_packet(&packet).is_err() {
+                let error_audit = AuditRecord::new_at(
+                    AuditKind::BrokerError,
+                    self.sandbox_id.clone(),
+                    closed_at_ms as u128,
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(parsed.protocol)
+                .with_source(parsed.source_endpoint())
+                .with_destination(parsed.destination_endpoint())
+                .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+                .with_detail("stack", "smoltcp")
+                .with_detail("direction", "to_sandbox")
+                .with_detail("device_io_error", "write_failed")
+                .with_detail("tcp_stream_local", endpoint_detail(&local_destination))
+                .with_detail("tcp_stream_remote", endpoint_detail(&source));
+                let _ = self.broker.append_audit_for(&packet_request, error_audit);
+                return Err(TcpEgressError::BridgeFailed);
+            }
             packets_written += 1;
         }
         let byte_counts = ByteCounts {
@@ -929,6 +945,44 @@ mod tests {
     }
 
     #[test]
+    fn smoltcp_tun_bridge_audits_tcp_response_write_failure() {
+        let mut stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        stack.listen_tcp(8080, 1024, 1024);
+        complete_tcp_handshake_and_send_payload(&mut stack, b"hello foxprox");
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let device = FailingWritePacketDevice;
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+        let mut egress = MockTcpEgress::new(b"host pong".to_vec());
+
+        let error = bridge
+            .bridge_first_tcp_stream_to_egress(
+                &mut egress,
+                NetworkEndpoint::socket("127.0.0.1".parse().unwrap(), 8080),
+                64,
+                6_000,
+                6_025,
+            )
+            .unwrap_err();
+
+        assert_eq!(error, TcpEgressError::BridgeFailed);
+        let records: Vec<_> = bridge.broker().audit().records().collect();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].kind, AuditKind::TcpConnectDecision);
+        assert_eq!(records[1].kind, AuditKind::PacketObserved);
+        assert_eq!(records[1].details["write_phase"], "attempt");
+        assert_eq!(records[2].kind, AuditKind::BrokerError);
+        assert_eq!(records[2].decision, Some(Decision::FailClosed));
+        assert_eq!(records[2].details["device_io_error"], "write_failed");
+        assert_eq!(records[2].details["direction"], "to_sandbox");
+        assert_eq!(records[2].details["stack"], "smoltcp");
+        assert_eq!(records[2].details["tcp_stream_remote"], "10.0.2.15:50000");
+    }
+
+    #[test]
     fn in_memory_ip_device_exposes_bounded_mtu_capabilities() {
         let device = InMemoryIpDevice::new(1280);
         let capabilities = device.capabilities();
@@ -940,6 +994,19 @@ mod tests {
     const TCP_SYN: u8 = 0x02;
     const TCP_PSH: u8 = 0x08;
     const TCP_ACK: u8 = 0x10;
+
+    #[derive(Clone, Debug, Default)]
+    struct FailingWritePacketDevice;
+
+    impl PacketDevice for FailingWritePacketDevice {
+        fn read_packet(&mut self) -> Result<Option<Vec<u8>>, DeviceIoError> {
+            Ok(None)
+        }
+
+        fn write_packet(&mut self, _packet: &[u8]) -> Result<(), DeviceIoError> {
+            Err(DeviceIoError::WriteFailed)
+        }
+    }
 
     #[derive(Clone, Debug)]
     struct MockTcpEgress {
