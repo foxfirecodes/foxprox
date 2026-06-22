@@ -14,8 +14,9 @@ use foxprox_device::fd as fd_handoff;
 use foxprox_core::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
 use foxprox_core::egress::{EgressBackend, EgressRequest};
 use foxprox_core::frontend::{
-    build_http_origin_request, parse_socks5_no_auth_greeting, socks5_connect_success_response,
-    HTTP_CONNECT_ESTABLISHED_RESPONSE, HTTP_FORBIDDEN_CLOSE_RESPONSE, SOCKS5_NO_AUTH_RESPONSE,
+    build_http_origin_request, parse_socks5_no_auth_greeting, read_http_headers,
+    socks5_connect_success_response, HTTP_CONNECT_ESTABLISHED_RESPONSE,
+    HTTP_FORBIDDEN_CLOSE_RESPONSE, SOCKS5_NO_AUTH_RESPONSE,
 };
 use foxprox_core::origin::parse_socks5_connect_request;
 use foxprox_core::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule, RuleAction};
@@ -2830,7 +2831,7 @@ fn run_https_connect_smoke() -> Result<AuditRecord, String> {
     client
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|err| format!("HTTPS CONNECT proxy timeout setup failed: {err}"))?;
-    let request = read_http_headers(&mut client, "HTTPS CONNECT proxy")?;
+    let request = read_http_headers(&mut client, 8192)?;
     let policy = PolicyEngine::new(
         PolicyConfig::deny_by_default().with_rule(
             PolicyRule::new("allow-https-connect-example", RuleAction::Allow)
@@ -2841,7 +2842,7 @@ fn run_https_connect_smoke() -> Result<AuditRecord, String> {
     );
     let mut proxy_runtime = ExplicitProxyRuntime::new(policy);
     let parsed = proxy_runtime
-        .evaluate_https_connect_request("https-connect-smoke", request.as_bytes(), origin_addr)?
+        .evaluate_https_connect_request("https-connect-smoke", &request, origin_addr)?
         .ok_or_else(|| "HTTPS CONNECT smoke policy denied request".to_string())?;
     let proxy_audit = proxy_runtime
         .audit
@@ -3063,27 +3064,6 @@ fn run_socks5_smoke() -> Result<AuditRecord, String> {
     .with_metadata("origin_fixture", origin_addr.to_string())
     .with_metadata("egress_calls", tunnel_egress.calls().to_string())
     .with_bytes(read_n as u64, tunnel_outcome.bytes_received))
-}
-
-fn read_http_headers(stream: &mut TcpStream, context: &str) -> Result<String, String> {
-    let mut bytes = Vec::new();
-    let mut buf = [0_u8; 256];
-    while bytes.len() < 8192 {
-        let n = stream
-            .read(&mut buf)
-            .map_err(|err| format!("{context} header read failed: {err}"))?;
-        if n == 0 {
-            break;
-        }
-        bytes.extend_from_slice(&buf[..n]);
-        if bytes.windows(4).any(|window| window == b"\r\n\r\n")
-            || bytes.windows(2).any(|window| window == b"\n\n")
-        {
-            return String::from_utf8(bytes)
-                .map_err(|_| format!("{context} headers were not UTF-8"));
-        }
-    }
-    Err(format!("{context} headers were incomplete"))
 }
 
 #[cfg(unix)]

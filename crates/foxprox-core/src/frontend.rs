@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 
 use crate::origin::HttpRequestMeta;
@@ -6,6 +7,38 @@ pub const HTTP_CONNECT_ESTABLISHED_RESPONSE: &[u8] = b"HTTP/1.1 200 Connection E
 pub const HTTP_FORBIDDEN_CLOSE_RESPONSE: &[u8] =
     b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 pub const SOCKS5_NO_AUTH_RESPONSE: &[u8] = &[0x05, 0x00];
+
+pub fn read_http_headers(reader: &mut impl Read, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    let mut buf = [0_u8; 256];
+    while bytes.len() < max_bytes {
+        let n = reader
+            .read(&mut buf)
+            .map_err(|err| format!("HTTP header read failed: {err}"))?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+        if let Some(header_len) = http_header_end(&bytes) {
+            bytes.truncate(header_len);
+            return Ok(bytes);
+        }
+    }
+    Err("HTTP headers were incomplete".to_string())
+}
+
+fn http_header_end(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|idx| idx + 4)
+        .or_else(|| {
+            bytes
+                .windows(2)
+                .position(|window| window == b"\n\n")
+                .map(|idx| idx + 2)
+        })
+}
 
 pub fn build_http_origin_request(meta: &HttpRequestMeta) -> Vec<u8> {
     format!(
@@ -46,6 +79,21 @@ pub fn socks5_connect_success_response(bound_addr: SocketAddr) -> [u8; 10] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_complete_http_headers_only_until_header_end() {
+        let mut input = std::io::Cursor::new(
+            b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\npayload".to_vec(),
+        );
+        let headers = read_http_headers(&mut input, 8192).unwrap();
+        assert_eq!(
+            headers,
+            b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com\r\n\r\n"
+        );
+
+        let mut incomplete = std::io::Cursor::new(b"GET / HTTP/1.1\r\n".to_vec());
+        assert!(read_http_headers(&mut incomplete, 8192).is_err());
+    }
 
     #[test]
     fn builds_http_origin_form_request() {

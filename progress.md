@@ -1015,3 +1015,16 @@
 - Recent structural commit hash: packet device interface `9af9166`.
 - Next verification gap: commit dispatcher helper; remaining work is using the dispatcher in more transparent smokes or consolidating process/handoff orchestration.
 - Commit hash after commit: pending.
+
+## 2026-06-22T09:55:00Z — HTTP header reader moved to core frontend module
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run https-connect-smoke`
+- Environment assumptions: HTTPS CONNECT smoke uses loopback client/proxy/origin fixtures only.
+- Expected result: move reusable bounded HTTP header reading out of CLI smoke code and into `foxprox-core::frontend`, with deterministic tests for complete and incomplete headers.
+- Observed result: pass. `foxprox-core` increased to 64 tests; workspace tests passed (`foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). HTTPS CONNECT smoke still emitted `"decision":"allow"` and `"egress_calls":"1"`.
+- Relevant output excerpt: `frontend::tests::reads_complete_http_headers_only_until_header_end ... ok`; HTTPS CONNECT `"event":"https_connect","decision":"allow"`.
+- Changed files: `crates/foxprox-core/src/frontend.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: explicit frontend stream parsing has another reusable core boundary; the CLI no longer owns CONNECT header-read semantics.
+- Recent structural commit hash: transparent packet dispatcher `6cfa9b4`.
+- Next verification gap: commit HTTP reader extraction; remaining work is final full verification and deciding whether further long-lived broker-loop implementation is still in-scope for this autonomous pass.
+- Commit hash after commit: pending.
