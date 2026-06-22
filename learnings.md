@@ -121,3 +121,7 @@ Bounded audit queues also need bounded drain APIs. Even if queue capacity is fix
 ## 2026-06-21 - Parser errors need audit mapping before runtime wiring
 
 Packet parser failures should have a single structured audit conversion path before adding TUN runtime loops. This avoids each caller inventing its own malformed-vs-unsupported mapping and preserves numeric unsupported protocol evidence consistently.
+
+## 2026-06-21 - Autonomy should follow documented scope without clarification
+
+I paused to ask which runtime implementation track to take even though the source docs already specify the alpha direction: Rust, TUN, smoltcp-based forwarding proof, broker-controlled DNS, shared policy/audit core, and bwrap-compatible setup boundaries. That was an over-application of the clarification gate. For this workflow, documented architecture choices should be treated as authorization to proceed autonomously; only conflicts, outside-docs choices, irreversible external changes, or security-model changes should stop for user input.

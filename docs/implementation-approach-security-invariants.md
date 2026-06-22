@@ -109,8 +109,9 @@ Commit only verified invariant-preserving changes. Avoid bundling unrelated func
 
 Continue autonomously by selecting the most severe unverified invariant, especially those related to bypass, malformed input, attribution, and resource exhaustion.
 
-Autonomy means proceed by default. Pause only for decisions that are scope-changing, security-sensitive, hard to reverse, or explicitly outside the source docs. For ordinary implementation choices, choose the safest documented option, record the assumption in `progress.md`, and continue.
+Autonomy means proceed by default. Do not ask for decisions whose answers are present in the source docs, required invariant categories, progress ledger, or learning ledger. When multiple implementation tracks are valid but all are within documented scope, choose the safest, smallest, most reversible track that advances a required invariant, record the assumption in `progress.md`, and continue.
 
+Pause only when the next step is explicitly outside the source docs, conflicts with documented requirements, requires an irreversible external/environment change, or would materially change the security model beyond the documented alpha scope. Runtime architecture choices already named in the source docs (for example Rust, TUN, smoltcp-based forwarding proof, broker-controlled DNS, shared policy/audit core, and bwrap-compatible setup-helper boundaries) are implementation work, not clarification triggers.
 
 A verified commit is a checkpoint, not a completion signal. After each meaningful commit, continue by selecting the next highest-value documented implementation or verification gap from `progress.md`, `learnings.md`, or the source docs.
 
@@ -119,6 +120,6 @@ Do not continue by making ledger-only, cosmetic, or speculative changes. Each lo
 Stop only when one of these is true:
 
 * the documented success criteria are complete;
-* the next step requires a scope-changing, security-sensitive, hard-to-reverse, or outside-docs decision;
+* the next step requires a decision that is outside the source docs, conflicts with the source docs, or changes the documented security model in a hard-to-reverse way;
 * verification is impossible after reducing the issue to a minimal repro;
 * two consecutive work cycles produce no meaningful product or verification progress;
