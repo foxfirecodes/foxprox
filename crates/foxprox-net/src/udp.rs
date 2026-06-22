@@ -57,25 +57,25 @@ pub struct UdpDnsProofConfig {
 }
 
 #[derive(Clone, Copy)]
-struct UdpForwardSocket {
-    port: u16,
-    handle: smoltcp::iface::SocketHandle,
+pub(crate) struct UdpForwardSocket {
+    pub(crate) port: u16,
+    pub(crate) handle: smoltcp::iface::SocketHandle,
 }
 
-struct UdpForwardDatagram {
-    socket: UdpForwardSocket,
-    payload: Vec<u8>,
-    metadata: udp::UdpMetadata,
+pub(crate) struct UdpForwardDatagram {
+    pub(crate) socket: UdpForwardSocket,
+    pub(crate) payload: Vec<u8>,
+    pub(crate) metadata: udp::UdpMetadata,
 }
 
 #[derive(Clone)]
-struct WorkerLimiter {
+pub(crate) struct WorkerLimiter {
     max_workers: usize,
     active: Arc<AtomicUsize>,
 }
 
 impl WorkerLimiter {
-    fn new(max_workers: usize) -> io::Result<Self> {
+    pub(crate) fn new(max_workers: usize) -> io::Result<Self> {
         if max_workers == 0 {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -126,7 +126,7 @@ impl Drop for WorkerPermit {
     }
 }
 
-enum UdpWorkerResult {
+pub(crate) enum UdpWorkerResult {
     Dns {
         metadata: udp::UdpMetadata,
         source: TransportEndpoint,
@@ -327,7 +327,7 @@ where
     }
 }
 
-fn udp_socket(config: &UdpDnsProofConfig) -> io::Result<udp::Socket<'static>> {
+pub(crate) fn udp_socket(config: &UdpDnsProofConfig) -> io::Result<udp::Socket<'static>> {
     if config.udp_packet_capacity == 0 || config.udp_payload_capacity == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -341,7 +341,7 @@ fn udp_socket(config: &UdpDnsProofConfig) -> io::Result<udp::Socket<'static>> {
     Ok(udp::Socket::new(rx_buffer, tx_buffer))
 }
 
-fn handle_worker_results(
+pub(crate) fn handle_worker_results(
     config: &UdpDnsProofConfig,
     cache: &mut DnsCache,
     flows: &mut UdpFlowTable,
@@ -433,7 +433,7 @@ fn handle_worker_results(
     }
 }
 
-fn handle_dns_datagram(
+pub(crate) fn handle_dns_datagram(
     config: &UdpDnsProofConfig,
     audit: &mut AuditBuffer,
     worker_limiter: &WorkerLimiter,
@@ -526,7 +526,7 @@ fn handle_dns_datagram(
     Ok(())
 }
 
-fn handle_udp_forward_datagram(
+pub(crate) fn handle_udp_forward_datagram(
     config: &UdpDnsProofConfig,
     cache: &DnsCache,
     flows: &mut UdpFlowTable,

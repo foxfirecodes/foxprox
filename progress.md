@@ -1318,6 +1318,79 @@
 - Current git status summary: net/progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit transparent HTTP/TLS unsupported audit coverage, then reassess remaining alpha gaps.
 
+## 2026-06-22T00:42:09Z — transparent HTTP/TLS unsupported audit committed; alpha gap reassessment requested
+
+- Commit created: `4949c53` (`audit malformed transparent inspection`).
+- Current objective: reassess remaining alpha scope and select the next smallest coherent slice.
+- Rationale: recent commits completed proxy connection limits, UDP/DNS worker limits, explicit proxy unsupported audit, malformed broker DNS audit, and transparent HTTP/TLS unsupported audit. A fresh read-only alpha gap reassessment should prevent overfitting to stale review notes before the next implementation slice.
+- Subagents/reviews requested: `alpha-gap-reassessment` is running.
+- Verification evidence for latest commit: full workspace fmt/check/test/clippy/doc passed before commit; reviewer found no blockers.
+- Files changed: `progress.md` only for this checkpoint.
+- Current git status summary before this progress edit: clean `autonomous-crew` branch at `4949c53`.
+- Next exact action: read `reviews/alpha-gap-reassessment.md`, select/fix next alpha gap if any, or run final alpha verification if none remain.
+
+## 2026-06-22T00:58:38Z — combined transparent proof pending review
+
+- Current objective: close the P0 alpha gap that TCP and UDP/DNS transparent proofs were separate TUN-owning runtimes.
+- Alpha gap reassessment result: P0 blockers remain because no single transparent runtime combines TCP + UDP/DNS on one TUN fd, and transparent DNS attribution was not wired into TCP/TLS policy decisions.
+- Planner result: implement a smallest combined proof runtime with one smoltcp `Interface`/`SocketSet`, shared `DnsCache`, `AuditBuffer`, and `PolicyRuleSet`, reusing existing TCP and UDP handlers rather than a production broker rewrite.
+- Changes implemented:
+  - Added `crates/foxprox-net/src/combined.rs` with `CombinedTransparentProofConfig`, `run_combined_transparent_proof`, and `run_combined_transparent_proof_with_ready`.
+  - Combined runtime owns one TUN fd/smoltcp interface and installs a TCP socket, broker DNS UDP socket, and configured UDP forwarding sockets in a single `SocketSet`.
+  - Combined runtime shares one `DnsCache`, `UdpFlowTable`, `AuditBuffer`, `PolicyRuleSet`, and UDP worker limiter/channel across TCP and UDP/DNS paths.
+  - Refactored TCP proof loop into `TransparentTcpState::poll` so standalone TCP and combined runtime use the same TCP policy/audit/inspection/bridge logic.
+  - TCP connect attribution now uses DNS-cache attribution when a shared cache is provided, otherwise keeps IP-only standalone behavior.
+  - TLS ClientHello events now populate `dns_hostname` and `mismatch` from the shared DNS cache when available.
+  - Made selected UDP internals `pub(crate)` for reuse by the combined loop while preserving standalone UDP/DNS behavior.
+  - Added CLI `proof-transparent` with setup-socket fd handoff, ready handshake, TCP port policy rules, UDP forwarding policy rules, `--audit-queue-capacity`, and `--max-workers` parsing.
+  - Added pure tests for combined config bounds, zero audit/worker capacity validation, TCP DNS-cache attribution/fallback, TLS DNS mismatch metadata, and CLI usage.
+- Subagents/reviews requested: `combined-transparent-final` is running.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-net -p foxprox-cli` passed: 33 net tests, 8 CLI tests.
+  - `cargo test --workspace` passed: 51 core tests, 9 device tests, 33 net tests, 28 proxy tests, 8 CLI tests, setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed after reducing TLS pump argument count.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net` and `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-net/src/combined.rs`, `crates/foxprox-net/src/lib.rs`, `crates/foxprox-net/src/udp.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: combined/net/UDP/CLI/progress modified; review artifacts pending.
+- Next exact action: read combined transparent proof review, fix blockers if any, then commit.
+
+## 2026-06-22T01:01:39Z — combined transparent proof blocker fixed; rereview pending
+
+- Current objective: commit combined transparent proof runtime.
+- Review result: `combined-transparent-final` found one blocker: `proof-transparent` could signal `ready` before the TCP listener was installed, because the combined runtime only added the TCP socket to the `SocketSet` and relied on first `TransparentTcpState::poll` after `ready()` to call `listen`.
+- Fix implemented:
+  - Added `install_tcp_listener` helper in `crates/foxprox-net/src/combined.rs`.
+  - Combined runtime now calls `install_tcp_listener(sockets.get_mut::<tcp::Socket>(tcp_handle), config.tcp_port)?` before the combined proof log and before `ready()?`.
+  - Retained `TransparentTcpState` relisten behavior for subsequent closed flows.
+  - Added `combined_installs_tcp_listener_before_ready_point` unit test.
+- Subagents/reviews requested: `combined-transparent-rereview` is running.
+- Verification commands and outcomes after fix:
+  - `cargo test -p foxprox-net -p foxprox-cli` passed: 34 net tests, 8 CLI tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 51 core tests, 9 device tests, 34 net tests, 28 proxy tests, 8 CLI tests, setup 0 tests.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net` and `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-net/src/combined.rs`, `crates/foxprox-net/src/lib.rs`, `crates/foxprox-net/src/udp.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: combined/net/UDP/CLI/progress modified; review artifacts pending.
+- Next exact action: read combined transparent rereview, fix blockers if any, then commit.
+
+## 2026-06-22T01:03:31Z — combined transparent proof rereview passed
+
+- Current objective: commit combined transparent proof runtime.
+- Rereview result: `combined-transparent-rereview` found no blockers after the ready/listen ordering fix.
+- Confirmed behavior:
+  - Combined runtime installs the TCP listener before `ready()` releases the setup handshake.
+  - `TransparentTcpState` still handles relisten behavior for subsequent closed flows.
+  - Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed; focused net/CLI tests passed; dependency trees showed no creep.
+- Files changed: `crates/foxprox-net/src/combined.rs`, `crates/foxprox-net/src/lib.rs`, `crates/foxprox-net/src/udp.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: combined/net/UDP/CLI/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit combined transparent proof runtime, then reassess remaining P1/P2 alpha gaps.
+
 ## 2026-06-22T00:12:18Z — ICMP audit/cleanup rereview passed
 
 - Current objective: commit cleanup-safe setup socket binding plus ICMP proof audit coverage.

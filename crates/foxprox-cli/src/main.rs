@@ -8,7 +8,9 @@ use foxprox_device::{
     unsupported_event_for_drop,
 };
 use foxprox_net::{
-    run_tcp_proof_with_ready, run_udp_dns_proof_with_ready, TcpProofConfig, UdpDnsProofConfig,
+    run_combined_transparent_proof_with_ready, run_tcp_proof_with_ready,
+    run_udp_dns_proof_with_ready, CombinedTransparentProofConfig, TcpProofConfig,
+    UdpDnsProofConfig,
 };
 use foxprox_proxy::{
     run_http_proxy_proof, run_socks5_proxy_proof, HttpProxyProofConfig, Socks5ProxyProofConfig,
@@ -36,6 +38,7 @@ fn run() -> io::Result<()> {
         Some("proof-icmp") => proof_icmp(args),
         Some("proof-tcp") => proof_tcp(args),
         Some("proof-udp-dns") => proof_udp_dns(args),
+        Some("proof-transparent") => proof_transparent(args),
         Some("proof-http-proxy") => proof_http_proxy(args),
         Some("proof-socks5-proxy") => proof_socks5_proxy(args),
         Some("--help" | "-h") | None => Err(io::Error::new(io::ErrorKind::InvalidInput, usage())),
@@ -47,7 +50,7 @@ fn run() -> io::Result<()> {
 }
 
 fn usage() -> &'static str {
-    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1] [--audit-queue-capacity N]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--audit-queue-capacity N]\n       foxprox proof-udp-dns --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N]\n       foxprox proof-http-proxy [--listen 10.255.0.1:8080] [--allow-port PORT]... [--request-head-limit BYTES] [--request-head-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]\n       foxprox proof-socks5-proxy [--listen 10.255.0.1:1080] [--allow-port PORT]... [--request-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]"
+    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1] [--audit-queue-capacity N]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--audit-queue-capacity N]\n       foxprox proof-udp-dns --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N]\n       foxprox proof-transparent --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N]\n       foxprox proof-http-proxy [--listen 10.255.0.1:8080] [--allow-port PORT]... [--request-head-limit BYTES] [--request-head-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]\n       foxprox proof-socks5-proxy [--listen 10.255.0.1:1080] [--allow-port PORT]... [--request-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]"
 }
 
 fn proof_icmp<I>(mut args: I) -> io::Result<()>
@@ -304,6 +307,99 @@ where
         config.broker_ip, config.dns_port, config.upstream_dns
     );
     run_udp_dns_proof_with_ready(tun_fd, config, || stream.write_all(b"ready\n"))
+}
+
+fn proof_transparent<I>(mut args: I) -> io::Result<()>
+where
+    I: Iterator<Item = String>,
+{
+    let mut setup_socket = env::var("FOXPROX_SETUP_SOCKET").ok();
+    let mut config = CombinedTransparentProofConfig::new(
+        SandboxId::new("proof-transparent").map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid sandbox id: {error}"),
+            )
+        })?,
+    );
+
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--setup-socket" => setup_socket = Some(required_value(&mut args, "--setup-socket")?),
+            "--broker-ip" => {
+                config.broker_ip = parse_value(&required_value(&mut args, "--broker-ip")?)?
+            }
+            "--prefix-len" => {
+                config.prefix_len = parse_value(&required_value(&mut args, "--prefix-len")?)?
+            }
+            "--mtu" => config.mtu = parse_value(&required_value(&mut args, "--mtu")?)?,
+            "--tcp-port" => {
+                config.tcp_port = parse_value(&required_value(&mut args, "--tcp-port")?)?
+            }
+            "--upstream-dns" => {
+                config.upstream_dns =
+                    parse_socket_addr(&required_value(&mut args, "--upstream-dns")?)?
+            }
+            "--udp-forward-port" => {
+                let port = parse_value(&required_value(&mut args, "--udp-forward-port")?)?;
+                config.udp_forward_ports.push(port);
+                config.policy.rules.push(allow_udp_forward_rule(port));
+            }
+            "--audit-queue-capacity" => {
+                config.audit_queue_capacity =
+                    parse_nonzero_usize(&required_value(&mut args, "--audit-queue-capacity")?)?
+            }
+            "--max-workers" => {
+                config.max_worker_threads =
+                    parse_nonzero_usize(&required_value(&mut args, "--max-workers")?)?
+            }
+            "--help" | "-h" => return Err(io::Error::new(io::ErrorKind::InvalidInput, usage())),
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unexpected argument {other:?}\n{}", usage()),
+                ));
+            }
+        }
+    }
+
+    config
+        .policy
+        .rules
+        .push(allow_tcp_forward_rule(config.tcp_port));
+    if config.tcp_port == 80 {
+        config
+            .policy
+            .rules
+            .push(allow_http_forward_rule(config.tcp_port));
+    }
+    if config.tcp_port == 443 {
+        config
+            .policy
+            .rules
+            .push(allow_tls_forward_rule(config.tcp_port));
+    }
+
+    let setup_socket = setup_socket.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "missing --setup-socket or FOXPROX_SETUP_SOCKET\n{}",
+                usage()
+            ),
+        )
+    })?;
+
+    let listener = BoundSetupListener::bind(&setup_socket)?;
+    eprintln!("foxprox: waiting for foxproxsetup on {setup_socket}");
+    let (mut stream, _) = listener.accept()?;
+    verify_peer_credentials(&stream)?;
+    let tun_fd = recv_fd(stream.as_raw_fd())?;
+    eprintln!(
+        "foxprox: received TUN fd; starting combined transparent proof tcp_port={} broker_dns={}:{} upstream={}",
+        config.tcp_port, config.broker_ip, config.dns_port, config.upstream_dns
+    );
+    run_combined_transparent_proof_with_ready(tun_fd, config, || stream.write_all(b"ready\n"))
 }
 
 fn proof_http_proxy<I>(mut args: I) -> io::Result<()>
@@ -717,6 +813,13 @@ mod tests {
             "foxprox-{name}-{}-{nanos}.sock",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn usage_mentions_combined_transparent_proof() {
+        assert!(usage().contains("proof-transparent"));
+        assert!(usage().contains("--max-workers"));
+        assert!(usage().contains("--udp-forward-port"));
     }
 
     #[test]

@@ -7,14 +7,19 @@
 
 #![deny(missing_docs)]
 
+mod combined;
 mod udp;
 
+pub use combined::{
+    run_combined_transparent_proof, run_combined_transparent_proof_with_ready,
+    CombinedTransparentProofConfig,
+};
 pub use udp::{run_udp_dns_proof, run_udp_dns_proof_with_ready, UdpDnsProofConfig};
 
 use foxprox_core::{
     parse_http_request_head, parse_tls_client_hello, Attribution, AttributionConfidence,
     AttributionSource, AuditBackpressure, AuditBuffer, AuditEvent, AuditEventKind, Decision,
-    Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, SandboxId, TransportEndpoint,
+    DnsCache, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, SandboxId, TransportEndpoint,
     UnsupportedReason,
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
@@ -26,7 +31,7 @@ use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream};
 use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::time::{Duration, Instant as StdInstant};
+use std::time::{Duration, Instant as StdInstant, SystemTime};
 
 /// Configuration for the smoltcp TCP forwarding proof.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -122,179 +127,12 @@ where
     );
     ready()?;
 
-    let mut flow: Option<FlowState> = None;
+    let mut tcp_state = TransparentTcpState::new();
 
     loop {
-        let now = Instant::now();
-        iface.poll(now, &mut device, &mut sockets);
-
-        {
-            let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
-            if flow.is_none() && !socket.is_open() {
-                socket
-                    .listen(config.tcp_port)
-                    .map_err(|error| io::Error::other(format!("listen failed: {error}")))?;
-                eprintln!(
-                    "foxprox-net: listening for transparent TCP port {}",
-                    config.tcp_port
-                );
-            }
-        }
-
-        if flow.is_none() {
-            let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
-            if socket.is_active() {
-                if let (Some(local), Some(remote)) =
-                    (socket.local_endpoint(), socket.remote_endpoint())
-                {
-                    let destination = endpoint_to_socket_addr(local)?;
-                    let source = endpoint_to_transport(remote)?;
-                    eprintln!(
-                        "foxprox-net: tcp connect sandbox={}:{} destination={}",
-                        source.ip, source.port, destination
-                    );
-                    let event = NetworkEvent::TcpConnectAttempt {
-                        sandbox_id: config.sandbox_id.clone(),
-                        frontend: Frontend::Tun,
-                        source: Some(source),
-                        destination: TransportEndpoint::from(destination),
-                        attribution: Attribution::ip_only(),
-                    };
-                    let decision = PolicyEngine::new(config.policy.clone()).evaluate(&event);
-                    eprintln!("foxprox-net: tcp policy decision={decision:?} event={event:?}");
-                    if let Err(error) = emit_tcp_audit(&mut audit, &event, decision.clone()) {
-                        eprintln!("foxprox-net: tcp audit backpressure: {error}");
-                        socket.abort();
-                    } else if decision.is_allowed() {
-                        flow = Some(if should_inspect_http(destination.port()) {
-                            FlowState::InspectingHttp(InspectingHttpFlow::new(source, destination))
-                        } else if should_inspect_tls(destination.port()) {
-                            FlowState::InspectingTls(InspectingTlsFlow::new(source, destination))
-                        } else {
-                            FlowState::Connecting(ConnectingFlow::new(
-                                source,
-                                destination,
-                                config.connect_timeout,
-                            ))
-                        });
-                    } else {
-                        socket.abort();
-                    }
-                }
-            }
-        }
-
-        let mut clear_flow = false;
-        if let Some(state) = flow.as_mut() {
-            let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
-            match state {
-                FlowState::InspectingHttp(inspecting) => {
-                    match inspecting.pump(
-                        socket,
-                        &config.sandbox_id,
-                        &config.policy,
-                        &mut audit,
-                        config.pending_buffer_limit,
-                        config.connect_timeout,
-                    ) {
-                        Ok(Some(connecting)) => *state = FlowState::Connecting(connecting),
-                        Ok(None) => {
-                            if inspecting.is_expired(config.connect_timeout) || !socket.is_active()
-                            {
-                                eprintln!(
-                                    "foxprox-net: HTTP inspection timed out or socket closed"
-                                );
-                                socket.abort();
-                                clear_flow = true;
-                            }
-                        }
-                        Err(error) => {
-                            eprintln!("foxprox-net: HTTP inspection denied/failed: {error}");
-                            socket.abort();
-                            clear_flow = true;
-                        }
-                    }
-                }
-                FlowState::InspectingTls(inspecting) => {
-                    match inspecting.pump(
-                        socket,
-                        &config.sandbox_id,
-                        &config.policy,
-                        &mut audit,
-                        config.pending_buffer_limit,
-                        config.connect_timeout,
-                    ) {
-                        Ok(Some(connecting)) => *state = FlowState::Connecting(connecting),
-                        Ok(None) => {
-                            if inspecting.is_expired(config.connect_timeout) || !socket.is_active()
-                            {
-                                eprintln!("foxprox-net: TLS inspection timed out or socket closed");
-                                socket.abort();
-                                clear_flow = true;
-                            }
-                        }
-                        Err(error) => {
-                            eprintln!("foxprox-net: TLS inspection denied/failed: {error}");
-                            socket.abort();
-                            clear_flow = true;
-                        }
-                    }
-                }
-                FlowState::Connecting(connecting) => {
-                    let mut connected = None;
-                    if let Err(error) = connecting.pump(socket, config.pending_buffer_limit) {
-                        eprintln!("foxprox-net: connecting flow error: {error}");
-                        socket.abort();
-                        clear_flow = true;
-                    } else {
-                        match connecting.try_finish() {
-                            Ok(Some(active)) => connected = Some(active),
-                            Ok(None) => {}
-                            Err(error) => {
-                                eprintln!("foxprox-net: host connect failed: {error}");
-                                socket.abort();
-                                clear_flow = true;
-                            }
-                        }
-                    }
-                    if !clear_flow
-                        && connected.is_none()
-                        && (!socket.is_active() || connecting.is_expired(config.connect_timeout))
-                    {
-                        eprintln!("foxprox-net: connect timed out or sandbox socket closed");
-                        socket.abort();
-                        clear_flow = true;
-                    }
-                    if let Some(active) = connected {
-                        *state = FlowState::Active(active);
-                    }
-                }
-                FlowState::Active(active) => {
-                    if let Err(error) = active.pump(socket, config.pending_buffer_limit) {
-                        eprintln!("foxprox-net: tcp flow error: {error}");
-                        socket.abort();
-                        clear_flow = true;
-                    } else if active.is_idle(config.idle_timeout) {
-                        eprintln!("foxprox-net: tcp flow idle timeout");
-                        socket.abort();
-                        clear_flow = true;
-                    } else if !socket.is_active()
-                        && active.pending_to_host.is_empty()
-                        && active.pending_to_sandbox.is_empty()
-                    {
-                        eprintln!(
-                            "foxprox-net: tcp flow closed sandbox_to_host={} host_to_sandbox={}",
-                            active.bytes_to_host, active.bytes_to_sandbox
-                        );
-                        clear_flow = true;
-                    }
-                }
-            }
-        }
-        if clear_flow {
-            flow = None;
-        }
-
+        iface.poll(Instant::now(), &mut device, &mut sockets);
+        let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
+        tcp_state.poll(socket, &config, &mut audit, None)?;
         std::thread::sleep(Duration::from_millis(2));
     }
 }
@@ -416,6 +254,182 @@ fn transparent_tcp_audit_event(event: &NetworkEvent, decision: Decision) -> Audi
     audit
 }
 
+pub(crate) struct TransparentTcpState {
+    flow: Option<FlowState>,
+}
+
+impl TransparentTcpState {
+    pub(crate) const fn new() -> Self {
+        Self { flow: None }
+    }
+
+    pub(crate) fn poll(
+        &mut self,
+        socket: &mut tcp::Socket<'_>,
+        config: &TcpProofConfig,
+        audit: &mut AuditBuffer,
+        dns_cache: Option<&DnsCache>,
+    ) -> io::Result<()> {
+        if self.flow.is_none() && !socket.is_open() {
+            socket
+                .listen(config.tcp_port)
+                .map_err(|error| io::Error::other(format!("listen failed: {error}")))?;
+            eprintln!(
+                "foxprox-net: listening for transparent TCP port {}",
+                config.tcp_port
+            );
+        }
+
+        if self.flow.is_none() && socket.is_active() {
+            if let (Some(local), Some(remote)) = (socket.local_endpoint(), socket.remote_endpoint())
+            {
+                let destination = endpoint_to_socket_addr(local)?;
+                let source = endpoint_to_transport(remote)?;
+                eprintln!(
+                    "foxprox-net: tcp connect sandbox={}:{} destination={}",
+                    source.ip, source.port, destination
+                );
+                let event = NetworkEvent::TcpConnectAttempt {
+                    sandbox_id: config.sandbox_id.clone(),
+                    frontend: Frontend::Tun,
+                    source: Some(source),
+                    destination: TransportEndpoint::from(destination),
+                    attribution: tcp_attribution_for_destination(
+                        &config.sandbox_id,
+                        dns_cache,
+                        destination.ip(),
+                        SystemTime::now(),
+                    ),
+                };
+                let decision = PolicyEngine::new(config.policy.clone()).evaluate(&event);
+                eprintln!("foxprox-net: tcp policy decision={decision:?} event={event:?}");
+                if let Err(error) = emit_tcp_audit(audit, &event, decision.clone()) {
+                    eprintln!("foxprox-net: tcp audit backpressure: {error}");
+                    socket.abort();
+                } else if decision.is_allowed() {
+                    self.flow = Some(if should_inspect_http(destination.port()) {
+                        FlowState::InspectingHttp(InspectingHttpFlow::new(source, destination))
+                    } else if should_inspect_tls(destination.port()) {
+                        FlowState::InspectingTls(InspectingTlsFlow::new(source, destination))
+                    } else {
+                        FlowState::Connecting(ConnectingFlow::new(
+                            source,
+                            destination,
+                            config.connect_timeout,
+                        ))
+                    });
+                } else {
+                    socket.abort();
+                }
+            }
+        }
+
+        let mut clear_flow = false;
+        if let Some(state) = self.flow.as_mut() {
+            match state {
+                FlowState::InspectingHttp(inspecting) => {
+                    match inspecting.pump(
+                        socket,
+                        &config.sandbox_id,
+                        &config.policy,
+                        audit,
+                        config.pending_buffer_limit,
+                        config.connect_timeout,
+                    ) {
+                        Ok(Some(connecting)) => *state = FlowState::Connecting(connecting),
+                        Ok(None) => {
+                            if inspecting.is_expired(config.connect_timeout) || !socket.is_active()
+                            {
+                                eprintln!(
+                                    "foxprox-net: HTTP inspection timed out or socket closed"
+                                );
+                                socket.abort();
+                                clear_flow = true;
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("foxprox-net: HTTP inspection denied/failed: {error}");
+                            socket.abort();
+                            clear_flow = true;
+                        }
+                    }
+                }
+                FlowState::InspectingTls(inspecting) => {
+                    match inspecting.pump(socket, config, dns_cache, audit) {
+                        Ok(Some(connecting)) => *state = FlowState::Connecting(connecting),
+                        Ok(None) => {
+                            if inspecting.is_expired(config.connect_timeout) || !socket.is_active()
+                            {
+                                eprintln!("foxprox-net: TLS inspection timed out or socket closed");
+                                socket.abort();
+                                clear_flow = true;
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("foxprox-net: TLS inspection denied/failed: {error}");
+                            socket.abort();
+                            clear_flow = true;
+                        }
+                    }
+                }
+                FlowState::Connecting(connecting) => {
+                    let mut connected = None;
+                    if let Err(error) = connecting.pump(socket, config.pending_buffer_limit) {
+                        eprintln!("foxprox-net: connecting flow error: {error}");
+                        socket.abort();
+                        clear_flow = true;
+                    } else {
+                        match connecting.try_finish() {
+                            Ok(Some(active)) => connected = Some(active),
+                            Ok(None) => {}
+                            Err(error) => {
+                                eprintln!("foxprox-net: host connect failed: {error}");
+                                socket.abort();
+                                clear_flow = true;
+                            }
+                        }
+                    }
+                    if !clear_flow
+                        && connected.is_none()
+                        && (!socket.is_active() || connecting.is_expired(config.connect_timeout))
+                    {
+                        eprintln!("foxprox-net: connect timed out or sandbox socket closed");
+                        socket.abort();
+                        clear_flow = true;
+                    }
+                    if let Some(active) = connected {
+                        *state = FlowState::Active(active);
+                    }
+                }
+                FlowState::Active(active) => {
+                    if let Err(error) = active.pump(socket, config.pending_buffer_limit) {
+                        eprintln!("foxprox-net: tcp flow error: {error}");
+                        socket.abort();
+                        clear_flow = true;
+                    } else if active.is_idle(config.idle_timeout) {
+                        eprintln!("foxprox-net: tcp flow idle timeout");
+                        socket.abort();
+                        clear_flow = true;
+                    } else if !socket.is_active()
+                        && active.pending_to_host.is_empty()
+                        && active.pending_to_sandbox.is_empty()
+                    {
+                        eprintln!(
+                            "foxprox-net: tcp flow closed sandbox_to_host={} host_to_sandbox={}",
+                            active.bytes_to_host, active.bytes_to_sandbox
+                        );
+                        clear_flow = true;
+                    }
+                }
+            }
+        }
+        if clear_flow {
+            self.flow = None;
+        }
+        Ok(())
+    }
+}
+
 enum FlowState {
     InspectingHttp(InspectingHttpFlow),
     InspectingTls(InspectingTlsFlow),
@@ -527,16 +541,14 @@ impl InspectingTlsFlow {
     fn pump(
         &mut self,
         socket: &mut tcp::Socket<'_>,
-        sandbox_id: &SandboxId,
-        policy: &PolicyRuleSet,
+        config: &TcpProofConfig,
+        dns_cache: Option<&DnsCache>,
         audit: &mut AuditBuffer,
-        pending_limit: usize,
-        connect_timeout: Duration,
     ) -> io::Result<Option<ConnectingFlow>> {
         recv_socket_to_vec(
             socket,
             &mut self.pending_to_host,
-            pending_limit,
+            config.pending_buffer_limit,
             &mut self.last_activity,
         )?;
         let inspection = match parse_tls_client_hello(&self.pending_to_host) {
@@ -545,7 +557,7 @@ impl InspectingTlsFlow {
             Err(error) => {
                 emit_tcp_unsupported_audit(
                     audit,
-                    sandbox_id,
+                    &config.sandbox_id,
                     format!(
                         "malformed or unsupported TLS ClientHello source={}:{} destination={} error={error:?}",
                         self.source.ip, self.source.port, self.destination
@@ -556,16 +568,26 @@ impl InspectingTlsFlow {
                 )));
             }
         };
+        let dns_hostname = dns_cache.and_then(|cache| {
+            cache
+                .lookup_address(&config.sandbox_id, self.destination.ip(), SystemTime::now())
+                .map(|entry| entry.hostname.clone())
+        });
+        let mismatch = inspection
+            .sni
+            .as_ref()
+            .zip(dns_hostname.as_ref())
+            .is_some_and(|(sni, dns_hostname)| sni != dns_hostname);
         let event = NetworkEvent::TlsClientHello {
-            sandbox_id: sandbox_id.clone(),
+            sandbox_id: config.sandbox_id.clone(),
             frontend: Frontend::Tun,
             destination: TransportEndpoint::from(self.destination),
             sni: inspection.sni,
             ech_present: inspection.ech_present,
-            dns_hostname: None,
-            mismatch: false,
+            dns_hostname,
+            mismatch,
         };
-        let decision = PolicyEngine::new(policy.clone()).evaluate(&event);
+        let decision = PolicyEngine::new(config.policy.clone()).evaluate(&event);
         eprintln!("foxprox-net: transparent TLS policy decision={decision:?} event={event:?}");
         emit_tcp_audit(audit, &event, decision.clone())?;
         if !decision.is_allowed() {
@@ -576,7 +598,7 @@ impl InspectingTlsFlow {
         Ok(Some(ConnectingFlow::new_with_pending(
             self.source,
             self.destination,
-            connect_timeout,
+            config.connect_timeout,
             std::mem::take(&mut self.pending_to_host),
         )))
     }
@@ -792,6 +814,18 @@ fn recv_socket_to_vec(
     Ok(())
 }
 
+fn tcp_attribution_for_destination(
+    sandbox_id: &SandboxId,
+    dns_cache: Option<&DnsCache>,
+    destination_ip: IpAddr,
+    now: SystemTime,
+) -> Attribution {
+    dns_cache
+        .and_then(|cache| cache.lookup_address(sandbox_id, destination_ip, now))
+        .map(|entry| entry.attribution())
+        .unwrap_or_else(Attribution::ip_only)
+}
+
 fn should_inspect_http(port: u16) -> bool {
     port == 80
 }
@@ -837,7 +871,10 @@ fn set_nonblocking(fd: i32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use foxprox_core::{DecisionAction, Hostname, HttpMethod, Origin, Protocol};
+    use foxprox_core::{
+        DecisionAction, DnsCacheEntry, DnsObservation, DnsQueryType, Hostname, HttpMethod, Origin,
+        Protocol,
+    };
 
     #[test]
     fn default_config_is_bounded() {
@@ -877,6 +914,74 @@ mod tests {
         assert!(!PolicyEngine::new(config.policy)
             .evaluate(&event)
             .is_allowed());
+    }
+
+    #[test]
+    fn tcp_attribution_uses_dns_cache_when_available() {
+        let sandbox_id = SandboxId::new("test").unwrap();
+        let now = SystemTime::now();
+        let entry = DnsCacheEntry::new(
+            DnsObservation {
+                sandbox_id: sandbox_id.clone(),
+                hostname: Hostname::parse("www.example.com").unwrap(),
+                query_type: DnsQueryType::A,
+                observed_at: now,
+                broker_controlled: true,
+            },
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        let mut cache = DnsCache::default();
+        cache.insert(entry);
+
+        let attribution = tcp_attribution_for_destination(
+            &sandbox_id,
+            Some(&cache),
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            now,
+        );
+
+        assert_eq!(attribution.hostname.unwrap().as_str(), "www.example.com");
+        assert_eq!(attribution.source, AttributionSource::DnsCache);
+        assert_eq!(attribution.confidence, AttributionConfidence::Medium);
+    }
+
+    #[test]
+    fn tcp_attribution_falls_back_to_ip_only_without_dns_cache() {
+        let attribution = tcp_attribution_for_destination(
+            &SandboxId::new("test").unwrap(),
+            None,
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            SystemTime::now(),
+        );
+
+        assert!(attribution.hostname.is_none());
+        assert_eq!(attribution.source, AttributionSource::IpOnly);
+        assert_eq!(attribution.confidence, AttributionConfidence::Low);
+    }
+
+    #[test]
+    fn tls_audit_event_records_dns_hostname_and_mismatch_metadata() {
+        let event = NetworkEvent::TlsClientHello {
+            sandbox_id: SandboxId::new("test").unwrap(),
+            frontend: Frontend::Tun,
+            destination: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 443),
+            sni: Some(Hostname::parse("visible.example.com").unwrap()),
+            ech_present: false,
+            dns_hostname: Some(Hostname::parse("dns.example.com").unwrap()),
+            mismatch: true,
+        };
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let audit = transparent_tcp_audit_event(&event, decision);
+
+        assert_eq!(audit.kind, AuditEventKind::TlsClientHello);
+        assert_eq!(audit.hostname.unwrap().as_str(), "visible.example.com");
+        assert_eq!(audit.attribution.unwrap().source, AttributionSource::TlsSni);
+        assert_eq!(
+            audit.decision.as_ref().map(|decision| decision.action),
+            Some(DecisionAction::FailClosed)
+        );
     }
 
     #[test]
@@ -1041,8 +1146,7 @@ mod tests {
 
     #[test]
     fn malformed_transparent_tls_hello_emits_unsupported_audit() {
-        let sandbox_id = SandboxId::new("test").unwrap();
-        let policy = PolicyRuleSet::default();
+        let config = TcpProofConfig::new(SandboxId::new("test").unwrap());
         let mut audit = audit_buffer(8).unwrap();
         let mut socket = empty_tcp_socket();
         let mut flow = InspectingTlsFlow::new(
@@ -1052,14 +1156,7 @@ mod tests {
         flow.pending_to_host
             .extend_from_slice(&[0x15, 0x03, 0x03, 0x00, 0x04, 0, 0, 0, 0]);
 
-        let error = match flow.pump(
-            &mut socket,
-            &sandbox_id,
-            &policy,
-            &mut audit,
-            4096,
-            Duration::from_secs(1),
-        ) {
+        let error = match flow.pump(&mut socket, &config, None, &mut audit) {
             Ok(_) => panic!("malformed transparent TLS unexpectedly succeeded"),
             Err(error) => error,
         };
