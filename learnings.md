@@ -213,3 +213,8 @@
 
 - Stack flow-close events need to carry normalized frontend, key, byte counts, and duration so runtime can record lifecycle audit without reconstructing stack-specific flow state.
 - `StackEvent::FlowClosed` should remain a normalized adapter event; audit records are created in runtime, not inside smoltcp or other stack-specific crates.
+
+## 2026-06-22 — smoltcp TCP stream data events
+
+- TCP byte extraction can stay stack-neutral as `StackTcpData`: sandbox/session/frontend/source/destination plus payload bytes, with smoltcp receive buffers and socket state contained in the adapter crate.
+- A minimal SYN → SYN-ACK → ACK+payload fixture is enough to prove smoltcp data extraction before designing host egress stream backpressure.

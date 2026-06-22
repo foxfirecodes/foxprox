@@ -911,3 +911,26 @@
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
 - Commit hash after commit: 8d27e4d.
 - Remaining boundary risks: actual smoltcp close detection, TCP byte counts, stream bridging, and continuous polling remain.
+
+## 2026-06-22 — Boundary objective: smoltcp TCP stream data events
+
+- Boundary under work: userspace TCP stream data extraction from smoltcp sockets into stack-neutral adapter events.
+- Allowed dependency direction: smoltcp socket buffering and TCP state remain private to `foxprox-smoltcp`; `foxprox-net` exposes only normalized source/destination/frontend/sandbox metadata plus payload bytes as a stack event; policy/audit remain independent.
+- Dependency-risk assessment: TCP forwarding needs byte events after connect policy, but exposing smoltcp sockets or raw TCP headers would couple future forwarding and inspection to the selected stack. Keep data as a normalized runtime/adapter event and leave egress bridging for the next boundary.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: added `StackTcpData` to the stack event contract and taught `foxprox-smoltcp` to drain received TCP socket bytes into stack-neutral data events after connect. Added a SYN/SYN-ACK/ACK+payload fixture proving smoltcp emits `hello` as normalized TCP data without exposing socket or TCP header types. Runtime counts TCP data events for now; bridging is left to the next boundary. All verification passed.
+- Changed files:
+  - `crates/foxprox-net/src/lib.rs`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `crates/foxprox-smoltcp/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 92 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated in the adapter crate.
+  - `cargo tree -p foxprox-net` — net exposes only normalized stack event contracts.
+  - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: egress stream writes, backpressure, server-to-sandbox data, close lifecycle from real sockets, and continuous polling remain.

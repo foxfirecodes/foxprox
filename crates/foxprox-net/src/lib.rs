@@ -33,7 +33,20 @@ pub trait StackAdapter {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StackEvent {
     PolicyEvent(NormalizedEvent),
+    TcpData(StackTcpData),
     FlowClosed(StackFlowClosed),
+}
+
+/// Normalized TCP stream data emitted by a stack adapter after a connection is
+/// accepted by the userspace stack. Raw TCP headers and stack socket objects stay
+/// inside the adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StackTcpData {
+    pub sandbox_id: SandboxId,
+    pub frontend: FrontendKind,
+    pub source: SocketAddr,
+    pub destination: SocketAddr,
+    pub bytes: Vec<u8>,
 }
 
 /// Normalized flow lifecycle event emitted by a stack adapter without exposing

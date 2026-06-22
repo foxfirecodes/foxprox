@@ -74,6 +74,7 @@ pub struct StackDevicePacketStep<'a, S, E, A> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StackDevicePacketOutcome {
     pub broker_outcomes: Vec<BrokerEventOutcome>,
+    pub tcp_data_events: usize,
     pub flow_closed_events: usize,
     pub outbound_packets_written: usize,
 }
@@ -97,6 +98,7 @@ where
         .ingest_ip_packet(packet.bytes())
         .map_err(RuntimeError::Stack)?;
     let mut broker_outcomes = Vec::new();
+    let mut tcp_data_events = 0;
     let mut flow_closed_events = 0;
 
     for (offset, event) in events.into_iter().enumerate() {
@@ -112,6 +114,9 @@ where
                 )
                 .map_err(RuntimeError::Broker)?;
                 broker_outcomes.push(outcome);
+            }
+            StackEvent::TcpData(_) => {
+                tcp_data_events += 1;
             }
             StackEvent::FlowClosed(closed) => {
                 let protocol = match closed.key.protocol {
@@ -146,6 +151,7 @@ where
 
     Ok(StackDevicePacketOutcome {
         broker_outcomes,
+        tcp_data_events,
         flow_closed_events,
         outbound_packets_written,
     })

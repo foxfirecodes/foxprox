@@ -9,7 +9,7 @@ use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use foxprox_core::{FrontendKind, NormalizedEvent, SandboxId, TcpConnectAttempt};
-use foxprox_net::{OutboundIpPacket, StackAdapter, StackError, StackEvent};
+use foxprox_net::{OutboundIpPacket, StackAdapter, StackError, StackEvent, StackTcpData};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp;
@@ -116,29 +116,42 @@ impl SmoltcpStackAdapter {
         Instant::from_millis(self.now_millis)
     }
 
-    fn collect_tcp_connect_events(&mut self) -> Vec<StackEvent> {
+    fn collect_tcp_events(&mut self) -> Vec<StackEvent> {
         let mut events = Vec::new();
         for listener in &mut self.tcp_listeners {
-            if listener.observed_connect {
-                continue;
-            }
-            let socket = self.sockets.get::<tcp::Socket>(listener.handle);
+            let socket = self.sockets.get_mut::<tcp::Socket>(listener.handle);
             let Some(remote) = endpoint_to_socket_addr(socket.remote_endpoint()) else {
                 continue;
             };
             let Some(local) = endpoint_to_socket_addr(socket.local_endpoint()) else {
                 continue;
             };
-            listener.observed_connect = true;
-            events.push(StackEvent::PolicyEvent(NormalizedEvent::TcpConnectAttempt(
-                TcpConnectAttempt {
-                    sandbox_id: self.sandbox_id.clone(),
-                    frontend: self.frontend,
-                    source: remote,
-                    destination: local,
-                    hostname: None,
-                },
-            )));
+            if !listener.observed_connect {
+                listener.observed_connect = true;
+                events.push(StackEvent::PolicyEvent(NormalizedEvent::TcpConnectAttempt(
+                    TcpConnectAttempt {
+                        sandbox_id: self.sandbox_id.clone(),
+                        frontend: self.frontend,
+                        source: remote,
+                        destination: local,
+                        hostname: None,
+                    },
+                )));
+            }
+            if socket.can_recv() {
+                let data = socket
+                    .recv(|bytes| (bytes.len(), bytes.to_vec()))
+                    .unwrap_or_default();
+                if !data.is_empty() {
+                    events.push(StackEvent::TcpData(StackTcpData {
+                        sandbox_id: self.sandbox_id.clone(),
+                        frontend: self.frontend,
+                        source: remote,
+                        destination: local,
+                        bytes: data,
+                    }));
+                }
+            }
         }
         events
     }
@@ -183,7 +196,7 @@ impl StackAdapter for SmoltcpStackAdapter {
         self.device.push_inbound(packet.to_vec())?;
         let now = self.now();
         self.iface.poll(now, &mut self.device, &mut self.sockets);
-        Ok(self.collect_tcp_connect_events())
+        Ok(self.collect_tcp_events())
     }
 
     fn poll_outbound_packets(&mut self) -> Result<Vec<OutboundIpPacket>, StackError> {
@@ -333,6 +346,43 @@ mod tests {
     }
 
     #[test]
+    fn established_tcp_payload_emits_stack_data_event() {
+        let config = SmoltcpAdapterConfig::new(
+            SandboxId::new("s1").unwrap(),
+            FrontendKind::Tun,
+            "10.0.0.1".parse().unwrap(),
+            24,
+            1500,
+        )
+        .unwrap()
+        .with_tcp_listener(80);
+        let mut adapter = SmoltcpStackAdapter::new(config).unwrap();
+        let syn = tcp_syn_packet();
+        let connect_events = adapter.ingest_ip_packet(&syn).unwrap();
+        let syn_ack = adapter
+            .poll_outbound_packets()
+            .unwrap()
+            .remove(0)
+            .bytes()
+            .to_vec();
+        let server_seq = u32::from_be_bytes([syn_ack[24], syn_ack[25], syn_ack[26], syn_ack[27]]);
+        assert_eq!(connect_events.len(), 1);
+
+        let data_packet = tcp_ack_data_packet(0x1234_5679, server_seq.wrapping_add(1), b"hello");
+        let data_events = adapter.ingest_ip_packet(&data_packet).unwrap();
+
+        let Some(StackEvent::TcpData(data)) = data_events
+            .iter()
+            .find(|event| matches!(event, StackEvent::TcpData(_)))
+        else {
+            panic!("expected TCP data event");
+        };
+        assert_eq!(data.source, "10.0.0.2:49152".parse().unwrap());
+        assert_eq!(data.destination, "10.0.0.1:80".parse().unwrap());
+        assert_eq!(data.bytes, b"hello");
+    }
+
+    #[test]
     fn adapter_rejects_invalid_public_config_without_exposing_smoltcp_errors() {
         assert!(SmoltcpAdapterConfig::new(
             SandboxId::new("s1").unwrap(),
@@ -432,6 +482,30 @@ mod tests {
         assert_eq!(event.destination, "10.0.0.1:80".parse().unwrap());
         assert_eq!(outbound.len(), 1);
         assert_eq!(outbound[0].bytes()[9], 6);
+    }
+
+    fn tcp_ack_data_packet(seq: u32, ack: u32, payload: &[u8]) -> Vec<u8> {
+        let total_len = 40 + payload.len();
+        let mut packet = vec![0_u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[10, 0, 0, 2]);
+        packet[16..20].copy_from_slice(&[10, 0, 0, 1]);
+        packet[20..22].copy_from_slice(&49152_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&80_u16.to_be_bytes());
+        packet[24..28].copy_from_slice(&seq.to_be_bytes());
+        packet[28..32].copy_from_slice(&ack.to_be_bytes());
+        packet[32] = 0x50;
+        packet[33] = 0x18;
+        packet[34..36].copy_from_slice(&64240_u16.to_be_bytes());
+        packet[40..].copy_from_slice(payload);
+        let tcp_checksum = tcp_checksum_ipv4([10, 0, 0, 2], [10, 0, 0, 1], &packet[20..]);
+        packet[36..38].copy_from_slice(&tcp_checksum.to_be_bytes());
+        let ip_checksum = foxprox_packet::internet_checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+        packet
     }
 
     fn tcp_syn_packet() -> Vec<u8> {
