@@ -164,3 +164,7 @@ Keep bwrap-specific flags, `foxproxsetup -- target` wrapping, `/dev/net/tun` exp
 ## 2026-06-21 — fd handoff needs one reviewed unsafe conversion
 
 SCM_RIGHTS delivers raw file descriptors owned by the receiving process. Wrap each received raw fd exactly once in `OwnedFd` immediately after `recvmsg`; drop extras to avoid leaks. Keep this unsafe conversion isolated in the integration handoff module, not in broker core.
+
+## 2026-06-21 — TUN creation tests should prove fail-early on unprivileged hosts
+
+Opening `/dev/net/tun` may be possible without effective `CAP_NET_ADMIN`, while `TUNSETIFF` can still fail. Keep the Linux device primitive explicit about open versus ioctl failures and let live tests accept either a transient successful fd or a clear permission/setup error.

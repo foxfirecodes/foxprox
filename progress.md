@@ -897,3 +897,25 @@
 - What failed or surprised the agent: `recvmsg` borrows the receive buffer through its message object, so marker bytes must be read after extracting fd/control-message data inside a narrower scope.
 - What remains unproven: opening `/dev/net/tun`, creating/configuring a real TUN device, passing that real TUN fd through this channel, helper capability drop, and broker consumption of the received fd are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — Linux TUN open/ioctl fail-early slice
+
+- Slice attempted: add the first Linux TUN device frontend primitive that opens `/dev/net/tun`, issues `TUNSETIFF`, returns an owned fd on success, and reports explicit setup errors on failure.
+- Why next: fd handoff is proven, but the setup helper still cannot create the TUN fd it must hand off; a narrow TUN open/ioctl primitive addresses the highest setup risk while allowing verification to pass on hosts without effective `CAP_NET_ADMIN` by asserting fail-early diagnostics.
+- Verification plan: add `foxprox-device` with typed TUN create config/errors, validate interface names, run a live `/dev/net/tun` create attempt that must either produce an owned fd or a clear open/ioctl error, then run formatting, clippy, focused device tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — Linux TUN open/ioctl fail-early
+
+- Slice attempted: Linux-specific TUN create primitive that opens `/dev/net/tun`, issues `TUNSETIFF`, returns an owned fd on success, and reports explicit fail-early errors on unsupported/unauthorized hosts.
+- Why next: fd handoff is proven, but setup still needs a real TUN fd to hand off; this establishes the ioctl-facing boundary while keeping Linux details out of broker core.
+- What changed: added `crates/foxprox-device` with `TunCreateConfig`, `TunDevice`, `TunCreateError`, and `create_tun`; validates interface names, opens configurable TUN device paths, calls `TUNSETIFF` for TUN/no-PI mode, wraps the fd in `OwnedFd`, and isolates reviewed unsafe ioctl/buffer/fd conversions in the Linux device crate.
+- Verification:
+  - Focused check passed: `cargo test -p foxprox-device -- --nocapture` ran 3 tests covering invalid interface names, missing TUN device path open failure, and a live `/dev/net/tun` create attempt that must either succeed or report a clear open/ioctl error.
+  - `cargo fmt --check` passed.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, now including 3 `foxprox-device` tests plus the prior workspace suites.
+  - Final `cargo fmt --check` passed.
+- What failed or surprised the agent: the host exposes `/dev/net/tun`, but the test is written to accept either a successful transient TUN fd or an explicit permission/ioctl failure because effective `CAP_NET_ADMIN` is environment-dependent.
+- What remains unproven: assigning IP/MTU, bringing the interface up, configuring routes/DNS, executing inside bwrap, capability drop, fd handoff of an actual TUN fd, and sandbox packet logs are still absent.
+- Commit: this commit.
