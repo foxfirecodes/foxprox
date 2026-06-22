@@ -11,6 +11,17 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::net::IpAddr;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, RawFd};
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+#[cfg(unix)]
+use std::process::Command;
+
 use foxprox_audit::{audit_record_to_json_line, AuditSinkError};
 use foxprox_broker::IpPacketBroker;
 use foxprox_config::{policy_config_from_toml, ConfigError};
@@ -18,16 +29,27 @@ use foxprox_core::{FrontendKind, PolicyEngine, SandboxId};
 use foxprox_device::{TunIoError, TunPacketIo};
 use foxprox_packet::PacketContext;
 
+#[cfg(unix)]
+use foxprox_integrations::{
+    fd_handoff::{run_setup_sequence, SetupSequenceConfig, SetupSequenceError},
+    ResolverConfig, TunInterfaceSetupConfig,
+};
+
 /// CLI/runtime errors reported to users.
 #[derive(Debug)]
 pub enum CliError {
     Usage(String),
-    Io { context: String, error: io::Error },
+    Io {
+        context: String,
+        error: io::Error,
+    },
     Config(ConfigError),
     Core(String),
     Audit(AuditSinkError),
     Reply(String),
     TunIo(TunIoError),
+    #[cfg(unix)]
+    SetupSequence(SetupSequenceError),
 }
 
 impl fmt::Display for CliError {
@@ -40,6 +62,8 @@ impl fmt::Display for CliError {
             Self::Audit(error) => write!(f, "{error}"),
             Self::Reply(error) => write!(f, "packet-reply-error: {error}"),
             Self::TunIo(error) => write!(f, "{error}"),
+            #[cfg(unix)]
+            Self::SetupSequence(error) => write!(f, "{error}"),
         }
     }
 }
@@ -51,6 +75,8 @@ impl std::error::Error for CliError {
             Self::Config(error) => Some(error),
             Self::Audit(error) => Some(error),
             Self::TunIo(error) => Some(error),
+            #[cfg(unix)]
+            Self::SetupSequence(error) => Some(error),
             Self::Usage(_) | Self::Core(_) | Self::Reply(_) => None,
         }
     }
@@ -74,12 +100,58 @@ impl From<TunIoError> for CliError {
     }
 }
 
+#[cfg(unix)]
+impl From<SetupSequenceError> for CliError {
+    fn from(value: SetupSequenceError) -> Self {
+        Self::SetupSequence(value)
+    }
+}
+
 /// Result of one packet-once processing run.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PacketOnceSummary {
     pub audit_json_line: String,
     pub outbound_packet_count: usize,
     pub outbound_byte_count: usize,
+}
+
+/// Parsed `foxproxsetup` command configuration.
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetupCommandConfig {
+    pub broker_socket: PathBuf,
+    pub tun_name: String,
+    pub tun_device: PathBuf,
+    pub address_cidr: String,
+    pub mtu: u16,
+    pub resolv_conf: PathBuf,
+    pub broker_dns: IpAddr,
+    pub ip_program: PathBuf,
+    pub target_argv: Vec<String>,
+}
+
+#[cfg(unix)]
+impl SetupCommandConfig {
+    fn sequence_config(&self) -> SetupSequenceConfig {
+        SetupSequenceConfig {
+            interface: TunInterfaceSetupConfig::new(
+                self.tun_name.clone(),
+                self.address_cidr.clone(),
+                self.mtu,
+            )
+            .with_ip_program(self.ip_program.clone()),
+            resolver: ResolverConfig::new(self.resolv_conf.clone(), self.broker_dns),
+        }
+    }
+}
+
+/// Evidence returned after setup command work completes before target exec.
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SetupCommandSummary {
+    pub interface_name: String,
+    pub resolver_path: PathBuf,
+    pub target_argv: Vec<String>,
 }
 
 /// Process one packet using TOML policy configuration.
@@ -154,9 +226,73 @@ pub fn process_tun_io_packets(
     Ok(summaries)
 }
 
-/// Execute the `packet-once` command using process stdin/stdout semantics.
+/// Run setup command work with an already-created TUN-like fd.
+#[cfg(unix)]
+pub fn run_setup_command_with_existing_fd(
+    config: &SetupCommandConfig,
+    setup_fd: RawFd,
+) -> Result<SetupCommandSummary, CliError> {
+    let broker_socket =
+        UnixStream::connect(&config.broker_socket).map_err(|error| CliError::Io {
+            context: format!("connect-broker-socket {}", config.broker_socket.display()),
+            error,
+        })?;
+    let result = run_setup_sequence(&broker_socket, setup_fd, &config.sequence_config())?;
+    Ok(SetupCommandSummary {
+        interface_name: result.interface_name,
+        resolver_path: result.resolver_path,
+        target_argv: config.target_argv.clone(),
+    })
+}
+
+/// Run the production Linux setup command path, then exec the target process.
+#[cfg(all(unix, target_os = "linux"))]
+pub fn run_linux_setup_command(config: &SetupCommandConfig) -> Result<(), CliError> {
+    let tun = foxprox_device::create_tun(
+        &foxprox_device::TunCreateConfig::new(config.tun_name.clone())
+            .with_device_path(config.tun_device.clone()),
+    )
+    .map_err(|error| CliError::Core(error.to_string()))?;
+    run_setup_command_with_existing_fd(config, tun.fd.as_raw_fd())?;
+    drop(tun);
+    exec_setup_target(&config.target_argv)
+}
+
+#[cfg(unix)]
+fn exec_setup_target(target_argv: &[String]) -> Result<(), CliError> {
+    let Some(program) = target_argv.first() else {
+        return Err(CliError::Usage(setup_usage_text().to_owned()));
+    };
+    if program.trim().is_empty() {
+        return Err(CliError::Usage(setup_usage_text().to_owned()));
+    }
+    let error = Command::new(program).args(&target_argv[1..]).exec();
+    Err(CliError::Io {
+        context: format!("exec-target {program}"),
+        error,
+    })
+}
+
+/// Execute a command using process stdin/stdout semantics.
 pub fn run_from_env() -> Result<(), CliError> {
     run_with_args(std::env::args_os().map(PathBuf::from))
+}
+
+/// Execute the standalone `foxproxsetup` helper.
+pub fn run_foxproxsetup_from_env() -> Result<(), CliError> {
+    #[cfg(all(unix, target_os = "linux"))]
+    {
+        let mut args = std::env::args_os().map(PathBuf::from);
+        let _program = args.next();
+        let config = parse_setup_args(args)?;
+        run_linux_setup_command(&config)
+    }
+    #[cfg(not(all(unix, target_os = "linux")))]
+    {
+        Err(CliError::Usage(
+            "foxproxsetup is only supported on Linux".to_owned(),
+        ))
+    }
 }
 
 fn run_with_args<I>(mut args: I) -> Result<(), CliError>
@@ -167,10 +303,120 @@ where
     let Some(command) = args.next() else {
         return Err(usage());
     };
-    if command.as_os_str() != "packet-once" {
-        return Err(usage());
+    if command.as_os_str() == "packet-once" {
+        return run_packet_once_args(args);
+    }
+    if command.as_os_str() == "setup" {
+        #[cfg(all(unix, target_os = "linux"))]
+        {
+            let config = parse_setup_args(args)?;
+            return run_linux_setup_command(&config);
+        }
+        #[cfg(not(all(unix, target_os = "linux")))]
+        {
+            return Err(CliError::Usage(
+                "setup command is only supported on Linux".to_owned(),
+            ));
+        }
+    }
+    Err(usage())
+}
+
+#[cfg(unix)]
+fn parse_setup_args<I>(mut args: I) -> Result<SetupCommandConfig, CliError>
+where
+    I: Iterator<Item = PathBuf>,
+{
+    let mut broker_socket = None;
+    let mut tun_name = None;
+    let mut tun_device = PathBuf::from("/dev/net/tun");
+    let mut address_cidr = None;
+    let mut mtu = None;
+    let mut resolv_conf = None;
+    let mut broker_dns = None;
+    let mut ip_program = PathBuf::from("ip");
+    let mut target_argv = Vec::new();
+
+    while let Some(flag) = args.next() {
+        if flag.as_os_str() == "--" {
+            target_argv.extend(args.map(|value| value.to_string_lossy().into_owned()));
+            break;
+        }
+        match flag.to_string_lossy().as_ref() {
+            "--broker-socket" => broker_socket = args.next(),
+            "--tun-name" => tun_name = args.next().map(path_to_string),
+            "--tun-device" => {
+                tun_device = args.next().ok_or_else(setup_usage)?.to_path_buf();
+            }
+            "--address-cidr" => address_cidr = args.next().map(path_to_string),
+            "--mtu" => {
+                let value = args.next().ok_or_else(setup_usage)?;
+                mtu = Some(parse_u16_arg("--mtu", &value)?);
+            }
+            "--resolv-conf" => resolv_conf = args.next(),
+            "--broker-dns" => {
+                let value = args.next().ok_or_else(setup_usage)?;
+                broker_dns = Some(parse_ip_arg("--broker-dns", &value)?);
+            }
+            "--ip-program" => {
+                ip_program = args.next().ok_or_else(setup_usage)?.to_path_buf();
+            }
+            _ => return Err(setup_usage()),
+        }
     }
 
+    if target_argv.is_empty() || target_argv[0].trim().is_empty() {
+        return Err(setup_usage());
+    }
+
+    Ok(SetupCommandConfig {
+        broker_socket: broker_socket.ok_or_else(setup_usage)?,
+        tun_name: tun_name.ok_or_else(setup_usage)?,
+        tun_device,
+        address_cidr: address_cidr.ok_or_else(setup_usage)?,
+        mtu: mtu.ok_or_else(setup_usage)?,
+        resolv_conf: resolv_conf.ok_or_else(setup_usage)?,
+        broker_dns: broker_dns.ok_or_else(setup_usage)?,
+        ip_program,
+        target_argv,
+    })
+}
+
+#[cfg(unix)]
+fn path_to_string(value: PathBuf) -> String {
+    value.to_string_lossy().into_owned()
+}
+
+#[cfg(unix)]
+fn parse_u16_arg(flag: &str, value: &Path) -> Result<u16, CliError> {
+    value
+        .to_string_lossy()
+        .parse::<u16>()
+        .map_err(|error| CliError::Usage(format!("invalid {flag}: {error}")))
+}
+
+#[cfg(unix)]
+fn parse_ip_arg(flag: &str, value: &Path) -> Result<IpAddr, CliError> {
+    value
+        .to_string_lossy()
+        .parse::<IpAddr>()
+        .map_err(|error| CliError::Usage(format!("invalid {flag}: {error}")))
+}
+
+#[cfg(unix)]
+fn setup_usage() -> CliError {
+    CliError::Usage(setup_usage_text().to_owned())
+}
+
+#[cfg(unix)]
+fn setup_usage_text() -> &'static str {
+    "usage: foxproxsetup --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP [--tun-device PATH] [--ip-program PATH] -- TARGET [ARGS...]"
+}
+
+fn run_packet_once_args<I>(mut args: I) -> Result<(), CliError>
+where
+    I: Iterator<Item = PathBuf>,
+{
     let mut config_path = None;
     let mut sandbox_id = None;
     let mut outbound_path = None;
@@ -231,7 +477,7 @@ fn run_packet_once_command(
 
 fn usage() -> CliError {
     CliError::Usage(
-        "usage: foxprox-cli packet-once --config <policy.toml> --sandbox <id> [--outbound <packet.bin>] < packet.bin"
+        "usage: foxprox-cli packet-once --config <policy.toml> --sandbox <id> [--outbound <packet.bin>] < packet.bin\n       foxprox-cli setup --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP [--tun-device PATH] [--ip-program PATH] -- TARGET [ARGS...]"
             .to_owned(),
     )
 }
@@ -350,6 +596,137 @@ mod tests {
             assert_eq!(reply.len(), packet.len());
             assert_eq!(reply[20], 0);
         }
+    }
+
+    #[cfg(unix)]
+    fn unique_test_dir(prefix: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "foxprox-cli-{prefix}-{}-{nanos}",
+            std::process::id()
+        ))
+    }
+
+    #[cfg(unix)]
+    fn write_fake_ip_program(dir: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+
+        let program = dir.join("ip");
+        std::fs::write(
+            &program,
+            format!("#!/bin/sh\necho \"$@\" >> {}\n", log.display()),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&program, permissions).unwrap();
+        program
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_command_configures_network_writes_resolver_and_hands_fd_to_broker() {
+        use foxprox_device::TunPacketIo;
+        use foxprox_integrations::fd_handoff::receive_setup_fd;
+        use std::io::{Read, Write};
+        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::thread;
+
+        let dir = unique_test_dir("setup-command");
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("broker.sock");
+        let ip_log = dir.join("ip.log");
+        let ip_program = write_fake_ip_program(&dir, &ip_log);
+        let resolv_conf = dir.join("resolv.conf");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let broker_thread = thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            receive_setup_fd(&socket).unwrap()
+        });
+        let (mut peer, setup_fd) = UnixStream::pair().unwrap();
+        let config = SetupCommandConfig {
+            broker_socket: socket_path,
+            tun_name: "foxprox0".to_owned(),
+            tun_device: PathBuf::from("/dev/net/tun"),
+            address_cidr: "10.0.0.2/24".to_owned(),
+            mtu: 1500,
+            resolv_conf: resolv_conf.clone(),
+            broker_dns: "10.0.0.1".parse().unwrap(),
+            ip_program,
+            target_argv: vec!["/bin/true".to_owned()],
+        };
+
+        let summary = run_setup_command_with_existing_fd(&config, setup_fd.as_raw_fd()).unwrap();
+        drop(setup_fd);
+        let received = broker_thread.join().unwrap();
+        assert_eq!(received.marker, b"foxprox-fd".to_vec());
+        assert_eq!(summary.interface_name, "foxprox0");
+        assert_eq!(summary.resolver_path, resolv_conf);
+        assert_eq!(summary.target_argv, vec!["/bin/true".to_owned()]);
+        assert_eq!(
+            std::fs::read_to_string(&summary.resolver_path).unwrap(),
+            "# generated by foxproxsetup\nnameserver 10.0.0.1\noptions ndots:0\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&ip_log).unwrap(),
+            "link set dev foxprox0 mtu 1500 up\naddr add 10.0.0.2/24 dev foxprox0\nroute add default dev foxprox0\n"
+        );
+
+        let mut broker_tun = TunPacketIo::from_owned_fd(received.fd, 64).unwrap();
+        peer.write_all(b"packet-from-sandbox").unwrap();
+        assert_eq!(broker_tun.read_packet().unwrap(), b"packet-from-sandbox");
+        broker_tun.write_packet(b"packet-to-sandbox").unwrap();
+        let mut reply = [0_u8; 17];
+        peer.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"packet-to-sandbox");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_arg_parser_accepts_documented_foxproxsetup_shape() {
+        let config = parse_setup_args(
+            [
+                "--broker-socket",
+                "/tmp/broker.sock",
+                "--tun-name",
+                "foxprox0",
+                "--tun-device",
+                "/tmp/not-real-tun",
+                "--address-cidr",
+                "10.0.0.2/24",
+                "--mtu",
+                "1400",
+                "--resolv-conf",
+                "/tmp/resolv.conf",
+                "--broker-dns",
+                "10.0.0.1",
+                "--ip-program",
+                "/sbin/ip",
+                "--",
+                "curl",
+                "http://example.com",
+            ]
+            .into_iter()
+            .map(PathBuf::from),
+        )
+        .unwrap();
+
+        assert_eq!(config.broker_socket, PathBuf::from("/tmp/broker.sock"));
+        assert_eq!(config.tun_name, "foxprox0");
+        assert_eq!(config.tun_device, PathBuf::from("/tmp/not-real-tun"));
+        assert_eq!(config.address_cidr, "10.0.0.2/24");
+        assert_eq!(config.mtu, 1400);
+        assert_eq!(config.resolv_conf, PathBuf::from("/tmp/resolv.conf"));
+        assert_eq!(config.broker_dns, "10.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(config.ip_program, PathBuf::from("/sbin/ip"));
+        assert_eq!(
+            config.target_argv,
+            vec!["curl".to_owned(), "http://example.com".to_owned()]
+        );
     }
 
     #[test]

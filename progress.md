@@ -1138,3 +1138,24 @@
 - What failed or surprised the agent: stream fds are fine for one-shot IO, but datagram fds better preserve packet boundaries for multi-packet tests.
 - What remains unproven: unbounded/long-running runtime scheduling, graceful shutdown, real TUN fd readiness, and live sandbox traffic are still absent.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — executable foxproxsetup command slice
+
+- Slice attempted: implement a real `foxproxsetup` command contract that connects to a broker Unix socket, configures sandbox TUN networking, writes resolver config, hands the TUN fd to the broker, and then execs the target in production shape.
+- Why next: bwrap planning, TUN create/configuration, fd handoff, and broker fd consumption were proven as library slices, but Milestone 0 still needs an executable setup-helper boundary.
+- Verification plan: add a `foxproxsetup` binary and CLI setup subcommand, parse the minimal documented setup arguments, expose a test seam that injects a TUN-like fd, prove fd handoff and resolver/ip-command ordering with a broker Unix listener and fake `ip`, then run focused tests plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — executable foxproxsetup command
+
+- Slice attempted: implement a real `foxproxsetup` command contract that connects to the broker Unix socket, configures sandbox TUN networking, writes resolver config, hands the TUN fd to the broker, and execs the target in production shape.
+- Why next: bwrap planning, TUN create/configuration, fd handoff, and broker fd consumption were proven as library slices; Milestone 0 still needed an executable setup-helper boundary.
+- What changed: `foxprox-cli` now builds a standalone `foxproxsetup` binary and accepts a `setup` subcommand. The setup parser accepts `--broker-socket`, `--tun-name`, `--tun-device`, `--address-cidr`, `--mtu`, `--resolv-conf`, `--broker-dns`, `--ip-program`, and `-- TARGET...`. The Linux production path creates the TUN fd, runs the existing setup sequence, closes setup-side TUN state, and `exec`s the target. A test seam runs the same setup sequence with an injected TUN-like fd.
+- Verification:
+  - Focused check passed: `cargo test -p foxprox-cli setup_ -- --nocapture` verified documented argument parsing and end-to-end setup command behavior with a broker Unix listener, fake `ip`, resolver file write, SCM_RIGHTS fd handoff, and broker-side `TunPacketIo` read/write over the received fd.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including the new `foxproxsetup` binary test target and 8 `foxprox-cli` tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: `AsRawFd` bounds were simpler and clearer as an explicit `RawFd` test seam; clippy also required removing a needless `return` in the Linux-only setup entrypoint.
+- What remains unproven: actual privileged bwrap execution, `/dev/net/tun` creation inside a bwrap net namespace, capability drop before target exec, and live sandbox packet logs are still absent.
+- Commit: this commit.

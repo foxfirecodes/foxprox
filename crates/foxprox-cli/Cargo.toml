@@ -14,5 +14,12 @@ foxprox-core = { path = "../foxprox-core" }
 foxprox-device = { path = "../foxprox-device" }
 foxprox-packet = { path = "../foxprox-packet" }
 
+[target.'cfg(unix)'.dependencies]
+foxprox-integrations = { path = "../foxprox-integrations" }
+
+[[bin]]
+name = "foxproxsetup"
+path = "src/bin/foxproxsetup.rs"
+
 [dev-dependencies]
 serde_json = { workspace = true }

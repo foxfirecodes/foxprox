@@ -208,3 +208,7 @@ Keep packet processing byte-oriented and isolate fd reads/writes in `TunPacketIo
 ## 2026-06-21 — use datagram fd stand-ins for multi-packet TUN tests
 
 For tests that need to prove multiple TUN packet reads remain separate, a Unix datagram pair is a better fd stand-in than a Unix stream pair because each send maps to one read-sized datagram.
+
+## 2026-06-22 — setup command tests can prove the process boundary without privileges
+
+Keep the production `foxproxsetup` path responsible for creating the real TUN fd, but expose a setup-sequence test seam that accepts a raw TUN-like fd. A Unix listener plus fake `ip` command can prove parser shape, resolver writes, SCM_RIGHTS handoff, and broker-side fd usability without requiring `CAP_NET_ADMIN`.
