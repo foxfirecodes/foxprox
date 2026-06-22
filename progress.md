@@ -989,3 +989,16 @@
 - Recent structural commit hash: frontend helper extraction `18e5f75`.
 - Next verification gap: commit RAII device fd wrapper; remaining work is consolidating repeated bwrap/handoff process setup or designing long-lived async broker loops.
 - Commit hash after commit: pending.
+
+## 2026-06-22T09:20:00Z — PacketDevice trait for TUN packet IO
+
+- Command executed: `cargo fmt --all && cargo test --all`; `cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run writeback-smoke && target/debug/foxprox-lab run udp-forward-smoke && target/debug/foxprox-lab run tcp-bridge-smoke`
+- Environment assumptions: local bwrap/TUN fd handoff works; selected smokes exercise packet read/write through the handed-off device fd.
+- Expected result: expose a reusable packet-device interface over the handed-off fd (`read_packet`, `write_packet`, nonblocking setup) and update CLI TUN packet loops to use packet-oriented methods rather than generic raw-fd read/write helpers.
+- Observed result: pass. Workspace tests passed (`foxprox-core` 62, `foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). Writeback, UDP forward, and TCP bridge smokes all completed.
+- Relevant output excerpt: writeback `"reply_written":"true"`; UDP forward `"forwarded":"true"`; TCP bridge `"response_written":"true"`.
+- Changed files: `crates/foxprox-device/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: the device frontend boundary now explicitly models packet IO, aligning with the architecture’s TUN frontend responsibilities and further isolating low-level fd helpers from broker/runtime loops.
+- Recent structural commit hash: RAII fd wrapper `b048603`.
+- Next verification gap: commit packet device trait; remaining work is consolidating bwrap/handoff orchestration or implementing long-lived broker lifecycle loops.
+- Commit hash after commit: pending.

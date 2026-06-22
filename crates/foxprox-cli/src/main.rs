@@ -539,13 +539,13 @@ fn run_writeback_smoke() -> Result<AuditRecord, String> {
     let mut packets_read = 0_u64;
     let mut replied = false;
     while Instant::now() < deadline {
-        match fd.read(&mut buf) {
+        match fd.read_packet(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
                 if let Ok(reply) = synthesize_udp_echo_reply(packet, b"foxprox") {
-                    fd.write_all(&reply)?;
+                    fd.write_packet(&reply)?;
                     replied = true;
                     break;
                 }
@@ -756,13 +756,13 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
     let mut packets_read = 0_u64;
     let mut forwarded = false;
     while Instant::now() < deadline {
-        match fd.read(&mut buf) {
+        match fd.read_packet(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
                 if let Some(reply) = runtime.handle_ipv4_packet("udp-forward-smoke", packet)? {
-                    fd.write_all(&reply)?;
+                    fd.write_packet(&reply)?;
                     forwarded = true;
                     break;
                 }
@@ -954,13 +954,13 @@ fn run_dns_smoke() -> Result<AuditRecord, String> {
     let mut packets_read = 0_u64;
     let mut answered = false;
     while Instant::now() < deadline {
-        match fd.read(&mut buf) {
+        match fd.read_packet(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
                 if let Some(reply) = runtime.handle_ipv4_packet("dns-smoke", packet)? {
-                    fd.write_all(&reply)?;
+                    fd.write_packet(&reply)?;
                     answered = true;
                     break;
                 }
@@ -1174,7 +1174,7 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
     let mut dns_answered = false;
     let mut forwarded = false;
     while Instant::now() < deadline {
-        match fd.read(&mut buf) {
+        match fd.read_packet(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
@@ -1194,7 +1194,7 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
                     if let Some(reply) =
                         dns_runtime.handle_ipv4_packet("dns-attribution-smoke", packet)?
                     {
-                        fd.write_all(&reply)?;
+                        fd.write_packet(&reply)?;
                         runtime.dns_cache = dns_runtime.dns_cache.clone();
                         runtime.now_tick = 2;
                         dns_answered = true;
@@ -1202,7 +1202,7 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
                 } else if let Some(reply) =
                     runtime.handle_ipv4_packet("dns-attribution-smoke", packet)?
                 {
-                    fd.write_all(&reply)?;
+                    fd.write_packet(&reply)?;
                     forwarded = true;
                     break;
                 }
@@ -1424,7 +1424,7 @@ fn run_tcp_syn_smoke() -> Result<AuditRecord, String> {
     let mut packets_read = 0_u64;
     let mut syn_observed = false;
     while Instant::now() < deadline {
-        match fd.read(&mut buf) {
+        match fd.read_packet(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
@@ -1631,7 +1631,7 @@ fn run_tcp_synack_smoke() -> Result<AuditRecord, String> {
     let mut emitted_packets = 0_usize;
     let mut syn_ack_written = false;
     while Instant::now() < deadline {
-        match fd.read(&mut buf) {
+        match fd.read_packet(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
@@ -1670,7 +1670,7 @@ fn run_tcp_synack_smoke() -> Result<AuditRecord, String> {
                             }
                         }
                     }
-                    fd.write_all(emitted)?;
+                    fd.write_packet(emitted)?;
                 }
                 break;
             }
@@ -1901,7 +1901,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
     let mut bridged_bytes = 0_usize;
     let mut response_written = false;
     while Instant::now() < deadline {
-        match fd.read(&mut buf) {
+        match fd.read_packet(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
@@ -1909,7 +1909,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
                 let step = bridge_runtime.handle_ipv4_packet("tcp-bridge-smoke", packet)?;
                 for emitted in step.emitted_packets {
                     emitted_packets += 1;
-                    fd.write_all(&emitted)?;
+                    fd.write_packet(&emitted)?;
                 }
                 if let Some(data) = step.egress_payload {
                     if !data.is_empty() && !response_written {
@@ -1922,7 +1922,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
                             bridge_runtime.send_egress_response(&outcome.response_payload)?
                         {
                             emitted_packets += 1;
-                            fd.write_all(&emitted)?;
+                            fd.write_packet(&emitted)?;
                         }
                         response_written = true;
                     }
@@ -1938,7 +1938,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
         }
         for emitted in bridge_runtime.poll()? {
             emitted_packets += 1;
-            fd.write_all(&emitted)?;
+            fd.write_packet(&emitted)?;
         }
         if child
             .try_wait()
@@ -2138,14 +2138,14 @@ fn run_tcp_bridge_deny_smoke() -> Result<AuditRecord, String> {
     let mut packets_read = 0_u64;
     let mut rst_written = false;
     while Instant::now() < deadline {
-        match fd.read(&mut buf) {
+        match fd.read_packet(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
                 let step = bridge_runtime.handle_ipv4_packet("tcp-bridge-deny-smoke", packet)?;
                 for emitted in step.emitted_packets {
-                    fd.write_all(&emitted)?;
+                    fd.write_packet(&emitted)?;
                     rst_written = true;
                 }
                 if rst_written {
@@ -2329,7 +2329,7 @@ fn run_udp_deny_smoke() -> Result<AuditRecord, String> {
     let mut packets_read = 0_u64;
     let mut denied = false;
     while Instant::now() < deadline {
-        match fd.read(&mut buf) {
+        match fd.read_packet(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;

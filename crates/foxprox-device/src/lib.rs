@@ -53,6 +53,12 @@ pub mod fd {
         fd: RawFd,
     }
 
+    pub trait PacketDevice {
+        fn set_nonblocking(&self) -> Result<(), String>;
+        fn read_packet(&self, buf: &mut [u8]) -> io::Result<usize>;
+        fn write_packet(&self, packet: &[u8]) -> Result<(), String>;
+    }
+
     impl DeviceFd {
         pub fn new(fd: RawFd) -> Result<Self, String> {
             if fd_is_valid(fd) {
@@ -74,16 +80,30 @@ pub mod fd {
             set_nonblocking(self.fd)
         }
 
-        pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        pub fn read_packet(&self, buf: &mut [u8]) -> io::Result<usize> {
             read_fd(self.fd, buf)
         }
 
-        pub fn write_all(&self, buf: &[u8]) -> Result<(), String> {
-            write_all_fd(self.fd, buf)
+        pub fn write_packet(&self, packet: &[u8]) -> Result<(), String> {
+            write_all_fd(self.fd, packet)
         }
 
         pub fn close(self) {
             drop(self);
+        }
+    }
+
+    impl PacketDevice for DeviceFd {
+        fn set_nonblocking(&self) -> Result<(), String> {
+            DeviceFd::set_nonblocking(self)
+        }
+
+        fn read_packet(&self, buf: &mut [u8]) -> io::Result<usize> {
+            DeviceFd::read_packet(self, buf)
+        }
+
+        fn write_packet(&self, packet: &[u8]) -> Result<(), String> {
+            DeviceFd::write_packet(self, packet)
         }
     }
 
