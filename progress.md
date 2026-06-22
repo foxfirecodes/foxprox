@@ -1199,3 +1199,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: the listener is not yet connected to a peer or surfaced as a normalized `TcpConnectAttempt`.
 - Exact next step: commit smoltcp TCP listener proof, then add a loopback client-to-listener connection proof that can detect the listener socket becoming active.
+
+## 2026-06-22T21:53:42Z
+- Current objective: continue after smoltcp TCP listener proof toward TCP connect detection.
+- Git status summary: clean worktree after commit `3af4cd2`.
+- Intended slice: add a smoltcp loopback client-to-listener connection proof and expose only adapter-level active socket counts, not smoltcp types to core policy.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: this remains smoltcp-internal loopback, not TUN-origin SYN handling or host egress bridging.
+- Exact next step: track TCP socket handles inside the adapter and test listener/client active state after polling.
+
+## 2026-06-22T21:54:38Z
+- Current objective: add smoltcp loopback client-to-listener connection proof.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 6 smoltcp adapter tests passed. New tests prove the adapter can allocate listener and client TCP sockets, poll the smoltcp IP loopback until both sockets are active, and reject invalid client ports/buffers.
+- Commit hash when committed: pending.
+- Remaining risks: active smoltcp sockets are not yet translated into foxprox runtime connect attempts or bridged to host sockets.
+- Exact next step: commit smoltcp loopback connection proof, then translate active smoltcp TCP endpoints into a `TcpStackConnectAttempt` without leaking smoltcp endpoint types.

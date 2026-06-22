@@ -7,7 +7,7 @@
 
 use std::net::Ipv4Addr;
 
-use smoltcp::iface::{Config, Interface, SocketSet};
+use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Loopback, Medium};
 use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
@@ -26,12 +26,14 @@ pub enum SmoltcpAdapterError {
     InvalidTcpPort,
     InvalidTcpBufferSize,
     TcpListenRejected,
+    TcpConnectRejected,
 }
 
 pub struct SmoltcpIpLoopback {
     iface: Interface,
     device: Loopback,
     sockets: SocketSet<'static>,
+    tcp_handles: Vec<SocketHandle>,
     config: SmoltcpIpConfig,
 }
 
@@ -55,6 +57,7 @@ impl SmoltcpIpLoopback {
             iface,
             device,
             sockets: SocketSet::new(Vec::new()),
+            tcp_handles: Vec::new(),
             config,
         })
     }
@@ -82,7 +85,43 @@ impl SmoltcpIpLoopback {
         self.sockets
             .get_mut::<tcp::Socket>(handle)
             .listen(port)
-            .map_err(|_| SmoltcpAdapterError::TcpListenRejected)
+            .map_err(|_| SmoltcpAdapterError::TcpListenRejected)?;
+        self.tcp_handles.push(handle);
+        Ok(())
+    }
+
+    pub fn connect_tcp(
+        &mut self,
+        remote: Ipv4Addr,
+        remote_port: u16,
+        local_port: u16,
+        rx_bytes: usize,
+        tx_bytes: usize,
+    ) -> Result<(), SmoltcpAdapterError> {
+        if remote_port == 0 || local_port == 0 {
+            return Err(SmoltcpAdapterError::InvalidTcpPort);
+        }
+        if rx_bytes == 0 || tx_bytes == 0 {
+            return Err(SmoltcpAdapterError::InvalidTcpBufferSize);
+        }
+        let rx_buffer = tcp::SocketBuffer::new(vec![0; rx_bytes]);
+        let tx_buffer = tcp::SocketBuffer::new(vec![0; tx_bytes]);
+        let socket = tcp::Socket::new(rx_buffer, tx_buffer);
+        let handle = self.sockets.add(socket);
+        let cx = self.iface.context();
+        self.sockets
+            .get_mut::<tcp::Socket>(handle)
+            .connect(cx, (ipv4_to_smoltcp(remote), remote_port), local_port)
+            .map_err(|_| SmoltcpAdapterError::TcpConnectRejected)?;
+        self.tcp_handles.push(handle);
+        Ok(())
+    }
+
+    pub fn active_tcp_socket_count(&mut self) -> usize {
+        self.tcp_handles
+            .iter()
+            .filter(|handle| self.sockets.get::<tcp::Socket>(**handle).is_active())
+            .count()
     }
 
     pub fn poll_once(&mut self, now_millis: i64) {
@@ -133,6 +172,56 @@ mod tests {
 
         adapter.listen_tcp(8080, 1024, 1024).unwrap();
         adapter.poll_once(1);
+    }
+
+    #[test]
+    fn loopback_client_connection_makes_tcp_sockets_active() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        adapter
+            .connect_tcp(Ipv4Addr::new(10, 66, 0, 1), 8080, 50000, 1024, 1024)
+            .unwrap();
+
+        for millis in 1..20 {
+            adapter.poll_once(millis);
+            if adapter.active_tcp_socket_count() >= 2 {
+                break;
+            }
+        }
+
+        assert_eq!(adapter.active_tcp_socket_count(), 2);
+    }
+
+    #[test]
+    fn tcp_client_rejects_invalid_port_and_buffers() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            adapter.connect_tcp(Ipv4Addr::new(10, 66, 0, 1), 0, 50000, 1024, 1024),
+            Err(SmoltcpAdapterError::InvalidTcpPort)
+        ));
+        assert!(matches!(
+            adapter.connect_tcp(Ipv4Addr::new(10, 66, 0, 1), 8080, 0, 1024, 1024),
+            Err(SmoltcpAdapterError::InvalidTcpPort)
+        ));
+        assert!(matches!(
+            adapter.connect_tcp(Ipv4Addr::new(10, 66, 0, 1), 8080, 50000, 0, 1024),
+            Err(SmoltcpAdapterError::InvalidTcpBufferSize)
+        ));
     }
 
     #[test]
