@@ -1,8 +1,11 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-use crate::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
+use crate::audit::{
+    AttributionConfidence, AttributionSource, AuditRecord, Decision, EventKind, Frontend, Protocol,
+};
 use crate::dns::DnsCache;
 use crate::egress::{EgressBackend, EgressRequest};
+use crate::origin::{parse_http_request, parse_tls_client_hello};
 use crate::packet::{parse_ipv4, parse_tcp, parse_udp, synthesize_udp_reply};
 use crate::policy::{PolicyEngine, PolicyRequest};
 
@@ -264,6 +267,239 @@ impl<B: EgressBackend> TransparentTcpRuntime<B> {
     }
 }
 
+/// Transparent TCP payload inspection for HTTP and TLS metadata.
+///
+/// This runtime proves the normalized inspection/policy/audit boundary without owning TCP stream
+/// reassembly. The smoltcp adapter or flow manager can call this once request bytes are available.
+#[derive(Debug)]
+pub struct TransparentInspectionRuntime {
+    pub policy: PolicyEngine,
+    pub audit: Vec<AuditRecord>,
+    pub dns_cache: DnsCache,
+    pub now_tick: u64,
+}
+
+impl TransparentInspectionRuntime {
+    pub fn new(policy: PolicyEngine) -> Self {
+        Self {
+            policy,
+            audit: Vec::new(),
+            dns_cache: DnsCache::new(),
+            now_tick: 0,
+        }
+    }
+
+    pub fn with_dns_cache(mut self, dns_cache: DnsCache, now_tick: u64) -> Self {
+        self.dns_cache = dns_cache;
+        self.now_tick = now_tick;
+        self
+    }
+
+    pub fn inspect_ipv4_tcp_payload(
+        &mut self,
+        sandbox_id: impl Into<String>,
+        packet: &[u8],
+    ) -> Result<(), String> {
+        let sandbox_id = sandbox_id.into();
+        let parsed = match parse_ipv4(packet) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                self.audit.push(
+                    AuditRecord::new(
+                        EventKind::UnsupportedNetworkEvent,
+                        sandbox_id,
+                        Decision::FailClosed,
+                        format!("malformed IPv4 packet fails closed: {err}"),
+                    )
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(Protocol::Unsupported),
+                );
+                return Ok(());
+            }
+        };
+        if parsed.protocol_number != 6 {
+            self.audit.push(
+                AuditRecord::new(
+                    EventKind::UnsupportedNetworkEvent,
+                    sandbox_id,
+                    Decision::FailClosed,
+                    "transparent inspection runtime received non-TCP packet",
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(parsed.protocol()),
+            );
+            return Ok(());
+        }
+        let tcp = match parse_tcp(parsed.payload) {
+            Ok(tcp) => tcp,
+            Err(err) => {
+                self.audit.push(
+                    AuditRecord::new(
+                        EventKind::UnsupportedNetworkEvent,
+                        sandbox_id,
+                        Decision::FailClosed,
+                        format!("malformed TCP segment fails closed: {err}"),
+                    )
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(Protocol::Tcp),
+                );
+                return Ok(());
+            }
+        };
+        let source = SocketAddr::new(IpAddr::V4(parsed.source), tcp.source_port);
+        let destination = SocketAddr::new(IpAddr::V4(parsed.destination), tcp.destination_port);
+        match tcp.destination_port {
+            80 => self.inspect_http(&sandbox_id, source, destination, tcp.payload),
+            443 => self.inspect_tls(&sandbox_id, source, destination, tcp.payload),
+            _ => {
+                self.audit.push(
+                    AuditRecord::new(
+                        EventKind::UnsupportedNetworkEvent,
+                        sandbox_id,
+                        Decision::FailClosed,
+                        "no transparent inspector for TCP destination port",
+                    )
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(Protocol::Unsupported)
+                    .with_addresses(Some(source), Some(destination)),
+                );
+                Ok(())
+            }
+        }
+    }
+
+    fn inspect_http(
+        &mut self,
+        sandbox_id: &str,
+        source: SocketAddr,
+        destination: SocketAddr,
+        payload: &[u8],
+    ) -> Result<(), String> {
+        let parsed = match parse_http_request(payload) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                self.audit.push(
+                    AuditRecord::new(
+                        EventKind::HttpRequest,
+                        sandbox_id,
+                        Decision::FailClosed,
+                        format!("malformed transparent HTTP request fails closed: {err}"),
+                    )
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(Protocol::Http)
+                    .with_addresses(Some(source), Some(destination)),
+                );
+                return Ok(());
+            }
+        };
+        let request = PolicyRequest::new(sandbox_id, Frontend::Tun, Protocol::Http)
+            .with_source(source.ip(), source.port())
+            .with_destination(destination.ip(), destination.port())
+            .with_hostname(&parsed.host, AttributionConfidence::High)
+            .with_http(&parsed.method, &parsed.path);
+        let outcome = self.policy.evaluate(&request);
+        self.audit.push(
+            AuditRecord::new(
+                EventKind::HttpRequest,
+                sandbox_id,
+                outcome.decision,
+                outcome.reason,
+            )
+            .with_frontend(Frontend::Tun)
+            .with_protocol(Protocol::Http)
+            .with_addresses(Some(source), Some(destination))
+            .with_hostname(
+                Some(parsed.host),
+                AttributionSource::HttpHost,
+                AttributionConfidence::High,
+            )
+            .with_rule(outcome.rule_id)
+            .with_metadata("method", parsed.method)
+            .with_metadata("path", parsed.path),
+        );
+        Ok(())
+    }
+
+    fn inspect_tls(
+        &mut self,
+        sandbox_id: &str,
+        source: SocketAddr,
+        destination: SocketAddr,
+        payload: &[u8],
+    ) -> Result<(), String> {
+        let dns_attr = self
+            .dns_cache
+            .attribution_for(destination.ip(), self.now_tick);
+        let parsed = match parse_tls_client_hello(payload) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                self.audit.push(
+                    AuditRecord::new(
+                        EventKind::TlsClientHello,
+                        sandbox_id,
+                        Decision::FailClosed,
+                        format!("malformed TLS ClientHello fails closed: {err}"),
+                    )
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(Protocol::Tls)
+                    .with_addresses(Some(source), Some(destination)),
+                );
+                return Ok(());
+            }
+        };
+        let hostname = parsed
+            .sni
+            .clone()
+            .or_else(|| dns_attr.as_ref().map(|attr| attr.hostname.clone()));
+        let confidence = if parsed.sni.is_some() {
+            AttributionConfidence::High
+        } else {
+            dns_attr
+                .as_ref()
+                .map(|attr| attr.confidence)
+                .unwrap_or(AttributionConfidence::None)
+        };
+        let attribution_source = if parsed.sni.is_some() {
+            AttributionSource::TlsSni
+        } else {
+            dns_attr
+                .as_ref()
+                .map(|attr| attr.source)
+                .unwrap_or(AttributionSource::None)
+        };
+        let mismatch = match (parsed.sni.as_deref(), dns_attr.as_ref()) {
+            (Some(sni), Some(attr)) => sni != attr.hostname,
+            _ => false,
+        };
+
+        let mut request = PolicyRequest::new(sandbox_id, Frontend::Tun, Protocol::Tls)
+            .with_source(source.ip(), source.port())
+            .with_destination(destination.ip(), destination.port());
+        if let Some(hostname) = &hostname {
+            request = request.with_hostname(hostname, confidence);
+        }
+        request.sni_dns_mismatch = mismatch;
+        request.hidden_sni = parsed.hidden_sni;
+        let outcome = self.policy.evaluate(&request);
+        self.audit.push(
+            AuditRecord::new(
+                EventKind::TlsClientHello,
+                sandbox_id,
+                outcome.decision,
+                outcome.reason,
+            )
+            .with_frontend(Frontend::Tun)
+            .with_protocol(Protocol::Tls)
+            .with_addresses(Some(source), Some(destination))
+            .with_hostname(hostname, attribution_source, confidence)
+            .with_rule(outcome.rule_id)
+            .with_metadata("hidden_sni", parsed.hidden_sni.to_string())
+            .with_metadata("sni_dns_mismatch", mismatch.to_string()),
+        );
+        Ok(())
+    }
+}
+
 fn is_multicast_or_broadcast(ip: Ipv4Addr) -> bool {
     ip.is_multicast() || ip == Ipv4Addr::BROADCAST || ip.octets()[3] == 255
 }
@@ -417,6 +653,88 @@ mod tests {
         assert_eq!(runtime.audit[0].decision, Decision::DenyDrop);
     }
 
+    #[test]
+    fn transparent_http_host_path_rule_is_audited() {
+        let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 80)), 80);
+        let policy = PolicyEngine::new(
+            PolicyConfig::deny_by_default().with_rule(
+                PolicyRule::new("allow-transparent-http-public", RuleAction::Allow)
+                    .protocol(Protocol::Http)
+                    .hostname("example.com")
+                    .http_path_prefix("/public"),
+            ),
+        );
+        let mut runtime = TransparentInspectionRuntime::new(policy);
+        let packet = tcp_payload_packet(
+            destination.ip(),
+            destination.port(),
+            b"GET /public?q=1 HTTP/1.1\r\nHost: Example.COM\r\n\r\n",
+        );
+        runtime.inspect_ipv4_tcp_payload("lab", &packet).unwrap();
+        assert_eq!(runtime.audit[0].kind, EventKind::HttpRequest);
+        assert_eq!(runtime.audit[0].decision, Decision::Allow);
+        assert_eq!(runtime.audit[0].hostname.as_deref(), Some("example.com"));
+        assert_eq!(
+            runtime.audit[0].metadata.get("path").map(String::as_str),
+            Some("/public?q=1")
+        );
+    }
+
+    #[test]
+    fn tls_sni_dns_mismatch_fails_closed() {
+        let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 44)), 443);
+        let policy = PolicyEngine::new(
+            PolicyConfig::deny_by_default().with_rule(
+                PolicyRule::new("allow-example-tls", RuleAction::Allow)
+                    .protocol(Protocol::Tls)
+                    .hostname("example.com")
+                    .port(443),
+            ),
+        );
+        let mut cache = DnsCache::new();
+        cache
+            .observe_response("other.example", [destination.ip()], 1, 60)
+            .unwrap();
+        let mut runtime = TransparentInspectionRuntime::new(policy).with_dns_cache(cache, 2);
+        let packet = tcp_payload_packet(
+            destination.ip(),
+            destination.port(),
+            &tls_client_hello_fixture(Some("example.com")),
+        );
+        runtime.inspect_ipv4_tcp_payload("lab", &packet).unwrap();
+        assert_eq!(runtime.audit[0].kind, EventKind::TlsClientHello);
+        assert_eq!(runtime.audit[0].decision, Decision::FailClosed);
+        assert_eq!(
+            runtime.audit[0]
+                .metadata
+                .get("sni_dns_mismatch")
+                .map(String::as_str),
+            Some("true")
+        );
+    }
+
+    #[test]
+    fn hidden_sni_requires_explicit_ip_allow_in_inspection_runtime() {
+        let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 45)), 443);
+        let policy = PolicyEngine::new(PolicyConfig::deny_by_default());
+        let mut runtime = TransparentInspectionRuntime::new(policy);
+        let packet = tcp_payload_packet(
+            destination.ip(),
+            destination.port(),
+            &tls_client_hello_fixture(None),
+        );
+        runtime.inspect_ipv4_tcp_payload("lab", &packet).unwrap();
+        assert_eq!(runtime.audit[0].kind, EventKind::TlsClientHello);
+        assert_eq!(runtime.audit[0].decision, Decision::FailClosed);
+        assert_eq!(
+            runtime.audit[0]
+                .metadata
+                .get("hidden_sni")
+                .map(String::as_str),
+            Some("true")
+        );
+    }
+
     fn tcp_syn_packet(destination: IpAddr, destination_port: u16) -> Vec<u8> {
         let IpAddr::V4(destination) = destination else {
             panic!("test destination must be IPv4");
@@ -436,6 +754,75 @@ mod tests {
         packet[32] = 5 << 4;
         packet[33] = 0x02;
         packet
+    }
+
+    fn tcp_payload_packet(destination: IpAddr, destination_port: u16, payload: &[u8]) -> Vec<u8> {
+        let IpAddr::V4(destination) = destination else {
+            panic!("test destination must be IPv4");
+        };
+        let total_len = 40 + payload.len();
+        let mut packet = vec![0_u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[10, 0, 2, 2]);
+        packet[16..20].copy_from_slice(&destination.octets());
+        let sum = checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&sum.to_be_bytes());
+        packet[20..22].copy_from_slice(&49152_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        packet[24..28].copy_from_slice(&1_u32.to_be_bytes());
+        packet[28..32].copy_from_slice(&1_u32.to_be_bytes());
+        packet[32] = 5 << 4;
+        packet[33] = 0x18;
+        packet[34..36].copy_from_slice(&64240_u16.to_be_bytes());
+        packet[40..].copy_from_slice(payload);
+        packet
+    }
+
+    fn tls_client_hello_fixture(host: Option<&str>) -> Vec<u8> {
+        let mut hello = Vec::new();
+        hello.extend_from_slice(&[0x03, 0x03]);
+        hello.extend_from_slice(&[0u8; 32]);
+        hello.push(0);
+        hello.extend_from_slice(&2u16.to_be_bytes());
+        hello.extend_from_slice(&[0x13, 0x01]);
+        hello.push(1);
+        hello.push(0);
+
+        let mut extensions = Vec::new();
+        if let Some(host) = host {
+            let host_bytes = host.as_bytes();
+            let mut sni = Vec::new();
+            let list_len = 1 + 2 + host_bytes.len();
+            sni.extend_from_slice(&(list_len as u16).to_be_bytes());
+            sni.push(0);
+            sni.extend_from_slice(&(host_bytes.len() as u16).to_be_bytes());
+            sni.extend_from_slice(host_bytes);
+            extensions.extend_from_slice(&0u16.to_be_bytes());
+            extensions.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+            extensions.extend_from_slice(&sni);
+        }
+        hello.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+        hello.extend_from_slice(&extensions);
+
+        let mut handshake = Vec::new();
+        handshake.push(0x01);
+        let len = hello.len();
+        handshake.extend_from_slice(&[
+            ((len >> 16) & 0xff) as u8,
+            ((len >> 8) & 0xff) as u8,
+            (len & 0xff) as u8,
+        ]);
+        handshake.extend_from_slice(&hello);
+
+        let mut record = Vec::new();
+        record.push(0x16);
+        record.extend_from_slice(&[0x03, 0x03]);
+        record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+        record.extend_from_slice(&handshake);
+        record
     }
 
     fn udp_probe_packet(destination: IpAddr, destination_port: u16, payload: &[u8]) -> Vec<u8> {

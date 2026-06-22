@@ -24,6 +24,7 @@ pub enum ScenarioName {
     Packets,
     Flows,
     Stack,
+    Inspect,
 }
 
 impl ScenarioName {
@@ -36,12 +37,15 @@ impl ScenarioName {
             "packets" => Ok(Self::Packets),
             "flows" => Ok(Self::Flows),
             "stack" => Ok(Self::Stack),
+            "inspect" => Ok(Self::Inspect),
             other => Err(format!("unknown scenario '{other}'")),
         }
     }
 
     pub fn list() -> &'static [&'static str] {
-        &["all", "policy", "dns", "proxy", "packets", "flows", "stack"]
+        &[
+            "all", "policy", "dns", "proxy", "packets", "flows", "stack", "inspect",
+        ]
     }
 }
 
@@ -57,6 +61,7 @@ pub fn run_scenario(name: ScenarioName) -> Vec<AuditRecord> {
                 ScenarioName::Packets,
                 ScenarioName::Flows,
                 ScenarioName::Stack,
+                ScenarioName::Inspect,
             ] {
                 records.extend(run_scenario(child));
             }
@@ -68,6 +73,7 @@ pub fn run_scenario(name: ScenarioName) -> Vec<AuditRecord> {
         ScenarioName::Packets => scenario_packets(),
         ScenarioName::Flows => scenario_flows(),
         ScenarioName::Stack => scenario_stack(),
+        ScenarioName::Inspect => scenario_inspect(),
     }
 }
 
@@ -365,6 +371,90 @@ fn scenario_stack() -> Vec<AuditRecord> {
     .with_metadata("emitted_packets", result.emitted_packets.len().to_string())]
 }
 
+fn scenario_inspect() -> Vec<AuditRecord> {
+    let http = parse_http_request(b"GET /public HTTP/1.1\r\nHost: example.com\r\n\r\n")
+        .expect("fixture transparent HTTP valid");
+    let http_engine = PolicyEngine::new(
+        PolicyConfig::deny_by_default().with_rule(
+            PolicyRule::new("allow-transparent-http-public", RuleAction::Allow)
+                .protocol(Protocol::Http)
+                .hostname("example.com")
+                .http_path_prefix("/public"),
+        ),
+    );
+    let http_request = PolicyRequest::new("lab", Frontend::Tun, Protocol::Http)
+        .with_destination(ip("203.0.113.80"), 80)
+        .with_hostname(&http.host, AttributionConfidence::High)
+        .with_http(&http.method, &http.path);
+    let http_outcome = http_engine.evaluate(&http_request);
+
+    let mismatch_engine = PolicyEngine::new(
+        PolicyConfig::deny_by_default().with_rule(
+            PolicyRule::new("allow-example-sni", RuleAction::Allow)
+                .protocol(Protocol::Tls)
+                .hostname("example.com")
+                .port(443),
+        ),
+    );
+    let mut mismatch_request = PolicyRequest::new("lab", Frontend::Tun, Protocol::Tls)
+        .with_destination(ip("203.0.113.44"), 443)
+        .with_hostname("example.com", AttributionConfidence::High);
+    mismatch_request.sni_dns_mismatch = true;
+    let mismatch_outcome = mismatch_engine.evaluate(&mismatch_request);
+
+    let mut hidden_request = PolicyRequest::new("lab", Frontend::Tun, Protocol::Tls)
+        .with_destination(ip("203.0.113.45"), 443);
+    hidden_request.hidden_sni = true;
+    let hidden_outcome =
+        PolicyEngine::new(PolicyConfig::deny_by_default()).evaluate(&hidden_request);
+
+    vec![
+        AuditRecord::new(
+            EventKind::HttpRequest,
+            "lab",
+            http_outcome.decision,
+            http_outcome.reason,
+        )
+        .with_frontend(Frontend::Tun)
+        .with_protocol(Protocol::Http)
+        .with_addresses(Some(sock("10.0.2.2:50080")), Some(sock("203.0.113.80:80")))
+        .with_hostname(
+            Some(http.host),
+            AttributionSource::HttpHost,
+            AttributionConfidence::High,
+        )
+        .with_rule(http_outcome.rule_id)
+        .with_metadata("method", http.method)
+        .with_metadata("path", http.path),
+        AuditRecord::new(
+            EventKind::TlsClientHello,
+            "lab",
+            mismatch_outcome.decision,
+            mismatch_outcome.reason,
+        )
+        .with_frontend(Frontend::Tun)
+        .with_protocol(Protocol::Tls)
+        .with_addresses(Some(sock("10.0.2.2:50443")), Some(sock("203.0.113.44:443")))
+        .with_hostname(
+            Some("example.com".to_string()),
+            AttributionSource::TlsSni,
+            AttributionConfidence::High,
+        )
+        .with_metadata("dns_attribution", "other.example")
+        .with_metadata("sni_dns_mismatch", "true"),
+        AuditRecord::new(
+            EventKind::TlsClientHello,
+            "lab",
+            hidden_outcome.decision,
+            hidden_outcome.reason,
+        )
+        .with_frontend(Frontend::Tun)
+        .with_protocol(Protocol::Tls)
+        .with_addresses(Some(sock("10.0.2.2:50444")), Some(sock("203.0.113.45:443")))
+        .with_metadata("hidden_sni", "true"),
+    ]
+}
+
 fn record_policy(
     kind: EventKind,
     protocol: Protocol,
@@ -494,6 +584,7 @@ mod tests {
         assert!(events.contains(&"http_request"));
         assert!(events.contains(&"https_connect"));
         assert!(events.contains(&"socks_connect"));
+        assert!(events.contains(&"tls_client_hello"));
         assert!(events.contains(&"icmp_message"));
         assert!(events.contains(&"quic_candidate_flow"));
         assert!(events.contains(&"udp_flow_created"));

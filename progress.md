@@ -539,3 +539,27 @@
 - Interpretation: Milestone 6 now has local forwarding proofs for all explicit proxy modes in scope: HTTP proxy, HTTPS CONNECT, and SOCKS5 TCP CONNECT. Denied/malformed explicit proxy paths still need runnable smoke coverage beyond parser/unit tests.
 - Next verification gap: add denied/malformed explicit proxy smokes, then improve transparent inspection/audit coverage for plaintext HTTP, TLS SNI mismatch, hidden SNI, and QUIC candidate decisions.
 - Commit hash after commit: pending.
+
+## 2026-06-22T01:12:00Z — explicit proxy smokes commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs progress.md && git commit -m "Add CONNECT and SOCKS5 proxy smokes"`
+- Environment assumptions: HTTPS CONNECT/SOCKS5 smoke commands and workspace tests above were verified before commit.
+- Expected result: commit captures explicit HTTPS CONNECT and SOCKS5 TCP CONNECT forwarding smokes plus documentation.
+- Observed result: commit `92d14a1` created with 3 files changed.
+- Relevant output excerpt: `[harness-lab 92d14a1] Add CONNECT and SOCKS5 proxy smokes`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: explicit proxy forwarding checkpoint is preserved.
+- Next verification gap: denied/malformed explicit proxy smokes, then transparent inspection/audit coverage for plaintext HTTP, TLS SNI mismatch, hidden SNI, and QUIC candidate decisions.
+- Commit hash after commit: 92d14a1.
+
+## 2026-06-22T01:25:00Z — Transparent inspection runtime and scenario
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run inspect`
+- Environment assumptions: deterministic in-memory TCP payload fixtures; no Linux namespace or external network required. TCP stream reassembly remains the responsibility of the smoltcp/flow adapter before calling this inspection boundary.
+- Expected result: transparent plaintext HTTP Host/method/path inspection, TLS SNI/DNS mismatch handling, and hidden-SNI fail-closed behavior are modeled as reusable policy/audit behavior and visible through a harness command.
+- Observed result: pass. `foxprox-core` increased to 44 tests; `foxprox-cli` ran 2 tests; `foxproxsetup` ran 7 tests. `foxprox-lab run inspect` emitted transparent `http_request` allow, `tls_client_hello` SNI/DNS mismatch fail-closed, and `tls_client_hello` hidden-SNI fail-closed records.
+- Relevant output excerpt: `"event":"http_request","frontend":"tun","attribution_source":"http_host","rule_id":"allow-transparent-http-public"`; `"reason":"SNI/DNS attribution mismatch"`; `"reason":"hidden SNI requires explicit IP allow"`.
+- Changed files: `crates/foxprox-core/src/runtime.rs`, `crates/foxprox-core/src/scenario.rs`, `README.md`, `progress.md`.
+- Interpretation: Milestone 5 has stronger deterministic harness coverage for transparent HTTP and TLS attribution decisions. The remaining quality gap is end-to-end environment smoke coverage for transparent HTTP/TLS bytes through the smoltcp bridge, plus explicit denied/malformed proxy smokes.
+- Next verification gap: add denied/malformed explicit proxy smoke or wire transparent HTTP inspection into the TCP bridge environment smoke.
+- Commit hash after commit: pending.
