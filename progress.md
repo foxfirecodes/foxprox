@@ -1233,5 +1233,5 @@
   - `cargo test --workspace` — passed, 107 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-packet` — checksum logic remains packet/core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: cf1b824.
 - Remaining boundary risks: IPv6 UDP responses, ICMP errors, and rate limiting remain.
