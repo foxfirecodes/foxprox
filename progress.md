@@ -655,3 +655,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: SOCKS runtime does not yet include greeting response IO, listener loops, stream bridging, UDP ASSOCIATE support, or integrated DNS resolution for hostnames.
 - Exact next step: commit SOCKS runtime gating, then add minimal config-to-runtime construction so static DNS records/proxy/runtime policy can be loaded from validated configuration rather than only in-memory tests.
+
+## 2026-06-22T01:37:35Z
+- Current objective: continue after SOCKS runtime gating toward configuration-backed runtime construction.
+- Git status summary: clean worktree after commit `524543a`.
+- Intended slice: add a minimal validated runtime configuration builder for sandbox identity, policy, broker DNS addresses, and static DNS resolver records so DNS/proxy/runtime tests no longer require ad hoc construction only.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`, and possibly `learnings.md` if config validation uncovers a new invariant.
+- Remaining risks: this is still an in-memory configuration schema, not a serde/file-format loader or CLI parser.
+- Exact next step: implement validated runtime config construction for `StaticDnsResolver`, `DnsCache`, and `PolicyEngine` inputs.
+
+## 2026-06-22T01:44:15Z
+- Current objective: add validated in-memory runtime configuration construction for policy and static DNS components.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on import wrapping; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 54 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 53 runtime tests, and 7 setup tests passed. New runtime tests prove `BrokerRuntimeConfig` validates policy before construction, rejects zero DNS TTL, builds a policy engine, carries broker DNS addresses, and seeds a static DNS resolver with configured records.
+- Commit hash when committed: pending.
+- Remaining risks: runtime configuration is still in-memory only; no serde/file-format loader, CLI config path, upstream DNS resolver config, or listener binding config exists.
+- Exact next step: commit runtime configuration builder, then add a small launcher/session assembly path that combines prepared bwrap launch, runtime config, and setup control handoff into a fail-early broker session plan.

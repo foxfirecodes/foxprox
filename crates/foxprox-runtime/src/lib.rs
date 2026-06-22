@@ -9,13 +9,13 @@
 use foxprox_core::{
     classify_udp, parse_dns_query, parse_http_proxy_request_line, parse_http_request,
     parse_ip_packet, parse_socks5_connect, parse_tls_client_hello_sni,
-    synthesize_icmpv4_echo_reply, synthesize_udpv4_response, AttributionConfidence,
-    AttributionSource, AuditSink, Decision, DecisionAction, DecisionReason, DnsCache,
-    DnsParseError, Endpoint, FlowKey, FlowTable, FrontendKind, HostnameAttribution,
-    HttpProxyRequestLine, HttpRequestMetadata, InspectError, NormalizedEvent, PacketError,
-    ParsedIpPacket, Protocol, ProxyParseError, QuicStatus, SandboxId, SniStatus, SocksDestination,
-    StaticDnsResolver, Tcpv4Segment, UdpFlow, Udpv4Packet, UnsupportedIpv4Protocol,
-    VerificationKernel,
+    synthesize_icmpv4_echo_reply, synthesize_udpv4_response, validate_policy_config,
+    AttributionConfidence, AttributionSource, AuditSink, ConfigError, Decision, DecisionAction,
+    DecisionReason, DnsCache, DnsParseError, Endpoint, FlowKey, FlowTable, FrontendKind,
+    HostnameAttribution, HttpProxyRequestLine, HttpRequestMetadata, InspectError, NormalizedEvent,
+    PacketError, ParsedIpPacket, PolicyEngine, Protocol, ProxyParseError, QuicStatus, SandboxId,
+    SniStatus, SocksDestination, StaticDnsRecord, StaticDnsResolver, Tcpv4Segment, UdpFlow,
+    Udpv4Packet, UnsupportedIpv4Protocol, VerificationKernel,
 };
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
@@ -804,6 +804,49 @@ pub fn handle_one_tun_packet<R: Read, W: Write>(
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BrokerRuntimeConfig {
+    pub sandbox_id: SandboxId,
+    pub policy: foxprox_core::PolicyConfig,
+    pub static_dns_ttl_secs: u32,
+    pub static_dns_records: Vec<StaticDnsRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeConfigError {
+    InvalidPolicy(ConfigError),
+    ZeroDnsTtl,
+}
+
+pub struct BrokerRuntimeComponents {
+    pub sandbox_id: SandboxId,
+    pub policy_engine: PolicyEngine,
+    pub resolver: StaticDnsResolver,
+    pub cache: DnsCache,
+    pub broker_dns: Vec<IpAddr>,
+}
+
+pub fn build_runtime_components(
+    config: BrokerRuntimeConfig,
+) -> Result<BrokerRuntimeComponents, RuntimeConfigError> {
+    validate_policy_config(&config.policy).map_err(RuntimeConfigError::InvalidPolicy)?;
+    if config.static_dns_ttl_secs == 0 {
+        return Err(RuntimeConfigError::ZeroDnsTtl);
+    }
+    let broker_dns = config.policy.broker_dns.clone();
+    let mut resolver = StaticDnsResolver::new(config.static_dns_ttl_secs);
+    for record in config.static_dns_records {
+        resolver.insert(record.hostname, record.addresses);
+    }
+    Ok(BrokerRuntimeComponents {
+        sandbox_id: config.sandbox_id,
+        policy_engine: PolicyEngine::new(config.policy),
+        resolver,
+        cache: DnsCache::new(),
+        broker_dns,
+    })
+}
+
 pub struct BrokerDnsRuntime<'a, S> {
     pub sandbox_id: SandboxId,
     pub resolver: &'a StaticDnsResolver,
@@ -1476,6 +1519,87 @@ mod tests {
         assert_eq!(runtime.stack().resets, 0);
         assert_eq!(runtime.stack().opened, 1);
         assert_eq!(runtime.egress().tcp_attempts, 1);
+    }
+
+    #[test]
+    fn runtime_config_builds_policy_engine_and_static_dns_resolver() {
+        let mut rule = PolicyRule::allow("allow-broker-dns");
+        rule.protocol = Some(Protocol::Dns);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let config = BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("configured-sandbox").unwrap(),
+            policy: PolicyConfig {
+                broker_dns: vec![IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+                rules,
+                ..PolicyConfig::default()
+            },
+            static_dns_ttl_secs: 30,
+            static_dns_records: vec![StaticDnsRecord {
+                hostname: Hostname::normalize("example.com").unwrap(),
+                addresses: vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+            }],
+        };
+
+        let components = build_runtime_components(config).unwrap();
+
+        assert_eq!(components.sandbox_id.as_str(), "configured-sandbox");
+        assert_eq!(
+            components.broker_dns,
+            vec![IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))]
+        );
+        let response = components
+            .resolver
+            .resolve_query_packet(&dns_query_payload(), 100)
+            .unwrap();
+        let observation = response.observation.unwrap();
+        assert_eq!(observation.hostname.as_str(), "example.com");
+        assert_eq!(
+            observation.addresses,
+            vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))]
+        );
+        let event = NormalizedEvent::DnsPacketAttempt {
+            sandbox_id: components.sandbox_id,
+            frontend: FrontendKind::Tun,
+            source: Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            destination: Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1)), 53),
+        };
+        let decision = components.policy_engine.evaluate(&event.to_policy_input());
+        assert_eq!(decision.action, DecisionAction::Allow);
+    }
+
+    #[test]
+    fn runtime_config_rejects_invalid_policy_and_zero_dns_ttl() {
+        let duplicate_rules = {
+            let mut rules = RuleSet::default();
+            rules.push(PolicyRule::allow("duplicate"));
+            rules.push(PolicyRule::deny_drop("duplicate"));
+            rules
+        };
+        let invalid_policy = BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("invalid-policy").unwrap(),
+            policy: PolicyConfig {
+                rules: duplicate_rules,
+                ..PolicyConfig::default()
+            },
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+        };
+        assert!(matches!(
+            build_runtime_components(invalid_policy),
+            Err(RuntimeConfigError::InvalidPolicy(_))
+        ));
+
+        let zero_ttl = BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("zero-ttl").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 0,
+            static_dns_records: Vec::new(),
+        };
+        assert!(matches!(
+            build_runtime_components(zero_ttl),
+            Err(RuntimeConfigError::ZeroDnsTtl)
+        ));
     }
 
     #[test]
