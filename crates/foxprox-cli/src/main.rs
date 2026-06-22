@@ -11,7 +11,9 @@ use std::os::unix::net::UnixListener;
 use foxprox_core::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
 use foxprox_core::dns::{parse_dns_query, synthesize_a_response, DnsCache};
 use foxprox_core::egress::{EgressBackend, EgressOutcome, EgressRequest};
-use foxprox_core::origin::parse_http_request;
+use foxprox_core::origin::{
+    parse_connect_target, parse_http_request, parse_socks5_connect_request,
+};
 use foxprox_core::policy::{
     Cidr, PolicyConfig, PolicyEngine, PolicyRequest, PolicyRule, RuleAction,
 };
@@ -58,6 +60,8 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("tcp-bridge-smoke");
             println!("tcp-bridge-deny-smoke");
             println!("http-proxy-smoke");
+            println!("https-connect-smoke");
+            println!("socks5-smoke");
             Ok(())
         }
         [cmd, scenario] if cmd == "run" => run_named_scenario(scenario),
@@ -97,6 +101,10 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         tcp_bridge_deny_smoke_records()
     } else if scenario == "http-proxy-smoke" {
         http_proxy_smoke_records()
+    } else if scenario == "https-connect-smoke" {
+        https_connect_smoke_records()
+    } else if scenario == "socks5-smoke" {
+        socks5_smoke_records()
     } else {
         run_scenario(ScenarioName::parse(scenario)?)
     };
@@ -108,7 +116,7 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke|tcp-bridge-smoke|tcp-bridge-deny-smoke|http-proxy-smoke>",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke|tcp-bridge-smoke|tcp-bridge-deny-smoke|http-proxy-smoke|https-connect-smoke|socks5-smoke>",
         ScenarioName::list().join("|")
     );
 }
@@ -2488,6 +2496,34 @@ fn http_proxy_smoke_records() -> Vec<AuditRecord> {
     }
 }
 
+fn https_connect_smoke_records() -> Vec<AuditRecord> {
+    match run_https_connect_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::HttpsConnect,
+            "https-connect-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::HttpProxy)
+        .with_protocol(Protocol::HttpsConnect)],
+    }
+}
+
+fn socks5_smoke_records() -> Vec<AuditRecord> {
+    match run_socks5_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::SocksConnect,
+            "socks5-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::Socks5)
+        .with_protocol(Protocol::Socks)],
+    }
+}
+
 fn run_http_proxy_smoke() -> Result<AuditRecord, String> {
     let origin = TcpListener::bind("127.0.0.1:0")
         .map_err(|err| format!("failed to bind HTTP origin fixture: {err}"))?;
@@ -2624,6 +2660,380 @@ fn run_http_proxy_smoke() -> Result<AuditRecord, String> {
     .with_metadata("policy_reason", outcome.reason)
     .with_metadata("origin_fixture", origin_addr.to_string())
     .with_bytes(n as u64, origin_response.len() as u64))
+}
+
+fn run_https_connect_smoke() -> Result<AuditRecord, String> {
+    let origin = TcpListener::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind HTTPS CONNECT origin fixture: {err}"))?;
+    let origin_addr = origin
+        .local_addr()
+        .map_err(|err| format!("failed to inspect HTTPS CONNECT origin fixture: {err}"))?;
+    let origin_thread = std::thread::spawn(move || -> Result<(), String> {
+        let (mut stream, _peer) = origin
+            .accept()
+            .map_err(|err| format!("HTTPS CONNECT origin accept failed: {err}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|err| format!("HTTPS CONNECT origin timeout setup failed: {err}"))?;
+        let mut buf = [0_u8; 64];
+        let n = stream
+            .read(&mut buf)
+            .map_err(|err| format!("HTTPS CONNECT origin read failed: {err}"))?;
+        if &buf[..n] != b"ping" {
+            return Err(format!(
+                "HTTPS CONNECT origin received unexpected bytes: {:?}",
+                &buf[..n]
+            ));
+        }
+        stream
+            .write_all(b"pong")
+            .map_err(|err| format!("HTTPS CONNECT origin write failed: {err}"))?;
+        Ok(())
+    });
+
+    let proxy = TcpListener::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind HTTPS CONNECT proxy listener: {err}"))?;
+    let proxy_addr = proxy
+        .local_addr()
+        .map_err(|err| format!("failed to inspect HTTPS CONNECT proxy listener: {err}"))?;
+    let client_thread = std::thread::spawn(move || -> Result<(), String> {
+        let mut stream = TcpStream::connect_timeout(&proxy_addr, Duration::from_secs(5))
+            .map_err(|err| format!("HTTPS CONNECT client connect failed: {err}"))?;
+        stream
+            .write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n")
+            .map_err(|err| format!("HTTPS CONNECT client write failed: {err}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|err| format!("HTTPS CONNECT client timeout setup failed: {err}"))?;
+        let mut response = [0_u8; 128];
+        let n = stream
+            .read(&mut response)
+            .map_err(|err| format!("HTTPS CONNECT client response read failed: {err}"))?;
+        let response_text = String::from_utf8_lossy(&response[..n]);
+        if !response_text.starts_with("HTTP/1.1 200") {
+            return Err(format!(
+                "HTTPS CONNECT client received unexpected connect response: {response_text:?}"
+            ));
+        }
+        stream
+            .write_all(b"ping")
+            .map_err(|err| format!("HTTPS CONNECT client tunnel write failed: {err}"))?;
+        let n = stream
+            .read(&mut response)
+            .map_err(|err| format!("HTTPS CONNECT client tunnel read failed: {err}"))?;
+        if &response[..n] != b"pong" {
+            return Err(format!(
+                "HTTPS CONNECT client received unexpected tunnel bytes: {:?}",
+                &response[..n]
+            ));
+        }
+        Ok(())
+    });
+
+    let (mut client, _peer) = proxy
+        .accept()
+        .map_err(|err| format!("HTTPS CONNECT proxy accept failed: {err}"))?;
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|err| format!("HTTPS CONNECT proxy timeout setup failed: {err}"))?;
+    let request = read_http_headers(&mut client, "HTTPS CONNECT proxy")?;
+    let target = parse_connect_request_target(&request)?;
+    let parsed = parse_connect_target(&target)?;
+    let policy = PolicyEngine::new(
+        PolicyConfig::deny_by_default().with_rule(
+            PolicyRule::new("allow-https-connect-example", RuleAction::Allow)
+                .protocol(Protocol::HttpsConnect)
+                .hostname("example.com")
+                .port(443),
+        ),
+    );
+    let policy_request = PolicyRequest::new(
+        "https-connect-smoke",
+        Frontend::HttpProxy,
+        Protocol::HttpsConnect,
+    )
+    .with_destination(origin_addr.ip(), parsed.port)
+    .with_hostname(
+        &parsed.host,
+        foxprox_core::audit::AttributionConfidence::High,
+    );
+    let outcome = policy.evaluate(&policy_request);
+    if !outcome.decision.is_allow() {
+        return Err(format!(
+            "HTTPS CONNECT smoke policy denied request: {}",
+            outcome.reason
+        ));
+    }
+
+    let mut origin_stream = TcpStream::connect_timeout(&origin_addr, Duration::from_secs(5))
+        .map_err(|err| format!("HTTPS CONNECT origin connect failed: {err}"))?;
+    client
+        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .map_err(|err| format!("HTTPS CONNECT response write failed: {err}"))?;
+    let mut tunnel_buf = [0_u8; 64];
+    let n = client
+        .read(&mut tunnel_buf)
+        .map_err(|err| format!("HTTPS CONNECT tunnel client read failed: {err}"))?;
+    origin_stream
+        .write_all(&tunnel_buf[..n])
+        .map_err(|err| format!("HTTPS CONNECT tunnel origin write failed: {err}"))?;
+    let reply_n = origin_stream
+        .read(&mut tunnel_buf)
+        .map_err(|err| format!("HTTPS CONNECT tunnel origin read failed: {err}"))?;
+    client
+        .write_all(&tunnel_buf[..reply_n])
+        .map_err(|err| format!("HTTPS CONNECT tunnel client write failed: {err}"))?;
+    drop(client);
+    drop(origin_stream);
+
+    origin_thread
+        .join()
+        .map_err(|_| "HTTPS CONNECT origin fixture thread panicked".to_string())??;
+    client_thread
+        .join()
+        .map_err(|_| "HTTPS CONNECT client thread panicked".to_string())??;
+
+    Ok(AuditRecord::new(
+        EventKind::HttpsConnect,
+        "https-connect-smoke",
+        Decision::Allow,
+        "HTTPS CONNECT request was policy-allowed and tunneled to a local TCP fixture",
+    )
+    .with_frontend(Frontend::HttpProxy)
+    .with_protocol(Protocol::HttpsConnect)
+    .with_addresses(None, Some(origin_addr))
+    .with_hostname(
+        Some(parsed.host),
+        foxprox_core::audit::AttributionSource::ExplicitProxy,
+        foxprox_core::audit::AttributionConfidence::High,
+    )
+    .with_rule(outcome.rule_id)
+    .with_metadata("connect_port", parsed.port.to_string())
+    .with_metadata("policy_decision", outcome.decision.as_str())
+    .with_metadata("policy_reason", outcome.reason)
+    .with_metadata("origin_fixture", origin_addr.to_string())
+    .with_bytes(n as u64, reply_n as u64))
+}
+
+fn run_socks5_smoke() -> Result<AuditRecord, String> {
+    let origin = TcpListener::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind SOCKS5 origin fixture: {err}"))?;
+    let origin_addr = origin
+        .local_addr()
+        .map_err(|err| format!("failed to inspect SOCKS5 origin fixture: {err}"))?;
+    let origin_thread = std::thread::spawn(move || -> Result<(), String> {
+        let (mut stream, _peer) = origin
+            .accept()
+            .map_err(|err| format!("SOCKS5 origin accept failed: {err}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|err| format!("SOCKS5 origin timeout setup failed: {err}"))?;
+        let mut buf = [0_u8; 64];
+        let n = stream
+            .read(&mut buf)
+            .map_err(|err| format!("SOCKS5 origin read failed: {err}"))?;
+        if &buf[..n] != b"ping" {
+            return Err(format!(
+                "SOCKS5 origin received unexpected bytes: {:?}",
+                &buf[..n]
+            ));
+        }
+        stream
+            .write_all(b"pong")
+            .map_err(|err| format!("SOCKS5 origin write failed: {err}"))?;
+        Ok(())
+    });
+
+    let proxy = TcpListener::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind SOCKS5 proxy listener: {err}"))?;
+    let proxy_addr = proxy
+        .local_addr()
+        .map_err(|err| format!("failed to inspect SOCKS5 proxy listener: {err}"))?;
+    let client_thread = std::thread::spawn(move || -> Result<(), String> {
+        let mut stream = TcpStream::connect_timeout(&proxy_addr, Duration::from_secs(5))
+            .map_err(|err| format!("SOCKS5 client connect failed: {err}"))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(|err| format!("SOCKS5 client timeout setup failed: {err}"))?;
+        stream
+            .write_all(&[0x05, 0x01, 0x00])
+            .map_err(|err| format!("SOCKS5 client greeting write failed: {err}"))?;
+        let mut buf = [0_u8; 64];
+        stream
+            .read_exact(&mut buf[..2])
+            .map_err(|err| format!("SOCKS5 client greeting read failed: {err}"))?;
+        if &buf[..2] != [0x05, 0x00] {
+            return Err(format!(
+                "SOCKS5 client received bad greeting: {:?}",
+                &buf[..2]
+            ));
+        }
+        let mut request = vec![0x05, 0x01, 0x00, 0x03, 11];
+        request.extend_from_slice(b"example.com");
+        request.extend_from_slice(&443_u16.to_be_bytes());
+        stream
+            .write_all(&request)
+            .map_err(|err| format!("SOCKS5 client CONNECT write failed: {err}"))?;
+        stream
+            .read_exact(&mut buf[..10])
+            .map_err(|err| format!("SOCKS5 client CONNECT response read failed: {err}"))?;
+        if buf[0] != 0x05 || buf[1] != 0x00 {
+            return Err(format!(
+                "SOCKS5 client received failed CONNECT response: {:?}",
+                &buf[..10]
+            ));
+        }
+        stream
+            .write_all(b"ping")
+            .map_err(|err| format!("SOCKS5 client tunnel write failed: {err}"))?;
+        let n = stream
+            .read(&mut buf)
+            .map_err(|err| format!("SOCKS5 client tunnel read failed: {err}"))?;
+        if &buf[..n] != b"pong" {
+            return Err(format!(
+                "SOCKS5 client received unexpected tunnel bytes: {:?}",
+                &buf[..n]
+            ));
+        }
+        Ok(())
+    });
+
+    let (mut client, _peer) = proxy
+        .accept()
+        .map_err(|err| format!("SOCKS5 proxy accept failed: {err}"))?;
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .map_err(|err| format!("SOCKS5 proxy timeout setup failed: {err}"))?;
+    let mut greeting = [0_u8; 3];
+    client
+        .read_exact(&mut greeting)
+        .map_err(|err| format!("SOCKS5 proxy greeting read failed: {err}"))?;
+    if greeting != [0x05, 0x01, 0x00] {
+        return Err(format!("SOCKS5 proxy received bad greeting: {greeting:?}"));
+    }
+    client
+        .write_all(&[0x05, 0x00])
+        .map_err(|err| format!("SOCKS5 proxy greeting write failed: {err}"))?;
+    let mut request_bytes = [0_u8; 512];
+    let n = client
+        .read(&mut request_bytes)
+        .map_err(|err| format!("SOCKS5 proxy CONNECT read failed: {err}"))?;
+    let parsed = parse_socks5_connect_request(&request_bytes[..n])?;
+    let policy = PolicyEngine::new(
+        PolicyConfig::deny_by_default().with_rule(
+            PolicyRule::new("allow-socks5-example", RuleAction::Allow)
+                .protocol(Protocol::Socks)
+                .hostname("example.com")
+                .port(443),
+        ),
+    );
+    let policy_request = PolicyRequest::new("socks5-smoke", Frontend::Socks5, Protocol::Socks)
+        .with_destination(origin_addr.ip(), parsed.destination_port)
+        .with_hostname(
+            &parsed.destination_host,
+            foxprox_core::audit::AttributionConfidence::High,
+        );
+    let outcome = policy.evaluate(&policy_request);
+    if !outcome.decision.is_allow() {
+        return Err(format!(
+            "SOCKS5 smoke policy denied request: {}",
+            outcome.reason
+        ));
+    }
+
+    let mut origin_stream = TcpStream::connect_timeout(&origin_addr, Duration::from_secs(5))
+        .map_err(|err| format!("SOCKS5 origin connect failed: {err}"))?;
+    client
+        .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
+        .map_err(|err| format!("SOCKS5 proxy CONNECT response write failed: {err}"))?;
+    let mut tunnel_buf = [0_u8; 64];
+    let read_n = client
+        .read(&mut tunnel_buf)
+        .map_err(|err| format!("SOCKS5 tunnel client read failed: {err}"))?;
+    origin_stream
+        .write_all(&tunnel_buf[..read_n])
+        .map_err(|err| format!("SOCKS5 tunnel origin write failed: {err}"))?;
+    let reply_n = origin_stream
+        .read(&mut tunnel_buf)
+        .map_err(|err| format!("SOCKS5 tunnel origin read failed: {err}"))?;
+    client
+        .write_all(&tunnel_buf[..reply_n])
+        .map_err(|err| format!("SOCKS5 tunnel client write failed: {err}"))?;
+    drop(client);
+    drop(origin_stream);
+
+    origin_thread
+        .join()
+        .map_err(|_| "SOCKS5 origin fixture thread panicked".to_string())??;
+    client_thread
+        .join()
+        .map_err(|_| "SOCKS5 client thread panicked".to_string())??;
+
+    Ok(AuditRecord::new(
+        EventKind::SocksConnect,
+        "socks5-smoke",
+        Decision::Allow,
+        "SOCKS5 TCP CONNECT was policy-allowed and tunneled to a local TCP fixture",
+    )
+    .with_frontend(Frontend::Socks5)
+    .with_protocol(Protocol::Socks)
+    .with_addresses(None, Some(origin_addr))
+    .with_hostname(
+        Some(parsed.destination_host),
+        foxprox_core::audit::AttributionSource::ExplicitProxy,
+        foxprox_core::audit::AttributionConfidence::High,
+    )
+    .with_rule(outcome.rule_id)
+    .with_metadata("connect_port", parsed.destination_port.to_string())
+    .with_metadata("policy_decision", outcome.decision.as_str())
+    .with_metadata("policy_reason", outcome.reason)
+    .with_metadata("origin_fixture", origin_addr.to_string())
+    .with_bytes(read_n as u64, reply_n as u64))
+}
+
+fn read_http_headers(stream: &mut TcpStream, context: &str) -> Result<String, String> {
+    let mut bytes = Vec::new();
+    let mut buf = [0_u8; 256];
+    while bytes.len() < 8192 {
+        let n = stream
+            .read(&mut buf)
+            .map_err(|err| format!("{context} header read failed: {err}"))?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buf[..n]);
+        if bytes.windows(4).any(|window| window == b"\r\n\r\n")
+            || bytes.windows(2).any(|window| window == b"\n\n")
+        {
+            return String::from_utf8(bytes)
+                .map_err(|_| format!("{context} headers were not UTF-8"));
+        }
+    }
+    Err(format!("{context} headers were incomplete"))
+}
+
+fn parse_connect_request_target(headers: &str) -> Result<String, String> {
+    let request_line = headers
+        .lines()
+        .next()
+        .ok_or_else(|| "CONNECT request line missing".to_string())?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| "CONNECT method missing".to_string())?;
+    let target = parts
+        .next()
+        .ok_or_else(|| "CONNECT target missing".to_string())?;
+    let version = parts
+        .next()
+        .ok_or_else(|| "CONNECT HTTP version missing".to_string())?;
+    if method != "CONNECT" {
+        return Err("request is not CONNECT".to_string());
+    }
+    if !version.starts_with("HTTP/") {
+        return Err("CONNECT HTTP version missing".to_string());
+    }
+    Ok(target.to_string())
 }
 
 #[cfg(unix)]

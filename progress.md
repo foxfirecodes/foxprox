@@ -527,3 +527,15 @@
 - Interpretation: explicit HTTP proxy allow checkpoint is preserved.
 - Next verification gap: denied HTTP proxy behavior, HTTPS CONNECT forwarding, or SOCKS TCP CONNECT forwarding.
 - Commit hash after commit: a1401ce.
+
+## 2026-06-22T01:08:00Z — Explicit HTTPS CONNECT and SOCKS5 forwarding smokes
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run https-connect-smoke && cargo run -p foxprox-cli --bin foxprox-lab -- run socks5-smoke`
+- Environment assumptions: local-only TCP sockets are available; both smokes use in-process client/proxy/origin fixtures and no external network.
+- Expected result: workspace tests remain green; HTTPS CONNECT and SOCKS5 TCP CONNECT requests are parsed, evaluated by policy, tunneled through host-owned TCP sockets, and audited with explicit-proxy attribution.
+- Observed result: pass. `foxprox-core` ran 41 tests, `foxprox-cli` ran 2 tests, `foxproxsetup` ran 7 tests. `https-connect-smoke` and `socks5-smoke` each emitted `decision":"allow"`, `policy_decision":"allow"`, and exchanged `ping`/`pong` through a local TCP fixture.
+- Relevant output excerpt: `"event":"https_connect","frontend":"http_proxy","hostname":"example.com","rule_id":"allow-https-connect-example"`; `"event":"socks_connect","frontend":"socks5","rule_id":"allow-socks5-example"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: Milestone 6 now has local forwarding proofs for all explicit proxy modes in scope: HTTP proxy, HTTPS CONNECT, and SOCKS5 TCP CONNECT. Denied/malformed explicit proxy paths still need runnable smoke coverage beyond parser/unit tests.
+- Next verification gap: add denied/malformed explicit proxy smokes, then improve transparent inspection/audit coverage for plaintext HTTP, TLS SNI mismatch, hidden SNI, and QUIC candidate decisions.
+- Commit hash after commit: pending.
