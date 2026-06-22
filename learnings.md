@@ -232,3 +232,7 @@ SCM_RIGHTS can transfer a write-only descriptor successfully, but broker-side re
 ## 2026-06-22 — keep privileged namespace smoke tests ignored but runnable
 
 For bwrap/TUN proofs that depend on host kernel features and `/dev/net/tun`, add ignored integration tests and run them explicitly during vertical-evidence work. Default workspace tests should compile them but not require privileged namespace support.
+
+## 2026-06-22 — minimal IPv4 UDP write-back is enough for live TUN proof
+
+For live TUN write-back smoke tests, a broker can parse the target's IPv4 UDP packet, swap IPs/ports, write a reply with a valid IPv4 header checksum, and set UDP checksum to zero. Linux accepts zero UDP checksum for IPv4, letting an unprivileged target socket prove end-to-end TUN write-back without raw socket privileges.

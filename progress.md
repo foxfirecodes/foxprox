@@ -1257,3 +1257,25 @@
 - What failed or surprised the agent: no behavior failures; the prior manual proof translated cleanly once the Rust broker control listener existed.
 - What remains unproven: live write-back/reply into the bwrap namespace and TCP forwarding through a userspace stack.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — live TUN write-back smoke slice
+
+- Slice attempted: extend the live bwrap setup smoke test from ingress-only packet logging to broker write-back into the sandbox namespace.
+- Why next: Milestone 0 live setup is proven, and in-memory/fd-stand-in packet write-back is proven; the remaining Milestone 1 gap is a live packet written by the broker back through the bwrap-created TUN fd and received by a target process.
+- Verification plan: have the ignored live smoke test target send UDP and wait for a reply; have the broker thread parse the inbound IPv4 UDP packet, synthesize a minimal IPv4/UDP response, write it to `TunPacketIo`, then assert the target exits successfully and the original packet was observed. Run the ignored live test explicitly plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — live TUN write-back smoke
+
+- Slice attempted: extend the live bwrap setup smoke test from ingress-only packet logging to broker write-back into the sandbox namespace.
+- Why next: Milestone 0 live setup was proven, and in-memory/fd-stand-in packet write-back was proven; the remaining Milestone 1 gap was a live packet written by the broker back through the bwrap-created TUN fd and received by a target process.
+- What changed: the ignored live bwrap smoke test now has the target Python process send UDP and wait for a response. The broker test thread parses the inbound IPv4 UDP packet from `TunPacketIo`, synthesizes a minimal IPv4/UDP response with payload `ok`, writes it back through the same TUN fd, and the target exits successfully only if it receives `ok`.
+- Verification:
+  - Explicit live smoke passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed; the live smoke test remains compiled but ignored by default.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: IPv4 UDP checksum can be zero for this smoke path, so the minimal response only needs a correct IPv4 header checksum to reach the target socket through TUN.
+- What this proves: in a real bwrap namespace, broker-side code can receive the live TUN fd, read target traffic, write an IP packet back to the same fd, and have the unprivileged target process receive it.
+- What remains unproven: production broker integration for live TUN packet loops, DNS/UDP forwarding semantics through live TUN, and TCP forwarding via a userspace stack.
+- Commit: this commit.
