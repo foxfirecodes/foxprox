@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::VecDeque;
+use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr};
 
 use foxprox_core::{Endpoint, FlowKey, Protocol};
@@ -40,6 +41,15 @@ pub enum SmoltcpAdapterError {
 pub struct SmoltcpTcpPayload {
     pub flow: FlowKey,
     pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SmoltcpTunPumpOutcome {
+    NoPacket,
+    PacketProcessed {
+        outbound_packets: usize,
+        outbound_bytes: usize,
+    },
 }
 
 pub struct SmoltcpIpLoopback {
@@ -400,6 +410,36 @@ impl TcpStackAdapter for SmoltcpIpLoopback {
     }
 }
 
+pub fn pump_one_tun_packet<R: Read, W: Write>(
+    adapter: &mut SmoltcpIpLoopback,
+    reader: &mut R,
+    writer: &mut W,
+    buffer: &mut [u8],
+    now_millis: i64,
+) -> io::Result<SmoltcpTunPumpOutcome> {
+    let bytes_read = reader.read(buffer)?;
+    if bytes_read == 0 {
+        return Ok(SmoltcpTunPumpOutcome::NoPacket);
+    }
+    adapter
+        .ingest_ip_packet(buffer[..bytes_read].to_vec())
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))?;
+    adapter.poll_once(now_millis);
+
+    let mut outbound_packets = 0;
+    let mut outbound_bytes = 0;
+    while let Some(packet) = adapter.next_outbound_ip_packet() {
+        writer.write_all(&packet)?;
+        outbound_packets += 1;
+        outbound_bytes += packet.len();
+    }
+
+    Ok(SmoltcpTunPumpOutcome::PacketProcessed {
+        outbound_packets,
+        outbound_bytes,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -412,7 +452,7 @@ mod tests {
         TcpBridgeError, TcpConnectRequest, TcpFlowRuntime, TcpStackOutcome, TcpStackRuntime,
         TcpStreamBridge, UdpDatagramRequest,
     };
-    use std::io::Read;
+    use std::io::{Cursor, Read};
     use std::net::{TcpListener, TcpStream};
 
     #[derive(Default)]
@@ -602,6 +642,72 @@ mod tests {
             }
             other => panic!("expected TCP response packet, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tun_packet_pump_reads_ip_packet_and_writes_smoltcp_response() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        let syn = ipv4_tcp_syn_packet(
+            Ipv4Addr::new(10, 66, 0, 2),
+            Ipv4Addr::new(10, 66, 0, 1),
+            50001,
+            8080,
+            7,
+        );
+        let mut reader = Cursor::new(syn);
+        let mut writer = Vec::new();
+        let mut buffer = vec![0; 1500];
+
+        let outcome =
+            pump_one_tun_packet(&mut adapter, &mut reader, &mut writer, &mut buffer, 1).unwrap();
+
+        assert_eq!(
+            outcome,
+            SmoltcpTunPumpOutcome::PacketProcessed {
+                outbound_packets: 1,
+                outbound_bytes: writer.len()
+            }
+        );
+        match parse_ip_packet(&writer).unwrap() {
+            ParsedIpPacket::Tcpv4Segment(segment) => {
+                assert_eq!(segment.source, Ipv4Addr::new(10, 66, 0, 1));
+                assert_eq!(segment.destination, Ipv4Addr::new(10, 66, 0, 2));
+                assert_eq!(segment.source_port, 8080);
+                assert_eq!(segment.destination_port, 50001);
+                assert!(segment.syn);
+                assert!(segment.ack);
+            }
+            other => panic!("expected TCP response packet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tun_packet_pump_reports_empty_reads_without_polling() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        let mut reader = Cursor::new(Vec::new());
+        let mut writer = Vec::new();
+        let mut buffer = vec![0; 1500];
+
+        let outcome =
+            pump_one_tun_packet(&mut adapter, &mut reader, &mut writer, &mut buffer, 1).unwrap();
+
+        assert_eq!(outcome, SmoltcpTunPumpOutcome::NoPacket);
+        assert!(writer.is_empty());
     }
 
     #[test]

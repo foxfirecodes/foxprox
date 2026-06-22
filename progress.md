@@ -1409,3 +1409,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: ingress packets are still test-fed bytes, not read from a live TUN fd; outbound packets are captured in memory and not written to TUN.
 - Exact next step: commit smoltcp packet queue ingress, then add a runtime-facing one-poll packet pump that reads one IP packet from a TUN-like object, feeds smoltcp, and writes emitted outbound IP packets back to the TUN-like writer.
+
+## 2026-06-22T22:21:05Z
+- Current objective: continue after smoltcp packet queue ingress toward a TUN-like packet pump.
+- Git status summary: clean worktree after commit `0567306`.
+- Intended slice: add a runtime-facing one-packet pump that reads one IP packet from a TUN-like reader, feeds `SmoltcpIpLoopback`, polls once, and writes emitted outbound IP packets to a TUN-like writer.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with deterministic in-memory reader/writer tests.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: this will still be a one-packet synchronous proof, not a continuous broker loop or live fd integration.
+- Exact next step: add the pump helper and prove a raw SYN read from fake TUN writes a smoltcp SYN/ACK response packet.
+
+## 2026-06-22T22:22:25Z
+- Current objective: add one-packet TUN-like pump for smoltcp packet ingress/egress.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on wrapped pump calls in tests; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 18 smoltcp adapter tests passed. New `pump_one_tun_packet` reads one TUN-like IP packet, feeds the adapter queue, polls smoltcp once, drains emitted outbound packets to a writer, and reports no-packet reads without polling; tests prove a raw TCP SYN read from fake TUN writes a parseable smoltcp SYN/ACK packet.
+- Commit hash when committed: pending.
+- Remaining risks: one-packet pump is synchronous and test-only so far; it does not integrate policy-gated connect handling, host socket opening, or continuous TUN fd operation.
+- Exact next step: commit smoltcp TUN packet pump, then connect packet-pumped smoltcp connect attempts to `TcpStackRuntime` so an ingress SYN can be policy-gated after the smoltcp poll.
