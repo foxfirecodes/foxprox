@@ -14,13 +14,14 @@ use std::{
 use foxprox_audit::{AuditRecord, AuditSink, FlowClosedAudit};
 use foxprox_core::{
     FrontendKind, NormalizedEvent, Protocol, SandboxId, TcpConnectAttempt, UdpFlowAttempt,
+    UdpTimeouts,
 };
 use foxprox_device::{DeviceError, DevicePacket, PacketDevice};
 use foxprox_egress::{EgressError, EgressOutcome, HostEgress, HostTcpStream, HostUdpFlow};
 use foxprox_net::{
     handle_ipv4_packet, handle_ipv4_packet_with_egress, handle_normalized_event_with_egress,
-    BrokerError, BrokerEventOutcome, FlowProtocol, InboundIpv4Packet, OutboundIpPacket,
-    PacketBrokerOutcome, StackAdapter, StackEvent, StackTcpData, StackTcpWrite,
+    udp_timeout, BrokerError, BrokerEventOutcome, FlowProtocol, InboundIpv4Packet,
+    OutboundIpPacket, PacketBrokerOutcome, StackAdapter, StackEvent, StackTcpData, StackTcpWrite,
 };
 use foxprox_policy::PolicyEngine;
 
@@ -90,8 +91,16 @@ impl UdpFlowKey {
 
 /// Runtime-owned UDP flow table. It stores only egress-owned UDP handles behind
 /// the shared `HostUdpFlow` contract.
+pub const DEFAULT_UDP_BRIDGE_IDLE_TIMEOUT_MILLIS: u64 = 60_000;
+
 pub struct UdpBridgeTable<U> {
-    flows: HashMap<UdpFlowKey, U>,
+    flows: HashMap<UdpFlowKey, UdpBridge<U>>,
+}
+
+struct UdpBridge<U> {
+    flow: U,
+    last_activity_millis: u64,
+    idle_timeout_millis: u64,
 }
 
 impl<U> Default for UdpBridgeTable<U> {
@@ -116,11 +125,38 @@ impl<U> UdpBridgeTable<U> {
     }
 
     pub fn insert(&mut self, key: UdpFlowKey, flow: U) -> Option<U> {
-        self.flows.insert(key, flow)
+        self.insert_with_timeout(key, flow, 0, DEFAULT_UDP_BRIDGE_IDLE_TIMEOUT_MILLIS)
+    }
+
+    pub fn insert_with_timeout(
+        &mut self,
+        key: UdpFlowKey,
+        flow: U,
+        now_millis: u64,
+        idle_timeout_millis: u64,
+    ) -> Option<U> {
+        self.flows
+            .insert(
+                key,
+                UdpBridge {
+                    flow,
+                    last_activity_millis: now_millis,
+                    idle_timeout_millis,
+                },
+            )
+            .map(|bridge| bridge.flow)
     }
 
     pub fn remove(&mut self, key: &UdpFlowKey) -> Option<U> {
-        self.flows.remove(key)
+        self.flows.remove(key).map(|bridge| bridge.flow)
+    }
+
+    pub fn expire_idle(&mut self, now_millis: u64) -> usize {
+        let before = self.flows.len();
+        self.flows.retain(|_, bridge| {
+            now_millis.saturating_sub(bridge.last_activity_millis) < bridge.idle_timeout_millis
+        });
+        before - self.flows.len()
     }
 }
 
@@ -137,18 +173,21 @@ pub fn flush_udp_bridge_reads_to_device<D, U>(
     device: &mut D,
     bridges: &mut UdpBridgeTable<U>,
     max_bytes_per_flow: usize,
+    now_millis: u64,
 ) -> Result<UdpBridgeReadOutcome, RuntimeError>
 where
     D: PacketDevice,
     U: HostUdpFlow,
 {
     let mut replies = Vec::new();
-    for (key, flow) in &mut bridges.flows {
-        let bytes = flow
+    for (key, bridge) in &mut bridges.flows {
+        let bytes = bridge
+            .flow
             .recv_to_sandbox(max_bytes_per_flow)
             .map_err(BrokerError::Egress)
             .map_err(RuntimeError::Broker)?;
         if !bytes.is_empty() {
+            bridge.last_activity_millis = now_millis;
             replies.push((key.clone(), bytes));
         }
     }
@@ -186,6 +225,7 @@ where
     pub egress: &'a mut E,
     pub audit: &'a mut A,
     pub udp_bridges: &'a mut UdpBridgeTable<E::UdpHandle>,
+    pub udp_timeouts: UdpTimeouts,
     pub sequence: u64,
     pub timestamp_millis: u64,
 }
@@ -220,8 +260,12 @@ where
     if let (NormalizedEvent::UdpFlowAttempt(event), Some(EgressOutcome::UdpOpened(flow))) =
         (&result.event, result.egress_outcome.take())
     {
-        ctx.udp_bridges
-            .insert(UdpFlowKey::from_attempt(event), flow);
+        ctx.udp_bridges.insert_with_timeout(
+            UdpFlowKey::from_attempt(event),
+            flow,
+            ctx.timestamp_millis,
+            udp_timeout(event.classification, &ctx.udp_timeouts).as_millis() as u64,
+        );
     }
 
     write_outbound_packets(device, &result.outbound_packets)?;
@@ -759,6 +803,7 @@ mod tests {
                 egress: &mut egress,
                 audit: &mut audit,
                 udp_bridges: &mut udp_bridges,
+                udp_timeouts: UdpTimeouts::default(),
                 sequence: 2,
                 timestamp_millis: 2000,
             },
@@ -779,6 +824,23 @@ mod tests {
     }
 
     #[test]
+    fn udp_bridge_table_expires_idle_flows_by_timeout() {
+        let key = UdpFlowKey {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:53000".parse().unwrap(),
+            destination: "203.0.113.10:12345".parse().unwrap(),
+        };
+        let mut bridges = UdpBridgeTable::default();
+        bridges.insert_with_timeout(key, ReadableUdpFlow::new(VecDeque::new()), 100, 30);
+
+        assert_eq!(bridges.expire_idle(129), 0);
+        assert_eq!(bridges.len(), 1);
+        assert_eq!(bridges.expire_idle(130), 1);
+        assert!(bridges.is_empty());
+    }
+
+    #[test]
     fn udp_bridge_reads_host_reply_and_writes_sandbox_packet() {
         let cursor = Cursor::new(Vec::new());
         let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
@@ -791,7 +853,8 @@ mod tests {
         let mut bridges = UdpBridgeTable::default();
         bridges.insert(key, ReadableUdpFlow::new(vec![b"pong".to_vec()].into()));
 
-        let outcome = flush_udp_bridge_reads_to_device(&mut device, &mut bridges, 1024).unwrap();
+        let outcome =
+            flush_udp_bridge_reads_to_device(&mut device, &mut bridges, 1024, 20).unwrap();
 
         assert_eq!(outcome.udp_flows_read, 1);
         assert_eq!(outcome.udp_bytes_read_from_egress, 4);

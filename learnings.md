@@ -273,3 +273,8 @@
 
 - UDP reply packet construction belongs in `foxprox-packet`; runtime should only map normalized UDP flow keys plus host reply bytes into opaque outbound packets.
 - Minimal IPv4 UDP response synthesis can use zero UDP checksum for the forwarding proof while keeping future checksum hardening isolated to packet code.
+
+## 2026-06-22 — UDP bridge idle expiry
+
+- UDP bridges need runtime-owned idle timestamps and typed timeout durations when retained; otherwise host UDP sockets can leak after one-shot flows.
+- Use normalized UDP classification plus configured `UdpTimeouts` at insertion time so expiry policy does not depend on parser internals or socket types.

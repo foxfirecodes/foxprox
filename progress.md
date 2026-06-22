@@ -1176,3 +1176,23 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 75f68e5.
 - Remaining boundary risks: UDP idle expiry, IPv6 UDP responses, UDP checksums, ICMP errors, and rate limiting remain.
+
+## 2026-06-22 — Boundary objective: UDP bridge idle expiry
+
+- Boundary under work: runtime expiry of retained UDP pseudo-flow handles using normalized classification timeouts.
+- Allowed dependency direction: runtime owns host UDP handle lifetime and uses typed `UdpTimeouts`; policy/audit remain independent; egress handles are dropped through the bridge table without exposing socket internals.
+- Dependency-risk assessment: UDP bridge retention enables replies but can leak host sockets without idle expiry. Expiry should be based on normalized flow metadata and runtime time, not packet parser or OS socket details.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/audit.
+- Observed results: extended runtime `UdpBridgeTable` entries with last-activity and idle-timeout metadata, added `expire_idle`, and inserted retained UDP handles with timeouts derived from normalized UDP classification plus typed `UdpTimeouts`. Updated UDP response flushing to refresh activity timestamps. Added a runtime test proving a bridge survives before its timeout and is removed exactly at expiry. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 106 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — UDP expiry remains runtime-owned and typed.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: per-sandbox/global UDP limits, ICMP error handling, IPv6, and rate limiting remain.
