@@ -5,12 +5,13 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::VecDeque;
 use std::net::{IpAddr, Ipv4Addr};
 
 use foxprox_core::{Endpoint, FlowKey, Protocol};
 use foxprox_runtime::{TcpStackAdapter, TcpStackConnectAttempt};
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
-use smoltcp::phy::{Loopback, Medium};
+use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
@@ -29,6 +30,7 @@ pub enum SmoltcpAdapterError {
     InvalidTcpBufferSize,
     TcpListenRejected,
     TcpConnectRejected,
+    EmptyIpPacket,
     NoMatchingTcpSocket,
     TcpSendRejected,
     TcpRecvRejected,
@@ -42,7 +44,7 @@ pub struct SmoltcpTcpPayload {
 
 pub struct SmoltcpIpLoopback {
     iface: Interface,
-    device: Loopback,
+    device: QueuedIpDevice,
     sockets: SocketSet<'static>,
     tcp_handles: Vec<SocketHandle>,
     listener_ports: Vec<u16>,
@@ -55,7 +57,7 @@ impl SmoltcpIpLoopback {
         if config.prefix_len > 32 {
             return Err(SmoltcpAdapterError::InvalidPrefixLen);
         }
-        let mut device = Loopback::new(Medium::Ip);
+        let mut device = QueuedIpDevice::new(true);
         let iface_config = Config::new(HardwareAddress::Ip);
         let mut iface = Interface::new(iface_config, &mut device, Instant::from_millis(now_millis));
         let cidr = IpCidr::new(ipv4_to_smoltcp(config.address), config.prefix_len);
@@ -241,12 +243,120 @@ impl SmoltcpIpLoopback {
             .collect()
     }
 
+    pub fn ingest_ip_packet(&mut self, packet: Vec<u8>) -> Result<(), SmoltcpAdapterError> {
+        if packet.is_empty() {
+            return Err(SmoltcpAdapterError::EmptyIpPacket);
+        }
+        self.device.push_inbound(packet);
+        Ok(())
+    }
+
+    pub fn next_outbound_ip_packet(&mut self) -> Option<Vec<u8>> {
+        self.device.pop_outbound()
+    }
+
     pub fn poll_once(&mut self, now_millis: i64) {
         let _ = self.iface.poll(
             Instant::from_millis(now_millis),
             &mut self.device,
             &mut self.sockets,
         );
+    }
+}
+
+struct QueuedIpDevice {
+    inbound: VecDeque<Vec<u8>>,
+    outbound: VecDeque<Vec<u8>>,
+    loopback_transmit: bool,
+}
+
+impl QueuedIpDevice {
+    fn new(loopback_transmit: bool) -> Self {
+        Self {
+            inbound: VecDeque::new(),
+            outbound: VecDeque::new(),
+            loopback_transmit,
+        }
+    }
+
+    fn push_inbound(&mut self, packet: Vec<u8>) {
+        self.inbound.push_back(packet);
+    }
+
+    fn pop_outbound(&mut self) -> Option<Vec<u8>> {
+        self.outbound.pop_front()
+    }
+}
+
+impl Device for QueuedIpDevice {
+    type RxToken<'a>
+        = QueuedRxToken
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = QueuedTxToken<'a>
+    where
+        Self: 'a;
+
+    fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        let buffer = self.inbound.pop_front()?;
+        Some((
+            QueuedRxToken { buffer },
+            QueuedTxToken {
+                inbound: &mut self.inbound,
+                outbound: &mut self.outbound,
+                loopback_transmit: self.loopback_transmit,
+            },
+        ))
+    }
+
+    fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
+        Some(QueuedTxToken {
+            inbound: &mut self.inbound,
+            outbound: &mut self.outbound,
+            loopback_transmit: self.loopback_transmit,
+        })
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        let mut capabilities = DeviceCapabilities::default();
+        capabilities.max_transmission_unit = 65535;
+        capabilities.medium = Medium::Ip;
+        capabilities
+    }
+}
+
+struct QueuedRxToken {
+    buffer: Vec<u8>,
+}
+
+impl RxToken for QueuedRxToken {
+    fn consume<R, F>(self, f: F) -> R
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        f(&self.buffer)
+    }
+}
+
+struct QueuedTxToken<'a> {
+    inbound: &'a mut VecDeque<Vec<u8>>,
+    outbound: &'a mut VecDeque<Vec<u8>>,
+    loopback_transmit: bool,
+}
+
+impl TxToken for QueuedTxToken<'_> {
+    fn consume<R, F>(self, len: usize, f: F) -> R
+    where
+        F: FnOnce(&mut [u8]) -> R,
+    {
+        let mut buffer = vec![0; len];
+        let result = f(&mut buffer);
+        self.outbound.push_back(buffer.clone());
+        if self.loopback_transmit {
+            self.inbound.push_back(buffer);
+        }
+        result
     }
 }
 
@@ -294,8 +404,8 @@ impl TcpStackAdapter for SmoltcpIpLoopback {
 mod tests {
     use super::*;
     use foxprox_core::{
-        DecisionAction, PolicyConfig, PolicyEngine, PolicyRule, Protocol, RuleSet, SandboxId,
-        VecAuditSink, VerificationKernel,
+        parse_ip_packet, DecisionAction, ParsedIpPacket, PolicyConfig, PolicyEngine, PolicyRule,
+        Protocol, RuleSet, SandboxId, VecAuditSink, VerificationKernel,
     };
     use foxprox_runtime::{
         build_runtime_components, BrokerRuntimeConfig, EgressError, HostEgress, StdTcpStreamBridge,
@@ -339,6 +449,62 @@ mod tests {
         fn send_udp(&mut self, _request: UdpDatagramRequest) -> Result<(), EgressError> {
             Err(EgressError::UnsupportedProtocol)
         }
+    }
+
+    fn ipv4_tcp_syn_packet(
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+        source_port: u16,
+        destination_port: u16,
+        sequence: u32,
+    ) -> Vec<u8> {
+        let mut packet = vec![0u8; 40];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(40u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&source.octets());
+        packet[16..20].copy_from_slice(&destination.octets());
+        let ip_checksum = checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+
+        let tcp = &mut packet[20..];
+        tcp[0..2].copy_from_slice(&source_port.to_be_bytes());
+        tcp[2..4].copy_from_slice(&destination_port.to_be_bytes());
+        tcp[4..8].copy_from_slice(&sequence.to_be_bytes());
+        tcp[12] = 5 << 4;
+        tcp[13] = 0x02;
+        tcp[14..16].copy_from_slice(&64240u16.to_be_bytes());
+        let tcp_checksum = tcp_ipv4_checksum(source, destination, tcp);
+        tcp[16..18].copy_from_slice(&tcp_checksum.to_be_bytes());
+        packet
+    }
+
+    fn tcp_ipv4_checksum(source: Ipv4Addr, destination: Ipv4Addr, tcp: &[u8]) -> u16 {
+        let mut pseudo = Vec::with_capacity(12 + tcp.len());
+        pseudo.extend_from_slice(&source.octets());
+        pseudo.extend_from_slice(&destination.octets());
+        pseudo.push(0);
+        pseudo.push(6);
+        pseudo.extend_from_slice(&(tcp.len() as u16).to_be_bytes());
+        pseudo.extend_from_slice(tcp);
+        checksum(&pseudo)
+    }
+
+    fn checksum(bytes: &[u8]) -> u16 {
+        let mut sum = 0u32;
+        for chunk in bytes.chunks(2) {
+            let word = if chunk.len() == 2 {
+                u16::from_be_bytes([chunk[0], chunk[1]])
+            } else {
+                u16::from_be_bytes([chunk[0], 0])
+            };
+            sum += u32::from(word);
+            while sum > 0xffff {
+                sum = (sum & 0xffff) + (sum >> 16);
+            }
+        }
+        !(sum as u16)
     }
 
     fn connected_adapter() -> SmoltcpIpLoopback {
@@ -393,6 +559,66 @@ mod tests {
 
         adapter.listen_tcp(8080, 1024, 1024).unwrap();
         adapter.poll_once(1);
+    }
+
+    #[test]
+    fn raw_ip_packet_ingress_emits_outbound_ip_packet_without_smoltcp_type_leakage() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        let syn = ipv4_tcp_syn_packet(
+            Ipv4Addr::new(10, 66, 0, 2),
+            Ipv4Addr::new(10, 66, 0, 1),
+            50001,
+            8080,
+            7,
+        );
+
+        adapter.ingest_ip_packet(syn).unwrap();
+        let mut outbound = None;
+        for millis in 1..10 {
+            adapter.poll_once(millis);
+            if let Some(packet) = adapter.next_outbound_ip_packet() {
+                outbound = Some(packet);
+                break;
+            }
+        }
+        let outbound = outbound.expect("smoltcp should emit a TCP response packet");
+
+        match parse_ip_packet(&outbound).unwrap() {
+            ParsedIpPacket::Tcpv4Segment(segment) => {
+                assert_eq!(segment.source, Ipv4Addr::new(10, 66, 0, 1));
+                assert_eq!(segment.destination, Ipv4Addr::new(10, 66, 0, 2));
+                assert_eq!(segment.source_port, 8080);
+                assert_eq!(segment.destination_port, 50001);
+                assert!(segment.syn);
+                assert!(segment.ack);
+            }
+            other => panic!("expected TCP response packet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn raw_ip_packet_ingress_rejects_empty_packets() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            adapter.ingest_ip_packet(Vec::new()),
+            Err(SmoltcpAdapterError::EmptyIpPacket)
+        ));
     }
 
     #[test]

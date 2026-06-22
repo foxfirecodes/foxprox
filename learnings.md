@@ -47,3 +47,6 @@
 
 ## 2026-06-22T22:07:08Z
 - A smoltcp TCP socket can be active before `send_slice` accepts payload data; adapter tests should poll/retry on `TcpSendRejected` instead of assuming active implies send-ready.
+
+## 2026-06-22T22:20:18Z
+- `smoltcp::phy::DeviceCapabilities` is non-exhaustive in 0.12, so custom devices must mutate `DeviceCapabilities::default()` rather than constructing it with struct update syntax.

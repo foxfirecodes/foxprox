@@ -1388,3 +1388,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: this still uses loopback test sockets and an in-memory smoltcp loopback adapter; no live TUN fd is feeding smoltcp yet.
 - Exact next step: commit concrete smoltcp-to-host bridge proof, then add an adapter-facing IP packet ingress queue so tests can feed raw IP packets toward smoltcp without exposing smoltcp device types to policy.
+
+## 2026-06-22T22:12:05Z
+- Current objective: continue after concrete smoltcp-to-host bridge proof toward adapter packet ingress.
+- Git status summary: clean worktree after commit `aa29e36`.
+- Intended slice: replace the smoltcp loopback-only device boundary with an adapter-owned IP packet queue that can ingest raw IP packets and expose emitted outbound IP packets without leaking smoltcp device types to policy/runtime code.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with deterministic in-process packet queue tests.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`, and `learnings.md` only if replacing `Loopback` changes a test invariant.
+- Remaining risks: packet ingress will still be test-fed bytes, not a live TUN fd; TCP host bridging remains separate from continuous stack polling.
+- Exact next step: add an adapter-owned IP packet device with `ingest_ip_packet` and `next_outbound_ip_packet` helpers plus a raw packet ingress/emission proof.
+
+## 2026-06-22T22:20:18Z
+- Current objective: add adapter-owned raw IP packet ingress/egress queues for smoltcp.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on associated type formatting; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings` (initially failed because `DeviceCapabilities` is non-exhaustive; fixed by mutating `DeviceCapabilities::default()`)
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 16 smoltcp adapter tests passed. `SmoltcpIpLoopback` now owns a queue-backed IP device, exposes `ingest_ip_packet` and `next_outbound_ip_packet`, rejects empty ingress packets, and proves a raw IPv4 TCP SYN fed into the adapter causes smoltcp to emit a parseable SYN/ACK without leaking smoltcp device types.
+- Commit hash when committed: pending.
+- Remaining risks: ingress packets are still test-fed bytes, not read from a live TUN fd; outbound packets are captured in memory and not written to TUN.
+- Exact next step: commit smoltcp packet queue ingress, then add a runtime-facing one-poll packet pump that reads one IP packet from a TUN-like object, feeds smoltcp, and writes emitted outbound IP packets back to the TUN-like writer.
