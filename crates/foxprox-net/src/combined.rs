@@ -18,14 +18,17 @@ use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime};
 
-/// TUN-reachable explicit HTTP proxy bridge configuration.
+/// TUN-reachable explicit proxy bridge configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ExplicitHttpProxyBridgeConfig {
+pub struct ExplicitProxyBridgeConfig {
     /// Sandbox-reachable TCP port on the broker IP.
     pub sandbox_port: u16,
-    /// Host-loopback backend address of the existing HTTP proxy proof listener.
+    /// Host-loopback backend address of the existing proxy proof listener.
     pub backend_addr: SocketAddr,
 }
+
+/// Backward-compatible name for the HTTP proxy bridge configuration.
+pub type ExplicitHttpProxyBridgeConfig = ExplicitProxyBridgeConfig;
 
 /// Configuration for the combined transparent TCP/UDP/DNS proof runtime.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,7 +72,9 @@ pub struct CombinedTransparentProofConfig {
     /// Maximum simultaneous tracked UDP pseudo-flows.
     pub max_udp_flows: usize,
     /// Optional TUN-to-loopback bridge for explicit HTTP proxy proof reachability.
-    pub http_proxy_bridge: Option<ExplicitHttpProxyBridgeConfig>,
+    pub http_proxy_bridge: Option<ExplicitProxyBridgeConfig>,
+    /// Optional TUN-to-loopback bridge for explicit SOCKS5 proxy proof reachability.
+    pub socks5_proxy_bridge: Option<ExplicitProxyBridgeConfig>,
 }
 
 impl CombinedTransparentProofConfig {
@@ -98,6 +103,7 @@ impl CombinedTransparentProofConfig {
             max_worker_threads: udp.max_worker_threads,
             max_udp_flows: udp.max_udp_flows,
             http_proxy_bridge: None,
+            socks5_proxy_bridge: None,
         }
     }
 
@@ -137,7 +143,7 @@ impl CombinedTransparentProofConfig {
         }
     }
 
-    fn proxy_bridge_tcp_config(&self, bridge: ExplicitHttpProxyBridgeConfig) -> TcpProofConfig {
+    fn proxy_bridge_tcp_config(&self, bridge: ExplicitProxyBridgeConfig) -> TcpProofConfig {
         let mut config = self.tcp_config();
         config.tcp_port = bridge.sandbox_port;
         config.tcp_egress_override = Some(bridge.backend_addr);
@@ -195,6 +201,11 @@ where
         let tx = tcp::SocketBuffer::new(vec![0; 65_535]);
         tcp::Socket::new(rx, tx)
     });
+    let socks_tcp_socket = config.socks5_proxy_bridge.map(|_| {
+        let rx = tcp::SocketBuffer::new(vec![0; 65_535]);
+        let tx = tcp::SocketBuffer::new(vec![0; 65_535]);
+        tcp::Socket::new(rx, tx)
+    });
     let mut dns_socket = udp_socket(&config.udp_config())?;
     dns_socket
         .bind(config.dns_port)
@@ -203,6 +214,7 @@ where
     let mut sockets = SocketSet::new(vec![]);
     let tcp_handle = sockets.add(tcp_socket);
     let proxy_tcp_handle = proxy_tcp_socket.map(|socket| sockets.add(socket));
+    let socks_tcp_handle = socks_tcp_socket.map(|socket| sockets.add(socket));
     let dns_handle = sockets.add(dns_socket);
     let udp_config = config.udp_config();
     let mut forward_sockets = Vec::new();
@@ -224,14 +236,18 @@ where
     if let (Some(bridge), Some(handle)) = (config.http_proxy_bridge, proxy_tcp_handle) {
         install_tcp_listener(sockets.get_mut::<tcp::Socket>(handle), bridge.sandbox_port)?;
     }
+    if let (Some(bridge), Some(handle)) = (config.socks5_proxy_bridge, socks_tcp_handle) {
+        install_tcp_listener(sockets.get_mut::<tcp::Socket>(handle), bridge.sandbox_port)?;
+    }
     eprintln!(
-        "foxprox-net: combined transparent proof listening tcp_port={} dns={}:{} upstream={} udp_forward_ports={:?} http_proxy_bridge={:?}",
+        "foxprox-net: combined transparent proof listening tcp_port={} dns={}:{} upstream={} udp_forward_ports={:?} http_proxy_bridge={:?} socks5_proxy_bridge={:?}",
         config.tcp_port,
         config.broker_ip,
         config.dns_port,
         config.upstream_dns,
         config.udp_forward_ports,
-        config.http_proxy_bridge
+        config.http_proxy_bridge,
+        config.socks5_proxy_bridge
     );
     ready()?;
 
@@ -239,9 +255,15 @@ where
     let proxy_tcp_config = config
         .http_proxy_bridge
         .map(|bridge| config.proxy_bridge_tcp_config(bridge));
+    let socks_tcp_config = config
+        .socks5_proxy_bridge
+        .map(|bridge| config.proxy_bridge_tcp_config(bridge));
     let (worker_tx, worker_rx) = mpsc::channel();
     let mut tcp_state = TransparentTcpState::new();
     let mut proxy_tcp_state = config.http_proxy_bridge.map(|_| TransparentTcpState::new());
+    let mut socks_tcp_state = config
+        .socks5_proxy_bridge
+        .map(|_| TransparentTcpState::new());
     let mut cache = DnsCache::default();
     let mut udp_flows = UdpFlowTable::default();
     loop {
@@ -264,6 +286,14 @@ where
             proxy_tcp_state.as_mut(),
             proxy_tcp_handle,
             proxy_tcp_config.as_ref(),
+        ) {
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            state.poll(socket, proxy_config, &mut audit, Some(&cache))?;
+        }
+        if let (Some(state), Some(handle), Some(proxy_config)) = (
+            socks_tcp_state.as_mut(),
+            socks_tcp_handle,
+            socks_tcp_config.as_ref(),
         ) {
             let socket = sockets.get_mut::<tcp::Socket>(handle);
             state.poll(socket, proxy_config, &mut audit, Some(&cache))?;
@@ -361,9 +391,25 @@ fn install_tcp_listener(socket: &mut tcp::Socket<'_>, tcp_port: u16) -> io::Resu
 pub(crate) fn validate_http_proxy_bridge(
     config: &CombinedTransparentProofConfig,
 ) -> io::Result<()> {
-    let Some(bridge) = config.http_proxy_bridge else {
-        return Ok(());
-    };
+    let bridges = [config.http_proxy_bridge, config.socks5_proxy_bridge];
+    if let (Some(http), Some(socks)) = (config.http_proxy_bridge, config.socks5_proxy_bridge) {
+        if http.sandbox_port == socks.sandbox_port {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "explicit proxy bridge ports must be unique",
+            ));
+        }
+    }
+    for bridge in bridges.into_iter().flatten() {
+        validate_one_proxy_bridge(config, bridge)?;
+    }
+    Ok(())
+}
+
+fn validate_one_proxy_bridge(
+    config: &CombinedTransparentProofConfig,
+    bridge: ExplicitProxyBridgeConfig,
+) -> io::Result<()> {
     if bridge.sandbox_port == 0 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -411,6 +457,7 @@ mod tests {
         assert!(config.max_worker_threads > 0);
         assert!(config.max_udp_flows > 0);
         assert!(config.http_proxy_bridge.is_none());
+        assert!(config.socks5_proxy_bridge.is_none());
     }
 
     #[test]
@@ -457,6 +504,19 @@ mod tests {
         config.http_proxy_bridge = Some(ExplicitHttpProxyBridgeConfig {
             sandbox_port: 8080,
             backend_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        });
+        assert_eq!(
+            validate_http_proxy_bridge(&config).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        config.http_proxy_bridge = Some(ExplicitHttpProxyBridgeConfig {
+            sandbox_port: 8080,
+            backend_addr: SocketAddr::from(([127, 0, 0, 1], 18080)),
+        });
+        config.socks5_proxy_bridge = Some(ExplicitProxyBridgeConfig {
+            sandbox_port: 8080,
+            backend_addr: SocketAddr::from(([127, 0, 0, 1], 11080)),
         });
         assert_eq!(
             validate_http_proxy_bridge(&config).unwrap_err().kind(),

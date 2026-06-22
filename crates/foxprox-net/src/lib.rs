@@ -12,7 +12,7 @@ mod udp;
 
 pub use combined::{
     run_combined_transparent_proof, run_combined_transparent_proof_with_ready,
-    CombinedTransparentProofConfig, ExplicitHttpProxyBridgeConfig,
+    CombinedTransparentProofConfig, ExplicitHttpProxyBridgeConfig, ExplicitProxyBridgeConfig,
 };
 pub use udp::{run_udp_dns_proof, run_udp_dns_proof_with_ready, UdpDnsProofConfig};
 

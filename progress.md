@@ -1792,3 +1792,42 @@
   - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
   - Dependency checks passed: `cargo tree -p foxprox-core`, `cargo tree -p foxprox-egress`, `cargo tree -p foxprox-net`, `cargo tree -p foxprox-proxy`.
 - Next action: remove transient review/context artifacts and commit `add shared std egress adapter`.
+
+## 2026-06-22T22:26:12Z — committed shared std egress backend
+
+- Commit created: `3766662` (`add shared std egress adapter`).
+- Commit contents: new `foxprox-egress` crate, proxy TCP egress refactor, transparent TCP egress refactor, UDP/DNS egress refactor, tests, and verification ledger.
+- Current git status after commit: clean.
+- Remaining alpha comparison: explicit HTTP proxy is TUN-reachable, but SOCKS5 remains only separately CLI-runnable and is not yet exposed as a sandbox-reachable listener through the combined TUN path. Initial alpha docs require explicit HTTP/SOCKS proxy networking and setup/proxy reachability. Next smallest coherent slice: reuse the existing local-service raw bridge pattern to expose SOCKS5 over broker IP/port in `proof-transparent`, without moving parser/policy/audit code out of `foxprox-proxy`.
+
+## 2026-06-22T22:32:06Z — SOCKS5 TUN bridge implemented, awaiting review
+
+- Current objective: expose the existing SOCKS5 proxy proof to sandbox applications over the combined broker-owned TUN/smoltcp path.
+- Implemented WIP:
+  - Added `run_socks5_proxy_proof_with_ready` so CLI can learn the loopback backend address after bind and before accept.
+  - Generalized combined proxy bridge config name to `ExplicitProxyBridgeConfig` while retaining `ExplicitHttpProxyBridgeConfig` as a compatibility alias.
+  - Added optional `socks5_proxy_bridge` to `CombinedTransparentProofConfig`, with a second smoltcp TCP socket/state for raw bridging to the loopback SOCKS5 backend.
+  - Extended bridge validation to reject zero/backend-zero ports, transparent TCP port conflicts, and HTTP/SOCKS bridge port conflicts.
+  - Extended `proof-transparent` with `--socks5-proxy-port`, repeatable `--socks5-proxy-allow-port`, and `--socks5-proxy-backend-listen`; it validates all proxy bridge inputs before starting either backend, starts a loopback SOCKS5 backend, adds a broker-IP-scoped TCP bridge allow rule, and prints an `ALL_PROXY=socks5h://<broker-ip>:<port>` hint.
+- Focused verification passed:
+  - `cargo test -p foxprox-net -p foxprox-proxy -p foxprox-cli` passed: 45 net tests, 28 proxy tests, 10 CLI tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+- Current status: WIP modified files include combined runtime, proxy ready callback, CLI bridge wiring, and progress ledger.
+- Next exact action: request/read blocker review focused on SOCKS5 bridge reachability, validation/order, and no parser/policy/audit movement.
+
+## 2026-06-22T22:31:26Z — SOCKS5 TUN bridge final review and verification
+
+- Review result: `reviews/socks5-tun-bridge-final.md` reported no blockers.
+  - Confirmed combined runtime exposes HTTP and SOCKS5 bridges as separate smoltcp TCP sockets/states.
+  - Confirmed bridge validation runs before TUN setup and rejects zero bridge/backend ports plus transparent/HTTP/SOCKS port conflicts.
+  - Confirmed CLI validates all bridge inputs before starting backend threads and revalidates loopback bound addresses after ready callbacks.
+  - Confirmed SOCKS parsing/policy/audit remains in `foxprox-proxy`; the new path only raw-bridges TUN TCP bytes to a loopback backend.
+  - Confirmed bridge allow rules remain scoped to broker IP `/32` and single proxy bridge port.
+- Final verification after review:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 10 CLI tests, 53 core tests, 9 device tests, 7 egress tests, 45 net tests, 28 proxy tests, 2 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - Dependency checks passed: `cargo tree -p foxprox-core`, `cargo tree -p foxprox-net`, `cargo tree -p foxprox-proxy`, `cargo tree -p foxprox-cli`.
+- Next action: remove transient review artifact and commit `bridge socks5 proxy over tun`.

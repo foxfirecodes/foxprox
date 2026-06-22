@@ -151,13 +151,23 @@ where
 
 /// Runs the blocking SOCKS5 proof listener forever.
 pub fn run_socks5_proxy_proof(config: Socks5ProxyProofConfig) -> io::Result<()> {
+    run_socks5_proxy_proof_with_ready(config, |_| Ok(()))
+}
+
+/// Runs the blocking SOCKS5 proof listener and reports its bound address before accepting.
+pub fn run_socks5_proxy_proof_with_ready<F>(
+    config: Socks5ProxyProofConfig,
+    ready: F,
+) -> io::Result<()>
+where
+    F: FnOnce(SocketAddr) -> io::Result<()>,
+{
     let audit = shared_audit_buffer(config.audit_queue_capacity)?;
     let limiter = ConnectionLimiter::new(config.max_connections)?;
     let listener = TcpListener::bind(config.listen_addr)?;
-    eprintln!(
-        "foxprox-proxy: socks5 listening on {}",
-        listener.local_addr()?
-    );
+    let local_addr = listener.local_addr()?;
+    ready(local_addr)?;
+    eprintln!("foxprox-proxy: socks5 listening on {local_addr}");
     for accepted in listener.incoming() {
         let config = config.clone();
         let audit = Arc::clone(&audit);
