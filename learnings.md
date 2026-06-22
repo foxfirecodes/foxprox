@@ -144,3 +144,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Cleanup must be part of lifecycle exit evidence
 
 - Session exit evidence should include cleanup attempts and failures, not just child/runtime status. Cleanup failures after otherwise clean process exit are still fail-closed session outcomes and must make failed resources visible in structured audit details.
+
+## 2026-06-22 — Listener bind evidence belongs in lifecycle ledger
+
+- Runtime start evidence that only lists component names is not enough for proxy/DNS reachability. Listener setup must emit structured `proxy_listener_configured` records with component, protocol, bind address, and sandbox-reachable address, and listener-config audit backpressure must fail closed before claiming readiness.

@@ -1,5 +1,5 @@
 use crate::audit::{AuditError, AuditRecord, BoundedAuditLedger};
-use crate::types::{AuditKind, Decision, DenialReason, Frontend};
+use crate::types::{AuditKind, Decision, DenialReason, Frontend, Protocol};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -21,6 +21,28 @@ impl RuntimeComponent {
             Self::HttpProxyListener => "http_proxy_listener",
             Self::Socks5Listener => "socks5_listener",
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeListenerConfig {
+    pub component: RuntimeComponent,
+    pub bind_addr: String,
+    pub reachable_addr: Option<String>,
+}
+
+impl RuntimeListenerConfig {
+    pub fn new(component: RuntimeComponent, bind_addr: impl Into<String>) -> Self {
+        Self {
+            component,
+            bind_addr: bind_addr.into(),
+            reachable_addr: None,
+        }
+    }
+
+    pub fn with_reachable_addr(mut self, reachable_addr: impl Into<String>) -> Self {
+        self.reachable_addr = Some(reachable_addr.into());
+        self
     }
 }
 
@@ -186,6 +208,44 @@ impl RuntimeLifecycleHarness {
         Ok(())
     }
 
+    pub fn record_listener_config(
+        &mut self,
+        config: RuntimeListenerConfig,
+        now_ms: u64,
+    ) -> Result<(), RuntimeLifecycleError> {
+        match self.state {
+            RuntimeLifecycleState::Running { .. } => {}
+            RuntimeLifecycleState::NotStarted => {
+                return self.reject_invalid_transition(
+                    RuntimeLifecycleError::NotStarted,
+                    "configure_listener",
+                    now_ms,
+                );
+            }
+            RuntimeLifecycleState::Exited { .. } => {
+                return self.reject_invalid_transition(
+                    RuntimeLifecycleError::AlreadyExited,
+                    "configure_listener",
+                    now_ms,
+                );
+            }
+        }
+        let mut audit = AuditRecord::new_at(
+            AuditKind::ProxyListenerConfigured,
+            self.sandbox_id.clone(),
+            now_ms as u128,
+        )
+        .with_frontend(frontend_for_component(config.component))
+        .with_protocol(protocol_for_component(config.component))
+        .with_decision(Decision::Allow, None)
+        .with_detail("listener_component", config.component.as_detail())
+        .with_detail("bind_addr", config.bind_addr);
+        if let Some(reachable_addr) = config.reachable_addr {
+            audit = audit.with_detail("reachable_addr", reachable_addr);
+        }
+        self.append_required(audit)
+    }
+
     pub fn exit(
         &mut self,
         status: RuntimeExitStatus,
@@ -314,6 +374,24 @@ impl RuntimeLifecycleHarness {
     }
 }
 
+fn frontend_for_component(component: RuntimeComponent) -> Frontend {
+    match component {
+        RuntimeComponent::HttpProxyListener => Frontend::HttpProxy,
+        RuntimeComponent::Socks5Listener => Frontend::Socks5Proxy,
+        RuntimeComponent::TunDevice => Frontend::Tun,
+        RuntimeComponent::SmoltcpStack | RuntimeComponent::DnsListener => Frontend::Core,
+    }
+}
+
+fn protocol_for_component(component: RuntimeComponent) -> Protocol {
+    match component {
+        RuntimeComponent::DnsListener => Protocol::Dns,
+        RuntimeComponent::HttpProxyListener => Protocol::Http,
+        RuntimeComponent::Socks5Listener => Protocol::Socks,
+        RuntimeComponent::TunDevice | RuntimeComponent::SmoltcpStack => Protocol::Unsupported,
+    }
+}
+
 fn runtime_error_detail(error: RuntimeLifecycleError) -> &'static str {
     match error {
         RuntimeLifecycleError::AuditBackpressure { .. } => "audit_backpressure",
@@ -372,6 +450,77 @@ mod tests {
         assert_eq!(records[1].decision, Some(Decision::Allow));
         assert_eq!(records[1].duration_ms, Some(250));
         assert_eq!(records[1].details["runtime_status"], "clean");
+    }
+
+    #[test]
+    fn runtime_lifecycle_records_listener_configuration() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start(
+                vec![
+                    RuntimeComponent::DnsListener,
+                    RuntimeComponent::HttpProxyListener,
+                ],
+                1_000,
+            )
+            .unwrap();
+        runtime
+            .record_listener_config(
+                RuntimeListenerConfig::new(RuntimeComponent::DnsListener, "127.0.0.1:5300")
+                    .with_reachable_addr("10.0.2.3:53"),
+                1_001,
+            )
+            .unwrap();
+        runtime
+            .record_listener_config(
+                RuntimeListenerConfig::new(RuntimeComponent::HttpProxyListener, "127.0.0.1:3128")
+                    .with_reachable_addr("10.0.2.2:3128"),
+                1_002,
+            )
+            .unwrap();
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[1].kind, AuditKind::ProxyListenerConfigured);
+        assert_eq!(records[1].frontend, Some(Frontend::Core));
+        assert_eq!(records[1].protocol, Some(Protocol::Dns));
+        assert_eq!(records[1].details["listener_component"], "dns_listener");
+        assert_eq!(records[1].details["bind_addr"], "127.0.0.1:5300");
+        assert_eq!(records[1].details["reachable_addr"], "10.0.2.3:53");
+        assert_eq!(records[2].kind, AuditKind::ProxyListenerConfigured);
+        assert_eq!(records[2].frontend, Some(Frontend::HttpProxy));
+        assert_eq!(records[2].protocol, Some(Protocol::Http));
+        assert_eq!(
+            records[2].details["listener_component"],
+            "http_proxy_listener"
+        );
+    }
+
+    #[test]
+    fn runtime_lifecycle_listener_config_backpressure_fails_closed() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 1);
+        runtime
+            .start(vec![RuntimeComponent::Socks5Listener], 1_000)
+            .unwrap();
+        let error = runtime
+            .record_listener_config(
+                RuntimeListenerConfig::new(RuntimeComponent::Socks5Listener, "127.0.0.1:1080"),
+                1_001,
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            RuntimeLifecycleError::AuditBackpressure {
+                attempted_kind: AuditKind::ProxyListenerConfigured,
+            }
+        );
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::AuditBackpressure);
+        assert_eq!(
+            records[0].details["attempted_kind"],
+            "proxylistenerconfigured"
+        );
     }
 
     #[test]

@@ -1847,3 +1847,33 @@ Added `RuntimeCleanupAction` and `RuntimeCleanupReport`, plus `RuntimeLifecycleH
 
 ### Remaining blind spots
 - Cleanup is still a platform-independent ledger contract. Final runtime must attach concrete cleanup actions for listener sockets, TUN fd, smoltcp state, setup control fd, and child process supervision.
+
+## 2026-06-22 — Runtime listener configuration evidence
+
+### Commands run
+- `cargo fmt` — applied formatting for listener configuration evidence.
+- `cargo test -p foxprox-core runtime::tests --all-targets --all-features` — passed, 9 runtime lifecycle/listener tests.
+- `cargo test -p foxprox-egress blocking_dns_http_runtime --all-targets --all-features` — passed, DNS/HTTP runtime listener proof.
+- `cargo test -p foxprox-egress blocking_proxy_runtime --all-targets --all-features` — passed, DNS/HTTP/SOCKS runtime listener proof.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 122 core tests, 3 device tests, 28 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_lifecycle_records_listener_configuration ... ok`
+- `runtime::tests::runtime_lifecycle_listener_config_backpressure_fails_closed ... ok`
+- `foxprox_egress::tests::blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners ... ok`
+- `foxprox_egress::tests::blocking_proxy_runtime_shares_delivered_dns_cache_with_socks_listener ... ok`
+
+### Interpretation
+Addressed the round-27 high observability note for listener readiness evidence. `RuntimeLifecycleHarness` can now emit structured `proxy_listener_configured` records through `RuntimeListenerConfig`, including listener component, protocol/frontend mapping, bind address, and reachable address. The blocking DNS/HTTP and DNS/HTTP/SOCKS runtime proofs record listener configuration after bind and before claiming runtime readiness, and their exits now include cleanup actions for the configured listeners.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Shared policy/audit is still represented by shared core subsystem types and per-component broker ledgers, not a single shared runtime audit sink. Final runtime still needs concrete async supervision, TUN/smoltcp task wiring, child exit status, and real cleanup execution.

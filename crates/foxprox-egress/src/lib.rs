@@ -11,9 +11,10 @@ use foxprox_core::{
     malformed_proxy_request, AuditKind, AuditRecord, BrokerRuntimeConfig, Decision, DenialReason,
     DnsBrokerHandler, DnsQueryMetadata, DnsUpstream, DnsUpstreamError, ExplicitProxyEgress,
     ExplicitProxyFrontend, Frontend, HttpProxyRequestMetadata, NetworkEndpoint, PolicyRequest,
-    Protocol, ProxyEgressError, ProxyParseError, RuntimeComponent, RuntimeExitStatus,
-    RuntimeLifecycleError, RuntimeLifecycleHarness, SharedDnsCache, SocksConnectMetadata,
-    TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
+    Protocol, ProxyEgressError, ProxyParseError, RuntimeCleanupAction, RuntimeCleanupReport,
+    RuntimeComponent, RuntimeExitStatus, RuntimeLifecycleError, RuntimeLifecycleHarness,
+    RuntimeListenerConfig, SharedDnsCache, SocksConnectMetadata, TcpEgress, TcpEgressError,
+    UdpEgress, UdpEgressError,
 };
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -957,6 +958,29 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
                 now_ms,
             )
             .map_err(BlockingProxyRuntimeError::Lifecycle)?;
+        let dns_addr = dns_server
+            .local_addr()
+            .map_err(BlockingProxyRuntimeError::Dns)?;
+        let http_addr = http_proxy_server
+            .local_addr()
+            .map_err(BlockingProxyRuntimeError::HttpProxy)?;
+        lifecycle
+            .record_listener_config(
+                RuntimeListenerConfig::new(RuntimeComponent::DnsListener, dns_addr.to_string())
+                    .with_reachable_addr(dns_addr.to_string()),
+                now_ms,
+            )
+            .map_err(BlockingProxyRuntimeError::Lifecycle)?;
+        lifecycle
+            .record_listener_config(
+                RuntimeListenerConfig::new(
+                    RuntimeComponent::HttpProxyListener,
+                    http_addr.to_string(),
+                )
+                .with_reachable_addr(http_addr.to_string()),
+                now_ms,
+            )
+            .map_err(BlockingProxyRuntimeError::Lifecycle)?;
         Ok(Self {
             sandbox_id,
             shared_dns_cache,
@@ -993,7 +1017,14 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
         status: RuntimeExitStatus,
         now_ms: u64,
     ) -> Result<(), RuntimeLifecycleError> {
-        self.lifecycle.exit(status, now_ms)
+        self.lifecycle.exit_with_cleanup(
+            status,
+            RuntimeCleanupReport::all_succeeded(vec![
+                RuntimeCleanupAction::DnsListener,
+                RuntimeCleanupAction::HttpProxyListener,
+            ]),
+            now_ms,
+        )
     }
 
     pub fn shared_dns_cache(&self) -> SharedDnsCache {
@@ -1079,6 +1110,42 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
                 now_ms,
             )
             .map_err(BlockingProxyRuntimeError::Lifecycle)?;
+        let dns_addr = dns_server
+            .local_addr()
+            .map_err(BlockingProxyRuntimeError::Dns)?;
+        let http_addr = http_proxy_server
+            .local_addr()
+            .map_err(BlockingProxyRuntimeError::HttpProxy)?;
+        let socks_addr = socks5_proxy_server
+            .local_addr()
+            .map_err(BlockingProxyRuntimeError::Socks5Proxy)?;
+        lifecycle
+            .record_listener_config(
+                RuntimeListenerConfig::new(RuntimeComponent::DnsListener, dns_addr.to_string())
+                    .with_reachable_addr(dns_addr.to_string()),
+                now_ms,
+            )
+            .map_err(BlockingProxyRuntimeError::Lifecycle)?;
+        lifecycle
+            .record_listener_config(
+                RuntimeListenerConfig::new(
+                    RuntimeComponent::HttpProxyListener,
+                    http_addr.to_string(),
+                )
+                .with_reachable_addr(http_addr.to_string()),
+                now_ms,
+            )
+            .map_err(BlockingProxyRuntimeError::Lifecycle)?;
+        lifecycle
+            .record_listener_config(
+                RuntimeListenerConfig::new(
+                    RuntimeComponent::Socks5Listener,
+                    socks_addr.to_string(),
+                )
+                .with_reachable_addr(socks_addr.to_string()),
+                now_ms,
+            )
+            .map_err(BlockingProxyRuntimeError::Lifecycle)?;
         Ok(Self {
             sandbox_id,
             shared_dns_cache,
@@ -1127,7 +1194,15 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
         status: RuntimeExitStatus,
         now_ms: u64,
     ) -> Result<(), RuntimeLifecycleError> {
-        self.lifecycle.exit(status, now_ms)
+        self.lifecycle.exit_with_cleanup(
+            status,
+            RuntimeCleanupReport::all_succeeded(vec![
+                RuntimeCleanupAction::DnsListener,
+                RuntimeCleanupAction::HttpProxyListener,
+                RuntimeCleanupAction::Socks5Listener,
+            ]),
+            now_ms,
+        )
     }
 
     pub fn shared_dns_cache(&self) -> SharedDnsCache {
@@ -2519,7 +2594,7 @@ mod tests {
 
         let mut runtime = BlockingDnsHttpRuntime::bind(
             "s1",
-            4,
+            8,
             shared_cache.clone(),
             "127.0.0.1:0".parse().unwrap(),
             dns_handler,
@@ -2565,11 +2640,30 @@ mod tests {
         assert!(http_response.starts_with("HTTP/1.1 200 OK"));
 
         let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
-        assert_eq!(lifecycle_records.len(), 1);
+        assert_eq!(lifecycle_records.len(), 3);
         assert_eq!(lifecycle_records[0].kind, AuditKind::NetworkSessionStart);
         assert_eq!(
             lifecycle_records[0].details["runtime_components"],
             "dns_listener,http_proxy_listener"
+        );
+        assert_eq!(
+            lifecycle_records[1].kind,
+            AuditKind::ProxyListenerConfigured
+        );
+        assert_eq!(lifecycle_records[1].protocol, Some(Protocol::Dns));
+        assert_eq!(
+            lifecycle_records[1].details["listener_component"],
+            "dns_listener"
+        );
+        assert!(lifecycle_records[1].details["bind_addr"].starts_with("127.0.0.1:"));
+        assert_eq!(
+            lifecycle_records[2].kind,
+            AuditKind::ProxyListenerConfigured
+        );
+        assert_eq!(lifecycle_records[2].protocol, Some(Protocol::Http));
+        assert_eq!(
+            lifecycle_records[2].details["listener_component"],
+            "http_proxy_listener"
         );
 
         let proxy_records: Vec<_> = runtime
@@ -2595,9 +2689,14 @@ mod tests {
 
         runtime.exit(RuntimeExitStatus::Clean, 1_100).unwrap();
         let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
-        assert_eq!(lifecycle_records.len(), 2);
-        assert_eq!(lifecycle_records[1].kind, AuditKind::NetworkSessionExit);
-        assert_eq!(lifecycle_records[1].duration_ms, Some(100));
+        assert_eq!(lifecycle_records.len(), 4);
+        assert_eq!(lifecycle_records[3].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(lifecycle_records[3].duration_ms, Some(100));
+        assert_eq!(lifecycle_records[3].details["cleanup_status"], "complete");
+        assert_eq!(
+            lifecycle_records[3].details["cleanup_actions"],
+            "dns_listener,http_proxy_listener"
+        );
     }
 
     #[test]
@@ -2648,7 +2747,7 @@ mod tests {
 
         let mut runtime = BlockingProxyRuntime::bind(
             "s1",
-            4,
+            8,
             shared_cache.clone(),
             "127.0.0.1:0".parse().unwrap(),
             dns_handler,
@@ -2704,11 +2803,30 @@ mod tests {
         );
 
         let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
-        assert_eq!(lifecycle_records.len(), 1);
+        assert_eq!(lifecycle_records.len(), 4);
         assert_eq!(lifecycle_records[0].kind, AuditKind::NetworkSessionStart);
         assert_eq!(
             lifecycle_records[0].details["runtime_components"],
             "dns_listener,http_proxy_listener,socks5_listener"
+        );
+        assert_eq!(
+            lifecycle_records[1].kind,
+            AuditKind::ProxyListenerConfigured
+        );
+        assert_eq!(lifecycle_records[1].protocol, Some(Protocol::Dns));
+        assert_eq!(
+            lifecycle_records[2].kind,
+            AuditKind::ProxyListenerConfigured
+        );
+        assert_eq!(lifecycle_records[2].protocol, Some(Protocol::Http));
+        assert_eq!(
+            lifecycle_records[3].kind,
+            AuditKind::ProxyListenerConfigured
+        );
+        assert_eq!(lifecycle_records[3].protocol, Some(Protocol::Socks));
+        assert_eq!(
+            lifecycle_records[3].details["listener_component"],
+            "socks5_listener"
         );
 
         let socks_records: Vec<_> = runtime
@@ -2738,9 +2856,14 @@ mod tests {
 
         runtime.exit(RuntimeExitStatus::Clean, 2_100).unwrap();
         let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
-        assert_eq!(lifecycle_records.len(), 2);
-        assert_eq!(lifecycle_records[1].kind, AuditKind::NetworkSessionExit);
-        assert_eq!(lifecycle_records[1].duration_ms, Some(100));
+        assert_eq!(lifecycle_records.len(), 5);
+        assert_eq!(lifecycle_records[4].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(lifecycle_records[4].duration_ms, Some(100));
+        assert_eq!(lifecycle_records[4].details["cleanup_status"], "complete");
+        assert_eq!(
+            lifecycle_records[4].details["cleanup_actions"],
+            "dns_listener,http_proxy_listener,socks5_listener"
+        );
     }
 
     #[test]
