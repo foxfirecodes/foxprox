@@ -47,3 +47,7 @@ Review caught that parsing returned addresses without matching transaction ID, q
 ## 2026-06-21 — Egress failures need their own audit event after allow
 
 Policy allow and lifecycle creation are not enough when a host egress operation fails. UDP, TCP, and explicit proxy harnesses now append `broker_error` records for send/connect failures so post-allow errors are inspectable instead of only visible as returned Rust errors.
+
+## 2026-06-21 — MSRV-sensitive helpers in validation code
+
+- `Option::is_none_or` is convenient for validation predicates but violates this workspace's Rust 1.80 MSRV; use an explicit `match` for helper predicates that must pass `cargo clippy --all-targets --all-features -- -D warnings` with `clippy::incompatible_msrv` enabled.

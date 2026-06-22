@@ -109,17 +109,38 @@ impl<D: PacketDevice> TunPacketHarness<D> {
             .with_detail("direction", "to_sandbox")
             .with_detail("ip_version", reply_parsed.ip_version.to_string())
             .with_detail("packet_len", reply.len().to_string())
-            .with_detail("write_back", "icmp_echo_reply");
+            .with_detail("write_back", "icmp_echo_reply")
+            .with_detail("write_phase", "attempt");
             if let Err(decision) = self.broker.append_audit_for(&reply_request, write_audit) {
                 return Ok(result_from_decision(Some(parsed), decision, false));
             }
-            self.device.write_packet(&reply)?;
-            return Ok(TunPacketHarnessResult {
-                parsed: Some(parsed),
-                decision: Decision::Allow,
-                reason: None,
-                wrote_packet: true,
-            });
+            match self.device.write_packet(&reply) {
+                Ok(()) => {
+                    return Ok(TunPacketHarnessResult {
+                        parsed: Some(parsed),
+                        decision: Decision::Allow,
+                        reason: None,
+                        wrote_packet: true,
+                    });
+                }
+                Err(error) => {
+                    let error_audit = AuditRecord::new_at(
+                        AuditKind::BrokerError,
+                        self.sandbox_id.clone(),
+                        now_ms as u128,
+                    )
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(Protocol::Icmp)
+                    .with_source(reply_parsed.source_endpoint())
+                    .with_destination(reply_parsed.destination_endpoint())
+                    .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+                    .with_detail("direction", "to_sandbox")
+                    .with_detail("write_back", "icmp_echo_reply")
+                    .with_detail("device_io_error", "write_failed");
+                    let _ = self.broker.append_audit_for(&reply_request, error_audit);
+                    return Err(error);
+                }
+            }
         }
 
         Ok(TunPacketHarnessResult {
@@ -344,6 +365,34 @@ mod tests {
     }
 
     #[test]
+    fn icmp_echo_write_failure_is_audited_without_success_claim() {
+        let mut icmp = vec![8, 0, 0, 0, 0x12, 0x34, 0, 1];
+        let icmp_checksum = checksum(&icmp);
+        icmp[2..4].copy_from_slice(&icmp_checksum.to_be_bytes());
+        let packet = ipv4_packet(1, 0, &icmp);
+        let config = PolicyConfig {
+            allow_ping: true,
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let device = FailingWritePacketDevice::with_inbound([packet]);
+        let mut harness = TunPacketHarness::new("s1", broker, device);
+
+        let error = harness.process_next_packet(3_250).unwrap_err();
+        assert_eq!(error, DeviceIoError::WriteFailed);
+        let records: Vec<_> = harness.broker().audit().records().collect();
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[2].kind, AuditKind::PacketObserved);
+        assert_eq!(records[2].details["direction"], "to_sandbox");
+        assert_eq!(records[2].details["write_phase"], "attempt");
+        assert_eq!(records[3].kind, AuditKind::BrokerError);
+        assert_eq!(records[3].decision, Some(Decision::FailClosed));
+        assert_eq!(records[3].details["device_io_error"], "write_failed");
+        assert!(harness.device().outbound().is_empty());
+    }
+
+    #[test]
     fn icmp_echo_request_is_denied_when_ping_is_not_allowed() {
         let mut icmp = vec![8, 0, 0, 0, 0x12, 0x34, 0, 1];
         let icmp_checksum = checksum(&icmp);
@@ -380,6 +429,35 @@ mod tests {
         let records: Vec<_> = harness.broker().audit().records().collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, AuditKind::AuditBackpressure);
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct FailingWritePacketDevice {
+        inbound: VecDeque<Vec<u8>>,
+        outbound: Vec<Vec<u8>>,
+    }
+
+    impl FailingWritePacketDevice {
+        fn with_inbound(packets: impl IntoIterator<Item = Vec<u8>>) -> Self {
+            Self {
+                inbound: packets.into_iter().collect(),
+                outbound: Vec::new(),
+            }
+        }
+
+        fn outbound(&self) -> &[Vec<u8>] {
+            &self.outbound
+        }
+    }
+
+    impl PacketDevice for FailingWritePacketDevice {
+        fn read_packet(&mut self) -> Result<Option<Vec<u8>>, DeviceIoError> {
+            Ok(self.inbound.pop_front())
+        }
+
+        fn write_packet(&mut self, _packet: &[u8]) -> Result<(), DeviceIoError> {
+            Err(DeviceIoError::WriteFailed)
+        }
     }
 
     fn ipv6_packet(next_header: u8, payload: &[u8]) -> Vec<u8> {

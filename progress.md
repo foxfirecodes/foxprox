@@ -857,3 +857,37 @@ The `foxprox` CLI can now emit an inspectable bwrap-compatible setup plan from r
 
 ### Remaining blind spots
 - The CLI still does not execute bwrap or configure TUN; it exposes the setup contract for inspection before privileged runtime work.
+
+## 2026-06-21 — Round-6 high findings cycle
+
+### Behavior under work
+Fix reviewer high notes before further alpha runtime work: DNS upstream validation must reject same-name IN-class address records whose RR type does not match the validated query type, and TUN write-back failures must be auditable without implying a successful write.
+
+### Expected evidence
+- AAAA-query responses that contain A answer RRs fail closed, return REFUSED, record `dns_upstream_error=malformed_response`, and leave attribution cache empty.
+- ICMP TUN write-back audit is explicitly a write attempt; device write failures append structured `broker_error` evidence before returning `DeviceIoError::WriteFailed`.
+
+### Commands run
+- `cargo fmt` — applied formatting for DNS RR-type and TUN write-failure audit fixes.
+- `cargo test --all-targets --all-features` — passed, 6 CLI tests, 101 core tests, 3 device tests, and 3 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — initially failed on `Option::is_none_or` because the workspace MSRV is Rust 1.80; replaced with an explicit `match`.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed after the MSRV-safe helper change.
+
+### Evidence excerpts
+- `dns_handler::tests::wrong_answer_type_fails_closed_without_cache_update ... ok`
+- `dns_handler::tests::wrong_answer_class_fails_closed_without_cache_update ... ok`
+- `tun::tests::icmp_echo_write_failure_is_audited_without_success_claim ... ok`
+
+### Interpretation
+Round-6 high findings are fixed. Validated DNS responses now reject address RR types that do not match the original query type before any hostname attribution cache commit. TUN write-back evidence now explicitly records a `write_phase=attempt`, and device write failure appends structured `broker_error` evidence with `device_io_error=write_failed` before surfacing `DeviceIoError::WriteFailed`.
+
+### Changed files
+- `crates/foxprox-core/src/dns_handler.rs`
+- `crates/foxprox-core/src/tun.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- DNS still validates only the alpha-relevant address attribution subset; full CNAME/SVCB/HTTPS chain handling remains future resolver work.
+- TUN write success is represented by the absence of a device error after an audited write attempt; adding a post-write success record would require a separate non-gating telemetry path to avoid unobserved writes on audit backpressure.

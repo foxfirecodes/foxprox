@@ -277,10 +277,18 @@ fn parse_dns_response_addresses_inner(
                 .min(u64::from(ttl_seconds).saturating_mul(1_000)),
         );
         match (answer_type, rdlen) {
-            (1, 4) => addresses.push(IpAddr::V4(Ipv4Addr::new(
-                rdata[0], rdata[1], rdata[2], rdata[3],
-            ))),
+            (1, 4) => {
+                if !answer_type_matches_expected_query(DnsQueryType::A, expected_query) {
+                    return Err(DnsResponseValidationError::Mismatch);
+                }
+                addresses.push(IpAddr::V4(Ipv4Addr::new(
+                    rdata[0], rdata[1], rdata[2], rdata[3],
+                )));
+            }
             (28, 16) => {
+                if !answer_type_matches_expected_query(DnsQueryType::Aaaa, expected_query) {
+                    return Err(DnsResponseValidationError::Mismatch);
+                }
                 let mut octets = [0u8; 16];
                 octets.copy_from_slice(rdata);
                 addresses.push(IpAddr::V6(Ipv6Addr::from(octets)));
@@ -293,6 +301,16 @@ fn parse_dns_response_addresses_inner(
         addresses,
         ttl_ms: min_ttl_ms,
     })
+}
+
+fn answer_type_matches_expected_query(
+    answer_query_type: DnsQueryType,
+    expected_query: Option<&DnsQueryMetadata>,
+) -> bool {
+    match expected_query {
+        Some(query) => query.query_type == answer_query_type,
+        None => true,
+    }
 }
 
 fn read_dns_name(packet: &[u8], cursor: &mut usize) -> Result<String, DnsParseError> {
@@ -551,6 +569,39 @@ mod tests {
         let result = handler.handle_query("s1", &query, 1_000);
         assert_eq!(result.decision.decision, Decision::FailClosed);
         assert_eq!(result.response.unwrap()[3] & 0x0f, 5);
+        assert!(handler
+            .cache()
+            .attribution_for("93.184.216.34".parse().unwrap(), 2_000)
+            .is_none());
+        let records: Vec<_> = handler.broker().audit().records().collect();
+        assert_eq!(
+            records[1].details["dns_upstream_error"],
+            "malformed_response"
+        );
+    }
+
+    #[test]
+    fn wrong_answer_type_fails_closed_without_cache_update() {
+        let query = dns_query(0x8888, "Example.COM", 28);
+        let response = dns_a_response(&query, [93, 184, 216, 34], 30);
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-example-dns")
+                .protocol(Protocol::Dns)
+                .hostname("example.com"),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut handler = DnsBrokerHandler::new(
+            broker,
+            MockUpstream { response, calls: 0 },
+            "10.0.2.3".parse().unwrap(),
+        );
+
+        let result = handler.handle_query("s1", &query, 1_000);
+        assert_eq!(result.decision.decision, Decision::FailClosed);
+        assert_eq!(result.decision.reason, Some(DenialReason::DnsDenied));
+        assert_eq!(result.response.unwrap()[3] & 0x0f, 5);
+        assert!(result.observed_addresses.is_empty());
         assert!(handler
             .cache()
             .attribution_for("93.184.216.34".parse().unwrap(), 2_000)
