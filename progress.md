@@ -2175,3 +2175,30 @@ Added structured task-join evidence to `network_session_exit` via `RuntimeTaskJo
 
 ### Remaining blind spots
 - Task-join evidence is still modeled by a synchronous lifecycle report. The final runtime still needs concrete async task supervision, real join/cancel ordering for listener/TUN/smoltcp loops, and one shared audit sink with propagated backpressure.
+
+## 2026-06-22 — Wire task-join report into blocking proxy runtime exit
+
+### Commands run
+- `cargo fmt` — applied formatting for blocking runtime task-report wiring.
+- `cargo test -p foxprox-core runtime::tests --all-targets --all-features` — passed, 20 runtime tests.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_exit_records_task_join_failure --all-targets --all-features` — passed.
+- `cargo test -p foxprox-egress blocking_child_supervisor --all-targets --all-features` — passed, 6 blocking child supervisor tests.
+- `cargo clippy --all-targets --all-features -- -D warnings` — initially caught test-only imports, then passed after moving them into the test module.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 133 core tests, 3 device tests, 37 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+
+### Evidence excerpts
+- `tests::blocking_proxy_runtime_exit_records_task_join_failure ... ok`
+- `runtime::tests::runtime_lifecycle_task_join_failure_is_fail_closed ... ok`
+- `tests::blocking_child_supervisor_session_backpressure_returns_partial_lifecycle ... ok`
+
+### Interpretation
+`BlockingDnsHttpRuntime` and `BlockingProxyRuntime` now expose `exit_with_task_report(...)`, which records task join/cancel/failure status on the lifecycle exit ledger while preserving listener cleanup/retirement behavior. A proxy runtime regression proves a join-failed SOCKS listener task produces fail-closed `network_session_exit` with structured `task_join_status`, `runtime_tasks`, and `failed_runtime_task_count` fields, then retires listeners.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The task report is still caller-provided; final async runtime must derive it from real task handles, child wait futures, TUN/smoltcp loops, and listener accept loops.

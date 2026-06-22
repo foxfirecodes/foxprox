@@ -13,8 +13,8 @@ use foxprox_core::{
     ExplicitProxyFrontend, Frontend, HttpProxyRequestMetadata, NetworkEndpoint, PolicyRequest,
     Protocol, ProxyEgressError, ProxyParseError, RuntimeChildExit, RuntimeCleanupAction,
     RuntimeCleanupReport, RuntimeComponent, RuntimeExitStatus, RuntimeLifecycleError,
-    RuntimeLifecycleHarness, RuntimeListenerConfig, SharedDnsCache, SocksConnectMetadata,
-    TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
+    RuntimeLifecycleHarness, RuntimeListenerConfig, RuntimeTaskJoinReport, SharedDnsCache,
+    SocksConnectMetadata, TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
 };
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -1053,6 +1053,15 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
         status: RuntimeExitStatus,
         now_ms: u64,
     ) -> Result<(), RuntimeLifecycleError> {
+        self.exit_with_task_report(status, None, now_ms)
+    }
+
+    pub fn exit_with_task_report(
+        &mut self,
+        status: RuntimeExitStatus,
+        task_report: Option<RuntimeTaskJoinReport>,
+        now_ms: u64,
+    ) -> Result<(), RuntimeLifecycleError> {
         let mut cleanup_actions = Vec::new();
         if self.dns_server.is_some() {
             cleanup_actions.push(RuntimeCleanupAction::DnsListener);
@@ -1060,9 +1069,11 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
         if self.http_proxy_server.is_some() {
             cleanup_actions.push(RuntimeCleanupAction::HttpProxyListener);
         }
-        let result = self.lifecycle.exit_with_cleanup(
+        let result = self.lifecycle.exit_with_cleanup_child_and_tasks(
             status,
             RuntimeCleanupReport::all_succeeded(cleanup_actions),
+            None,
+            task_report,
             now_ms,
         );
         self.archive_new_lifecycle_records();
@@ -1344,6 +1355,15 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
         status: RuntimeExitStatus,
         now_ms: u64,
     ) -> Result<(), RuntimeLifecycleError> {
+        self.exit_with_task_report(status, None, now_ms)
+    }
+
+    pub fn exit_with_task_report(
+        &mut self,
+        status: RuntimeExitStatus,
+        task_report: Option<RuntimeTaskJoinReport>,
+        now_ms: u64,
+    ) -> Result<(), RuntimeLifecycleError> {
         let mut cleanup_actions = Vec::new();
         if self.dns_server.is_some() {
             cleanup_actions.push(RuntimeCleanupAction::DnsListener);
@@ -1354,9 +1374,11 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
         if self.socks5_proxy_server.is_some() {
             cleanup_actions.push(RuntimeCleanupAction::Socks5Listener);
         }
-        let result = self.lifecycle.exit_with_cleanup(
+        let result = self.lifecycle.exit_with_cleanup_child_and_tasks(
             status,
             RuntimeCleanupReport::all_succeeded(cleanup_actions),
+            None,
+            task_report,
             now_ms,
         );
         self.archive_new_lifecycle_records();
@@ -1665,7 +1687,8 @@ mod tests {
     use foxprox_core::{
         BrokerCore, Cidr, Decision, DnsBrokerHandler, DnsCache, ExplicitProxyFrontend, FlowKey,
         InMemoryExplicitProxyEgress, PolicyConfig, PolicyEngine, PolicyRule, Protocol,
-        SharedDnsCache, TcpForwarder, UdpForwarder, UdpTimeoutConfig,
+        RuntimeTaskOutcome, RuntimeTaskStatus, SharedDnsCache, TcpForwarder, UdpForwarder,
+        UdpTimeoutConfig,
     };
     use std::collections::VecDeque;
     use std::io::{ErrorKind, Read, Result as IoResult, Write};
@@ -3509,6 +3532,79 @@ mod tests {
         assert!(aggregate
             .iter()
             .any(|record| record.kind == AuditKind::SocksConnectDecision));
+    }
+
+    #[test]
+    fn blocking_proxy_runtime_exit_records_task_join_failure() {
+        let query = dns_query(0x7a7a, "Join.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+
+        let mut runtime = BlockingProxyRuntime::bind(
+            "s1",
+            8,
+            SharedDnsCache::default(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            3_500,
+        )
+        .unwrap();
+
+        runtime
+            .exit_with_task_report(
+                RuntimeExitStatus::Clean,
+                Some(RuntimeTaskJoinReport::new(vec![
+                    RuntimeTaskOutcome::new(
+                        RuntimeComponent::DnsListener,
+                        "dns_accept_loop",
+                        RuntimeTaskStatus::Completed,
+                    ),
+                    RuntimeTaskOutcome::new(
+                        RuntimeComponent::Socks5Listener,
+                        "socks_accept_loop",
+                        RuntimeTaskStatus::JoinFailed,
+                    ),
+                ])),
+                3_600,
+            )
+            .unwrap();
+
+        let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
+        let exit = lifecycle_records.last().unwrap();
+        assert_eq!(exit.kind, AuditKind::NetworkSessionExit);
+        assert_eq!(exit.decision, Some(Decision::FailClosed));
+        assert_eq!(exit.reason, Some(DenialReason::RuntimeState));
+        assert_eq!(exit.details["task_join_status"], "failed");
+        assert_eq!(
+            exit.details["runtime_tasks"],
+            "dns_listener:dns_accept_loop:completed,socks5_listener:socks_accept_loop:join_failed"
+        );
+        assert_eq!(exit.details["failed_runtime_task_count"], "1");
+        assert_eq!(
+            runtime.handle_socks5_proxy_once(3_601).unwrap_err(),
+            ProxyEgressError::SendFailed
+        );
     }
 
     #[test]

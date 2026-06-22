@@ -193,3 +193,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 
 - Runtime exit evidence should include task join/cancellation outcomes; failed or unjoined runtime tasks are `runtime_state` failures, while graceful cancellation can be recorded as a successful join outcome.
 - Helpers that own lifecycle ledgers must return partial ledger evidence on audit backpressure. Returning only the error can hide the structured `broker_error`/`audit_backpressure` records needed to debug fail-closed shutdown.
+
+## 2026-06-22 — Blocking runtimes should expose task join exit paths
+
+- Runtime task-join contracts are more useful when blocking runtime harnesses can pass them through their concrete exit methods. This keeps listener cleanup/retirement evidence and task join outcomes on the same `network_session_exit` record.
