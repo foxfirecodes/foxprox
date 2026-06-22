@@ -2379,3 +2379,31 @@ Also extended the smoltcp bridge proof committed in `a00f13c`: the smoltcp TUN b
 
 ### Remaining blind spots
 - Runtime task expectations are still harness-declared. The final async runtime must derive expected task names from actual spawned handles and route real join/cancel results through lifecycle exit and global audit fan-in.
+
+## 2026-06-22 — Complete smoltcp loop terminal-branch proof
+
+### Commands run
+- `cargo fmt` — applied formatting for additional smoltcp loop tests.
+- `cargo test -p foxprox-stack smoltcp_tun_bridge_loop --all-targets --all-features` — passed, 3 smoltcp loop tests.
+- `cargo test -p foxprox-stack --all-targets --all-features` — passed, 12 stack tests.
+- `cargo clippy -p foxprox-stack --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 142 core tests, 3 device tests, 38 egress tests, and 12 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::smoltcp_tun_bridge_loop_reports_idle_completion ... ok`
+- `tests::smoltcp_tun_bridge_loop_reports_budget_cancellation ... ok`
+- `tests::smoltcp_tun_bridge_loop_reports_write_failure ... ok`
+- `tests::smoltcp_tun_bridge_read_failure_is_audited_and_reported ... ok`
+
+### Interpretation
+Completed smoltcp bridge-loop terminal-branch coverage: idle completion reports `completed`, budget exhaustion reports `cancelled`, and write/read device failures report failed task outcomes with structured device-error audit evidence. `FailingWritePacketDevice` now supports scripted inbound packets so the smoltcp bridge loop can prove output-write failure from `process_packet_loop(...)`, not only direct TCP response bridging.
+
+### Changed files
+- `crates/foxprox-stack/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The smoltcp and TUN loop proofs remain synchronous. Final runtime must drive them from real async readiness/timers and derive task outcomes from actual task handles.

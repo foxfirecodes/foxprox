@@ -896,6 +896,62 @@ mod tests {
     }
 
     #[test]
+    fn smoltcp_tun_bridge_loop_reports_write_failure() {
+        let packet = ipv4_icmp_echo_request();
+        let config = PolicyConfig {
+            allow_ping: true,
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        let mut device = FailingWritePacketDevice::default();
+        device.push_inbound(packet);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+
+        let report = bridge.process_packet_loop(2_775, 8);
+
+        assert_eq!(report.processed_packets, 0);
+        assert_eq!(report.error, Some(DeviceIoError::WriteFailed));
+        assert_eq!(
+            report.task_outcome.component,
+            RuntimeComponent::SmoltcpStack
+        );
+        assert_eq!(report.task_outcome.task_name, "smoltcp_tun_bridge_loop");
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Failed);
+        let records: Vec<_> = bridge.broker().audit().records().collect();
+        assert_eq!(records[3].kind, AuditKind::BrokerError);
+        assert_eq!(records[3].details["stack"], "smoltcp");
+        assert_eq!(records[3].details["direction"], "to_sandbox");
+        assert_eq!(records[3].details["device_io_error"], "write_failed");
+    }
+
+    #[test]
+    fn smoltcp_tun_bridge_loop_reports_idle_completion() {
+        let packet = ipv4_icmp_echo_request();
+        let device = InMemoryPacketDevice::with_inbound([packet]);
+        let config = PolicyConfig {
+            allow_ping: true,
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 16);
+        let stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+
+        let report = bridge.process_packet_loop(2_790, 8);
+
+        assert_eq!(report.processed_packets, 1);
+        assert_eq!(report.error, None);
+        assert_eq!(
+            report.task_outcome.component,
+            RuntimeComponent::SmoltcpStack
+        );
+        assert_eq!(report.task_outcome.task_name, "smoltcp_tun_bridge_loop");
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Completed);
+    }
+
+    #[test]
     fn smoltcp_tun_bridge_loop_reports_budget_cancellation() {
         let packet = ipv4_icmp_echo_request();
         let device = InMemoryPacketDevice::with_inbound([packet.clone(), packet]);
@@ -1075,7 +1131,7 @@ mod tests {
             ..PolicyConfig::default()
         };
         let broker = BrokerCore::new(PolicyEngine::new(config), 8);
-        let device = FailingWritePacketDevice;
+        let device = FailingWritePacketDevice::default();
         let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
         let mut egress = MockTcpEgress::new(b"host pong".to_vec());
 
@@ -1130,11 +1186,19 @@ mod tests {
     }
 
     #[derive(Clone, Debug, Default)]
-    struct FailingWritePacketDevice;
+    struct FailingWritePacketDevice {
+        inbound: VecDeque<Vec<u8>>,
+    }
+
+    impl FailingWritePacketDevice {
+        fn push_inbound(&mut self, packet: Vec<u8>) {
+            self.inbound.push_back(packet);
+        }
+    }
 
     impl PacketDevice for FailingWritePacketDevice {
         fn read_packet(&mut self) -> Result<Option<Vec<u8>>, DeviceIoError> {
-            Ok(None)
+            Ok(self.inbound.pop_front())
         }
 
         fn write_packet(&mut self, _packet: &[u8]) -> Result<(), DeviceIoError> {

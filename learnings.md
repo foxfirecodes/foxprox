@@ -223,3 +223,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 
 - Once lifecycle start records expected runtime task names, exit without a task report must fail closed with `task_join_status=not_recorded`; otherwise clean shutdown can overclaim success.
 - Named task expectations must not replace component coverage. If any started component has no expected task, missing task evidence should still include that component.
+
+## 2026-06-22 — smoltcp loop outcomes need all terminal branches tested
+
+- Like the TUN loop, the smoltcp bridge loop should directly prove idle completion, bounded cancellation, read failure, and write failure. Otherwise progress can overclaim that loop outcomes map to lifecycle task evidence.
