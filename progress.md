@@ -521,3 +521,5 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * optional fields serialize as explicit `null`, which makes missing attribution or endpoints auditable.
 * Audit evidence: unit tests assert deterministic JSON fragments for denial context, DNS query metadata, fail-closed reason, endpoint objects, and unsupported protocol numbers.
 * Residual risk: no async audit drain or file/stdout sink exists yet; lifecycle/flow-specific event constructors and response audit serialization coverage remain future work.
+
+* Commit hash: e9613d8 serialize audit events as structured json.
