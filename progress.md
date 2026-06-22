@@ -474,5 +474,5 @@
   - `cargo check --workspace` — passed.
   - `cargo test --workspace` — passed, 63 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
-- Commit hash after commit: pending.
+- Commit hash after commit: d4219dc.
 - Remaining boundary risks: configurable parser limits, streaming read limits in production listener IO, SOCKS negotiation size/timeout handling, and fuzzing proxy parser inputs remain.
