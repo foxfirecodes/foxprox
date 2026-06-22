@@ -7,12 +7,12 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    classify_udp, parse_dns_query, parse_ip_packet, synthesize_icmpv4_echo_reply,
-    synthesize_udpv4_response, AuditSink, Decision, DecisionAction, DecisionReason, DnsCache,
-    DnsParseError, Endpoint, FlowKey, FlowTable, FrontendKind, HostnameAttribution,
-    NormalizedEvent, PacketError, ParsedIpPacket, Protocol, QuicStatus, SandboxId, SniStatus,
-    StaticDnsResolver, Tcpv4Segment, UdpFlow, Udpv4Packet, UnsupportedIpv4Protocol,
-    VerificationKernel,
+    classify_udp, parse_dns_query, parse_http_request, parse_ip_packet,
+    synthesize_icmpv4_echo_reply, synthesize_udpv4_response, AuditSink, Decision, DecisionAction,
+    DecisionReason, DnsCache, DnsParseError, Endpoint, FlowKey, FlowTable, FrontendKind,
+    HostnameAttribution, InspectError, NormalizedEvent, PacketError, ParsedIpPacket, Protocol,
+    QuicStatus, SandboxId, SniStatus, StaticDnsResolver, Tcpv4Segment, UdpFlow, Udpv4Packet,
+    UnsupportedIpv4Protocol, VerificationKernel,
 };
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
@@ -943,6 +943,26 @@ pub fn tcpv4_segment_to_event(
     }
 }
 
+pub fn tcpv4_http_request_to_event(
+    sandbox_id: SandboxId,
+    segment: &Tcpv4Segment<'_>,
+) -> Result<NormalizedEvent, InspectError> {
+    let metadata = parse_http_request(segment.payload)?;
+    Ok(NormalizedEvent::HttpRequest {
+        sandbox_id,
+        frontend: FrontendKind::Tun,
+        source: Some(Endpoint::new(
+            IpAddr::V4(segment.source),
+            segment.source_port,
+        )),
+        destination: Some(Endpoint::new(
+            IpAddr::V4(segment.destination),
+            segment.destination_port,
+        )),
+        metadata,
+    })
+}
+
 pub fn udpv4_packet_to_event(sandbox_id: SandboxId, packet: &Udpv4Packet<'_>) -> NormalizedEvent {
     udpv4_packet_to_event_with_broker_dns(sandbox_id, packet, &[])
 }
@@ -1739,6 +1759,45 @@ mod tests {
             PolicyEngine::new(PolicyConfig::default()).evaluate(&event.to_policy_input());
         assert_eq!(decision.action, DecisionAction::FailClosed);
         assert_eq!(decision.reason, DecisionReason::UnsupportedProtocol);
+    }
+
+    #[test]
+    fn tcp_payload_http_request_becomes_normalized_http_event() {
+        let request = b"GET /allowed?q=1 HTTP/1.1\r\nHost: Example.com\r\n\r\n";
+        let packet = build_tcp_ipv4_packet(53000, 80, 0x18, request);
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+
+        let event = tcpv4_http_request_to_event(SandboxId::new("http-tun").unwrap(), &tcp).unwrap();
+
+        let NormalizedEvent::HttpRequest {
+            source,
+            destination,
+            metadata,
+            ..
+        } = event
+        else {
+            panic!("expected HTTP request event");
+        };
+        assert_eq!(source.unwrap().port, 53000);
+        assert_eq!(destination.unwrap().port, 80);
+        assert_eq!(metadata.host.as_str(), "example.com");
+        assert_eq!(metadata.method, "GET");
+        assert_eq!(metadata.path_query, "/allowed?q=1");
+    }
+
+    #[test]
+    fn incomplete_tcp_http_payload_needs_more_data_instead_of_guessing() {
+        let packet = build_tcp_ipv4_packet(53000, 80, 0x18, b"GET / HTTP/1.1\r\n");
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+
+        assert_eq!(
+            tcpv4_http_request_to_event(SandboxId::new("http-tun").unwrap(), &tcp),
+            Err(InspectError::NeedMoreData)
+        );
     }
 
     #[test]

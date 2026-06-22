@@ -529,3 +529,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: no smoltcp implementation, byte bridging, backpressure, TCP close/reset packet synthesis, or real stream lifecycle audit exists yet.
 - Exact next step: commit TCP stack adapter boundary, then add minimal plaintext HTTP inspection wiring from TCP payload metadata into policy events before stream forwarding is implemented.
+
+## 2026-06-22T00:38:00Z
+- Current objective: continue from TCP adapter boundary with the first transparent plaintext HTTP metadata wiring.
+- Git status summary: clean worktree after commit `fe8dd58`.
+- Intended slice: convert validated TCP payload bytes on HTTP-like traffic into normalized `HttpRequest` policy events using the existing parser, without adding TCP stream reassembly.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`, and possibly `learnings.md` if one-packet HTTP parsing reveals a constraint.
+- Remaining risks: this slice only handles a complete request in one segment; stream buffering/reassembly remains future TCP adapter work.
+- Exact next step: add a runtime conversion function and tests for parsed HTTP metadata and incomplete request fail-closed/no-event behavior.
+
+## 2026-06-22T00:42:45Z
+- Current objective: wire complete TCP plaintext HTTP payloads into normalized HTTP policy events.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed due import/call formatting; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 52 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 39 runtime tests, and 7 setup tests passed. New tests prove a complete HTTP request in a validated TCP segment becomes a normalized `HttpRequest` with host/method/path metadata, while incomplete HTTP data returns `NeedMoreData` instead of guessing.
+- Commit hash when committed: pending.
+- Remaining risks: no TCP stream reassembly exists, so split HTTP requests cannot be classified yet; this helper must remain metadata-only until the stack adapter can buffer stream bytes safely.
+- Exact next step: commit TCP HTTP metadata wiring, then add TLS ClientHello SNI wiring from TCP payloads into TCP connect policy metadata.

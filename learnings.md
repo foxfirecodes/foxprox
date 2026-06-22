@@ -23,3 +23,6 @@
 
 ## 2026-06-22T00:27:10Z
 - Once protocol 6 became a parsed TCP path, unsupported-protocol tests had to switch to a truly unsupported IPv4 protocol number; otherwise they no longer proved fail-closed unsupported handling.
+
+## 2026-06-22T00:42:45Z
+- Transparent HTTP inspection is only safe for complete buffered request headers; one TCP segment with incomplete headers must return `NeedMoreData` and wait for future stream reassembly rather than making a policy guess.
