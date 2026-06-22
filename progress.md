@@ -1089,6 +1089,54 @@
 - Current git status summary: CLI/progress modified; review artifacts pending rereview/removal.
 - Next exact action: read ICMP audit/cleanup rereview, fix blockers if any, remove `reviews/`, and commit.
 
+## 2026-06-22T00:16:35Z — proxy connection limit enforcement pending review
+
+- Commit created: `7644ede` (`audit icmp proof and harden socket cleanup`).
+- Current objective: commit explicit proxy runtime connection-limit enforcement.
+- Rationale: alpha gap assessment identified that resource-limit config existed but blocking proof proxy listeners still spawned unbounded handler threads. The smallest safe slice is bounded simultaneous accepted HTTP/SOCKS proxy connections with non-zero CLI-configurable limits.
+- Changes implemented:
+  - Added `max_connections` to `HttpProxyProofConfig` and `Socks5ProxyProofConfig`, defaulting to 1024.
+  - Added `ConnectionLimiter` with atomic active count and RAII `ConnectionPermit` release on handler exit.
+  - HTTP/SOCKS listener loops validate non-zero max connections before `TcpListener::bind` and reject excess accepted streams with shutdown instead of spawning a handler thread.
+  - CLI proxy proof commands document and parse `--max-connections` with non-zero validation.
+  - Tests cover limiter capacity/release, zero-capacity rejection, bounded defaults, and proof pre-bind rejection of zero max connections.
+- Subagents/reviews requested: `proxy-connection-limit-final` is running.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-proxy -p foxprox-cli` passed: 26 proxy tests, 7 CLI tests.
+  - `cargo test --workspace` passed: 51 core tests, 9 device tests, 18 net tests, 26 proxy tests, 7 CLI tests, setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-proxy` and `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-proxy/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: proxy/CLI/progress modified; review artifacts pending.
+- Next exact action: read proxy connection-limit review, fix blockers if any, then commit.
+
+## 2026-06-22T00:18:00Z — proxy connection limit review passed
+
+- Current objective: commit explicit proxy runtime connection-limit enforcement.
+- Review result: `proxy-connection-limit-final` found no blockers.
+- Confirmed behavior:
+  - HTTP/SOCKS proxy proof listeners enforce max concurrent connection permits.
+  - Zero max connection limit is rejected before listener bind.
+  - Permits release on handler exit via RAII drop.
+  - Excess accepted connections fail closed via socket shutdown without spawning handler threads.
+  - CLI documents/parses `--max-connections` with non-zero validation.
+- Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed; reviewer also ran focused proxy+CLI tests successfully.
+- Files changed: `crates/foxprox-proxy/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: proxy/CLI/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit proxy connection-limit enforcement, then continue with UDP/DNS worker resource limits or unsupported-path audit consistency.
+
+## 2026-06-22T00:18:30Z — proxy connection limit committed; next objective selected
+
+- Commit created: `f32f105` (`limit proxy proof connections`).
+- Current objective: enforce UDP/DNS worker resource limits.
+- Rationale: alpha gap assessment still identifies unbounded UDP/DNS worker spawning. The proxy listener now enforces connection caps; the next smallest coherent runtime resource-limit slice is bounding DNS/UDP worker threads so bursts cannot spawn unbounded host egress workers.
+- Expected commit boundary: `UdpDnsProofConfig` worker limit, CLI `--max-workers`, limiter helper/tests, and fail-closed behavior before upstream/host UDP egress; no policy model changes.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: implement bounded UDP/DNS worker limiter in `crates/foxprox-net/src/udp.rs` and CLI wiring.
+
 ## 2026-06-22T00:12:18Z — ICMP audit/cleanup rereview passed
 
 - Current objective: commit cleanup-safe setup socket binding plus ICMP proof audit coverage.

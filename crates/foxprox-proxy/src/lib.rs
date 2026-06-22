@@ -17,6 +17,7 @@ use std::io::{self, Read, Write};
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
 };
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -49,6 +50,8 @@ pub struct HttpProxyProofConfig {
     pub connect_timeout: Duration,
     /// Maximum queued audit events before policy paths fail closed.
     pub audit_queue_capacity: usize,
+    /// Maximum simultaneous accepted proxy connections.
+    pub max_connections: usize,
 }
 
 impl HttpProxyProofConfig {
@@ -62,6 +65,7 @@ impl HttpProxyProofConfig {
             request_head_timeout: Duration::from_secs(5),
             connect_timeout: Duration::from_secs(5),
             audit_queue_capacity: 8192,
+            max_connections: 1024,
         }
     }
 }
@@ -81,6 +85,8 @@ pub struct Socks5ProxyProofConfig {
     pub connect_timeout: Duration,
     /// Maximum queued audit events before policy paths fail closed.
     pub audit_queue_capacity: usize,
+    /// Maximum simultaneous accepted proxy connections.
+    pub max_connections: usize,
 }
 
 impl Socks5ProxyProofConfig {
@@ -93,6 +99,7 @@ impl Socks5ProxyProofConfig {
             request_timeout: Duration::from_secs(5),
             connect_timeout: Duration::from_secs(5),
             audit_queue_capacity: 8192,
+            max_connections: 1024,
         }
     }
 }
@@ -103,20 +110,29 @@ impl Socks5ProxyProofConfig {
 /// alpha proof, not the final async/resource-limited proxy runtime.
 pub fn run_http_proxy_proof(config: HttpProxyProofConfig) -> io::Result<()> {
     let audit = shared_audit_buffer(config.audit_queue_capacity)?;
+    let limiter = ConnectionLimiter::new(config.max_connections)?;
     let listener = TcpListener::bind(config.listen_addr)?;
     eprintln!("foxprox-proxy: listening on {}", listener.local_addr()?);
     for accepted in listener.incoming() {
         let config = config.clone();
         let audit = Arc::clone(&audit);
         match accepted {
-            Ok(stream) => {
-                thread::spawn(move || {
-                    if let Err(error) = handle_http_proxy_stream_with_audit(stream, &config, &audit)
-                    {
-                        eprintln!("foxprox-proxy: connection failed: {error}");
-                    }
-                });
-            }
+            Ok(stream) => match limiter.try_acquire() {
+                Some(permit) => {
+                    thread::spawn(move || {
+                        let _permit = permit;
+                        if let Err(error) =
+                            handle_http_proxy_stream_with_audit(stream, &config, &audit)
+                        {
+                            eprintln!("foxprox-proxy: connection failed: {error}");
+                        }
+                    });
+                }
+                None => {
+                    eprintln!("foxprox-proxy: rejecting connection: connection limit reached");
+                    let _ = stream.shutdown(Shutdown::Both);
+                }
+            },
             Err(error) => eprintln!("foxprox-proxy: accept failed: {error}"),
         }
     }
@@ -126,6 +142,7 @@ pub fn run_http_proxy_proof(config: HttpProxyProofConfig) -> io::Result<()> {
 /// Runs the blocking SOCKS5 proof listener forever.
 pub fn run_socks5_proxy_proof(config: Socks5ProxyProofConfig) -> io::Result<()> {
     let audit = shared_audit_buffer(config.audit_queue_capacity)?;
+    let limiter = ConnectionLimiter::new(config.max_connections)?;
     let listener = TcpListener::bind(config.listen_addr)?;
     eprintln!(
         "foxprox-proxy: socks5 listening on {}",
@@ -135,15 +152,24 @@ pub fn run_socks5_proxy_proof(config: Socks5ProxyProofConfig) -> io::Result<()> 
         let config = config.clone();
         let audit = Arc::clone(&audit);
         match accepted {
-            Ok(stream) => {
-                thread::spawn(move || {
-                    if let Err(error) =
-                        handle_socks5_proxy_stream_with_audit(stream, &config, &audit)
-                    {
-                        eprintln!("foxprox-proxy: socks5 connection failed: {error}");
-                    }
-                });
-            }
+            Ok(stream) => match limiter.try_acquire() {
+                Some(permit) => {
+                    thread::spawn(move || {
+                        let _permit = permit;
+                        if let Err(error) =
+                            handle_socks5_proxy_stream_with_audit(stream, &config, &audit)
+                        {
+                            eprintln!("foxprox-proxy: socks5 connection failed: {error}");
+                        }
+                    });
+                }
+                None => {
+                    eprintln!(
+                        "foxprox-proxy: rejecting socks5 connection: connection limit reached"
+                    );
+                    let _ = stream.shutdown(Shutdown::Both);
+                }
+            },
             Err(error) => eprintln!("foxprox-proxy: socks5 accept failed: {error}"),
         }
     }
@@ -151,6 +177,64 @@ pub fn run_socks5_proxy_proof(config: Socks5ProxyProofConfig) -> io::Result<()> 
 }
 
 type SharedAuditBuffer = Arc<Mutex<AuditBuffer>>;
+
+#[derive(Clone)]
+struct ConnectionLimiter {
+    max_connections: usize,
+    active: Arc<AtomicUsize>,
+}
+
+impl ConnectionLimiter {
+    fn new(max_connections: usize) -> io::Result<Self> {
+        if max_connections == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "max connections must be non-zero",
+            ));
+        }
+        Ok(Self {
+            max_connections,
+            active: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    fn try_acquire(&self) -> Option<ConnectionPermit> {
+        let mut current = self.active.load(Ordering::Acquire);
+        loop {
+            if current >= self.max_connections {
+                return None;
+            }
+            match self.active.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(ConnectionPermit {
+                        active: Arc::clone(&self.active),
+                    })
+                }
+                Err(next) => current = next,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn active_count(&self) -> usize {
+        self.active.load(Ordering::Acquire)
+    }
+}
+
+struct ConnectionPermit {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for ConnectionPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 fn shared_audit_buffer(capacity: usize) -> io::Result<SharedAuditBuffer> {
     if capacity == 0 {
@@ -1088,6 +1172,34 @@ mod tests {
     }
 
     #[test]
+    fn proxy_connection_limiter_enforces_capacity_and_releases_on_drop() {
+        let limiter = ConnectionLimiter::new(1).unwrap();
+        let permit = limiter.try_acquire().unwrap();
+        assert_eq!(limiter.active_count(), 1);
+        assert!(limiter.try_acquire().is_none());
+        drop(permit);
+        assert_eq!(limiter.active_count(), 0);
+        assert!(limiter.try_acquire().is_some());
+    }
+
+    #[test]
+    fn proxy_connection_limiter_rejects_zero_capacity() {
+        let error = match ConnectionLimiter::new(0) {
+            Ok(_) => panic!("zero-capacity limiter unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn proxy_configs_default_to_bounded_connections() {
+        let http = HttpProxyProofConfig::new(sandbox_id(), "127.0.0.1:0".parse().unwrap());
+        let socks = Socks5ProxyProofConfig::new(sandbox_id(), "127.0.0.1:0".parse().unwrap());
+        assert!(http.max_connections > 0);
+        assert!(socks.max_connections > 0);
+    }
+
+    #[test]
     fn proxy_proofs_reject_zero_audit_capacity_before_binding() {
         let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
         let occupied_addr = occupied.local_addr().unwrap();
@@ -1095,6 +1207,25 @@ mod tests {
         http_config.audit_queue_capacity = 0;
         let mut socks_config = Socks5ProxyProofConfig::new(sandbox_id(), occupied_addr);
         socks_config.audit_queue_capacity = 0;
+
+        assert_eq!(
+            run_http_proxy_proof(http_config).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            run_socks5_proxy_proof(socks_config).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn proxy_proofs_reject_zero_connection_limit_before_binding() {
+        let occupied = TcpListener::bind("127.0.0.1:0").unwrap();
+        let occupied_addr = occupied.local_addr().unwrap();
+        let mut http_config = HttpProxyProofConfig::new(sandbox_id(), occupied_addr);
+        http_config.max_connections = 0;
+        let mut socks_config = Socks5ProxyProofConfig::new(sandbox_id(), occupied_addr);
+        socks_config.max_connections = 0;
 
         assert_eq!(
             run_http_proxy_proof(http_config).unwrap_err().kind(),

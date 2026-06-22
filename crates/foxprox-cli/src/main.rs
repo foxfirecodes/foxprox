@@ -47,7 +47,7 @@ fn run() -> io::Result<()> {
 }
 
 fn usage() -> &'static str {
-    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1] [--audit-queue-capacity N]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--audit-queue-capacity N]\n       foxprox proof-udp-dns --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N]\n       foxprox proof-http-proxy [--listen 10.255.0.1:8080] [--allow-port PORT]... [--request-head-limit BYTES] [--request-head-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N]\n       foxprox proof-socks5-proxy [--listen 10.255.0.1:1080] [--allow-port PORT]... [--request-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N]"
+    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1] [--audit-queue-capacity N]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--audit-queue-capacity N]\n       foxprox proof-udp-dns --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N]\n       foxprox proof-http-proxy [--listen 10.255.0.1:8080] [--allow-port PORT]... [--request-head-limit BYTES] [--request-head-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]\n       foxprox proof-socks5-proxy [--listen 10.255.0.1:1080] [--allow-port PORT]... [--request-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]"
 }
 
 fn proof_icmp<I>(mut args: I) -> io::Result<()>
@@ -342,6 +342,10 @@ where
                 config.audit_queue_capacity =
                     parse_nonzero_usize(&required_value(&mut args, "--audit-queue-capacity")?)?
             }
+            "--max-connections" => {
+                config.max_connections =
+                    parse_nonzero_usize(&required_value(&mut args, "--max-connections")?)?
+            }
             "--help" | "-h" => return Err(io::Error::new(io::ErrorKind::InvalidInput, usage())),
             other => {
                 return Err(io::Error::new(
@@ -393,6 +397,10 @@ where
             "--audit-queue-capacity" => {
                 config.audit_queue_capacity =
                     parse_nonzero_usize(&required_value(&mut args, "--audit-queue-capacity")?)?
+            }
+            "--max-connections" => {
+                config.max_connections =
+                    parse_nonzero_usize(&required_value(&mut args, "--max-connections")?)?
             }
             "--help" | "-h" => return Err(io::Error::new(io::ErrorKind::InvalidInput, usage())),
             other => {
