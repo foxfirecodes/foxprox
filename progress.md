@@ -729,3 +729,37 @@ Round-4 findings were fixed. Hidden-SNI explicit exceptions now require an expli
 
 ### Remaining blind spots
 - Full QUIC/TLS metadata parsing is still not implemented; long-header classification is a candidate signal only.
+
+## 2026-06-21 — Host socket egress proof observability cycle
+
+### Behavior under work
+Add a concrete blocking host-socket egress crate that implements the core TCP and UDP egress traits for loopback-testable host networking while preserving the core parse→policy→audit→egress boundary.
+
+### Expected evidence
+- TCP host egress connects to a local listener, sends sandbox bytes, reads the host response, and can be driven through `TcpForwarder` audit/byte-count behavior.
+- UDP host egress sends a datagram to a local UDP socket and can be driven through `UdpForwarder` audit/egress behavior.
+- Host egress connection/send failures map to structured egress errors rather than panics.
+
+### Commands run
+- `cargo fmt` — applied formatting for `foxprox-egress`.
+- `cargo test --all-targets --all-features` — passed, 4 CLI tests, 98 core tests, and 3 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_tcp_egress_connects_and_exchanges_bytes_through_forwarder ... ok`
+- `foxprox_egress::tests::blocking_udp_egress_sends_datagram_through_forwarder ... ok`
+- `foxprox_egress::tests::missing_endpoint_maps_to_egress_errors ... ok`
+
+### Interpretation
+The workspace now has concrete host-socket TCP and UDP egress implementations outside `foxprox-core`, preserving the core boundary while proving loopback host networking through the existing policy/audit forwarding harnesses. Missing endpoints map to structured egress errors for observable broker error paths.
+
+### Changed files
+- `Cargo.toml`
+- `Cargo.lock`
+- `crates/foxprox-egress/Cargo.toml`
+- `crates/foxprox-egress/src/lib.rs`
+- `progress.md`
+
+### Remaining blind spots
+- TCP egress is a blocking proof that writes one sandbox byte slice and reads until EOF/limit; it is not the final async smoltcp stream bridge.
