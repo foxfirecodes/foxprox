@@ -32,7 +32,10 @@ pub use dns::{
     DnsResponseObserveOutcome, DnsTransactionError, ObserveOutcome, PendingDnsObserveOutcome,
     PendingDnsObserveStatus, PendingDnsQuery, PendingDnsQueryTable,
 };
-pub use dns_handler::{handle_broker_dns_query, BrokerDnsQueryContext, BrokerDnsQueryOutcome};
+pub use dns_handler::{
+    handle_broker_dns_query, handle_broker_dns_query_with_pending, BrokerDnsQueryContext,
+    BrokerDnsQueryOutcome,
+};
 pub use flow::{
     UdpFlowClass, UdpFlowEntry, UdpFlowKey, UdpFlowObserveOutcome, UdpFlowObserveStatus,
     UdpFlowTable, UdpFlowTimeouts,

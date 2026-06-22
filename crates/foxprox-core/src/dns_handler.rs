@@ -1,6 +1,7 @@
 use crate::audit::{AuditDecision, AuditEvent, AuditEventKind};
 use crate::dns::{
     build_dns_empty_response, parse_dns_query, DnsBuildError, DnsQueryMetadata, DnsResponseCode,
+    PendingDnsObserveOutcome, PendingDnsQueryTable,
 };
 use crate::policy::{Decision, DenialReason, PolicyEngine, PolicyRequest};
 use crate::types::{Endpoint, Frontend, HostnameConfidence, HostnameSource, Protocol, SandboxId};
@@ -22,6 +23,7 @@ pub enum BrokerDnsQueryOutcome {
     Forward {
         query: DnsQueryMetadata,
         audit: AuditEvent,
+        pending: Option<PendingDnsObserveOutcome>,
     },
     Respond {
         query: DnsQueryMetadata,
@@ -38,6 +40,31 @@ pub fn handle_broker_dns_query(
     wire: &[u8],
     config: &PolicyConfig,
     context: BrokerDnsQueryContext,
+) -> BrokerDnsQueryOutcome {
+    handle_broker_dns_query_inner(wire, config, context, None)
+}
+
+pub fn handle_broker_dns_query_with_pending(
+    wire: &[u8],
+    config: &PolicyConfig,
+    context: BrokerDnsQueryContext,
+    pending_queries: &mut PendingDnsQueryTable,
+    upstream: Endpoint,
+    now_millis: u64,
+) -> BrokerDnsQueryOutcome {
+    handle_broker_dns_query_inner(
+        wire,
+        config,
+        context,
+        Some((pending_queries, upstream, now_millis)),
+    )
+}
+
+fn handle_broker_dns_query_inner(
+    wire: &[u8],
+    config: &PolicyConfig,
+    context: BrokerDnsQueryContext,
+    pending: Option<(&mut PendingDnsQueryTable, Endpoint, u64)>,
 ) -> BrokerDnsQueryOutcome {
     let query = match parse_dns_query(wire, context.max_query_bytes) {
         Ok(query) => query,
@@ -67,7 +94,16 @@ pub fn handle_broker_dns_query(
     );
 
     if decision.is_allow() {
-        return BrokerDnsQueryOutcome::Forward { query, audit };
+        let pending = pending.and_then(|(pending_queries, upstream, now_millis)| {
+            context
+                .source
+                .map(|client| pending_queries.observe_query(client, upstream, &query, now_millis))
+        });
+        return BrokerDnsQueryOutcome::Forward {
+            query,
+            audit,
+            pending,
+        };
     }
 
     match build_dns_empty_response(
@@ -183,7 +219,12 @@ mod tests {
         ));
 
         let outcome = handle_broker_dns_query(&query("example.com", 1), &config, context());
-        let BrokerDnsQueryOutcome::Forward { query, audit } = outcome else {
+        let BrokerDnsQueryOutcome::Forward {
+            query,
+            audit,
+            pending,
+        } = outcome
+        else {
             panic!("expected forward outcome");
         };
 
@@ -194,6 +235,56 @@ mod tests {
         assert_eq!(audit.rule_id.as_deref(), Some("allow-example-dns"));
         assert_eq!(audit.dns_query_type, Some(DnsQueryType::A));
         assert_eq!(audit.requested_port, Some(53));
+        assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn allowed_broker_dns_queries_can_store_bounded_pending_transactions() {
+        let config = broker_config_with_rule(PolicyRule::allow_domain(
+            "allow-example-dns",
+            HostMatcher::exact("example.com").unwrap(),
+            Some(53),
+        ));
+        let mut pending_queries = PendingDnsQueryTable::new(4, 5_000);
+        let upstream = endpoint([8, 8, 8, 8], 53);
+
+        let outcome = handle_broker_dns_query_with_pending(
+            &query("example.com", 1),
+            &config,
+            context(),
+            &mut pending_queries,
+            upstream,
+            1_000,
+        );
+        let BrokerDnsQueryOutcome::Forward {
+            query,
+            audit: _,
+            pending,
+        } = outcome
+        else {
+            panic!("expected forward outcome");
+        };
+
+        let pending = pending.expect("allowed query should be observed");
+        assert_eq!(pending.status, crate::dns::PendingDnsObserveStatus::Stored);
+        assert_eq!(pending_queries.len(), 1);
+
+        let response = crate::dns::parse_dns_address_response(
+            &crate::dns::build_dns_address_response(
+                &query,
+                [IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+                60,
+                512,
+                8,
+            )
+            .unwrap(),
+            512,
+            8,
+        )
+        .unwrap();
+        assert!(pending_queries
+            .validate_response(endpoint([10, 0, 0, 2], 40000), upstream, &response, 1_100)
+            .is_ok());
     }
 
     #[test]
@@ -229,6 +320,30 @@ mod tests {
         );
         assert_eq!(audit.reason, Some(DenialReason::RuleDeny));
         assert_eq!(audit.rule_id.as_deref(), Some("deny-example-dns"));
+    }
+
+    #[test]
+    fn denied_queries_do_not_store_pending_transactions() {
+        let config = broker_config_with_rule(PolicyRule {
+            id: "deny-example-dns".into(),
+            action: RuleAction::Deny(DenyBehavior::Drop),
+            protocol: crate::config::ProtocolMatcher::Exact(Protocol::Dns),
+            destination: crate::config::DestinationMatcher::Any,
+            request: crate::config::RequestMatcher::default(),
+        });
+        let mut pending_queries = PendingDnsQueryTable::new(4, 5_000);
+
+        let outcome = handle_broker_dns_query_with_pending(
+            &query("example.com", 1),
+            &config,
+            context(),
+            &mut pending_queries,
+            endpoint([8, 8, 8, 8], 53),
+            1_000,
+        );
+
+        assert!(matches!(outcome, BrokerDnsQueryOutcome::Respond { .. }));
+        assert!(pending_queries.is_empty());
     }
 
     #[test]

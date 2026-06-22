@@ -760,3 +760,23 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * policy-denied validated DNS queries receive refused responses when response bounds permit; otherwise they are dropped with audit evidence.
 * Audit evidence: handler tests assert allow, deny, and fail-closed audit decisions with DNS query type, endpoints, requested port, denial reason, and rule provenance.
 * Residual risk: this is still a pure core helper; no UDP socket loop, upstream DNS forwarding, pending transaction observation on forwarded queries, response-cache insertion, or audit-buffer push/drain integration exists yet.
+
+## 2026-06-21 - Broker DNS forwarded-query pending transaction wiring
+
+* Invariant under work: allowed broker DNS queries that will be forwarded upstream must enter bounded pending-transaction state exactly once, while denied or malformed queries must not create cache-poisonable pending entries.
+* Threat or failure mode addressed: future DNS forwarding code could forward queries without transaction correlation state, allowing later responses to be dropped or tempting callers to cache uncorrelated responses; conversely denied/malformed queries could leave stale pending state.
+* Planned verification: extend DNS query handling with a pending-observation helper, test allowed query storage with bounded pending outcome, denied/malformed no-store behavior, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Broker DNS forwarded-query pending transaction wiring results
+
+* Tests added/updated:
+  * allowed broker DNS query handling can store a bounded pending transaction for the client/upstream path and later validate a matching parsed response.
+  * forward outcomes now expose the pending observation result when the pending helper is used, while the pure decision helper leaves it absent.
+  * denied broker DNS queries do not store pending transactions.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 111 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * only policy-allowed, strictly parsed DNS queries create pending transaction state for future response correlation.
+  * denied and malformed DNS queries keep pending state empty, preventing stale or cache-poisonable transaction entries.
+* Audit evidence: forward/deny handler tests continue to assert DNS audit metadata while pending tests verify transaction state is bounded and response-correlation compatible.
+* Residual risk: upstream UDP send/receive code, retransmission/timeout policy, response audit emission, and automatic correlated cache insertion in a runtime loop remain future work.

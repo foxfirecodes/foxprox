@@ -137,3 +137,7 @@ Even validated DNS query metadata should be denied by direct-DNS bypass checks u
 ## 2026-06-21 - DNS handler should separate malformed drops from validated denials
 
 Malformed DNS bytes may not contain a trustworthy transaction ID or question, so the safe core behavior is fail-closed audit plus drop. Once a query is strictly parsed, policy denials can synthesize bounded empty error responses such as REFUSED while preserving audit metadata.
+
+## 2026-06-21 - Pending DNS state should be created only after allow decisions
+
+Strict parsing alone is not enough to justify pending DNS transaction state. The core handler should observe pending transactions only for policy-allowed queries that are actually going to be forwarded upstream; denied or malformed queries must not leave state that a later response could match.
