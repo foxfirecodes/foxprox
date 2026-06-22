@@ -932,5 +932,5 @@
   - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated in the adapter crate.
   - `cargo tree -p foxprox-net` — net exposes only normalized stack event contracts.
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
-- Commit hash after commit: pending.
+- Commit hash after commit: 33a5dee.
 - Remaining boundary risks: egress stream writes, backpressure, server-to-sandbox data, close lifecycle from real sockets, and continuous polling remain.
