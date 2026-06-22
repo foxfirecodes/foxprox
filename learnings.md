@@ -173,3 +173,7 @@ Startup/setup/shutdown audit records should preserve sandbox and frontend contex
 ## 2026-06-21 - TCP flow expiration boundaries should be explicit
 
 TCP flow expiry uses `expires_at_millis <= now` semantics, matching UDP flow cleanup. Tests and runtime cleanup should account for the exact boundary so flow state is not retained past its configured idle timeout.
+
+## 2026-06-21 - TCP lifecycle audit should consume flow state
+
+TCP close/expiration audit records should be built from the `TcpFlowEntry` returned by close or expiration collection. That links bounded cleanup with complete endpoint, counter, and duration evidence instead of requiring stale state retention.

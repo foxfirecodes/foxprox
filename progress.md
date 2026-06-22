@@ -952,3 +952,22 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * byte counters saturate rather than overflowing under hostile traffic volume.
 * Audit evidence: no TCP audit builder was added in this cycle; the returned `TcpFlowEntry` data is structured for future TCP close/error audit constructors.
 * Residual risk: TCP flow close audit builders, smoltcp/host-socket forwarding, policy-decision caching, and automatic runtime expiration/cleanup coupling remain future work.
+
+## 2026-06-21 - TCP flow close audit builder
+
+* Invariant under work: TCP flow close/expiration audit records must preserve endpoints, byte counts, and duration from consumed bounded flow state so lifecycle cleanup remains reviewable.
+* Threat or failure mode addressed: TCP flow state can now be bounded and returned on close, but without a core audit builder runtimes could omit byte/duration evidence or log TCP lifecycle differently from UDP lifecycle.
+* Planned verification: add TCP flow audit constructor tests and JSON serialization coverage for close event source/destination/requested-port/byte-count/duration, then run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - TCP flow close audit builder results
+
+* Tests added/updated:
+  * TCP flow close audit builder preserves source/destination endpoints, requested port, protocol, total saturating byte count, and flow duration from returned `TcpFlowEntry` state.
+  * JSON serialization includes `tcp_flow_closed`, `byte_count`, and `flow_duration_millis` evidence for TCP lifecycle review.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 136 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * bounded TCP flow cleanup can now produce structured close audit records without retaining stale flow state.
+  * byte-count audit uses saturating arithmetic so hostile traffic cannot overflow lifecycle counters.
+* Audit evidence: unit tests assert TCP close audit fields and deterministic JSON fragments.
+* Residual risk: actual TCP forwarder runtime still needs to call the builder on close/error/expiration; no smoltcp or host-socket bridge exists yet.

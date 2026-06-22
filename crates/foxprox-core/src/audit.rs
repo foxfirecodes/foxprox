@@ -4,7 +4,7 @@ use std::net::IpAddr;
 
 use crate::attribution::Hostname;
 use crate::dns::{DnsAddressResponseMetadata, DnsQueryMetadata, DnsQueryType, DnsResponseCode};
-use crate::flow::{UdpFlowClass, UdpFlowEntry};
+use crate::flow::{TcpFlowEntry, UdpFlowClass, UdpFlowEntry};
 use crate::packet::PacketParseError;
 use crate::policy::{Decision, DenialReason, DenyBehavior, PolicyRequest};
 use crate::types::{Endpoint, Frontend, HostnameConfidence, HostnameSource, Protocol, SandboxId};
@@ -284,6 +284,42 @@ impl AuditEvent {
             http_path_query: None,
             byte_count: None,
             flow_duration_millis: None,
+        }
+    }
+
+    pub fn from_tcp_flow_entry(
+        timestamp_millis: u64,
+        sandbox_id: SandboxId,
+        kind: AuditEventKind,
+        entry: &TcpFlowEntry,
+    ) -> Self {
+        Self {
+            timestamp_millis,
+            sandbox_id,
+            kind,
+            frontend: Some(Frontend::Tun),
+            protocol: Some(Protocol::Tcp),
+            source: Some(entry.key.source),
+            destination: Some(entry.key.destination),
+            requested_port: entry.key.destination.port,
+            hostname: None,
+            hostname_source: HostnameSource::None,
+            hostname_confidence: HostnameConfidence::None,
+            dns_query_type: None,
+            dns_response_code: None,
+            dns_answer_count: None,
+            dns_min_ttl_seconds: None,
+            decision: None,
+            rule_id: None,
+            reason: None,
+            http_method: None,
+            http_path_query: None,
+            byte_count: Some(
+                entry
+                    .bytes_from_sandbox
+                    .saturating_add(entry.bytes_from_host),
+            ),
+            flow_duration_millis: Some(timestamp_millis.saturating_sub(entry.created_at_millis)),
         }
     }
 
@@ -1262,6 +1298,41 @@ mod tests {
         assert!(line.contains("\"decision\":\"fail_closed\""));
         assert!(line.contains("\"protocol\":\"unsupported:99\""));
         assert!(line.contains("\"reason\":\"unsupported_protocol\""));
+    }
+
+    #[test]
+    fn tcp_flow_audit_preserves_lifecycle_counters_and_duration() {
+        let key = crate::flow::TcpFlowKey::new(
+            Endpoint::tcp(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 40000),
+            Endpoint::tcp(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)), 443),
+        );
+        let entry = crate::flow::TcpFlowEntry {
+            key,
+            created_at_millis: 1_000,
+            last_seen_millis: 1_500,
+            expires_at_millis: 31_500,
+            bytes_from_sandbox: u64::MAX,
+            bytes_from_host: 10,
+        };
+
+        let event = AuditEvent::from_tcp_flow_entry(
+            2_000,
+            SandboxId::new("sandbox-tcp"),
+            AuditEventKind::TcpFlowClosed,
+            &entry,
+        );
+
+        assert_eq!(event.kind, AuditEventKind::TcpFlowClosed);
+        assert_eq!(event.protocol, Some(Protocol::Tcp));
+        assert_eq!(event.source, Some(key.source));
+        assert_eq!(event.destination, Some(key.destination));
+        assert_eq!(event.requested_port, Some(443));
+        assert_eq!(event.byte_count, Some(u64::MAX));
+        assert_eq!(event.flow_duration_millis, Some(1_000));
+        let line = event.to_json_line();
+        assert!(line.contains("\"kind\":\"tcp_flow_closed\""));
+        assert!(line.contains("\"byte_count\":18446744073709551615"));
+        assert!(line.contains("\"flow_duration_millis\":1000"));
     }
 
     #[test]
