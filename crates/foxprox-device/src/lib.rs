@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
+use std::fs::File;
 use std::io::{Read, Write};
 
 /// Default alpha MTU used by the TUN setup plan.
@@ -106,6 +107,58 @@ impl<Io: Read + Write> PacketDevice for BlockingPacketDevice<Io> {
     }
 }
 
+/// TUN-facing device wrapper for an already-opened TUN endpoint.
+///
+/// This type deliberately accepts a file-like object instead of creating a TUN
+/// device or taking ownership from a raw file descriptor. Setup helpers and
+/// integration backends can decide how the TUN fd is created/handed off; runtime
+/// code only receives an opaque packet device.
+#[derive(Debug)]
+pub struct PreopenedTunDevice<Io> {
+    inner: BlockingPacketDevice<Io>,
+}
+
+impl<Io> PreopenedTunDevice<Io> {
+    pub fn from_io(io: Io, max_packet_bytes: usize) -> Result<Self, DeviceError> {
+        Ok(Self {
+            inner: BlockingPacketDevice::new(io, max_packet_bytes)?,
+        })
+    }
+
+    pub fn alpha_default(io: Io) -> Self {
+        Self {
+            inner: BlockingPacketDevice::alpha_default(io),
+        }
+    }
+
+    pub fn max_packet_bytes(&self) -> usize {
+        self.inner.max_packet_bytes()
+    }
+
+    pub fn into_inner(self) -> Io {
+        self.inner.into_inner()
+    }
+}
+
+impl PreopenedTunDevice<File> {
+    /// Wrap an already-opened TUN file handle. This is intentionally not a raw-fd
+    /// constructor so fd ownership and unsafe conversion stay outside this crate
+    /// until the setup/fd-handoff contract is implemented.
+    pub fn from_file(file: File, max_packet_bytes: usize) -> Result<Self, DeviceError> {
+        Self::from_io(file, max_packet_bytes)
+    }
+}
+
+impl<Io: Read + Write> PacketDevice for PreopenedTunDevice<Io> {
+    fn read_packet(&mut self) -> Result<DevicePacket, DeviceError> {
+        self.inner.read_packet()
+    }
+
+    fn write_packet(&mut self, packet: &DevicePacket) -> Result<(), DeviceError> {
+        self.inner.write_packet(packet)
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum DeviceError {
     EmptyPacket,
@@ -158,6 +211,28 @@ mod tests {
         let cursor = device.into_inner();
 
         assert_eq!(cursor.into_inner(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn preopened_tun_wrapper_preserves_opaque_packet_contract() {
+        let cursor = Cursor::new(vec![0x45, 0, 0, 20]);
+        let mut device = PreopenedTunDevice::from_io(cursor, DEFAULT_ALPHA_MTU).unwrap();
+
+        let packet = device.read_packet().unwrap();
+        device.write_packet(&packet).unwrap();
+        let cursor = device.into_inner();
+
+        assert_eq!(packet.bytes(), &[0x45, 0, 0, 20]);
+        assert_eq!(cursor.into_inner(), vec![0x45, 0, 0, 20, 0x45, 0, 0, 20]);
+    }
+
+    #[test]
+    fn preopened_tun_rejects_invalid_packet_limit() {
+        let cursor = Cursor::new(Vec::<u8>::new());
+        assert_eq!(
+            PreopenedTunDevice::from_io(cursor, 0).unwrap_err(),
+            DeviceError::InvalidMaxPacketBytes
+        );
     }
 
     #[test]

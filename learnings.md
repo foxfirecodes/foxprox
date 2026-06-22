@@ -168,3 +168,8 @@
 
 - A small runtime crate can own orchestration across device, packet, policy, audit, and egress contracts without pushing device or raw packet types down into policy/audit.
 - Writing outbound packets back through `DevicePacket` preserves opaque device IO even when `foxprox-net` returns synthesized packet bytes.
+
+## 2026-06-22 — Pre-opened TUN device wrapper
+
+- The first Linux-adjacent TUN runtime step can safely accept an already-opened file-like endpoint instead of raw file descriptors; this preserves unsafe/fd ownership decisions for a later setup contract.
+- A semantic `PreopenedTunDevice` wrapper is useful even over the existing blocking IO implementation because it gives runtime/integration code a narrow TUN-facing type without exposing policy-visible device metadata.

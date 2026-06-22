@@ -718,3 +718,24 @@
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
 - Commit hash after commit: 61ef71c.
 - Remaining boundary risks: continuous async event loop, real TUN fd readiness, smoltcp TCP stream integration, and Linux setup remain.
+
+## 2026-06-22 — Boundary objective: pre-opened TUN device wrapper
+
+- Boundary under work: Linux-runtime-adjacent pre-opened TUN wrapper that accepts an already-opened file-like object without owning TUN creation, ioctl, namespace, or raw-fd handoff decisions.
+- Allowed dependency direction: `foxprox-device` owns the TUN-facing IO wrapper and exports only opaque `DevicePacket`/`PacketDevice`; policy, audit, core, and net contracts must not import Linux fd or TUN implementation types.
+- Dependency-risk assessment: accepting a pre-opened TUN endpoint is the safest unblocked path because it proves the runtime/device boundary while avoiding privileged setup and raw fd ownership. The wrapper must not introduce unsafe raw-fd constructors or policy-visible device metadata.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo tree -p foxprox-device`/policy/audit checks.
+- Observed results: added `PreopenedTunDevice<Io>` in `foxprox-device`, including `from_io`, `from_file`, `PacketDevice` delegation, and tests proving opaque read/write behavior plus invalid limit rejection. The wrapper accepts already-opened file-like TUN endpoints without unsafe raw-fd constructors or setup/ioctl behavior. All verification passed.
+- Changed files:
+  - `crates/foxprox-device/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 80 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-device` — device has no project crate dependencies.
+  - `cargo tree -p foxprox-policy` — policy depends only on `foxprox-core`.
+  - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: raw fd ownership conventions, Linux TUN ioctl creation/configuration, bwrap fd handoff, async readiness, and namespace setup remain.
