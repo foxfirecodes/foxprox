@@ -1104,5 +1104,5 @@
   - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated in adapter crate.
   - `cargo tree -p foxprox-runtime` — runtime consumes normalized close events.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 47cc2db.
 - Remaining boundary risks: FIN half-close nuance, timeout-driven closes, and richer close reasons remain.
