@@ -20,8 +20,9 @@ use foxprox_core::frontend::{
 use foxprox_core::origin::parse_socks5_connect_request;
 use foxprox_core::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule, RuleAction};
 use foxprox_core::runtime::{
-    ExplicitProxyRuntime, TransparentDnsRuntime, TransparentTcpBridgeRuntime,
-    TransparentTcpRuntime, TransparentUdpRuntime,
+    route_transparent_ipv4_packet, ExplicitProxyRuntime, TransparentDnsRuntime,
+    TransparentPacketRoute, TransparentTcpBridgeRuntime, TransparentTcpRuntime,
+    TransparentUdpRuntime,
 };
 use foxprox_core::scenario::{run_scenario, ScenarioName};
 use foxprox_core::smoltcp_gate::feed_tcp_syn_to_smoltcp_listener;
@@ -1179,32 +1180,35 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
-                let parsed = match foxprox_core::packet::parse_ipv4(packet) {
-                    Ok(parsed) => parsed,
-                    Err(_) => continue,
-                };
-                if parsed.protocol_number != 17 {
-                    continue;
-                }
-                let udp = match foxprox_core::packet::parse_udp(parsed.payload) {
-                    Ok(udp) => udp,
-                    Err(_) => continue,
-                };
-                if udp.destination_port == 53 {
-                    if let Some(reply) =
-                        dns_runtime.handle_ipv4_packet("dns-attribution-smoke", packet)?
-                    {
-                        fd.write_packet(&reply)?;
-                        runtime.dns_cache = dns_runtime.dns_cache.clone();
-                        runtime.now_tick = 2;
-                        dns_answered = true;
+                match route_transparent_ipv4_packet(
+                    packet,
+                    "10.0.2.1:53".parse().expect("static broker DNS addr valid"),
+                ) {
+                    Ok(TransparentPacketRoute::BrokerDns) => {
+                        if let Some(reply) =
+                            dns_runtime.handle_ipv4_packet("dns-attribution-smoke", packet)?
+                        {
+                            fd.write_packet(&reply)?;
+                            runtime.dns_cache = dns_runtime.dns_cache.clone();
+                            runtime.now_tick = 2;
+                            dns_answered = true;
+                        }
                     }
-                } else if let Some(reply) =
-                    runtime.handle_ipv4_packet("dns-attribution-smoke", packet)?
-                {
-                    fd.write_packet(&reply)?;
-                    forwarded = true;
-                    break;
+                    Ok(TransparentPacketRoute::Udp) => {
+                        if let Some(reply) =
+                            runtime.handle_ipv4_packet("dns-attribution-smoke", packet)?
+                        {
+                            fd.write_packet(&reply)?;
+                            forwarded = true;
+                            break;
+                        }
+                    }
+                    Ok(
+                        TransparentPacketRoute::Tcp
+                        | TransparentPacketRoute::Icmp
+                        | TransparentPacketRoute::Unsupported(_),
+                    ) => {}
+                    Err(_) => {}
                 }
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}

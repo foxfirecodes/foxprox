@@ -44,6 +44,39 @@ pub fn flush_audit_to_buffer(
     Ok(flushed)
 }
 
+/// Packet-level route used by long-lived transparent broker loops to dispatch a TUN IPv4 packet
+/// into the appropriate reusable runtime boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransparentPacketRoute {
+    BrokerDns,
+    Udp,
+    Tcp,
+    Icmp,
+    Unsupported(Protocol),
+}
+
+pub fn route_transparent_ipv4_packet(
+    packet: &[u8],
+    broker_dns: SocketAddr,
+) -> Result<TransparentPacketRoute, String> {
+    let parsed = parse_ipv4(packet).map_err(|err| format!("malformed IPv4 packet: {err}"))?;
+    match parsed.protocol_number {
+        17 => {
+            let udp =
+                parse_udp(parsed.payload).map_err(|err| format!("malformed UDP packet: {err}"))?;
+            let destination = SocketAddr::new(IpAddr::V4(parsed.destination), udp.destination_port);
+            if destination == broker_dns {
+                Ok(TransparentPacketRoute::BrokerDns)
+            } else {
+                Ok(TransparentPacketRoute::Udp)
+            }
+        }
+        6 => Ok(TransparentPacketRoute::Tcp),
+        1 => Ok(TransparentPacketRoute::Icmp),
+        _ => Ok(TransparentPacketRoute::Unsupported(parsed.protocol())),
+    }
+}
+
 /// Minimal transparent TUN UDP runtime boundary used by the harness and future broker runtime.
 ///
 /// This adapter owns the policy-before-egress sequence for one IPv4/UDP packet and returns an
@@ -1187,6 +1220,32 @@ mod tests {
     use crate::policy::{Cidr, PolicyConfig, PolicyRule, RuleAction};
 
     use super::*;
+
+    #[test]
+    fn routes_transparent_packets_to_runtime_boundaries() {
+        let broker_dns = "10.0.2.1:53".parse().unwrap();
+        let dns = udp_probe_packet(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), 53, b"dns");
+        let udp = udp_probe_packet(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)), 5354, b"probe");
+        let tcp = tcp_syn_packet(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 22)), 80);
+        let icmp = icmp_echo_packet();
+
+        assert_eq!(
+            route_transparent_ipv4_packet(&dns, broker_dns).unwrap(),
+            TransparentPacketRoute::BrokerDns
+        );
+        assert_eq!(
+            route_transparent_ipv4_packet(&udp, broker_dns).unwrap(),
+            TransparentPacketRoute::Udp
+        );
+        assert_eq!(
+            route_transparent_ipv4_packet(&tcp, broker_dns).unwrap(),
+            TransparentPacketRoute::Tcp
+        );
+        assert_eq!(
+            route_transparent_ipv4_packet(&icmp, broker_dns).unwrap(),
+            TransparentPacketRoute::Icmp
+        );
+    }
 
     #[test]
     fn allowed_udp_packet_reaches_egress_and_returns_tun_reply() {

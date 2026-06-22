@@ -1002,3 +1002,16 @@
 - Recent structural commit hash: RAII fd wrapper `b048603`.
 - Next verification gap: commit packet device trait; remaining work is consolidating bwrap/handoff orchestration or implementing long-lived broker lifecycle loops.
 - Commit hash after commit: pending.
+
+## 2026-06-22T09:40:00Z — Transparent packet dispatcher helper
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run dns-attribution-smoke`
+- Environment assumptions: deterministic dispatcher tests are local-only; DNS attribution smoke uses bwrap/TUN fd handoff and loopback UDP fixture.
+- Expected result: add a reusable core packet-routing helper that dispatches TUN IPv4 packets toward broker DNS, transparent UDP, transparent TCP, ICMP, or unsupported handling, then use it in the DNS-attribution environment smoke instead of ad-hoc CLI IPv4/UDP port parsing.
+- Observed result: pass. `foxprox-core` increased to 63 tests; workspace tests passed (`foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). DNS attribution smoke retained `"dns_answered":"true"` and `"forwarded":"true"`.
+- Relevant output excerpt: `runtime::tests::routes_transparent_packets_to_runtime_boundaries ... ok`; DNS attribution `"attributed_hostname":"lab.example"`.
+- Changed files: `crates/foxprox-core/src/runtime.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: long-lived broker loops now have a tested core dispatch primitive for selecting reusable runtime boundaries from TUN packets, reducing another CLI-only parsing decision.
+- Recent structural commit hash: packet device interface `9af9166`.
+- Next verification gap: commit dispatcher helper; remaining work is using the dispatcher in more transparent smokes or consolidating process/handoff orchestration.
+- Commit hash after commit: pending.
