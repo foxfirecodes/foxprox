@@ -611,3 +611,27 @@
 - Interpretation: transparent plaintext HTTP Host/path inspection is now proven in an environment-dependent bwrap/TUN TCP bridge, not only deterministic unit/scenario fixtures.
 - Next verification gap: robustness/resource-limit modeling such as audit backpressure, or UDP/QUIC policy smoke with DNS attribution and configurable timeout evidence.
 - Commit hash after commit: pending.
+
+## 2026-06-22T02:03:00Z — TCP bridge inspection commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs progress.md && git commit -m "Inspect HTTP in TCP bridge smoke"`
+- Environment assumptions: transparent HTTP TCP bridge smoke and workspace tests above were verified before commit.
+- Expected result: commit captures environment-backed transparent HTTP inspection in the smoltcp bridge and prior denied-proxy ledger note.
+- Observed result: commit `4b4cbe2` created with 3 files changed.
+- Relevant output excerpt: `[harness-lab 4b4cbe2] Inspect HTTP in TCP bridge smoke`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: environment transparent HTTP inspection checkpoint is preserved.
+- Next verification gap: robustness/resource-limit modeling such as audit backpressure, or UDP/QUIC policy smoke with DNS attribution and configurable timeout evidence.
+- Commit hash after commit: 4b4cbe2.
+
+## 2026-06-22T02:15:00Z — Bounded audit backpressure harness
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run robustness`
+- Environment assumptions: deterministic in-memory audit buffer; no Linux namespace or external network required.
+- Expected result: audit output has a bounded queue model that reports backpressure instead of implying unbounded memory growth; harness scenario emits a fail-closed broker error when capacity is exhausted.
+- Observed result: pass. `foxprox-core` increased to 45 tests; `foxprox-cli` ran 2 tests; `foxproxsetup` ran 7 tests. `foxprox-lab run robustness` emitted `broker_error` with `decision":"fail_closed"` and `backpressure_observed":"true"`.
+- Relevant output excerpt: `"reason":"audit buffer full; forwarding must fail closed or apply explicit overflow policy"`; `"capacity":"1"`; `"queued":"1"`.
+- Changed files: `crates/foxprox-core/src/audit.rs`, `crates/foxprox-core/src/scenario.rs`, `README.md`, `progress.md`.
+- Interpretation: Milestone 7 audit-backpressure behavior is now represented by a reusable core type and deterministic harness evidence. Production forwarding code still needs to wire this bounded sink into all hot paths.
+- Next verification gap: final alpha coverage review and any missing documented success criteria that can be reduced to local harness checks.
+- Commit hash after commit: pending.

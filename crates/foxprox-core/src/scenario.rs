@@ -1,7 +1,8 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::audit::{
-    AttributionConfidence, AttributionSource, AuditRecord, Decision, EventKind, Frontend, Protocol,
+    AttributionConfidence, AttributionSource, AuditRecord, BoundedAuditBuffer, Decision, EventKind,
+    Frontend, Protocol,
 };
 use crate::dns::{DnsCache, DnsQuery, QueryType};
 use crate::flow::{FlowKey, UdpFlowTable, UdpTimeouts};
@@ -25,6 +26,7 @@ pub enum ScenarioName {
     Flows,
     Stack,
     Inspect,
+    Robustness,
 }
 
 impl ScenarioName {
@@ -38,13 +40,22 @@ impl ScenarioName {
             "flows" => Ok(Self::Flows),
             "stack" => Ok(Self::Stack),
             "inspect" => Ok(Self::Inspect),
+            "robustness" => Ok(Self::Robustness),
             other => Err(format!("unknown scenario '{other}'")),
         }
     }
 
     pub fn list() -> &'static [&'static str] {
         &[
-            "all", "policy", "dns", "proxy", "packets", "flows", "stack", "inspect",
+            "all",
+            "policy",
+            "dns",
+            "proxy",
+            "packets",
+            "flows",
+            "stack",
+            "inspect",
+            "robustness",
         ]
     }
 }
@@ -62,6 +73,7 @@ pub fn run_scenario(name: ScenarioName) -> Vec<AuditRecord> {
                 ScenarioName::Flows,
                 ScenarioName::Stack,
                 ScenarioName::Inspect,
+                ScenarioName::Robustness,
             ] {
                 records.extend(run_scenario(child));
             }
@@ -74,6 +86,7 @@ pub fn run_scenario(name: ScenarioName) -> Vec<AuditRecord> {
         ScenarioName::Flows => scenario_flows(),
         ScenarioName::Stack => scenario_stack(),
         ScenarioName::Inspect => scenario_inspect(),
+        ScenarioName::Robustness => scenario_robustness(),
     }
 }
 
@@ -455,6 +468,29 @@ fn scenario_inspect() -> Vec<AuditRecord> {
     ]
 }
 
+fn scenario_robustness() -> Vec<AuditRecord> {
+    let mut buffer = BoundedAuditBuffer::new(1);
+    let first = AuditRecord::new(
+        EventKind::BrokerStarted,
+        "lab",
+        Decision::Allow,
+        "bounded audit buffer accepted first record",
+    )
+    .with_frontend(Frontend::Harness);
+    buffer.push(first).expect("first audit record fits");
+    let overflow = AuditRecord::new(
+        EventKind::BrokerError,
+        "lab",
+        Decision::FailClosed,
+        "audit buffer full; forwarding must fail closed or apply explicit overflow policy",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_metadata("capacity", buffer.capacity().to_string())
+    .with_metadata("queued", buffer.len().to_string());
+    let rejected = buffer.push(overflow.clone()).is_err();
+    vec![overflow.with_metadata("backpressure_observed", rejected.to_string())]
+}
+
 fn record_policy(
     kind: EventKind,
     protocol: Protocol,
@@ -589,6 +625,7 @@ mod tests {
         assert!(events.contains(&"quic_candidate_flow"));
         assert!(events.contains(&"udp_flow_created"));
         assert!(events.contains(&"unsupported_network_event"));
+        assert!(events.contains(&"broker_error"));
     }
 
     #[test]

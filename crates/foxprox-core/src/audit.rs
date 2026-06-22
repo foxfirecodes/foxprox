@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 
 /// Network protocol names used in normalized policy and audit records.
@@ -315,6 +315,50 @@ impl AuditRecord {
     }
 }
 
+/// Bounded audit queue used by harnesses to model backpressure.
+///
+/// Forwarding paths should treat a full audit buffer as fail-closed or apply an explicit overflow
+/// policy; this type makes that condition deterministic in tests instead of relying on unbounded
+/// memory growth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedAuditBuffer {
+    capacity: usize,
+    records: VecDeque<AuditRecord>,
+}
+
+impl BoundedAuditBuffer {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            records: VecDeque::new(),
+        }
+    }
+
+    pub fn push(&mut self, record: AuditRecord) -> Result<(), AuditRecord> {
+        if self.records.len() >= self.capacity {
+            return Err(record);
+        }
+        self.records.push_back(record);
+        Ok(())
+    }
+
+    pub fn pop(&mut self) -> Option<AuditRecord> {
+        self.records.pop_front()
+    }
+
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.records.len() >= self.capacity
+    }
+}
+
 pub fn json_escape(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     for ch in input.chars() {
@@ -357,5 +401,24 @@ mod tests {
         assert!(line.contains("\"sandbox_id\":\"sandbox\\\"1\""));
         assert!(line.contains("\"reason\":\"bad\\npacket\""));
         assert!(line.contains("\"detail\":\"x\\\\y\""));
+    }
+
+    #[test]
+    fn bounded_audit_buffer_reports_backpressure() {
+        let mut buffer = BoundedAuditBuffer::new(1);
+        let first = AuditRecord::new(EventKind::BrokerStarted, "lab", Decision::Allow, "started");
+        let second = AuditRecord::new(
+            EventKind::BrokerError,
+            "lab",
+            Decision::FailClosed,
+            "audit buffer full",
+        );
+        assert!(buffer.push(first).is_ok());
+        assert!(buffer.is_full());
+        let overflow = buffer.push(second).unwrap_err();
+        assert_eq!(overflow.reason, "audit buffer full");
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(buffer.pop().unwrap().kind, EventKind::BrokerStarted);
+        assert!(!buffer.is_full());
     }
 }
