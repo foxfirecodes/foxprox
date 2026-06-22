@@ -1253,5 +1253,5 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-runtime` — maintenance orchestration stays in runtime over contracts.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 0279186.
 - Remaining boundary risks: blocking device read integration, readiness registration, async scheduling, and fair per-flow budgets remain.
