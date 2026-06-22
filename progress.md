@@ -1202,3 +1202,16 @@
 - What failed or surprised the agent: the executable setup command made an existing integration gap visible immediately: bwrap planning and setup parser had drifted apart.
 - What remains unproven: a host launcher that binds the broker socket, starts bwrap, receives the TUN fd, and feeds it into the broker packet loop is still absent; live bwrap/TUN execution remains unproven.
 - Commit: this commit.
+
+## 2026-06-22 Live Evidence — bwrap foxproxsetup creates TUN, hands fd, drops cap, and logs sandbox packets
+
+- Slice attempted: run the newly implemented `foxproxsetup` inside a real bwrap user/network namespace and prove the broker side receives a live TUN fd with target-generated packets.
+- Why next: the setup command, capability drop, bwrap planning, and fd IO paths were tested independently; Milestone 0 needed live environment evidence.
+- Commands/evidence:
+  - Built the helper: `cargo build -p foxprox-cli --bin foxproxsetup`.
+  - Ran `bwrap --unshare-user --unshare-net --cap-add CAP_NET_ADMIN --dev-bind / / --dev-bind /dev/net/tun /dev/net/tun target/debug/foxproxsetup ... -- /bin/sh -c "capsh --print | grep '^Current:' > cap.log"` with a Python broker socket receiving SCM_RIGHTS. Evidence: broker log `marker=b'foxprox-fd'`, resolver file generated, and target cap log `Current: =` after exec.
+  - Ran the same bwrap/setup path with target `/usr/bin/python3 -c "import socket; ... sendto(b'hi', ('10.125.0.1', 5353))"`. The Python broker listener received the setup fd and read a packet from TUN: `packet_len=30`, `packet_hex=4500001e2bcd40004011fa050a7d00020a7d0001d05e14e9000a9d2c6869` (IPv4 UDP from 10.125.0.2 to 10.125.0.1 containing `hi`).
+- What failed or surprised the agent: `ping` after capability drop failed because the target no longer had raw-socket capability (`missing cap_net_raw+p`), but a normal UDP socket from Python generated a clean TUN packet and better matches the target-without-setup-caps requirement.
+- What this proves: bwrap can grant temporary `CAP_NET_ADMIN` to `foxproxsetup`; `/dev/net/tun` is usable; setup creates/configures TUN and route; resolver config is written; fd handoff works across the process boundary; setup drops capabilities before exec; and target traffic appears on the broker's received TUN fd.
+- What remains unproven: broker process automation around launching bwrap, continuous packet processing of the live received fd, synthetic reply write-back into the live namespace, and TCP forwarding via a userspace stack.
+- Commit: this evidence-only commit.

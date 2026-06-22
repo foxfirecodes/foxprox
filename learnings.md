@@ -220,3 +220,7 @@ The Rust `libc` crate may not expose `CAP_NET_ADMIN` or `__user_cap_*` structs o
 ## 2026-06-22 — keep launcher plans in sync with executable helper parsers
 
 Once a setup helper has a real CLI parser, the bwrap plan must construct that exact argument vector, including placing setup-helper args before the target `--` separator. Otherwise library setup tests can pass while the actual launch command cannot start.
+
+## 2026-06-22 — live setup proof should use unprivileged UDP, not ping
+
+After `foxproxsetup` drops setup capabilities, `ping` may fail because the target lacks raw-socket privileges. For live TUN ingress proof, use a normal UDP socket from the target namespace and read the resulting IPv4 UDP packet from the broker's received TUN fd.
