@@ -1119,3 +1119,16 @@
 - Recent verification sweep commit hash: `0b619af`.
 - Next verification gap: commit ICMP broker coverage. Remaining large gap is TCP bridge orchestration in the broker crate or async long-lived broker lifecycle integration.
 - Commit hash after commit: pending.
+
+## 2026-06-22T12:15:00Z — Broker TCP SYN dispatch unit coverage
+
+- Command executed: `cargo fmt --all && cargo test -p foxprox-broker`; follow-up: `cargo test --all`
+- Environment assumptions: deterministic TUN-shaped TCP SYN packet fixture with mock TCP connect egress; no Linux/TUN privileges required.
+- Expected result: prove `foxprox-broker::TransparentBroker` dispatches TCP packets into `TransparentTcpRuntime`, applies TCP policy, calls TCP connect egress on allow, and records normalized TCP connect audit.
+- Observed result: pass. `foxprox-broker` increased to 4 tests; workspace tests passed (`foxprox-core` 64, `foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4).
+- Relevant output excerpt: `broker_dispatches_tcp_syn_to_connect_egress ... ok`.
+- Changed files: `crates/foxprox-broker/src/lib.rs`, `progress.md`.
+- Interpretation: the reusable transparent broker now has deterministic coverage for dispatching every currently modeled transparent protocol family: DNS, UDP, TCP connect attempts, and ICMP echo.
+- Recent broker ICMP coverage commit hash: `e48cfce`.
+- Next verification gap: commit TCP broker coverage. Further production work is the larger TCP byte-bridge orchestration path or async lifecycle integration.
+- Commit hash after commit: pending.

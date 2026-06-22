@@ -196,6 +196,49 @@ mod tests {
     }
 
     #[test]
+    fn broker_dispatches_tcp_syn_to_connect_egress() {
+        let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 20)), 8080);
+        let tcp_policy = PolicyEngine::new(
+            PolicyConfig::deny_by_default().with_rule(
+                PolicyRule::new("allow-tcp", RuleAction::Allow)
+                    .protocol(Protocol::Tcp)
+                    .port(8080),
+            ),
+        );
+        let tcp_egress = MockEgressBackend::new().with_response(
+            destination,
+            EgressOutcome {
+                connected: true,
+                bytes_sent: 0,
+                bytes_received: 0,
+                message: "mock TCP connected".to_string(),
+                response_payload: Vec::new(),
+            },
+        );
+        let mut broker = TransparentBroker::new(
+            "10.0.2.1:53".parse().unwrap(),
+            [],
+            PolicyEngine::new(PolicyConfig::deny_by_default()),
+            MockEgressBackend::new(),
+            tcp_policy,
+            tcp_egress,
+            PolicyEngine::new(PolicyConfig::deny_by_default()),
+        );
+
+        let step = broker
+            .handle_ipv4_packet("lab", &tcp_syn_packet(destination.ip(), destination.port()))
+            .unwrap();
+
+        assert!(step.packets_to_device.is_empty());
+        assert_eq!(broker.audit.last().unwrap().decision, Decision::Allow);
+        assert_eq!(
+            broker.audit.last().unwrap().kind,
+            EventKind::TcpConnectAttempt
+        );
+        assert_eq!(broker.tcp.egress.requests.len(), 1);
+    }
+
+    #[test]
     fn broker_replies_to_allowed_icmp_echo() {
         let mut broker = TransparentBroker::new(
             "10.0.2.1:53".parse().unwrap(),
@@ -295,6 +338,30 @@ mod tests {
         packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
         packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
         packet[28..].copy_from_slice(payload);
+        packet
+    }
+
+    fn tcp_syn_packet(destination: IpAddr, destination_port: u16) -> Vec<u8> {
+        let source = Ipv4Addr::new(10, 0, 2, 2);
+        let destination = match destination {
+            IpAddr::V4(ip) => ip,
+            IpAddr::V6(_) => panic!("test destination must be IPv4"),
+        };
+        let total_len = 40;
+        let mut packet = vec![0_u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&source.octets());
+        packet[16..20].copy_from_slice(&destination.octets());
+        let ip_sum = checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&ip_sum.to_be_bytes());
+        packet[20..22].copy_from_slice(&49152_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        packet[24..28].copy_from_slice(&1_u32.to_be_bytes());
+        packet[32] = 0x50;
+        packet[33] = 0x02;
         packet
     }
 
