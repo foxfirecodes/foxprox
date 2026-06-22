@@ -650,5 +650,5 @@
   - `cargo test --workspace` — passed, 73 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
-- Commit hash after commit: pending.
+- Commit hash after commit: d2f2d8e.
 - Remaining boundary risks: file/stdout sinks, async audit backpressure integration, and schema versioning remain.
