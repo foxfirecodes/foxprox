@@ -1030,3 +1030,22 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * other audit records retain explicit null mismatch fields, keeping the JSON schema stable.
 * Audit evidence: unit tests assert mismatch hostnames and serialized JSON fragments for hostname, presented hostname, DNS attribution, and mismatch reason.
 * Residual risk: audit schema still does not include QUIC header version/type metadata or hidden-SNI booleans as separate fields; hidden-SNI is currently represented through denial reason and hostname absence.
+
+## 2026-06-21 - Hidden-SNI audit flag preservation
+
+* Invariant under work: audit records for TLS/QUIC hostname attribution decisions must preserve explicit hidden-SNI/ECH state, not only a denial reason, so hidden-name behavior is reviewable even when policy allows via explicit IP rules.
+* Threat or failure mode addressed: if hidden-SNI state is only visible on denied events, an explicit IP allow for hidden-SNI traffic could be audited without showing that domain attribution was unavailable or hidden.
+* Planned verification: add hidden-SNI audit field/context/JSON coverage for denied and IP-allowed hidden-SNI requests, then run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Hidden-SNI audit flag preservation results
+
+* Tests added/updated:
+  * policy-derived audit context now preserves `hidden_sni` from normalized TLS requests.
+  * hidden-SNI state serializes as a first-class JSON boolean even when an explicit IP rule allows the flow.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 145 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * hidden-SNI/ECH traffic remains denied by policy unless an explicit IP/CIDR rule allows it, and allowed hidden-SNI flows are now auditable as hidden-SNI.
+  * audit records no longer rely solely on `HiddenSni` denial reason to expose hidden-name state.
+* Audit evidence: unit tests assert hidden-SNI preservation and JSON output for an IP-allowed hidden-SNI request.
+* Residual risk: QUIC visible TLS/ECH extraction is still not implemented; QUIC candidate audit remains limited to protocol classification and DNS attribution.

@@ -24,6 +24,7 @@ pub struct AuditEvent {
     pub hostname: Option<Hostname>,
     pub presented_hostname: Option<Hostname>,
     pub dns_attribution: Option<Hostname>,
+    pub hidden_sni: bool,
     pub hostname_source: HostnameSource,
     pub hostname_confidence: HostnameConfidence,
     pub dns_query_type: Option<DnsQueryType>,
@@ -52,6 +53,7 @@ pub struct AuditPolicyContext {
     pub hostname: Option<Hostname>,
     pub presented_hostname: Option<Hostname>,
     pub dns_attribution: Option<Hostname>,
+    pub hidden_sni: bool,
     pub hostname_source: HostnameSource,
     pub hostname_confidence: HostnameConfidence,
     pub dns_query_type: Option<DnsQueryType>,
@@ -77,6 +79,7 @@ impl AuditPolicyContext {
             hostname: request.attribution.hostname.clone(),
             presented_hostname: request.presented_hostname.clone(),
             dns_attribution: request.dns_attribution.clone(),
+            hidden_sni: request.hidden_sni,
             hostname_source: request.attribution.source,
             hostname_confidence: request.attribution.confidence,
             dns_query_type: request.dns_query_type,
@@ -105,6 +108,7 @@ impl AuditEvent {
             hostname: None,
             presented_hostname: None,
             dns_attribution: None,
+            hidden_sni: false,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -140,6 +144,7 @@ impl AuditEvent {
             hostname: None,
             presented_hostname: None,
             dns_attribution: None,
+            hidden_sni: false,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -171,6 +176,7 @@ impl AuditEvent {
             hostname: context.hostname,
             presented_hostname: context.presented_hostname,
             dns_attribution: context.dns_attribution,
+            hidden_sni: context.hidden_sni,
             hostname_source: context.hostname_source,
             hostname_confidence: context.hostname_confidence,
             dns_query_type: context.dns_query_type,
@@ -210,6 +216,7 @@ impl AuditEvent {
             hostname: Some(metadata.hostname.clone()),
             presented_hostname: None,
             dns_attribution: None,
+            hidden_sni: false,
             hostname_source: HostnameSource::BrokerDnsQuery,
             hostname_confidence: HostnameConfidence::High,
             dns_query_type: Some(metadata.query_type),
@@ -249,6 +256,7 @@ impl AuditEvent {
             hostname: Some(metadata.hostname.clone()),
             presented_hostname: None,
             dns_attribution: None,
+            hidden_sni: false,
             hostname_source: HostnameSource::DnsCache,
             hostname_confidence: HostnameConfidence::Medium,
             dns_query_type: Some(metadata.query_type),
@@ -289,6 +297,7 @@ impl AuditEvent {
             hostname: None,
             presented_hostname: None,
             dns_attribution: None,
+            hidden_sni: false,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -323,6 +332,7 @@ impl AuditEvent {
             hostname: None,
             presented_hostname: None,
             dns_attribution: None,
+            hidden_sni: false,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -361,6 +371,7 @@ impl AuditEvent {
             hostname: None,
             presented_hostname: None,
             dns_attribution: None,
+            hidden_sni: false,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -415,6 +426,7 @@ impl AuditEvent {
                 .map(|hostname| hostname.as_str()),
             false,
         );
+        push_json_bool_field(&mut out, "hidden_sni", self.hidden_sni, false);
         push_json_string_field(
             &mut out,
             "hostname_source",
@@ -569,6 +581,11 @@ fn push_json_option_u16_field(out: &mut String, key: &str, value: Option<u16>, f
     } else {
         out.push_str("null");
     }
+}
+
+fn push_json_bool_field(out: &mut String, key: &str, value: bool, first: bool) {
+    push_json_key(out, key, first);
+    out.push_str(if value { "true" } else { "false" });
 }
 
 fn push_json_string_field(out: &mut String, key: &str, value: &str, first: bool) {
@@ -908,6 +925,7 @@ mod tests {
                 hostname: None,
                 presented_hostname: None,
                 dns_attribution: None,
+                hidden_sni: false,
                 hostname_source: HostnameSource::None,
                 hostname_confidence: HostnameConfidence::None,
                 dns_query_type: None,
@@ -1159,6 +1177,31 @@ mod tests {
     }
 
     #[test]
+    fn audit_context_preserves_hidden_sni_even_when_ip_rule_allows() {
+        let request = PolicyRequest {
+            hidden_sni: true,
+            ..PolicyRequest::new(Protocol::TlsSni).with_destination(Endpoint::tcp(
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+                443,
+            ))
+        };
+
+        let event = AuditEvent::from_policy_decision(
+            AuditPolicyContext::from_request(102, AuditEventKind::TlsClientHello, &request),
+            &Decision::Allow {
+                rule_id: Some("allow-hidden-ip".into()),
+            },
+        );
+
+        assert!(event.hidden_sni);
+        assert_eq!(event.decision, Some(AuditDecision::Allow));
+        assert_eq!(event.rule_id.as_deref(), Some("allow-hidden-ip"));
+        let line = event.to_json_line();
+        assert!(line.contains("\"hidden_sni\":true"));
+        assert!(line.contains("\"decision\":\"allow\""));
+    }
+
+    #[test]
     fn dns_query_audit_preserves_query_type_and_endpoints() {
         let metadata = crate::dns::parse_dns_query(
             &[
@@ -1331,6 +1374,7 @@ mod tests {
                 hostname: None,
                 presented_hostname: None,
                 dns_attribution: None,
+                hidden_sni: false,
                 hostname_source: HostnameSource::None,
                 hostname_confidence: HostnameConfidence::None,
                 dns_query_type: None,

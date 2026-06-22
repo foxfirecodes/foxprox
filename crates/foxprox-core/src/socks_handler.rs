@@ -116,6 +116,7 @@ fn malformed_socks_connect(context: &Socks5Context) -> Socks5ConnectOutcome {
         hostname: None,
         presented_hostname: None,
         dns_attribution: None,
+        hidden_sni: false,
         hostname_source: HostnameSource::None,
         hostname_confidence: HostnameConfidence::None,
         dns_query_type: None,

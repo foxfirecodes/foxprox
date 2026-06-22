@@ -189,3 +189,7 @@ Future host socket code should accept an `EgressPermit` built from a shared poli
 ## 2026-06-21 - Attribution mismatch audit needs both names
 
 For SNI/DNS mismatch review, logging only the selected hostname and denial reason is insufficient. Audit records should preserve the presented hostname and DNS-correlated hostname together so reviewers can see the conflict without reconstructing flow state.
+
+## 2026-06-21 - Hidden-SNI state is audit-relevant even on allowed flows
+
+When policy explicitly allows hidden-SNI traffic by IP/CIDR, the audit record must still show that SNI/ECH hid hostname attribution. A denial reason alone is not enough because allowed hidden-SNI flows would otherwise lose that evidence.
