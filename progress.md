@@ -982,3 +982,35 @@ The round-7 blocker is fixed. `SmoltcpTunBridge` now appends inbound packet obse
 
 ### Remaining blind spots
 - The bridge now preserves the existing TUN policy gate, but full smoltcp TCP socket accept/connect and host TCP byte bridging are still outstanding.
+
+## 2026-06-21 — smoltcp TCP listener proof cycle
+
+### Behavior under work
+Extend the smoltcp adapter from ICMP packet emission into a TCP socket proof: the stack should listen on a broker IP/port, complete a minimal TCP handshake from injected sandbox packets, and expose received stream bytes without leaking smoltcp APIs into core.
+
+### Expected evidence
+- Injected SYN produces a SYN-ACK IP packet from smoltcp.
+- Injected ACK plus PSH/ACK payload reaches a smoltcp TCP listener and can be drained as stream bytes.
+- The proof remains bounded/in-memory and keeps remaining host egress byte-bridge work explicit.
+
+### Commands run
+- `cargo fmt` — applied formatting for smoltcp TCP listener proof.
+- `cargo test -p foxprox-stack --all-targets --all-features` — initially passed with warnings for unused TCP flag constants; removed unused constants.
+- `cargo test --all-targets --all-features` — passed, 6 CLI tests, 101 core tests, 3 device tests, 3 egress tests, and 5 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_stack::tests::smoltcp_tcp_listener_accepts_handshake_and_receives_bytes ... ok`
+- `foxprox_stack::tests::smoltcp_tun_bridge_default_denies_before_stack_poll_or_write ... ok`
+
+### Interpretation
+The smoltcp adapter now proves more than packet-level ICMP: it can host a TCP listener, produce a SYN-ACK from an injected SYN, accept the completing ACK, and expose payload bytes from an injected PSH/ACK as TCP stream data. This keeps smoltcp socket details inside `foxprox-stack` while preserving the core policy/audit boundary.
+
+### Changed files
+- `crates/foxprox-stack/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This proof drains stream bytes from smoltcp but does not yet connect those bytes to `foxprox-egress` host TCP sockets or bridge host responses back through the smoltcp socket.

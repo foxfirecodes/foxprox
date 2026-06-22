@@ -11,8 +11,9 @@ use foxprox_core::{
     AuditKind, AuditRecord, BrokerCore, Decision, DenialReason, DeviceIoError, Frontend,
     PacketDevice, ParsedIpPacket, PolicyDecision, PolicyRequest,
 };
-use smoltcp::iface::{Config, Interface, PollResult, SocketSet};
+use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
+use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 use std::cell::RefCell;
@@ -129,6 +130,7 @@ pub struct SmoltcpIpStack {
     iface: Interface,
     sockets: SocketSet<'static>,
     device: InMemoryIpDevice,
+    tcp_handles: Vec<SocketHandle>,
 }
 
 impl SmoltcpIpStack {
@@ -149,11 +151,39 @@ impl SmoltcpIpStack {
             iface,
             sockets: SocketSet::new(Vec::new()),
             device,
+            tcp_handles: Vec::new(),
         }
     }
 
     pub fn inject_packet(&mut self, packet: Vec<u8>) {
         self.device.push_inbound(packet);
+    }
+
+    pub fn listen_tcp(&mut self, port: u16, rx_capacity: usize, tx_capacity: usize) {
+        let rx_buffer = tcp::SocketBuffer::new(vec![0; rx_capacity]);
+        let tx_buffer = tcp::SocketBuffer::new(vec![0; tx_capacity]);
+        let mut socket = tcp::Socket::new(rx_buffer, tx_buffer);
+        socket.listen(port).expect("tcp listen port is valid");
+        let handle = self.sockets.add(socket);
+        self.tcp_handles.push(handle);
+    }
+
+    pub fn drain_first_tcp_recv(&mut self, limit: usize) -> Vec<u8> {
+        let Some(handle) = self.tcp_handles.first().copied() else {
+            return Vec::new();
+        };
+        let socket = self.sockets.get_mut::<tcp::Socket>(handle);
+        if !socket.may_recv() {
+            return Vec::new();
+        }
+        let mut buffer = vec![0; limit];
+        match socket.recv_slice(&mut buffer) {
+            Ok(len) => {
+                buffer.truncate(len);
+                buffer
+            }
+            Err(_) => Vec::new(),
+        }
     }
 
     pub fn poll(&mut self, now_ms: i64) -> StackPollEvidence {
@@ -504,12 +534,131 @@ mod tests {
     }
 
     #[test]
+    fn smoltcp_tcp_listener_accepts_handshake_and_receives_bytes() {
+        let mut stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        stack.listen_tcp(8080, 1024, 1024);
+
+        let client_seq = 0x0102_0304;
+        stack.inject_packet(ipv4_tcp_packet(TcpPacketSpec {
+            source: [10, 0, 2, 15],
+            destination: [10, 0, 2, 1],
+            source_port: 50_000,
+            destination_port: 8080,
+            sequence: client_seq,
+            acknowledgment: 0,
+            flags: TCP_SYN,
+            payload: &[],
+        }));
+        let syn_ack_evidence = stack.poll(3_000);
+        assert_eq!(syn_ack_evidence.packets_emitted, 1);
+        let syn_ack_packets = stack.outbound_packets();
+        let syn_ack = &syn_ack_packets[0];
+        let syn_ack_tcp = &syn_ack[20..];
+        assert_eq!(syn_ack_tcp[13] & (TCP_SYN | TCP_ACK), TCP_SYN | TCP_ACK);
+        let server_seq = u32::from_be_bytes([
+            syn_ack_tcp[4],
+            syn_ack_tcp[5],
+            syn_ack_tcp[6],
+            syn_ack_tcp[7],
+        ]);
+        assert_eq!(
+            u32::from_be_bytes([
+                syn_ack_tcp[8],
+                syn_ack_tcp[9],
+                syn_ack_tcp[10],
+                syn_ack_tcp[11],
+            ]),
+            client_seq + 1
+        );
+
+        stack.inject_packet(ipv4_tcp_packet(TcpPacketSpec {
+            source: [10, 0, 2, 15],
+            destination: [10, 0, 2, 1],
+            source_port: 50_000,
+            destination_port: 8080,
+            sequence: client_seq + 1,
+            acknowledgment: server_seq + 1,
+            flags: TCP_ACK,
+            payload: &[],
+        }));
+        stack.poll(3_010);
+        stack.inject_packet(ipv4_tcp_packet(TcpPacketSpec {
+            source: [10, 0, 2, 15],
+            destination: [10, 0, 2, 1],
+            source_port: 50_000,
+            destination_port: 8080,
+            sequence: client_seq + 1,
+            acknowledgment: server_seq + 1,
+            flags: TCP_ACK | TCP_PSH,
+            payload: b"hello foxprox",
+        }));
+        stack.poll(3_020);
+
+        assert_eq!(stack.drain_first_tcp_recv(64), b"hello foxprox");
+    }
+
+    #[test]
     fn in_memory_ip_device_exposes_bounded_mtu_capabilities() {
         let device = InMemoryIpDevice::new(1280);
         let capabilities = device.capabilities();
         assert_eq!(capabilities.medium, Medium::Ip);
         assert_eq!(capabilities.max_transmission_unit, 1280);
         assert_eq!(capabilities.max_burst_size, Some(1));
+    }
+
+    const TCP_SYN: u8 = 0x02;
+    const TCP_PSH: u8 = 0x08;
+    const TCP_ACK: u8 = 0x10;
+
+    #[derive(Clone, Copy)]
+    struct TcpPacketSpec<'a> {
+        source: [u8; 4],
+        destination: [u8; 4],
+        source_port: u16,
+        destination_port: u16,
+        sequence: u32,
+        acknowledgment: u32,
+        flags: u8,
+        payload: &'a [u8],
+    }
+
+    fn ipv4_tcp_packet(spec: TcpPacketSpec<'_>) -> Vec<u8> {
+        let tcp_len = 20 + spec.payload.len();
+        let total_len = 20 + tcp_len;
+        let mut packet = vec![0u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&spec.source);
+        packet[16..20].copy_from_slice(&spec.destination);
+
+        let tcp = &mut packet[20..];
+        tcp[0..2].copy_from_slice(&spec.source_port.to_be_bytes());
+        tcp[2..4].copy_from_slice(&spec.destination_port.to_be_bytes());
+        tcp[4..8].copy_from_slice(&spec.sequence.to_be_bytes());
+        tcp[8..12].copy_from_slice(&spec.acknowledgment.to_be_bytes());
+        tcp[12] = 5 << 4;
+        tcp[13] = spec.flags;
+        tcp[14..16].copy_from_slice(&4096u16.to_be_bytes());
+        tcp[20..].copy_from_slice(spec.payload);
+
+        let tcp_checksum = tcp_checksum(spec.source, spec.destination, tcp);
+        packet[36..38].copy_from_slice(&tcp_checksum.to_be_bytes());
+        let header_checksum = checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
+        packet
+    }
+
+    fn tcp_checksum(source: [u8; 4], destination: [u8; 4], tcp: &[u8]) -> u16 {
+        let mut bytes = Vec::with_capacity(12 + tcp.len());
+        bytes.extend_from_slice(&source);
+        bytes.extend_from_slice(&destination);
+        bytes.push(0);
+        bytes.push(6);
+        bytes.extend_from_slice(&(tcp.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(tcp);
+        checksum(&bytes)
     }
 
     fn ipv4_icmp_echo_request() -> Vec<u8> {

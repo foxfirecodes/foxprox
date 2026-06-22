@@ -55,3 +55,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-21 — smoltcp IP-medium adapter boundary
 
 - `smoltcp` can be kept out of `foxprox-core` by wrapping it in a separate adapter crate with an IP-medium `Device`; `Interface::poll` can consume TUN-style raw IP packets and emit outbound IP packets through token-backed queues, which is enough to prove the TUN-to-userspace-stack boundary before real fd wiring.
+
+## 2026-06-21 — smoltcp TCP listener proof shape
+
+- A bounded in-memory TCP proof can drive smoltcp by injecting raw IPv4 SYN/ACK/PSH packets into an IP-medium device, reading the emitted SYN-ACK sequence number, and then draining bytes from a `tcp::Socket` listener. This keeps TCP stack behavior testable before host egress bridging is wired.
