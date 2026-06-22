@@ -529,5 +529,5 @@
   - `cargo test --workspace` — passed, 66 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-packet` — packet crate depends only on `foxprox-core`.
-- Commit hash after commit: pending.
+- Commit hash after commit: a057b35.
 - Remaining boundary risks: net/device orchestration must call this helper with the original packet, IPv6 ICMP unreachable synthesis is not implemented, and TCP reset denial synthesis remains behind the future stack adapter.
