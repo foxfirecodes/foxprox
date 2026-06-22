@@ -719,3 +719,15 @@
 - Interpretation: final verification evidence is preserved in git history.
 - Next verification gap: production hardening outside the current harness-lab alpha: long-lived broker runtime factoring, bounded audit sink wiring in hot paths, real upstream DNS forwarding, and optional real `ping` capability strategy.
 - Commit hash after commit: 7afd6a8.
+
+## 2026-06-22T03:25:00Z — Reusable TCP bridge runtime boundary
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run tcp-bridge-smoke`
+- Environment assumptions: deterministic core tests do not require privileges; `tcp-bridge-smoke` requires local bwrap/TUN fd handoff and sandbox Python, with host egress as a local TCP fixture.
+- Expected result: move the positive TCP bridge orchestration out of the CLI smoke into a reusable, platform-independent core runtime that owns policy-before-smoltcp, optional inspection, smoltcp state, audit records, and emitted TUN packets. Existing bridge smoke should continue to pass using the new runtime boundary.
+- Observed result: pass. `foxprox-core` increased to 50 tests; `foxprox-cli` ran 2 tests; `foxproxsetup` ran 7 tests. The environment `tcp-bridge-smoke` emitted `decision":"allow"`, `policy_decision":"allow"`, `inspection_decision":"allow"`, and `status":"exit status: 0"` through the refactored runtime.
+- Relevant output excerpt: `runtime::tests::tcp_bridge_runtime_allowed_syn_enters_smoltcp ... ok`; `runtime::tests::tcp_bridge_runtime_denied_syn_emits_rst_before_stack ... ok`; `"inspection_rule_id":"allow-transparent-http-bridge"`.
+- Changed files: `crates/foxprox-core/src/runtime.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: the highest-priority reviewer gap is partly closed: the core now contains a reusable TCP bridge runtime boundary rather than keeping all positive bridge orchestration in `foxprox-lab`. Host fd IO and host socket egress remain in the CLI/future device-egress crates by design.
+- Next verification gap: factor the denied TCP bridge smoke onto the same reusable runtime, then begin wiring bounded audit buffers into runtime paths instead of storing audit in unbounded `Vec`s.
+- Commit hash after commit: pending.

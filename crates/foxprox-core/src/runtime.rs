@@ -11,6 +11,7 @@ use crate::packet::{
     synthesize_udp_reply,
 };
 use crate::policy::{PolicyEngine, PolicyRequest};
+use crate::smoltcp_gate::SmoltcpTcpServerHarness;
 
 /// Minimal transparent TUN UDP runtime boundary used by the harness and future broker runtime.
 ///
@@ -273,6 +274,169 @@ impl<B: EgressBackend> TransparentTcpRuntime<B> {
         }
         self.audit.push(record);
         Ok(())
+    }
+}
+
+/// Result of processing one sandbox TCP packet through the reusable bridge runtime.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TcpBridgeStep {
+    pub emitted_packets: Vec<Vec<u8>>,
+    pub egress_payload: Option<Vec<u8>>,
+}
+
+/// Reusable transparent TCP bridge runtime boundary.
+///
+/// This owns policy-before-smoltcp enforcement, optional transparent inspection, smoltcp packet
+/// state, audit records, and outbound packet emission. Device fd IO and host socket egress remain in
+/// the caller so the core stays platform-independent.
+pub struct TransparentTcpBridgeRuntime {
+    policy: PolicyEngine,
+    inspection: Option<TransparentInspectionRuntime>,
+    stack: SmoltcpTcpServerHarness,
+    connect_allowed: bool,
+    connect_audited: bool,
+    payload_inspected: bool,
+    pub audit: Vec<AuditRecord>,
+}
+
+impl TransparentTcpBridgeRuntime {
+    pub fn listen(
+        listen_ip: Ipv4Addr,
+        listen_port: u16,
+        policy: PolicyEngine,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            policy,
+            inspection: None,
+            stack: SmoltcpTcpServerHarness::listen(listen_ip, listen_port)?,
+            connect_allowed: false,
+            connect_audited: false,
+            payload_inspected: false,
+            audit: Vec::new(),
+        })
+    }
+
+    pub fn with_inspection(mut self, inspection: TransparentInspectionRuntime) -> Self {
+        self.inspection = Some(inspection);
+        self
+    }
+
+    pub fn handle_ipv4_packet(
+        &mut self,
+        sandbox_id: impl Into<String>,
+        packet: &[u8],
+    ) -> Result<TcpBridgeStep, String> {
+        let sandbox_id = sandbox_id.into();
+        let parsed = match parse_ipv4(packet) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                self.audit.push(
+                    AuditRecord::new(
+                        EventKind::UnsupportedNetworkEvent,
+                        sandbox_id,
+                        Decision::FailClosed,
+                        format!("malformed IPv4 packet fails closed: {err}"),
+                    )
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(Protocol::Unsupported),
+                );
+                return Ok(TcpBridgeStep {
+                    emitted_packets: Vec::new(),
+                    egress_payload: None,
+                });
+            }
+        };
+        if parsed.protocol_number != 6 {
+            self.audit.push(
+                AuditRecord::new(
+                    EventKind::UnsupportedNetworkEvent,
+                    sandbox_id,
+                    Decision::FailClosed,
+                    "TCP bridge runtime received non-TCP packet",
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(parsed.protocol()),
+            );
+            return Ok(TcpBridgeStep {
+                emitted_packets: Vec::new(),
+                egress_payload: None,
+            });
+        }
+        let tcp =
+            parse_tcp(parsed.payload).map_err(|err| format!("malformed TCP segment: {err}"))?;
+        let source = SocketAddr::new(IpAddr::V4(parsed.source), tcp.source_port);
+        let destination = SocketAddr::new(IpAddr::V4(parsed.destination), tcp.destination_port);
+
+        if !self.connect_audited && tcp.syn && !tcp.ack {
+            let request = PolicyRequest::new(&sandbox_id, Frontend::Tun, Protocol::Tcp)
+                .with_source(source.ip(), source.port())
+                .with_destination(destination.ip(), destination.port());
+            let outcome = self.policy.evaluate(&request);
+            self.connect_allowed = outcome.decision.is_allow();
+            self.connect_audited = true;
+            self.audit.push(
+                AuditRecord::new(
+                    EventKind::TcpConnectAttempt,
+                    &sandbox_id,
+                    outcome.decision,
+                    outcome.reason,
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(Protocol::Tcp)
+                .with_addresses(Some(source), Some(destination))
+                .with_rule(outcome.rule_id),
+            );
+            if !self.connect_allowed {
+                return Ok(TcpBridgeStep {
+                    emitted_packets: vec![crate::packet::synthesize_tcp_rst(packet)?],
+                    egress_payload: None,
+                });
+            }
+        }
+
+        if !self.connect_allowed {
+            return Ok(TcpBridgeStep {
+                emitted_packets: Vec::new(),
+                egress_payload: None,
+            });
+        }
+
+        if !tcp.payload.is_empty() && !self.payload_inspected {
+            if let Some(inspection) = self.inspection.as_mut() {
+                inspection.inspect_ipv4_tcp_payload(&sandbox_id, packet)?;
+                if let Some(record) = inspection.audit.last().cloned() {
+                    let allow = record.decision.is_allow();
+                    self.audit.push(record);
+                    self.payload_inspected = true;
+                    if !allow {
+                        return Ok(TcpBridgeStep {
+                            emitted_packets: vec![crate::packet::synthesize_tcp_rst(packet)?],
+                            egress_payload: None,
+                        });
+                    }
+                }
+            }
+        }
+
+        self.stack.receive_packet(packet.to_vec())?;
+        let mut emitted_packets = self.stack.drain_emitted_packets();
+        self.stack.poll()?;
+        emitted_packets.extend(self.stack.drain_emitted_packets());
+        let egress_payload = self.stack.recv_available()?;
+        Ok(TcpBridgeStep {
+            emitted_packets,
+            egress_payload,
+        })
+    }
+
+    pub fn send_egress_response(&mut self, bytes: &[u8]) -> Result<Vec<Vec<u8>>, String> {
+        self.stack.send_slice(bytes)?;
+        Ok(self.stack.drain_emitted_packets())
+    }
+
+    pub fn poll(&mut self) -> Result<Vec<Vec<u8>>, String> {
+        self.stack.poll()?;
+        Ok(self.stack.drain_emitted_packets())
     }
 }
 
@@ -800,6 +964,47 @@ mod tests {
     }
 
     #[test]
+    fn tcp_bridge_runtime_denied_syn_emits_rst_before_stack() {
+        let destination = Ipv4Addr::new(203, 0, 113, 22);
+        let policy = PolicyEngine::new(PolicyConfig::deny_by_default());
+        let mut runtime = TransparentTcpBridgeRuntime::listen(destination, 80, policy).unwrap();
+        let packet = tcp_syn_packet(IpAddr::V4(destination), 80);
+        let step = runtime.handle_ipv4_packet("lab", &packet).unwrap();
+        assert_eq!(runtime.audit[0].decision, Decision::DenyReset);
+        assert_eq!(step.emitted_packets.len(), 1);
+        let rst_ip = parse_ipv4(&step.emitted_packets[0]).unwrap();
+        let rst_tcp = parse_tcp(rst_ip.payload).unwrap();
+        assert!(rst_tcp.rst);
+        assert!(step.egress_payload.is_none());
+    }
+
+    #[test]
+    fn tcp_bridge_runtime_allowed_syn_enters_smoltcp() {
+        let destination = Ipv4Addr::new(203, 0, 113, 22);
+        let policy = PolicyEngine::new(
+            PolicyConfig::deny_by_default().with_rule(
+                PolicyRule::new("allow-bridge", RuleAction::Allow)
+                    .protocol(Protocol::Tcp)
+                    .destination(Cidr::host(IpAddr::V4(destination)))
+                    .port(80),
+            ),
+        );
+        let mut runtime = TransparentTcpBridgeRuntime::listen(destination, 80, policy).unwrap();
+        let packet = tcp_syn_packet(IpAddr::V4(destination), 80);
+        let step = runtime.handle_ipv4_packet("lab", &packet).unwrap();
+        assert_eq!(runtime.audit[0].decision, Decision::Allow);
+        assert!(step.emitted_packets.iter().any(|packet| {
+            let Ok(ipv4) = parse_ipv4(packet) else {
+                return false;
+            };
+            let Ok(tcp) = parse_tcp(ipv4.payload) else {
+                return false;
+            };
+            tcp.syn && tcp.ack
+        }));
+    }
+
+    #[test]
     fn icmp_echo_reply_requires_ping_policy() {
         let policy = PolicyEngine::new(PolicyConfig::deny_by_default().allow_ping(true));
         let mut runtime = TransparentIcmpRuntime::new(policy);
@@ -921,9 +1126,27 @@ mod tests {
         packet[10..12].copy_from_slice(&sum.to_be_bytes());
         packet[20..22].copy_from_slice(&49152_u16.to_be_bytes());
         packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        packet[24..28].copy_from_slice(&1_u32.to_be_bytes());
         packet[32] = 5 << 4;
         packet[33] = 0x02;
+        packet[34..36].copy_from_slice(&64240_u16.to_be_bytes());
+        let tcp_sum = tcp_checksum_ipv4(Ipv4Addr::new(10, 0, 2, 2), destination, &packet[20..]);
+        packet[36..38].copy_from_slice(&tcp_sum.to_be_bytes());
         packet
+    }
+
+    fn tcp_checksum_ipv4(source: Ipv4Addr, destination: Ipv4Addr, tcp_segment: &[u8]) -> u16 {
+        let mut pseudo = Vec::with_capacity(12 + tcp_segment.len() + 1);
+        pseudo.extend_from_slice(&source.octets());
+        pseudo.extend_from_slice(&destination.octets());
+        pseudo.push(0);
+        pseudo.push(6);
+        pseudo.extend_from_slice(&(tcp_segment.len() as u16).to_be_bytes());
+        pseudo.extend_from_slice(tcp_segment);
+        if pseudo.len() % 2 != 0 {
+            pseudo.push(0);
+        }
+        checksum(&pseudo)
     }
 
     fn icmp_echo_packet() -> Vec<u8> {

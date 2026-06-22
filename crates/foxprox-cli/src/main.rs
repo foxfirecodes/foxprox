@@ -18,10 +18,10 @@ use foxprox_core::policy::{
     Cidr, PolicyConfig, PolicyEngine, PolicyRequest, PolicyRule, RuleAction,
 };
 use foxprox_core::runtime::{
-    TransparentInspectionRuntime, TransparentTcpRuntime, TransparentUdpRuntime,
+    TransparentTcpBridgeRuntime, TransparentTcpRuntime, TransparentUdpRuntime,
 };
 use foxprox_core::scenario::{run_scenario, ScenarioName};
-use foxprox_core::smoltcp_gate::{feed_tcp_syn_to_smoltcp_listener, SmoltcpTcpServerHarness};
+use foxprox_core::smoltcp_gate::feed_tcp_syn_to_smoltcp_listener;
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -1903,105 +1903,29 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
                 .http_path_prefix("/public"),
         ),
     );
-    let mut inspect_runtime = TransparentInspectionRuntime::new(inspect_policy);
-    let mut stack = SmoltcpTcpServerHarness::listen(bridge_destination, 80)?;
+    let inspection = foxprox_core::runtime::TransparentInspectionRuntime::new(inspect_policy);
+    let mut bridge_runtime = TransparentTcpBridgeRuntime::listen(bridge_destination, 80, policy)?
+        .with_inspection(inspection);
     let mut buf = [0_u8; 4096];
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut packets_read = 0_u64;
     let mut emitted_packets = 0_u64;
     let mut bridged_bytes = 0_usize;
     let mut response_written = false;
-    let mut policy_allowed = false;
-    let mut policy_audit = None;
-    let mut inspect_audit = None;
     while Instant::now() < deadline {
         match fd_handoff::read_fd(fd, &mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
-                if policy_audit.is_none() {
-                    if let Ok(parsed) = foxprox_core::packet::parse_ipv4(packet) {
-                        if parsed.protocol_number == 6 {
-                            if let Ok(tcp) = foxprox_core::packet::parse_tcp(parsed.payload) {
-                                if tcp.destination_port == 80 && tcp.syn && !tcp.ack {
-                                    let source = std::net::SocketAddr::new(
-                                        std::net::IpAddr::V4(parsed.source),
-                                        tcp.source_port,
-                                    );
-                                    let destination = std::net::SocketAddr::new(
-                                        std::net::IpAddr::V4(parsed.destination),
-                                        tcp.destination_port,
-                                    );
-                                    let request = PolicyRequest::new(
-                                        "tcp-bridge-smoke",
-                                        Frontend::Tun,
-                                        Protocol::Tcp,
-                                    )
-                                    .with_source(source.ip(), source.port())
-                                    .with_destination(destination.ip(), destination.port());
-                                    let outcome = policy.evaluate(&request);
-                                    policy_allowed = outcome.decision.is_allow();
-                                    policy_audit = Some(
-                                        AuditRecord::new(
-                                            EventKind::TcpConnectAttempt,
-                                            "tcp-bridge-smoke",
-                                            outcome.decision,
-                                            outcome.reason,
-                                        )
-                                        .with_frontend(Frontend::Tun)
-                                        .with_protocol(Protocol::Tcp)
-                                        .with_addresses(Some(source), Some(destination))
-                                        .with_rule(outcome.rule_id),
-                                    );
-                                    if !policy_allowed {
-                                        let rst = foxprox_core::packet::synthesize_tcp_rst(packet)?;
-                                        fd_handoff::write_all_fd(fd, &rst)?;
-                                        continue;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                if !policy_allowed {
-                    continue;
-                }
-                if inspect_audit.is_none() {
-                    if let Ok(parsed) = foxprox_core::packet::parse_ipv4(packet) {
-                        if parsed.protocol_number == 6 {
-                            if let Ok(tcp) = foxprox_core::packet::parse_tcp(parsed.payload) {
-                                if tcp.destination_port == 80 && !tcp.payload.is_empty() {
-                                    inspect_runtime
-                                        .inspect_ipv4_tcp_payload("tcp-bridge-smoke", packet)?;
-                                    inspect_audit = inspect_runtime.audit.last().cloned();
-                                    if !inspect_audit
-                                        .as_ref()
-                                        .is_some_and(|audit| audit.decision.is_allow())
-                                    {
-                                        return Err(
-                                            "transparent HTTP inspection denied TCP bridge payload"
-                                                .to_string(),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-                stack.receive_packet(packet.to_vec())?;
-                for emitted in stack.drain_emitted_packets() {
+                let step = bridge_runtime.handle_ipv4_packet("tcp-bridge-smoke", packet)?;
+                for emitted in step.emitted_packets {
                     emitted_packets += 1;
                     fd_handoff::write_all_fd(fd, &emitted)?;
                 }
-                if let Some(data) = stack.recv_available()? {
+                if let Some(data) = step.egress_payload {
                     if !data.is_empty() && !response_written {
                         bridged_bytes = data.len();
-                        if !policy_allowed {
-                            return Err(
-                                "TCP bridge attempted host egress before policy allow".to_string()
-                            );
-                        }
                         let mut stream =
                             TcpStream::connect_timeout(&echo_addr, Duration::from_secs(2))
                                 .map_err(|err| {
@@ -2019,8 +1943,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
                         let reply_len = stream
                             .read(&mut reply)
                             .map_err(|err| format!("TCP bridge host egress read failed: {err}"))?;
-                        stack.send_slice(&reply[..reply_len])?;
-                        for emitted in stack.drain_emitted_packets() {
+                        for emitted in bridge_runtime.send_egress_response(&reply[..reply_len])? {
                             emitted_packets += 1;
                             fd_handoff::write_all_fd(fd, &emitted)?;
                         }
@@ -2036,8 +1959,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
                 ))
             }
         }
-        stack.poll()?;
-        for emitted in stack.drain_emitted_packets() {
+        for emitted in bridge_runtime.poll()? {
             emitted_packets += 1;
             fd_handoff::write_all_fd(fd, &emitted)?;
         }
@@ -2061,7 +1983,19 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
         .join()
         .map_err(|_| "TCP bridge echo fixture thread panicked".to_string())?;
     echo_result?;
-    let runtime_audit = policy_audit.clone();
+    let runtime_audit = bridge_runtime
+        .audit
+        .iter()
+        .find(|audit| audit.kind == EventKind::TcpConnectAttempt)
+        .cloned();
+    let inspect_audit = bridge_runtime
+        .audit
+        .iter()
+        .find(|audit| audit.kind == EventKind::HttpRequest)
+        .cloned();
+    let policy_allowed = runtime_audit
+        .as_ref()
+        .is_some_and(|audit| audit.decision.is_allow());
     let success = output.status.success()
         && response_written
         && bridged_bytes == b"GET /public HTTP/1.1\r\nHost: example.com\r\n\r\n".len()
