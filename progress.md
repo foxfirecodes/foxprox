@@ -1568,3 +1568,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: session assumes policy already opened the flow; it does not yet own `TcpStackRuntime`, host-read reverse pumping, TUN writer draining, or lifecycle close auditing.
 - Exact next step: commit one-step TCP bridge session, then add a complementary session method that pumps host bytes from `TcpFlowRuntime` back into smoltcp and drains emitted IP packets to a TUN-like writer.
+
+## 2026-06-22T22:34:50Z
+- Current objective: continue after one-step TCP bridge session by adding host-to-sandbox session pumping.
+- Git status summary: clean worktree after commit `41305ca`.
+- Intended slice: add a session method that pumps host bytes from `TcpFlowRuntime<StdTcpStreamBridge<Vec<u8>>>`, injects them into the smoltcp accepted flow, polls, and drains emitted IP packets to a TUN-like writer.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: this will still use a Vec-backed bridge writer and in-memory TUN writer rather than a continuous live fd loop.
+- Exact next step: add typed host-to-sandbox pump outcome and regression with localhost host bytes.
+
+## 2026-06-22T22:36:05Z
+- Current objective: add host-to-sandbox pumping to the smoltcp TCP bridge session.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on chained formatting and bridge constructor wrapping; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings` (initially failed on an unnecessary `mut`; fixed)
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 27 smoltcp adapter tests passed. `SmoltcpTcpBridgeSession` can now pump host bytes from `TcpFlowRuntime<StdTcpStreamBridge<Vec<u8>>>`, inject them into the accepted smoltcp flow, poll, and drain emitted IP packets to a TUN-like writer with typed write errors.
+- Commit hash when committed: pending.
+- Remaining risks: session still depends on callers to establish/open flows and uses Vec-backed host-read staging; continuous event loop, real TUN fd, and lifecycle close auditing remain.
+- Exact next step: commit host-to-sandbox session pump, then add flow close accounting for the session path so packet-pumped bridge byte counts can become audited lifecycle events.

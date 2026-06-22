@@ -64,12 +64,21 @@ pub enum SmoltcpTunPumpOutcome {
 pub enum SmoltcpTcpBridgeSessionError {
     Adapter(SmoltcpAdapterError),
     Bridge(TcpBridgeError),
+    TunWrite,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SmoltcpTcpBridgeSessionOutcome {
     pub flow: FlowKey,
     pub bytes_forwarded: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SmoltcpHostToSandboxPumpOutcome {
+    pub host_read: foxprox_runtime::TcpHostReadOutcome,
+    pub sandbox_bytes: usize,
+    pub outbound_packets: usize,
+    pub outbound_bytes: usize,
 }
 
 pub struct SmoltcpTcpBridgeSession<B> {
@@ -114,6 +123,47 @@ impl<B: TcpStreamBridge> SmoltcpTcpBridgeSession<B> {
         Ok(SmoltcpTcpBridgeSessionOutcome {
             flow: payload.flow,
             bytes_forwarded: payload.bytes.len(),
+        })
+    }
+}
+
+impl SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>> {
+    pub fn pump_host_to_sandbox_once<W: Write>(
+        &mut self,
+        flow: &FlowKey,
+        max_host_bytes: usize,
+        tun_writer: &mut W,
+        now_millis: i64,
+    ) -> Result<SmoltcpHostToSandboxPumpOutcome, SmoltcpTcpBridgeSessionError> {
+        let previous_writer_len = self.flow_runtime.bridge().bridge().sandbox_writer().len();
+        let host_read = self
+            .flow_runtime
+            .pump_host_once_to_sandbox_writer(flow, max_host_bytes)
+            .map_err(SmoltcpTcpBridgeSessionError::Bridge)?;
+        let sandbox_bytes =
+            self.flow_runtime.bridge().bridge().sandbox_writer()[previous_writer_len..].to_vec();
+        if !sandbox_bytes.is_empty() {
+            self.adapter
+                .send_to_sandbox_on_flow(flow, &sandbox_bytes)
+                .map_err(SmoltcpTcpBridgeSessionError::Adapter)?;
+        }
+        self.adapter.poll_once(now_millis);
+
+        let mut outbound_packets = 0;
+        let mut outbound_bytes = 0;
+        while let Some(packet) = self.adapter.next_outbound_ip_packet() {
+            tun_writer
+                .write_all(&packet)
+                .map_err(|_| SmoltcpTcpBridgeSessionError::TunWrite)?;
+            outbound_packets += 1;
+            outbound_bytes += packet.len();
+        }
+
+        Ok(SmoltcpHostToSandboxPumpOutcome {
+            host_read,
+            sandbox_bytes: sandbox_bytes.len(),
+            outbound_packets,
+            outbound_bytes,
         })
     }
 }
@@ -1158,6 +1208,60 @@ mod tests {
                 assert_eq!(segment.source_port, 8080);
                 assert_eq!(segment.destination_port, 50001);
                 assert_eq!(segment.payload, b"host-via-runtime");
+            }
+            other => panic!("expected TCP payload packet, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bridge_session_pumps_host_bytes_to_tun_writer() {
+        let (adapter, payload) = packet_pumped_adapter_with_payload(b"sandbox-request");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.write_all(b"session-reply").unwrap();
+        });
+        let host_stream = TcpStream::connect(listen_addr).unwrap();
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("packet-pumped-session-reply").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let bridge =
+            StdTcpStreamBridge::new(payload.flow.clone(), host_stream, Vec::new()).unwrap();
+        let mut flow_runtime = TcpFlowRuntime::new(&components, bridge);
+        flow_runtime.mark_opened(payload.flow.clone()).unwrap();
+        let mut session = SmoltcpTcpBridgeSession::new(adapter, flow_runtime);
+        let mut tun_writer = Vec::new();
+
+        let outcome = session
+            .pump_host_to_sandbox_once(&payload.flow, 64, &mut tun_writer, 4)
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(
+            outcome,
+            SmoltcpHostToSandboxPumpOutcome {
+                host_read: TcpHostReadOutcome::Bytes {
+                    count: b"session-reply".len()
+                },
+                sandbox_bytes: b"session-reply".len(),
+                outbound_packets: 1,
+                outbound_bytes: tun_writer.len()
+            }
+        );
+        match parse_ip_packet(&tun_writer).unwrap() {
+            ParsedIpPacket::Tcpv4Segment(segment) => {
+                assert_eq!(segment.source, Ipv4Addr::new(10, 66, 0, 1));
+                assert_eq!(segment.destination, Ipv4Addr::new(10, 66, 0, 2));
+                assert_eq!(segment.source_port, 8080);
+                assert_eq!(segment.destination_port, 50001);
+                assert_eq!(segment.payload, b"session-reply");
             }
             other => panic!("expected TCP payload packet, got {other:?}"),
         }
