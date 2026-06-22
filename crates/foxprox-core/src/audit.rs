@@ -492,7 +492,11 @@ impl AuditEvent {
             reason: None,
             http_method: None,
             http_path_query: None,
-            byte_count: Some(entry.bytes_from_sandbox),
+            byte_count: Some(
+                entry
+                    .bytes_from_sandbox
+                    .saturating_add(entry.bytes_from_host),
+            ),
             flow_duration_millis: Some(timestamp_millis.saturating_sub(entry.created_at_millis)),
         }
     }
@@ -1704,6 +1708,7 @@ mod tests {
             last_seen_millis: 1_100,
             expires_at_millis: 181_100,
             bytes_from_sandbox: 42,
+            bytes_from_host: 8,
         };
 
         let event = AuditEvent::from_udp_flow_entry(
@@ -1717,12 +1722,12 @@ mod tests {
         assert_eq!(event.source, Some(entry.key.source));
         assert_eq!(event.destination, Some(entry.key.destination));
         assert_eq!(event.requested_port, Some(443));
-        assert_eq!(event.byte_count, Some(42));
+        assert_eq!(event.byte_count, Some(50));
         assert_eq!(event.flow_duration_millis, Some(250));
         let line = event.to_json_line();
         assert!(line.contains("\"kind\":\"quic_candidate_flow_created\""));
         assert!(line.contains("\"protocol\":\"quic_candidate\""));
-        assert!(line.contains("\"byte_count\":42"));
+        assert!(line.contains("\"byte_count\":50"));
         assert!(line.contains("\"flow_duration_millis\":250"));
     }
 
@@ -1738,6 +1743,7 @@ mod tests {
             last_seen_millis: 550,
             expires_at_millis: 1_000,
             bytes_from_sandbox: u64::MAX,
+            bytes_from_host: 1,
         };
 
         let event = AuditEvent::from_udp_flow_entry(

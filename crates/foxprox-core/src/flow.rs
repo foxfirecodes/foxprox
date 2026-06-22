@@ -239,6 +239,7 @@ pub struct UdpFlowEntry {
     pub last_seen_millis: u64,
     pub expires_at_millis: u64,
     pub bytes_from_sandbox: u64,
+    pub bytes_from_host: u64,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -278,11 +279,33 @@ impl UdpFlowTable {
         byte_count: u64,
         now_millis: u64,
     ) -> UdpFlowObserveOutcome {
+        self.observe(key, protocol, byte_count, 0, now_millis)
+    }
+
+    pub fn observe_from_host(
+        &mut self,
+        key: UdpFlowKey,
+        protocol: Protocol,
+        byte_count: u64,
+        now_millis: u64,
+    ) -> UdpFlowObserveOutcome {
+        self.observe(key, protocol, 0, byte_count, now_millis)
+    }
+
+    fn observe(
+        &mut self,
+        key: UdpFlowKey,
+        protocol: Protocol,
+        sandbox_bytes: u64,
+        host_bytes: u64,
+        now_millis: u64,
+    ) -> UdpFlowObserveOutcome {
         let expired = self.expire(now_millis);
         if let Some(entry) = self.flows.iter_mut().find(|entry| entry.key == key) {
             entry.class = UdpFlowClass::classify(protocol, key.destination);
             entry.last_seen_millis = now_millis;
-            entry.bytes_from_sandbox = entry.bytes_from_sandbox.saturating_add(byte_count);
+            entry.bytes_from_sandbox = entry.bytes_from_sandbox.saturating_add(sandbox_bytes);
+            entry.bytes_from_host = entry.bytes_from_host.saturating_add(host_bytes);
             entry.expires_at_millis =
                 now_millis.saturating_add(self.timeouts.timeout_for(entry.class));
             return UdpFlowObserveOutcome {
@@ -313,7 +336,8 @@ impl UdpFlowTable {
             created_at_millis: now_millis,
             last_seen_millis: now_millis,
             expires_at_millis: now_millis.saturating_add(self.timeouts.timeout_for(class)),
-            bytes_from_sandbox: byte_count,
+            bytes_from_sandbox: sandbox_bytes,
+            bytes_from_host: host_bytes,
         });
 
         UdpFlowObserveOutcome {
@@ -512,7 +536,26 @@ mod tests {
         assert_eq!(entry.created_at_millis, 1);
         assert_eq!(entry.last_seen_millis, 2);
         assert_eq!(entry.bytes_from_sandbox, u64::MAX);
+        assert_eq!(entry.bytes_from_host, 0);
         assert_eq!(entry.expires_at_millis, 180_002);
+    }
+
+    #[test]
+    fn udp_flow_table_tracks_host_reply_bytes_and_refreshes_timeout() {
+        let mut table = UdpFlowTable::new(8, UdpFlowTimeouts::default());
+        let flow = key(40000, endpoint([203, 0, 113, 10], 443));
+
+        table.observe_from_sandbox(flow, Protocol::QuicCandidate, 10, 1);
+        let outcome = table.observe_from_host(flow, Protocol::QuicCandidate, u64::MAX, 2);
+        let second = table.observe_from_host(flow, Protocol::QuicCandidate, 1, 3);
+
+        assert_eq!(outcome.status, UdpFlowObserveStatus::Updated);
+        assert_eq!(second.status, UdpFlowObserveStatus::Updated);
+        let entry = table.get(flow).unwrap();
+        assert_eq!(entry.bytes_from_sandbox, 10);
+        assert_eq!(entry.bytes_from_host, u64::MAX);
+        assert_eq!(entry.last_seen_millis, 3);
+        assert_eq!(entry.expires_at_millis, 180_003);
     }
 
     #[test]
@@ -558,6 +601,7 @@ mod tests {
         assert_eq!(expired[0].key, dns);
         assert_eq!(expired[0].class, UdpFlowClass::Dns);
         assert_eq!(expired[0].bytes_from_sandbox, 20);
+        assert_eq!(expired[0].bytes_from_host, 0);
         assert!(table.get(dns).is_none());
         assert!(table.get(quic).is_some());
         assert_eq!(table.len(), 1);

@@ -1174,3 +1174,23 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * ambiguous DNS cache state can be denied or handled separately instead of silently authorizing by FIFO cache order.
 * Audit evidence: no new audit event in this helper; it protects the attribution selected before existing packet/TLS/QUIC audit builders run.
 * Residual risk: callers must still wire `lookup_unique` into the live flow path; multi-host shared-IP policy semantics remain conservative false-deny rather than attempting request-level disambiguation.
+
+## 2026-06-21 - UDP flow reply accounting for lifecycle audit
+
+* Invariant under work: UDP pseudo-flow state must account for both sandbox-to-host and host-to-sandbox bytes so expiration audit records reflect complete broker-mediated traffic rather than only outbound datagrams.
+* Threat or failure mode addressed: a live UDP forwarder could route replies through broker-controlled sockets but later audit only sandbox bytes, hiding response volume and making resource review incomplete.
+* Planned verification: add host-byte accounting to bounded UDP flow entries, expose a host observation update path, update lifecycle audit byte counts, add tests for saturating bidirectional counters, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - UDP flow reply accounting for lifecycle audit results
+
+* Tests added/updated:
+  * UDP flow table records host-to-sandbox reply bytes, refreshes idle timeout on replies, and uses saturating counters.
+  * expired UDP flow entries preserve both sandbox and host byte counters for audit.
+  * UDP lifecycle audit byte counts now sum bidirectional traffic with saturation.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 161 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * bounded UDP flow state remains capacity/timeout controlled while gaining response-side accounting.
+  * lifecycle audit records now reflect complete broker-mediated datagram volume for the pseudo-flow.
+* Audit evidence: flow and audit tests assert bidirectional byte totals and JSON byte_count fields for UDP lifecycle events.
+* Residual risk: live host UDP socket mapping and actual reply packet synthesis/routing remain future work; this commit only strengthens bounded core flow accounting.

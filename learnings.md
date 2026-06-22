@@ -217,3 +217,7 @@ DNS cache attribution can safely enrich ordinary transparent TCP/UDP policy requ
 ## 2026-06-21 - Shared-IP DNS cache lookups need an explicit ambiguity state
 
 DNS cache APIs should not force callers to choose the first hostname for an IP. Returning `Ambiguous` for shared-IP mappings makes the false-deny tradeoff explicit and avoids accidental domain authorization based on cache insertion order.
+
+## 2026-06-21 - UDP lifecycle audit needs reply-side byte accounting
+
+UDP pseudo-flows are bidirectional once a host socket is opened. Expiration audit records should include host-to-sandbox bytes as well as sandbox-to-host bytes, using saturating counters so large flows cannot wrap audit totals.
