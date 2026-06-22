@@ -43,6 +43,17 @@ impl PolicyEngine {
             }
         }
 
+        if self.is_direct_encrypted_dns_candidate(event) {
+            if let Some(decision) = self.match_configured_rule(event) {
+                return decision;
+            }
+            return deny(
+                DenialAction::Reset,
+                None,
+                "direct DNS-over-TLS candidate denied by default",
+            );
+        }
+
         if let NormalizedEvent::UdpFlowAttempt(udp) = event {
             if udp.classification == UdpClassification::MulticastOrBroadcast {
                 return deny(
@@ -136,6 +147,16 @@ impl PolicyEngine {
                     deny(action, Some(rule.id.clone()), "matched deny rule")
                 }
             })
+    }
+
+    fn is_direct_encrypted_dns_candidate(&self, event: &NormalizedEvent) -> bool {
+        if event.protocol() != Protocol::Tcp || event.destination_port() != Some(853) {
+            return false;
+        }
+        event.destination_ip().is_some_and(|ip| {
+            !self.config.broker_dns_addrs.contains(&ip)
+                && self.config.direct_dns_policy == DirectDnsPolicy::DenyExternal
+        })
     }
 }
 
@@ -507,6 +528,39 @@ mod tests {
         rule.protocol = ProtocolMatcher::Exact(Protocol::TlsClientHello);
         rule.destination = DestinationMatcher::Ip("203.0.113.10".parse().unwrap());
         rule.port = foxprox_core::PortMatcher::Exact(443);
+        config.rules.push(rule);
+
+        assert!(PolicyEngine::new(config).decide(&event).is_allowed());
+    }
+
+    #[test]
+    fn direct_dot_candidate_is_denied_before_default_allow() {
+        let event = NormalizedEvent::TcpConnectAttempt(TcpConnectAttempt {
+            sandbox_id: sandbox(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:41000".parse().unwrap(),
+            destination: "203.0.113.53:853".parse().unwrap(),
+            hostname: None,
+        });
+
+        let decision = PolicyEngine::new(RuntimeConfig::allow_by_default()).decide(&event);
+        assert!(matches!(decision, PolicyDecision::Deny(_)));
+    }
+
+    #[test]
+    fn explicit_rule_can_allow_dot_candidate() {
+        let event = NormalizedEvent::TcpConnectAttempt(TcpConnectAttempt {
+            sandbox_id: sandbox(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:41000".parse().unwrap(),
+            destination: "203.0.113.53:853".parse().unwrap(),
+            hostname: None,
+        });
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut rule = PolicyRule::allow(RuleId::new("allow-dot-lab").unwrap());
+        rule.protocol = ProtocolMatcher::Exact(Protocol::Tcp);
+        rule.destination = DestinationMatcher::Ip("203.0.113.53".parse().unwrap());
+        rule.port = foxprox_core::PortMatcher::Exact(853);
         config.rules.push(rule);
 
         assert!(PolicyEngine::new(config).decide(&event).is_allowed());

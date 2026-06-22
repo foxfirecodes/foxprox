@@ -82,3 +82,8 @@
 - UDP destination classification is a shared core contract rather than a packet-local or flow-local helper; otherwise QUIC/DNS/multicast behavior could drift between raw packet parsing and stack-adapter flow paths.
 - TCP packet normalization should only emit connect attempts for initial SYN packets; later TCP segment handling belongs behind the userspace stack adapter and remains fail-closed in the packet proof parser.
 - ICMP denial packet synthesis can remain an opaque packet-boundary helper so policy chooses `Deny(IcmpUnreachable)` without learning raw IPv4/ICMP header shapes.
+
+## 2026-06-21 — Identifiable encrypted-DNS guard
+
+- DNS-over-TLS bypass prevention can be expressed as a normalized destination-port policy guard for TCP/853; policy does not need raw TLS or DNS parser inputs to deny this identifiable case by default.
+- The guard must run before default allow but after explicit configured rules are checked for that candidate, preserving a deliberate escape hatch for test resolvers or future broker-owned encrypted DNS endpoints.

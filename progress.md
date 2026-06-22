@@ -402,3 +402,21 @@
   - `cargo tree -p foxprox-packet` — packet crate depends only on `foxprox-core`.
 - Commit hash after commit: 7affa80.
 - Remaining boundary risks: IPv6 TCP/UDP normalization, production stack-adapter TCP segment handling, real TUN fd IO, UDP forwarding sockets, and policy-driven ICMP-unreachable write-back integration remain.
+
+## 2026-06-21 — Boundary objective: identifiable encrypted-DNS policy guard
+
+- Boundary under work: default fail-closed policy for identifiable direct encrypted DNS, starting with DNS-over-TLS TCP/853 candidates.
+- Allowed dependency direction: `foxprox-policy` consumes normalized destination IP/port and runtime broker DNS addresses from `foxprox-core`; it must not inspect raw TLS, DNS, TCP, or frontend parser objects.
+- Dependency-risk assessment: default-allow TCP policy can accidentally permit DoT bypass before richer TLS/DoH metadata exists, so the policy needs a normalized pre-default guard with an explicit rule escape hatch.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: all verification passed.
+- Changed files:
+  - `crates/foxprox-policy/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 60 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: DoH identification by hostname/IP intelligence, DNS-over-QUIC classification, and production TLS metadata wiring remain.
