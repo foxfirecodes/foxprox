@@ -6,10 +6,10 @@
 
 use foxprox_core::{
     classify_udp_candidate, parse_dns_query, parse_dns_response, Attribution, AuditBackpressure,
-    AuditBuffer, AuditEvent, AuditEventKind, Decision, DnsCache, DnsCacheEntry,
-    DnsResponseObservation, FlowKey, FlowTimeoutClass, Frontend, NetworkEvent, PolicyEngine,
-    PolicyRuleSet, Protocol, SandboxId, TransportEndpoint, UdpFlowRecord, UdpFlowTable,
-    UnsupportedReason,
+    AuditBuffer, AuditEvent, AuditEventKind, Decision, DecisionAction, DenialReason, DnsCache,
+    DnsCacheEntry, DnsResponseObservation, FlowKey, FlowTimeoutClass, Frontend, NetworkEvent,
+    PolicyEngine, PolicyRuleSet, Protocol, SandboxId, TransportEndpoint, UdpFlowRecord,
+    UdpFlowTable, UnsupportedReason,
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, PacketMeta, TunTapInterface};
@@ -55,6 +55,8 @@ pub struct UdpDnsProofConfig {
     pub audit_queue_capacity: usize,
     /// Maximum simultaneous DNS/UDP host worker threads.
     pub max_worker_threads: usize,
+    /// Maximum simultaneous tracked UDP pseudo-flows.
+    pub max_udp_flows: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -163,6 +165,7 @@ impl UdpDnsProofConfig {
             policy: PolicyRuleSet::default(),
             audit_queue_capacity: 8192,
             max_worker_threads: 1024,
+            max_udp_flows: 4096,
         }
     }
 }
@@ -183,6 +186,7 @@ where
 {
     let mut audit = audit_buffer(config.audit_queue_capacity)?;
     let worker_limiter = WorkerLimiter::new(config.max_worker_threads)?;
+    validate_max_udp_flows(config.max_udp_flows)?;
     set_nonblocking(tun_fd.as_raw_fd())?;
     let raw_fd = tun_fd.into_raw_fd();
     let mut device = TunTapInterface::from_fd(raw_fd, Medium::Ip, config.mtu).map_err(|error| {
@@ -588,6 +592,19 @@ pub(crate) fn handle_udp_forward_datagram(
     if !decision.is_allowed() {
         return Ok(());
     }
+    if flows.get(&key).is_none() && flows.len() >= config.max_udp_flows {
+        let decision = Decision {
+            action: DecisionAction::FailClosed,
+            rule_id: None,
+            reason: Some(DenialReason::ResourceLimit("max_udp_flows")),
+        };
+        emit_udp_audit(audit, &event, decision)?;
+        eprintln!(
+            "foxprox-net: drop UDP forward: max udp flows reached capacity={}",
+            config.max_udp_flows
+        );
+        return Ok(());
+    }
     let Some(permit) = worker_limiter.try_acquire() else {
         eprintln!("foxprox-net: drop UDP forward: worker limit reached");
         return Ok(());
@@ -622,6 +639,16 @@ fn audit_buffer(capacity: usize) -> io::Result<AuditBuffer> {
         ));
     }
     Ok(AuditBuffer::new(capacity))
+}
+
+pub(crate) fn validate_max_udp_flows(max_udp_flows: usize) -> io::Result<()> {
+    if max_udp_flows == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "max UDP flows must be non-zero",
+        ));
+    }
+    Ok(())
 }
 
 fn emit_udp_audit(
@@ -916,7 +943,7 @@ mod tests {
     use super::*;
     use foxprox_core::{
         AttributionConfidence, AttributionSource, DecisionAction, DnsAddressRecord, DnsObservation,
-        DnsQueryType, Hostname,
+        DnsQueryType, Hostname, PolicyRule, PortRange, RuleEffect,
     };
 
     #[test]
@@ -930,6 +957,7 @@ mod tests {
         assert!(config.udp_forward_timeout <= Duration::from_secs(3));
         assert!(config.audit_queue_capacity > 0);
         assert!(config.max_worker_threads > 0);
+        assert!(config.max_udp_flows > 0);
     }
 
     #[test]
@@ -978,6 +1006,14 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn udp_flow_limit_rejects_zero_capacity() {
+        assert_eq!(
+            validate_max_udp_flows(0).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 
     fn udp_metadata(source_ip: Ipv4Addr, source_port: u16, local_ip: Ipv4Addr) -> udp::UdpMetadata {
@@ -1094,6 +1130,73 @@ mod tests {
         assert_eq!(audit.destination.unwrap().port, 443);
         assert_eq!(audit.destination_port, Some(443));
         assert!(audit.decision.unwrap().is_allowed());
+    }
+
+    #[test]
+    fn udp_flow_limit_denies_new_flow_before_record_or_worker_spawn() {
+        let mut config = UdpDnsProofConfig::new(SandboxId::new("test").unwrap());
+        config.max_udp_flows = 1;
+        config.udp_forward_ports.push(443);
+        config.policy.rules.push(
+            PolicyRule::new("allow-udp-443", RuleEffect::Allow)
+                .with_protocol(Protocol::Quic)
+                .with_destination_ports(PortRange::single(443)),
+        );
+        let existing_key = FlowKey::udp(
+            IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)),
+            40000,
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            443,
+        );
+        let mut flows = UdpFlowTable::default();
+        flows.record_sandbox_datagram(
+            existing_key,
+            FlowTimeoutClass::Quic,
+            Attribution::ip_only(),
+            1,
+            SystemTime::now(),
+        );
+        let mut audit = audit_buffer(8).unwrap();
+        let limiter = WorkerLimiter::new(1).unwrap();
+        let (worker_tx, worker_rx) = mpsc::channel();
+        let mut socket = udp_socket(&config).unwrap();
+        socket.bind(443).unwrap();
+        let mut sockets = SocketSet::new(vec![]);
+        let handle = sockets.add(socket);
+
+        handle_udp_forward_datagram(
+            &config,
+            &DnsCache::default(),
+            &mut flows,
+            &mut audit,
+            &limiter,
+            worker_tx,
+            UdpForwardDatagram {
+                socket: UdpForwardSocket { port: 443, handle },
+                payload: vec![1, 2, 3],
+                metadata: udp_metadata(Ipv4Addr::new(10, 255, 0, 2), 40001, config.broker_ip),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(flows.len(), 1);
+        assert!(flows
+            .get(&FlowKey::udp(
+                IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)),
+                40001,
+                IpAddr::V4(config.broker_ip),
+                443,
+            ))
+            .is_none());
+        assert_eq!(limiter.active_count(), 0);
+        assert!(worker_rx.try_recv().is_err());
+        let _policy_allow = audit.pop_front().unwrap();
+        let limit_audit = audit.pop_front().unwrap();
+        assert_eq!(limit_audit.kind, AuditEventKind::UdpPacketDenied);
+        assert_eq!(
+            limit_audit.decision.unwrap().reason,
+            Some(DenialReason::ResourceLimit("max_udp_flows"))
+        );
     }
 
     #[test]

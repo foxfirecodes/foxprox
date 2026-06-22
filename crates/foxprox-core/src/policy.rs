@@ -42,6 +42,8 @@ pub enum DenialReason {
     SniDnsMismatch,
     /// Hidden or missing SNI is denied without an explicit IP/CIDR allow rule.
     HiddenSni,
+    /// A configured runtime resource limit was reached.
+    ResourceLimit(&'static str),
 }
 
 /// Policy decision plus the matching rule/reason.

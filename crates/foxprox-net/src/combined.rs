@@ -2,7 +2,8 @@
 
 use crate::udp::{
     expire_udp_flows_with_audit, handle_dns_datagram, handle_udp_forward_datagram,
-    handle_worker_results, udp_socket, UdpForwardDatagram, UdpForwardSocket, WorkerLimiter,
+    handle_worker_results, udp_socket, validate_max_udp_flows, UdpForwardDatagram,
+    UdpForwardSocket, WorkerLimiter,
 };
 use crate::{audit_buffer, set_nonblocking, smoltcp_ipv4, TcpProofConfig, TransparentTcpState};
 use foxprox_core::{DnsCache, PolicyRuleSet, SandboxId, UdpFlowTable};
@@ -56,6 +57,8 @@ pub struct CombinedTransparentProofConfig {
     pub audit_queue_capacity: usize,
     /// Maximum simultaneous DNS/UDP host worker threads.
     pub max_worker_threads: usize,
+    /// Maximum simultaneous tracked UDP pseudo-flows.
+    pub max_udp_flows: usize,
 }
 
 impl CombinedTransparentProofConfig {
@@ -82,6 +85,7 @@ impl CombinedTransparentProofConfig {
             policy: PolicyRuleSet::default(),
             audit_queue_capacity: udp.audit_queue_capacity,
             max_worker_threads: udp.max_worker_threads,
+            max_udp_flows: udp.max_udp_flows,
         }
     }
 
@@ -116,6 +120,7 @@ impl CombinedTransparentProofConfig {
             policy: self.policy.clone(),
             audit_queue_capacity: self.audit_queue_capacity,
             max_worker_threads: self.max_worker_threads,
+            max_udp_flows: self.max_udp_flows,
         }
     }
 }
@@ -139,6 +144,7 @@ where
 {
     let mut audit = audit_buffer(config.audit_queue_capacity)?;
     let worker_limiter = WorkerLimiter::new(config.max_worker_threads)?;
+    validate_max_udp_flows(config.max_udp_flows)?;
     set_nonblocking(tun_fd.as_raw_fd())?;
     let raw_fd = tun_fd.into_raw_fd();
     let mut device = TunTapInterface::from_fd(raw_fd, Medium::Ip, config.mtu).map_err(|error| {
@@ -333,6 +339,7 @@ mod tests {
         assert!(config.udp_payload_capacity >= 1500);
         assert!(config.audit_queue_capacity > 0);
         assert!(config.max_worker_threads > 0);
+        assert!(config.max_udp_flows > 0);
     }
 
     #[test]
@@ -354,6 +361,14 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn combined_rejects_zero_udp_flow_capacity_before_tun_setup() {
+        assert_eq!(
+            validate_max_udp_flows(0).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
     }
 
     #[test]

@@ -1585,3 +1585,53 @@
 - Files changed: `crates/foxprox-net/src/udp.rs`, `crates/foxprox-net/src/combined.rs`, `progress.md`.
 - Current git status summary: UDP/combined/progress modified; review artifact summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit DNS response answer audit, then reassess remaining alpha gaps.
+
+## 2026-06-22T01:26:10Z — DNS response audit committed; alpha reassessment next
+
+- Commit created: `4dccef3` (`audit broker dns responses`).
+- Current objective: reassess remaining alpha gaps after DNS response answer audit.
+- Completed in commit:
+  - Broker DNS response observations now emit structured audit metadata for rcode and returned answers before sandbox response delivery.
+  - DNS response audit backpressure withholds both the DNS response and associated cache state, preventing unaudited DNS answers from influencing later attribution/policy.
+  - Standalone UDP/DNS and combined transparent runtimes both pass the bounded audit buffer into DNS worker-result handling.
+- Verification evidence from pre-commit entry remains valid: focused net tests, workspace fmt/check/test/clippy/doc, and `cargo tree -p foxprox-net` all passed after the blocker fix.
+- Current git status summary after commit: code tree was clean immediately after `4dccef3`; this progress checkpoint entry is now the only uncommitted change.
+- Next exact action: run/read a fresh alpha gap reassessment, then start the next smallest remaining alpha slice or final verification if no blockers remain.
+
+## 2026-06-22T01:35:50Z — UDP flow limit enforcement pending review
+
+- Current objective: close the P1 resource-limit gap where UDP pseudo-flow tracking remained unbounded.
+- Alpha gap reassessment result: `alpha-gap-after-dns-response` identified remaining P1/P2 gaps: explicit proxy proof reachability, missing audit drain sink, unbounded UDP pseudo-flow table, single-port combined TCP proof, and incomplete shared egress backend. Accepted the UDP pseudo-flow limit as the smallest coherent P1 slice because `ResourceLimitConfig::max_udp_flows` already exists but was not enforced by the UDP/combined runtimes.
+- Changes implemented:
+  - Added `max_udp_flows` to `UdpDnsProofConfig` and `CombinedTransparentProofConfig`, defaulting to 4096 and rejecting zero before TUN/smoltcp setup.
+  - `proof-udp-dns` and `proof-transparent` now expose `--max-udp-flows N` with non-zero parsing.
+  - UDP forwarding checks whether a packet would create a new pseudo-flow after policy allow but before worker permit acquisition, `record_sandbox_datagram`, or host worker spawn.
+  - On capacity exhaustion, the runtime emits a structured `UdpPacketDenied` audit record with fail-closed `DenialReason::ResourceLimit("max_udp_flows")`, leaves the flow table unchanged, and does not spawn a host UDP worker.
+  - Added regression coverage for zero flow-limit validation, bounded defaults, combined validation, and capacity exhaustion preserving the existing flow table/no worker spawn.
+- Verification commands and outcomes so far:
+  - `cargo test -p foxprox-net -- --nocapture` passed: 42 net tests.
+- Files changed: `crates/foxprox-core/src/policy.rs`, `crates/foxprox-net/src/udp.rs`, `crates/foxprox-net/src/combined.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: core policy/net UDP/combined/CLI/progress modified; `reviews/` contains transient alpha reassessment artifact.
+- Next exact action: run full workspace verification, request/read UDP flow-limit blocker review, fix blockers if any, then commit.
+
+## 2026-06-22T01:37:20Z — UDP flow limit review passed
+
+- Current objective: commit UDP pseudo-flow resource-limit enforcement, then pause per user instruction.
+- Review result: `udp-flow-limit-final` found no blockers.
+- Confirmed behavior:
+  - Standalone UDP/DNS and combined transparent runtimes validate `max_udp_flows` before TUN/smoltcp setup.
+  - New-flow capacity exhaustion emits a fail-closed `UdpPacketDenied` audit with `DenialReason::ResourceLimit("max_udp_flows")` and returns before worker permit acquisition, flow recording, or host worker spawn.
+  - Existing flows are not blocked by the capacity check because the limit applies only to untracked flow keys.
+  - CLI usage/parsing/validation for `--max-udp-flows` is present on `proof-udp-dns` and `proof-transparent`.
+  - Core dependency boundary remains clean; only a policy/audit denial reason variant was added to core.
+- Verification commands and outcomes after final ordering fix:
+  - `cargo test -p foxprox-net -- --nocapture` passed: 42 net tests.
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 8 CLI tests, 51 core tests, 9 device tests, 42 net tests, 28 proxy tests, 2 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net` and `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-core/src/policy.rs`, `crates/foxprox-net/src/udp.rs`, `crates/foxprox-net/src/combined.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: core policy/net UDP/combined/CLI/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit UDP flow-limit enforcement, then pause as requested by the user.
