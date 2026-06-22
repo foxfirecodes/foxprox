@@ -8,8 +8,9 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    AuditKind, AuditRecord, BrokerCore, Decision, DenialReason, DeviceIoError, Frontend,
-    PacketDevice, ParsedIpPacket, PolicyDecision, PolicyRequest,
+    AuditKind, AuditRecord, BrokerCore, ByteCounts, Decision, DenialReason, DeviceIoError,
+    Frontend, NetworkEndpoint, PacketDevice, ParsedIpPacket, PolicyDecision, PolicyRequest,
+    TcpEgress, TcpEgressError,
 };
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -210,6 +211,64 @@ impl SmoltcpIpStack {
     pub fn mtu(&self) -> usize {
         self.device.mtu()
     }
+
+    pub fn bridge_first_tcp_stream_to_egress<E: TcpEgress>(
+        &mut self,
+        egress: &mut E,
+        destination: NetworkEndpoint,
+        max_from_sandbox: usize,
+        now_ms: i64,
+    ) -> Result<TcpStreamBridgeEvidence, TcpEgressError> {
+        let from_sandbox = self.drain_first_tcp_recv(max_from_sandbox);
+        if from_sandbox.is_empty() {
+            return Ok(tcp_stream_evidence(
+                ByteCounts::ZERO,
+                StackPollEvidence::none(),
+                false,
+                Decision::Allow,
+                None,
+            ));
+        }
+        let to_sandbox = egress.connect_and_exchange(destination, &from_sandbox)?;
+        let stack = self.send_first_tcp_stream_response(&to_sandbox, now_ms)?;
+        Ok(tcp_stream_evidence(
+            ByteCounts {
+                from_sandbox: from_sandbox.len() as u64,
+                to_sandbox: to_sandbox.len() as u64,
+            },
+            stack,
+            true,
+            Decision::Allow,
+            None,
+        ))
+    }
+
+    pub fn send_first_tcp_stream_response(
+        &mut self,
+        to_sandbox: &[u8],
+        now_ms: i64,
+    ) -> Result<StackPollEvidence, TcpEgressError> {
+        let Some(handle) = self.tcp_handles.first().copied() else {
+            return Err(TcpEgressError::BridgeFailed);
+        };
+        let socket = self.sockets.get_mut::<tcp::Socket>(handle);
+        let sent = socket
+            .send_slice(to_sandbox)
+            .map_err(|_| TcpEgressError::BridgeFailed)?;
+        if sent != to_sandbox.len() {
+            return Err(TcpEgressError::BridgeFailed);
+        }
+        Ok(self.poll(now_ms))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TcpStreamBridgeEvidence {
+    pub byte_counts: ByteCounts,
+    pub stack: StackPollEvidence,
+    pub opened_egress: bool,
+    pub decision: Decision,
+    pub reason: Option<DenialReason>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -388,6 +447,90 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
     pub fn device(&self) -> &D {
         &self.device
     }
+
+    pub fn bridge_first_tcp_stream_to_egress<E: TcpEgress>(
+        &mut self,
+        egress: &mut E,
+        destination: NetworkEndpoint,
+        max_from_sandbox: usize,
+        opened_at_ms: u64,
+        closed_at_ms: u64,
+    ) -> Result<TcpStreamBridgeEvidence, TcpEgressError> {
+        let from_sandbox = self.stack.drain_first_tcp_recv(max_from_sandbox);
+        if from_sandbox.is_empty() {
+            return Ok(tcp_stream_evidence(
+                ByteCounts::ZERO,
+                StackPollEvidence::none(),
+                false,
+                Decision::Allow,
+                None,
+            ));
+        }
+        let request = PolicyRequest::tcp_connect(
+            self.sandbox_id.clone(),
+            Frontend::Tun,
+            NetworkEndpoint::default(),
+            destination.clone(),
+        );
+        let policy_decision = self.broker.evaluate(&request);
+        if policy_decision.decision.is_deny() {
+            return Ok(tcp_stream_evidence(
+                ByteCounts::ZERO,
+                StackPollEvidence::none(),
+                false,
+                policy_decision.decision,
+                policy_decision.reason,
+            ));
+        }
+        let to_sandbox = match egress.connect_and_exchange(destination.clone(), &from_sandbox) {
+            Ok(to_sandbox) => to_sandbox,
+            Err(error) => {
+                let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(foxprox_core::Protocol::Tcp)
+                    .with_destination(destination)
+                    .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+                    .with_detail("stack", "smoltcp")
+                    .with_detail("error", tcp_egress_error_detail(&error));
+                let _ = self.broker.append_audit_for(&request, audit);
+                return Err(error);
+            }
+        };
+        let stack = self
+            .stack
+            .send_first_tcp_stream_response(&to_sandbox, closed_at_ms as i64)?;
+        let byte_counts = ByteCounts {
+            from_sandbox: from_sandbox.len() as u64,
+            to_sandbox: to_sandbox.len() as u64,
+        };
+        let close_audit = AuditRecord::new_at(
+            AuditKind::TcpFlowClosed,
+            self.sandbox_id.clone(),
+            closed_at_ms as u128,
+        )
+        .with_frontend(Frontend::Tun)
+        .with_protocol(foxprox_core::Protocol::Tcp)
+        .with_destination(destination)
+        .with_byte_counts(byte_counts.clone())
+        .with_duration_ms(closed_at_ms.saturating_sub(opened_at_ms))
+        .with_detail("stack", "smoltcp");
+        if let Err(decision) = self.broker.append_audit_for(&request, close_audit) {
+            return Ok(tcp_stream_evidence(
+                byte_counts,
+                stack,
+                true,
+                decision.decision,
+                decision.reason,
+            ));
+        }
+        Ok(tcp_stream_evidence(
+            byte_counts,
+            stack,
+            true,
+            Decision::Allow,
+            None,
+        ))
+    }
 }
 
 impl StackPollEvidence {
@@ -397,6 +540,29 @@ impl StackPollEvidence {
             packets_emitted: 0,
             outbound_bytes: 0,
         }
+    }
+}
+
+fn tcp_stream_evidence(
+    byte_counts: ByteCounts,
+    stack: StackPollEvidence,
+    opened_egress: bool,
+    decision: Decision,
+    reason: Option<DenialReason>,
+) -> TcpStreamBridgeEvidence {
+    TcpStreamBridgeEvidence {
+        byte_counts,
+        stack,
+        opened_egress,
+        decision,
+        reason,
+    }
+}
+
+fn tcp_egress_error_detail(error: &TcpEgressError) -> &'static str {
+    match error {
+        TcpEgressError::ConnectFailed => "connect_failed",
+        TcpEgressError::BridgeFailed => "bridge_failed",
     }
 }
 
@@ -598,6 +764,71 @@ mod tests {
     }
 
     #[test]
+    fn smoltcp_tcp_stream_bridges_host_response_back_to_stack_packets() {
+        let mut stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        stack.listen_tcp(8080, 1024, 1024);
+        complete_tcp_handshake_and_send_payload(&mut stack, b"hello foxprox");
+        let mut egress = MockTcpEgress::new(b"host pong".to_vec());
+
+        let evidence = stack
+            .bridge_first_tcp_stream_to_egress(
+                &mut egress,
+                NetworkEndpoint::socket("127.0.0.1".parse().unwrap(), 8080),
+                64,
+                4_000,
+            )
+            .unwrap();
+
+        assert!(evidence.opened_egress);
+        assert_eq!(evidence.byte_counts.from_sandbox, 13);
+        assert_eq!(evidence.byte_counts.to_sandbox, 9);
+        assert!(evidence.stack.packets_emitted >= 1);
+        assert_eq!(egress.requests, vec![b"hello foxprox".to_vec()]);
+        let outbound = stack.outbound_packets();
+        assert_eq!(tcp_payload(outbound.last().unwrap()), b"host pong");
+    }
+
+    #[test]
+    fn smoltcp_tun_bridge_audits_tcp_egress_and_flow_close() {
+        let mut stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        stack.listen_tcp(8080, 1024, 1024);
+        complete_tcp_handshake_and_send_payload(&mut stack, b"hello foxprox");
+        let device = InMemoryPacketDevice::default();
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+        let mut egress = MockTcpEgress::new(b"host pong".to_vec());
+
+        let evidence = bridge
+            .bridge_first_tcp_stream_to_egress(
+                &mut egress,
+                NetworkEndpoint::socket("127.0.0.1".parse().unwrap(), 8080),
+                64,
+                5_000,
+                5_025,
+            )
+            .unwrap();
+
+        assert_eq!(evidence.decision, Decision::Allow);
+        assert!(evidence.opened_egress);
+        assert_eq!(evidence.byte_counts.from_sandbox, 13);
+        assert_eq!(evidence.byte_counts.to_sandbox, 9);
+        assert!(evidence.stack.packets_emitted >= 1);
+        assert_eq!(egress.requests, vec![b"hello foxprox".to_vec()]);
+        let records: Vec<_> = bridge.broker().audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::TcpConnectDecision);
+        assert_eq!(records[0].decision, Some(Decision::Allow));
+        assert_eq!(records[1].kind, AuditKind::TcpFlowClosed);
+        assert_eq!(records[1].details["stack"], "smoltcp");
+        assert_eq!(records[1].byte_counts.as_ref().unwrap().from_sandbox, 13);
+        assert_eq!(records[1].byte_counts.as_ref().unwrap().to_sandbox, 9);
+    }
+
+    #[test]
     fn in_memory_ip_device_exposes_bounded_mtu_capabilities() {
         let device = InMemoryIpDevice::new(1280);
         let capabilities = device.capabilities();
@@ -610,6 +841,32 @@ mod tests {
     const TCP_PSH: u8 = 0x08;
     const TCP_ACK: u8 = 0x10;
 
+    #[derive(Clone, Debug)]
+    struct MockTcpEgress {
+        response: Vec<u8>,
+        requests: Vec<Vec<u8>>,
+    }
+
+    impl MockTcpEgress {
+        fn new(response: Vec<u8>) -> Self {
+            Self {
+                response,
+                requests: Vec::new(),
+            }
+        }
+    }
+
+    impl TcpEgress for MockTcpEgress {
+        fn connect_and_exchange(
+            &mut self,
+            _destination: NetworkEndpoint,
+            from_sandbox: &[u8],
+        ) -> Result<Vec<u8>, TcpEgressError> {
+            self.requests.push(from_sandbox.to_vec());
+            Ok(self.response.clone())
+        }
+    }
+
     #[derive(Clone, Copy)]
     struct TcpPacketSpec<'a> {
         source: [u8; 4],
@@ -620,6 +877,57 @@ mod tests {
         acknowledgment: u32,
         flags: u8,
         payload: &'a [u8],
+    }
+
+    fn complete_tcp_handshake_and_send_payload(stack: &mut SmoltcpIpStack, payload: &[u8]) {
+        let client_seq = 0x0102_0304;
+        stack.inject_packet(ipv4_tcp_packet(TcpPacketSpec {
+            source: [10, 0, 2, 15],
+            destination: [10, 0, 2, 1],
+            source_port: 50_000,
+            destination_port: 8080,
+            sequence: client_seq,
+            acknowledgment: 0,
+            flags: TCP_SYN,
+            payload: &[],
+        }));
+        stack.poll(3_000);
+        let syn_ack_packets = stack.outbound_packets();
+        let syn_ack_tcp = &syn_ack_packets[0][20..];
+        let server_seq = u32::from_be_bytes([
+            syn_ack_tcp[4],
+            syn_ack_tcp[5],
+            syn_ack_tcp[6],
+            syn_ack_tcp[7],
+        ]);
+        stack.inject_packet(ipv4_tcp_packet(TcpPacketSpec {
+            source: [10, 0, 2, 15],
+            destination: [10, 0, 2, 1],
+            source_port: 50_000,
+            destination_port: 8080,
+            sequence: client_seq + 1,
+            acknowledgment: server_seq + 1,
+            flags: TCP_ACK,
+            payload: &[],
+        }));
+        stack.poll(3_010);
+        stack.inject_packet(ipv4_tcp_packet(TcpPacketSpec {
+            source: [10, 0, 2, 15],
+            destination: [10, 0, 2, 1],
+            source_port: 50_000,
+            destination_port: 8080,
+            sequence: client_seq + 1,
+            acknowledgment: server_seq + 1,
+            flags: TCP_ACK | TCP_PSH,
+            payload,
+        }));
+        stack.poll(3_020);
+    }
+
+    fn tcp_payload(packet: &[u8]) -> &[u8] {
+        let ip_header_len = ((packet[0] & 0x0f) as usize) * 4;
+        let tcp_header_len = ((packet[ip_header_len + 12] >> 4) as usize) * 4;
+        &packet[ip_header_len + tcp_header_len..]
     }
 
     fn ipv4_tcp_packet(spec: TcpPacketSpec<'_>) -> Vec<u8> {

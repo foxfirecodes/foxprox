@@ -59,3 +59,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-21 — smoltcp TCP listener proof shape
 
 - A bounded in-memory TCP proof can drive smoltcp by injecting raw IPv4 SYN/ACK/PSH packets into an IP-medium device, reading the emitted SYN-ACK sequence number, and then draining bytes from a `tcp::Socket` listener. This keeps TCP stack behavior testable before host egress bridging is wired.
+
+## 2026-06-21 — Audited smoltcp TCP egress bridge
+
+- For smoltcp TCP egress proofs, split the stack operation into draining received stream bytes and sending response bytes back through the socket. This lets the bridge evaluate/audit host egress before opening the egress path, then append a structured `tcp_flow_closed` record with byte counts after stack response emission.

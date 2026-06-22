@@ -1014,3 +1014,26 @@ The smoltcp adapter now proves more than packet-level ICMP: it can host a TCP li
 
 ### Remaining blind spots
 - This proof drains stream bytes from smoltcp but does not yet connect those bytes to `foxprox-egress` host TCP sockets or bridge host responses back through the smoltcp socket.
+
+### Commands run
+- `cargo fmt` — applied formatting for smoltcp TCP egress bridge changes.
+- `cargo test -p foxprox-stack --all-targets --all-features` — passed, 7 stack tests.
+- `cargo test --all-targets --all-features` — passed, 6 CLI tests, 101 core tests, 3 device tests, 3 egress tests, and 7 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_stack::tests::smoltcp_tcp_stream_bridges_host_response_back_to_stack_packets ... ok`
+- `foxprox_stack::tests::smoltcp_tun_bridge_audits_tcp_egress_and_flow_close ... ok`
+- `foxprox_stack::tests::smoltcp_tcp_listener_accepts_handshake_and_receives_bytes ... ok`
+
+### Interpretation
+The smoltcp TCP path now proves a bounded host-egress bridge shape: bytes drained from an accepted smoltcp TCP stream are sent through a `TcpEgress` implementation, response bytes are pushed back into the smoltcp socket, and smoltcp emits outbound IP packets carrying the host response. The `SmoltcpTunBridge` variant evaluates the shared broker policy before opening egress and appends structured `tcp_connect_decision` plus `tcp_flow_closed` evidence with byte counts.
+
+### Changed files
+- `crates/foxprox-stack/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The bridge proof still uses in-memory TCP packets and mock egress in tests; real `/dev/net/tun`, async host sockets, and continuous bidirectional stream scheduling remain runtime integration work.
