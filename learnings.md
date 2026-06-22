@@ -231,3 +231,8 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Task expectations should come from a supervisor registry
 
 - Harness-declared task names are a useful contract, but a runtime needs a registry-like supervisor that records handles, derives expectations from registered tasks, and rejects unknown or duplicate task outcomes before lifecycle exit consumes the join report.
+
+## 2026-06-22 — Task names must be unique when reports match by name
+
+- If task join reports match outcomes to expectations by `(component, task_name)`, the task supervisor must reject duplicate registrations for that pair. Otherwise one outcome can satisfy multiple same-named expected tasks.
+- Runtime audit fan-in also needs a concrete drain-to-sink contract: successful drains should advance a drain cursor, and sink write failures should leave structured fail-closed evidence in the fan-in ledger.

@@ -1,7 +1,8 @@
-use crate::audit::{AuditError, AuditRecord, BoundedAuditLedger};
+use crate::audit::{AuditError, AuditRecord, BoundedAuditLedger, JsonLineAuditSink};
 use crate::types::{AuditKind, Decision, DenialReason, Frontend, Protocol};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io::Write;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -276,8 +277,16 @@ pub struct RuntimeTaskHandle {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeTaskSupervisorError {
-    UnknownTask { task_id: u64 },
-    DuplicateOutcome { task_id: u64 },
+    DuplicateTaskName {
+        component: RuntimeComponent,
+        task_name: String,
+    },
+    UnknownTask {
+        task_id: u64,
+    },
+    DuplicateOutcome {
+        task_id: u64,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -300,14 +309,25 @@ impl RuntimeTaskSupervisor {
         &mut self,
         component: RuntimeComponent,
         task_name: impl Into<String>,
-    ) -> RuntimeTaskHandle {
+    ) -> Result<RuntimeTaskHandle, RuntimeTaskSupervisorError> {
+        let task_name = task_name.into();
+        if self
+            .tasks
+            .iter()
+            .any(|(_, expected)| expected.component == component && expected.task_name == task_name)
+        {
+            return Err(RuntimeTaskSupervisorError::DuplicateTaskName {
+                component,
+                task_name,
+            });
+        }
         let handle = RuntimeTaskHandle {
             id: self.next_task_id,
         };
         self.next_task_id += 1;
         self.tasks
             .push((handle, RuntimeTaskExpectation::new(component, task_name)));
-        handle
+        Ok(handle)
     }
 
     pub fn record_outcome(
@@ -429,11 +449,23 @@ pub struct RuntimeAuditIngestReport {
     pub last_source_sequence: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RuntimeAuditDrainReport {
+    pub drained_records: usize,
+    pub last_drained_sequence: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RuntimeAuditDrainError {
+    SinkWriteFailed { attempted_sequence: u64 },
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimeAuditFanIn {
     sandbox_id: String,
     audit: BoundedAuditLedger,
     last_source_sequences: BTreeMap<String, u64>,
+    last_drained_sequence: u64,
 }
 
 impl RuntimeAuditFanIn {
@@ -442,6 +474,7 @@ impl RuntimeAuditFanIn {
             sandbox_id: sandbox_id.into(),
             audit: BoundedAuditLedger::new(audit_capacity),
             last_source_sequences: BTreeMap::new(),
+            last_drained_sequence: 0,
         }
     }
 
@@ -492,6 +525,43 @@ impl RuntimeAuditFanIn {
             source,
             accepted_records,
             last_source_sequence: last_sequence,
+        })
+    }
+
+    pub fn drain_to_sink<W: Write>(
+        &mut self,
+        sink: &mut JsonLineAuditSink<W>,
+    ) -> Result<RuntimeAuditDrainReport, RuntimeAuditDrainError> {
+        let records: Vec<_> = self
+            .audit
+            .records()
+            .filter(|record| record.sequence > self.last_drained_sequence)
+            .cloned()
+            .collect();
+        let mut drained_records = 0usize;
+        for record in records {
+            if sink.append(&record).is_err() {
+                self.audit.append_lossy(
+                    AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
+                        .with_frontend(Frontend::Core)
+                        .with_decision(Decision::FailClosed, Some(DenialReason::AuditBackpressure))
+                        .with_detail("runtime_error", "audit_sink_write_failed")
+                        .with_detail("attempted_sequence", record.sequence.to_string())
+                        .with_detail(
+                            "last_drained_sequence",
+                            self.last_drained_sequence.to_string(),
+                        ),
+                );
+                return Err(RuntimeAuditDrainError::SinkWriteFailed {
+                    attempted_sequence: record.sequence,
+                });
+            }
+            self.last_drained_sequence = record.sequence;
+            drained_records += 1;
+        }
+        Ok(RuntimeAuditDrainReport {
+            drained_records,
+            last_drained_sequence: self.last_drained_sequence,
         })
     }
 
@@ -1045,6 +1115,66 @@ mod tests {
     }
 
     #[test]
+    fn runtime_audit_fan_in_drains_to_json_sink_once() {
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+        let mut start = AuditRecord::new_at(AuditKind::NetworkSessionStart, "s1", 1_000);
+        start.sequence = 1;
+        let mut exit = AuditRecord::new_at(AuditKind::NetworkSessionExit, "s1", 1_100);
+        exit.sequence = 2;
+        fan_in.ingest("lifecycle", &[start, exit]).unwrap();
+
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+        let report = fan_in.drain_to_sink(&mut sink).unwrap();
+        assert_eq!(report.drained_records, 2);
+        assert_eq!(report.last_drained_sequence, 2);
+        assert_eq!(sink.records_written(), 2);
+        let duplicate = fan_in.drain_to_sink(&mut sink).unwrap();
+        assert_eq!(duplicate.drained_records, 0);
+        assert_eq!(sink.records_written(), 2);
+    }
+
+    #[derive(Debug)]
+    struct FailingAuditWriter;
+
+    impl std::io::Write for FailingAuditWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("audit sink unavailable"))
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn runtime_audit_fan_in_sink_failure_is_observable() {
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 4);
+        let mut start = AuditRecord::new_at(AuditKind::NetworkSessionStart, "s1", 1_000);
+        start.sequence = 1;
+        fan_in.ingest("lifecycle", &[start]).unwrap();
+
+        let mut sink = JsonLineAuditSink::new(FailingAuditWriter);
+        let error = fan_in.drain_to_sink(&mut sink).unwrap_err();
+
+        assert_eq!(
+            error,
+            RuntimeAuditDrainError::SinkWriteFailed {
+                attempted_sequence: 1,
+            }
+        );
+        let records: Vec<_> = fan_in.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].kind, AuditKind::BrokerError);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::AuditBackpressure));
+        assert_eq!(
+            records[1].details["runtime_error"],
+            "audit_sink_write_failed"
+        );
+        assert_eq!(records[1].details["attempted_sequence"], "1");
+    }
+
+    #[test]
     fn runtime_lifecycle_records_start_and_clean_exit() {
         let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
         runtime
@@ -1336,9 +1466,12 @@ mod tests {
     #[test]
     fn runtime_task_supervisor_derives_expectations_and_join_report() {
         let mut supervisor = RuntimeTaskSupervisor::new();
-        let dns = supervisor.register_task(RuntimeComponent::DnsListener, "dns_accept_loop");
-        let http =
-            supervisor.register_task(RuntimeComponent::HttpProxyListener, "http_accept_loop");
+        let dns = supervisor
+            .register_task(RuntimeComponent::DnsListener, "dns_accept_loop")
+            .unwrap();
+        let http = supervisor
+            .register_task(RuntimeComponent::HttpProxyListener, "http_accept_loop")
+            .unwrap();
         supervisor
             .record_outcome(dns, RuntimeTaskStatus::Completed)
             .unwrap();
@@ -1382,9 +1515,18 @@ mod tests {
     }
 
     #[test]
-    fn runtime_task_supervisor_rejects_unknown_and_duplicate_outcomes() {
+    fn runtime_task_supervisor_rejects_unknown_duplicate_names_and_duplicate_outcomes() {
         let mut supervisor = RuntimeTaskSupervisor::new();
-        let dns = supervisor.register_task(RuntimeComponent::DnsListener, "dns_accept_loop");
+        let dns = supervisor
+            .register_task(RuntimeComponent::DnsListener, "dns_accept_loop")
+            .unwrap();
+        assert_eq!(
+            supervisor.register_task(RuntimeComponent::DnsListener, "dns_accept_loop"),
+            Err(RuntimeTaskSupervisorError::DuplicateTaskName {
+                component: RuntimeComponent::DnsListener,
+                task_name: "dns_accept_loop".to_string(),
+            })
+        );
         supervisor
             .record_outcome(dns, RuntimeTaskStatus::Completed)
             .unwrap();

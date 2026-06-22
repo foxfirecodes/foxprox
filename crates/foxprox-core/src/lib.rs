@@ -55,11 +55,11 @@ pub use proxy_frontend::{
     ProxyEgressError,
 };
 pub use runtime::{
-    RuntimeAuditFanIn, RuntimeAuditFanInError, RuntimeAuditIngestReport, RuntimeChildExit,
-    RuntimeCleanupAction, RuntimeCleanupReport, RuntimeComponent, RuntimeExitStatus,
-    RuntimeLifecycleError, RuntimeLifecycleHarness, RuntimeListenerConfig, RuntimeTaskExpectation,
-    RuntimeTaskHandle, RuntimeTaskJoinReport, RuntimeTaskOutcome, RuntimeTaskStatus,
-    RuntimeTaskSupervisor, RuntimeTaskSupervisorError,
+    RuntimeAuditDrainError, RuntimeAuditDrainReport, RuntimeAuditFanIn, RuntimeAuditFanInError,
+    RuntimeAuditIngestReport, RuntimeChildExit, RuntimeCleanupAction, RuntimeCleanupReport,
+    RuntimeComponent, RuntimeExitStatus, RuntimeLifecycleError, RuntimeLifecycleHarness,
+    RuntimeListenerConfig, RuntimeTaskExpectation, RuntimeTaskHandle, RuntimeTaskJoinReport,
+    RuntimeTaskOutcome, RuntimeTaskStatus, RuntimeTaskSupervisor, RuntimeTaskSupervisorError,
 };
 pub use setup::{
     BwrapSetupPlan, NetworkSetupConfig, ProxyEnvironment, SetupExecutionReport, SetupHelperPlan,

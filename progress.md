@@ -2435,3 +2435,34 @@ Added a platform-independent `RuntimeTaskSupervisor` registry contract. Runtime 
 
 ### Remaining blind spots
 - The supervisor is still synchronous and handle-like, not an async executor integration. Final runtime must bind registered handles to actual spawned tasks/futures and feed real join/cancel outcomes into the registry.
+
+## 2026-06-22 — Reject duplicate supervised task names and add audit fan-in drain proof
+
+### Commands run
+- `cargo fmt` — applied formatting for supervisor and audit drain changes.
+- `cargo test -p foxprox-core runtime::tests::runtime_task_supervisor --all-targets --all-features` — passed, 2 supervisor tests.
+- `cargo test -p foxprox-core runtime::tests::runtime_audit_fan_in --all-targets --all-features` — passed, 5 fan-in tests.
+- `cargo test -p foxprox-core runtime::tests --all-targets --all-features` — passed, 28 runtime tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 146 core tests, 3 device tests, 38 egress tests, and 12 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_task_supervisor_rejects_unknown_duplicate_names_and_duplicate_outcomes ... ok`
+- `runtime::tests::runtime_task_supervisor_derives_expectations_and_join_report ... ok`
+- `runtime::tests::runtime_audit_fan_in_drains_to_json_sink_once ... ok`
+- `runtime::tests::runtime_audit_fan_in_sink_failure_is_observable ... ok`
+
+### Interpretation
+Addressed round-46 high finding. `RuntimeTaskSupervisor::register_task(...)` now returns a `Result` and rejects duplicate `(component, task_name)` registrations before they can create ambiguous expected task coverage. Unknown task handles and duplicate outcomes remain rejected.
+
+Also added `RuntimeAuditFanIn::drain_to_sink(...)`, a concrete sink-drain proof for the fan-in ledger. Successful drain advances a drain cursor so repeated drains skip already-written records; sink write failure returns `RuntimeAuditDrainError::SinkWriteFailed` and records structured fail-closed `broker_error` evidence (`runtime_error=audit_sink_write_failed`, attempted sequence, and last drained sequence).
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The fan-in drain proof is synchronous and in-memory. Final runtime still needs one async audit writer task and backpressure propagation from real task fan-in to lifecycle exit/cleanup.
