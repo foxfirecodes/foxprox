@@ -253,6 +253,61 @@ fn parse_destination_host(value: &str) -> Result<DestinationHost, FrontendError>
     }
 }
 
+/// SOCKS5 reply code used for frontend-local wire responses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum Socks5ReplyCode {
+    Succeeded,
+    GeneralFailure,
+    ConnectionNotAllowed,
+    NetworkUnreachable,
+    HostUnreachable,
+    ConnectionRefused,
+    TtlExpired,
+    CommandNotSupported,
+    AddressTypeNotSupported,
+}
+
+impl Socks5ReplyCode {
+    fn as_byte(self) -> u8 {
+        match self {
+            Self::Succeeded => 0x00,
+            Self::GeneralFailure => 0x01,
+            Self::ConnectionNotAllowed => 0x02,
+            Self::NetworkUnreachable => 0x03,
+            Self::HostUnreachable => 0x04,
+            Self::ConnectionRefused => 0x05,
+            Self::TtlExpired => 0x06,
+            Self::CommandNotSupported => 0x07,
+            Self::AddressTypeNotSupported => 0x08,
+        }
+    }
+}
+
+/// Select SOCKS5 no-authentication when offered by the client.
+///
+/// This helper returns the two-byte method-selection response and keeps SOCKS
+/// wire negotiation out of core policy contracts.
+pub fn select_socks5_no_auth_method(bytes: &[u8]) -> Result<[u8; 2], FrontendError> {
+    if bytes.len() < 2 || bytes[0] != 0x05 {
+        return Err(FrontendError::MalformedSocks("bad greeting"));
+    }
+    let method_count = usize::from(bytes[1]);
+    if method_count == 0 || bytes.len() < 2 + method_count {
+        return Err(FrontendError::MalformedSocks("short greeting"));
+    }
+    let methods = &bytes[2..2 + method_count];
+    if methods.contains(&0x00) {
+        Ok([0x05, 0x00])
+    } else {
+        Ok([0x05, 0xff])
+    }
+}
+
+/// Build a SOCKS5 CONNECT reply bound to 0.0.0.0:0 for alpha frontends.
+pub fn build_socks5_connect_reply(code: Socks5ReplyCode) -> [u8; 10] {
+    [0x05, code.as_byte(), 0x00, 0x01, 0, 0, 0, 0, 0, 0]
+}
+
 /// Parse one SOCKS5 TCP CONNECT request after method negotiation.
 pub fn parse_socks5_connect(sandbox_id: SandboxId, bytes: &[u8]) -> NormalizedEvent {
     match parse_socks5_connect_inner(sandbox_id.clone(), bytes) {
@@ -431,6 +486,22 @@ mod tests {
             panic!("expected unsupported event");
         };
         assert_eq!(unsupported.reason, UnsupportedReason::MalformedProxyRequest);
+    }
+
+    #[test]
+    fn socks5_handshake_helpers_stay_frontend_local() {
+        assert_eq!(
+            select_socks5_no_auth_method(&[0x05, 0x02, 0x02, 0x00]).unwrap(),
+            [0x05, 0x00]
+        );
+        assert_eq!(
+            select_socks5_no_auth_method(&[0x05, 0x01, 0x02]).unwrap(),
+            [0x05, 0xff]
+        );
+        assert_eq!(
+            build_socks5_connect_reply(Socks5ReplyCode::ConnectionNotAllowed),
+            [0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0]
+        );
     }
 
     #[test]

@@ -102,3 +102,8 @@
 
 - Parser size limits should map to `UnsupportedReason::ParserLimitExceeded` rather than generic malformed request errors; this preserves audit clarity for robustness failures without exposing raw proxy bytes.
 - Enforcing request-head size before UTF-8 conversion keeps malformed/oversized proxy input contained entirely in the frontend boundary.
+
+## 2026-06-21 — SOCKS5 handshake helpers
+
+- SOCKS5 method selection and reply-code bytes are frontend wire concerns; keeping them out of `foxprox-core` preserves the normalized policy contract around only the eventual `SocksConnect` intent.
+- The alpha SOCKS helper can advertise no-auth only and synthesize standard CONNECT replies without requiring egress or policy crates to know SOCKS reply codes.

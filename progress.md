@@ -476,3 +476,21 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: d4219dc.
 - Remaining boundary risks: configurable parser limits, streaming read limits in production listener IO, SOCKS negotiation size/timeout handling, and fuzzing proxy parser inputs remain.
+
+## 2026-06-21 — Boundary objective: SOCKS5 handshake helpers
+
+- Boundary under work: SOCKS5 no-auth method negotiation and CONNECT reply byte synthesis in the frontend crate.
+- Allowed dependency direction: SOCKS wire handshake details remain frontend-local; after CONNECT parsing, policy/egress receive only normalized `SocksConnect` events.
+- Dependency-risk assessment: SOCKS support is incomplete without handshake response helpers, but adding them must not push SOCKS wire enums into core policy contracts.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: all verification passed.
+- Changed files:
+  - `crates/foxprox-frontends/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 64 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: production SOCKS listener state machine, handshake/read timeouts, CONNECT stream bridging, and policy-to-reply-code mapping remain.
