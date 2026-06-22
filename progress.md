@@ -475,3 +475,5 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * response replay and hostname mismatch are rejected without cache mutation.
 * Audit evidence: not applicable in this commit; this helper wires correlation to cache mutation, while DNS query/response audit event builders remain future work.
 * Residual risk: DNS audit event fields, actual upstream forwarding, response synthesis, retry behavior, and DNS handler socket integration remain future work.
+
+* Commit hash: 6663d5d gate dns attribution cache by transactions.
