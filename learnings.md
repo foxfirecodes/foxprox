@@ -182,3 +182,8 @@
 
 - Allowed DNS response construction belongs in `foxprox-dns` beside refusal response synthesis; runtime/DNS-serving code should provide addresses and original query bytes rather than constructing wire records.
 - A/AAAA response synthesis should filter supplied addresses by the original query type and return a valid no-answer response for unsupported query types instead of guessing.
+
+## 2026-06-22 — DNS packet broker orchestration
+
+- DNS serving must pass through the same normalized policy/audit path as transparent flows; otherwise broker DNS can become a policy bypass.
+- `HostEgress::resolve_dns` is the right shared boundary for allowed DNS lookups, while `foxprox-dns` remains the only crate constructing DNS wire responses.

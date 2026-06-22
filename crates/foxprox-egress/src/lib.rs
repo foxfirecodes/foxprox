@@ -46,6 +46,7 @@ pub struct MockEgress {
     pub proxy_connects: Vec<HttpsConnect>,
     pub socks_connects: Vec<SocksConnect>,
     pub dns_queries: Vec<DnsQuery>,
+    pub dns_results: Vec<SocketAddr>,
 }
 
 impl HostEgress for MockEgress {
@@ -83,7 +84,7 @@ impl HostEgress for MockEgress {
 
     fn resolve_dns(&mut self, event: &DnsQuery) -> Result<Vec<SocketAddr>, EgressError> {
         self.dns_queries.push(event.clone());
-        Ok(Vec::new())
+        Ok(self.dns_results.clone())
     }
 }
 

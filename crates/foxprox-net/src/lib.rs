@@ -17,6 +17,7 @@ use foxprox_core::{
     HostnameConfidence, NormalizedEvent, PolicyDecision, Protocol, SandboxId, UdpClassification,
     UdpTimeouts,
 };
+use foxprox_dns::{build_address_response, build_refused_response, parse_dns_query_event};
 use foxprox_egress::{dispatch_allowed_event, EgressError, HostEgress};
 use foxprox_packet::{inspect_ipv4_packet, synthesize_ipv4_denial_response};
 use foxprox_policy::PolicyEngine;
@@ -371,6 +372,78 @@ where
     })
 }
 
+/// DNS packet handling input for the broker DNS service path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DnsPacketRequest<'a> {
+    pub sandbox_id: &'a SandboxId,
+    pub frontend: FrontendKind,
+    pub source: SocketAddr,
+    pub destination: SocketAddr,
+    pub broker_dns_addrs: &'a [IpAddr],
+    pub packet: &'a [u8],
+    pub response_ttl: Duration,
+    pub sequence: u64,
+    pub timestamp_millis: u64,
+}
+
+/// Result of handling one DNS wire query through normalized policy/audit/egress.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DnsPacketOutcome {
+    pub event: NormalizedEvent,
+    pub decision: PolicyDecision,
+    pub response: Option<Vec<u8>>,
+}
+
+/// Handle one DNS query packet without letting DNS wire data leak into policy or
+/// audit. Allowed queries resolve through shared egress; denied/require-DNS
+/// decisions receive a DNS REFUSED response when the query is parseable.
+pub fn handle_dns_packet<E, A>(
+    request: DnsPacketRequest<'_>,
+    policy: &PolicyEngine,
+    egress: &mut E,
+    audit: &mut A,
+) -> Result<DnsPacketOutcome, BrokerError>
+where
+    E: HostEgress,
+    A: AuditSink,
+{
+    let event = parse_dns_query_event(
+        request.sandbox_id.clone(),
+        request.frontend,
+        request.source,
+        request.destination,
+        request.broker_dns_addrs,
+        request.packet,
+    );
+    let decision = policy.decide(&event);
+    let record = AuditRecord::from_event(
+        request.sequence,
+        request.timestamp_millis,
+        &event,
+        &decision,
+    );
+    audit.record(record).map_err(BrokerError::Audit)?;
+
+    let response = match (&event, decision.is_allowed()) {
+        (NormalizedEvent::DnsQuery(query), true) => {
+            let addrs = egress.resolve_dns(query).map_err(BrokerError::Egress)?;
+            let ips = addrs.into_iter().map(|addr| addr.ip());
+            Some(
+                build_address_response(request.packet, ips, request.response_ttl)
+                    .map_err(BrokerError::Dns)?,
+            )
+        }
+        (_, false) => build_refused_response(request.packet).ok(),
+        _ => None,
+    };
+
+    Ok(DnsPacketOutcome {
+        event,
+        decision,
+        response,
+    })
+}
+
 /// Record a flow lifecycle close/expiry without exposing adapter-specific flow
 /// state to the audit crate.
 pub fn record_flow_closed<A>(
@@ -421,6 +494,7 @@ pub enum BrokerEventOutcome {
 #[derive(Debug)]
 pub enum BrokerError {
     Audit(foxprox_audit::AuditError),
+    Dns(foxprox_dns::DnsError),
     Egress(EgressError),
     Packet(foxprox_packet::PacketError),
     Stack(StackError),
@@ -430,6 +504,7 @@ impl fmt::Display for BrokerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Audit(error) => write!(f, "audit error: {error}"),
+            Self::Dns(error) => write!(f, "dns error: {error}"),
             Self::Egress(error) => write!(f, "egress error: {error}"),
             Self::Packet(error) => write!(f, "packet error: {error}"),
             Self::Stack(error) => write!(f, "stack error: {error}"),
@@ -724,6 +799,78 @@ mod tests {
     }
 
     #[test]
+    fn allowed_dns_packet_resolves_through_shared_egress_and_builds_response() {
+        let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
+        let mut egress = MockEgress {
+            dns_results: vec!["203.0.113.10:0".parse().unwrap()],
+            ..MockEgress::default()
+        };
+        let mut audit = BoundedAuditSink::new(8);
+        let sandbox_id = SandboxId::new("s1").unwrap();
+        let packet = dns_query_packet(0x1234, "example.com", 1);
+
+        let outcome = handle_dns_packet(
+            DnsPacketRequest {
+                sandbox_id: &sandbox_id,
+                frontend: FrontendKind::Tun,
+                source: "10.0.0.2:53000".parse().unwrap(),
+                destination: "10.255.0.1:53".parse().unwrap(),
+                broker_dns_addrs: &["10.255.0.1".parse().unwrap()],
+                packet: &packet,
+                response_ttl: Duration::from_secs(60),
+                sequence: 3,
+                timestamp_millis: 3000,
+            },
+            &policy,
+            &mut egress,
+            &mut audit,
+        )
+        .unwrap();
+
+        assert!(outcome.decision.is_allowed());
+        assert_eq!(egress.dns_queries.len(), 1);
+        assert_eq!(audit.records().len(), 1);
+        let response = outcome.response.unwrap();
+        assert_eq!(u16::from_be_bytes([response[6], response[7]]), 1);
+    }
+
+    #[test]
+    fn denied_dns_packet_returns_refused_without_egress() {
+        let policy = PolicyEngine::new(RuntimeConfig::deny_by_default());
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(8);
+        let sandbox_id = SandboxId::new("s1").unwrap();
+        let packet = dns_query_packet(0x1234, "example.com", 1);
+
+        let outcome = handle_dns_packet(
+            DnsPacketRequest {
+                sandbox_id: &sandbox_id,
+                frontend: FrontendKind::Tun,
+                source: "10.0.0.2:53000".parse().unwrap(),
+                destination: "9.9.9.9:53".parse().unwrap(),
+                broker_dns_addrs: &["10.255.0.1".parse().unwrap()],
+                packet: &packet,
+                response_ttl: Duration::from_secs(60),
+                sequence: 4,
+                timestamp_millis: 4000,
+            },
+            &policy,
+            &mut egress,
+            &mut audit,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome.decision,
+            PolicyDecision::RequireBrokerDns { .. }
+        ));
+        assert!(egress.dns_queries.is_empty());
+        assert_eq!(audit.records().len(), 1);
+        let response = outcome.response.unwrap();
+        assert_eq!(u16::from_be_bytes([response[2], response[3]]) & 0x000f, 5);
+    }
+
+    #[test]
     fn allowed_icmp_echo_packet_returns_synthetic_reply_after_policy() {
         let mut config = RuntimeConfig::deny_by_default();
         config.allow_ping = true;
@@ -795,6 +942,24 @@ mod tests {
         assert_eq!(outcome.outbound_packets[0].bytes()[21], 13);
         assert!(egress.udp_flows.is_empty());
         assert_eq!(audit.records().len(), 1);
+    }
+
+    fn dns_query_packet(id: u16, hostname: &str, qtype: u16) -> Vec<u8> {
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&id.to_be_bytes());
+        packet.extend_from_slice(&0x0100_u16.to_be_bytes());
+        packet.extend_from_slice(&1_u16.to_be_bytes());
+        packet.extend_from_slice(&0_u16.to_be_bytes());
+        packet.extend_from_slice(&0_u16.to_be_bytes());
+        packet.extend_from_slice(&0_u16.to_be_bytes());
+        for label in hostname.split('.') {
+            packet.push(label.len() as u8);
+            packet.extend_from_slice(label.as_bytes());
+        }
+        packet.push(0);
+        packet.extend_from_slice(&qtype.to_be_bytes());
+        packet.extend_from_slice(&1_u16.to_be_bytes());
+        packet
     }
 
     fn echo_request_packet() -> Vec<u8> {

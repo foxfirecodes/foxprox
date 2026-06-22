@@ -777,3 +777,25 @@
   - `cargo tree -p foxprox-dns` — DNS depends only on `foxprox-core`.
 - Commit hash after commit: 6beadd8.
 - Remaining boundary risks: UDP socket serving, upstream DNS wire forwarding, TCP DNS, negative caching, and DNSSEC/authority metadata remain.
+
+## 2026-06-22 — Boundary objective: DNS packet broker orchestration
+
+- Boundary under work: DNS packet handling that parses a UDP DNS query, applies shared policy/audit, resolves allowed queries through shared egress, and returns DNS wire responses from the DNS boundary.
+- Allowed dependency direction: `foxprox-net` may orchestrate DNS/policy/audit/egress; `foxprox-dns` owns wire parsing/synthesis; policy/audit must not import DNS wire structs or egress types.
+- Dependency-risk assessment: DNS serving can bypass shared policy if implemented as a standalone resolver path. Keep query decisions audited through normalized events and use shared egress for allowed resolution.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency tree checks for `foxprox-net`, `foxprox-policy`, and `foxprox-audit`.
+- Observed results: added `handle_dns_packet` in `foxprox-net`, plus `DnsPacketRequest`/`DnsPacketOutcome`, to parse DNS wire queries, audit policy decisions, resolve allowed queries through shared `HostEgress`, synthesize address responses through `foxprox-dns`, and return refused responses for denied/direct-external DNS. Extended `MockEgress` with configurable DNS results. All verification passed.
+- Changed files:
+  - `crates/foxprox-egress/src/lib.rs`
+  - `crates/foxprox-net/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 84 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-net` — net orchestrates DNS/policy/audit/egress behind normalized boundaries.
+  - `cargo tree -p foxprox-policy` — policy depends only on `foxprox-core`.
+  - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: real UDP DNS socket loop, upstream wire forwarding, response caching integration, TCP DNS, and negative caching remain.
