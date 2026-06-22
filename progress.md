@@ -695,3 +695,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * malformed checksum/length/header errors remain distinct from unsupported protocol/version/fragmentation/extension errors in audit reasons.
 * Audit evidence: unit tests assert audit kind, fail-closed decision, reason, unsupported protocol preservation, and JSON fragments.
 * Residual risk: actual TUN/runtime packet loop still needs to call this builder and push/drain audit records; no forwarding integration exists yet.
+* Commit hash: 978bbd6 audit packet parser fail closed errors.
