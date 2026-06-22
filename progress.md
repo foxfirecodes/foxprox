@@ -1905,3 +1905,38 @@
   - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
   - Dependency checks passed: `cargo tree -p foxprox-core`, `cargo tree -p foxprox-net`, `cargo tree -p foxprox-proxy`, `cargo tree -p foxprox-cli`.
 - Removed transient review/context artifacts before commit.
+
+## 2026-06-22T22:53:24Z — committed minimum audit event coverage
+
+- Commit created: `798650d` (`emit minimum audit lifecycle events`).
+- Commit contents: specific TLS denial audit kinds, lifecycle audit events across TCP/UDP/combined/proxy/ICMP proof runtimes, focused tests, and verification ledger.
+- Current git status after commit: clean.
+- Remaining alpha comparison: `context-build/alpha-gap-after-multi-port-tcp.md` identified setup-helper proxy environment behavior as the next P1 gap. Proxy bridges are reachable over TUN, but `foxproxsetup` cannot yet inject `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` before target exec. Next slice: add explicit proxy environment flags to `foxproxsetup` and apply them to the target command after setup privilege drop.
+
+## 2026-06-22T22:56:03Z — setup proxy environment injection WIP awaiting review
+
+- Current objective: close the setup-helper proxy environment gap from `context-build/alpha-gap-after-multi-port-tcp.md`.
+- Implemented WIP:
+  - Added `ProxyEnv` to `foxproxsetup` with explicit `--http-proxy`, `--https-proxy`, `--all-proxy`, and `--no-proxy` flags.
+  - `foxproxsetup` now applies both upper- and lower-case proxy environment variables to the target command immediately before exec, after network setup, broker ready ack, fd cleanup, and setup capability drop.
+  - Existing default behavior remains unchanged unless proxy env flags are provided.
+  - Added parse/apply regression tests.
+- Focused verification passed: `cargo test -p foxprox-setup` (4 tests).
+- Next exact action: request blocker review, then run full verification and commit if clean.
+
+## 2026-06-22T22:58:44Z — setup proxy env blocker fixed
+
+- Review result: `reviews/setup-proxy-env-final.md` found one test-coverage blocker: `apply_proxy_env` set upper/lowercase variants for HTTP/HTTPS/ALL/NO proxy variables, but the regression test asserted only four of the eight keys.
+- Fix applied: expanded `apply_proxy_env_sets_upper_and_lower_case_variables` to assert `HTTPS_PROXY`, `https_proxy`, `all_proxy`, and `no_proxy` in addition to existing assertions.
+- Next exact action: rerun final verification and commit if clean.
+
+## 2026-06-22T22:59:42Z — setup proxy env final verification complete
+
+- Blocker fix verification passed:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 10 CLI tests, 53 core tests, 9 device tests, 7 egress tests, 49 net tests, 29 proxy tests, 4 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - Dependency checks passed: `cargo tree -p foxprox-core`, `cargo tree -p foxprox-setup`.
+- Removed transient review artifact before commit.

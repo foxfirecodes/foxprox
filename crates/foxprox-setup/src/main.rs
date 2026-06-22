@@ -32,7 +32,16 @@ struct SetupArgs {
     mtu: u16,
     resolv_conf: PathBuf,
     keep_cap_net_raw: bool,
+    proxy_env: ProxyEnv,
     target: Vec<String>,
+}
+
+#[derive(Debug, Default, Clone, Eq, PartialEq)]
+struct ProxyEnv {
+    http_proxy: Option<String>,
+    https_proxy: Option<String>,
+    all_proxy: Option<String>,
+    no_proxy: Option<String>,
 }
 
 fn main() {
@@ -60,7 +69,7 @@ fn run() -> io::Result<()> {
     drop(stream);
 
     drop_setup_capabilities(args.keep_cap_net_raw)?;
-    exec_target(args.target)
+    exec_target(args.target, &args.proxy_env)
 }
 
 fn parse_args<I>(mut args: I) -> io::Result<SetupArgs>
@@ -75,6 +84,7 @@ where
     let mut mtu = 1500;
     let mut resolv_conf = PathBuf::from("/etc/resolv.conf");
     let mut keep_cap_net_raw = false;
+    let mut proxy_env = ProxyEnv::default();
     let mut target = Vec::new();
 
     while let Some(arg) = args.next() {
@@ -92,6 +102,14 @@ where
             "--resolv-conf" => {
                 resolv_conf = PathBuf::from(required_value(&mut args, "--resolv-conf")?)
             }
+            "--http-proxy" => {
+                proxy_env.http_proxy = Some(required_value(&mut args, "--http-proxy")?)
+            }
+            "--https-proxy" => {
+                proxy_env.https_proxy = Some(required_value(&mut args, "--https-proxy")?)
+            }
+            "--all-proxy" => proxy_env.all_proxy = Some(required_value(&mut args, "--all-proxy")?),
+            "--no-proxy" => proxy_env.no_proxy = Some(required_value(&mut args, "--no-proxy")?),
             "--keep-cap-net-raw-for-ping" => keep_cap_net_raw = true,
             "--" => {
                 target.extend(args);
@@ -131,6 +149,7 @@ where
         mtu,
         resolv_conf,
         keep_cap_net_raw,
+        proxy_env,
         target,
     })
 }
@@ -161,7 +180,7 @@ where
 }
 
 fn usage() -> &'static str {
-    "usage: foxproxsetup --setup-socket PATH [--ifname foxprox0] [--sandbox-ip 10.255.0.2] [--prefix-len 24] [--broker-ip 10.255.0.1] [--mtu 1500] [--resolv-conf /etc/resolv.conf] [--keep-cap-net-raw-for-ping] -- target args..."
+    "usage: foxproxsetup --setup-socket PATH [--ifname foxprox0] [--sandbox-ip 10.255.0.2] [--prefix-len 24] [--broker-ip 10.255.0.1] [--mtu 1500] [--resolv-conf /etc/resolv.conf] [--http-proxy URL] [--https-proxy URL] [--all-proxy URL] [--no-proxy LIST] [--keep-cap-net-raw-for-ping] -- target args..."
 }
 
 fn validate_ifname(ifname: &str) -> io::Result<()> {
@@ -296,11 +315,27 @@ fn drop_setup_capabilities(keep_cap_net_raw: bool) -> io::Result<()> {
     Ok(())
 }
 
-fn exec_target(target: Vec<String>) -> io::Result<()> {
+fn exec_target(target: Vec<String>, proxy_env: &ProxyEnv) -> io::Result<()> {
     let mut command = Command::new(&target[0]);
     command.args(&target[1..]);
+    apply_proxy_env(&mut command, proxy_env);
     close_unneeded_fds();
     Err(command.exec())
+}
+
+fn apply_proxy_env(command: &mut Command, proxy_env: &ProxyEnv) {
+    if let Some(value) = &proxy_env.http_proxy {
+        command.env("HTTP_PROXY", value).env("http_proxy", value);
+    }
+    if let Some(value) = &proxy_env.https_proxy {
+        command.env("HTTPS_PROXY", value).env("https_proxy", value);
+    }
+    if let Some(value) = &proxy_env.all_proxy {
+        command.env("ALL_PROXY", value).env("all_proxy", value);
+    }
+    if let Some(value) = &proxy_env.no_proxy {
+        command.env("NO_PROXY", value).env("no_proxy", value);
+    }
 }
 
 fn close_unneeded_fds() {
@@ -345,6 +380,71 @@ mod tests {
         .unwrap();
 
         assert_eq!(args.resolv_conf, PathBuf::from("/tmp/resolv.conf"));
+    }
+
+    #[test]
+    fn parse_args_accepts_proxy_environment_values() {
+        let args = parse_args(
+            [
+                "--setup-socket",
+                "/tmp/setup.sock",
+                "--http-proxy",
+                "http://10.255.0.1:8080",
+                "--https-proxy",
+                "http://10.255.0.1:8080",
+                "--all-proxy",
+                "socks5h://10.255.0.1:1080",
+                "--no-proxy",
+                "localhost,127.0.0.1",
+                "--",
+                "/bin/true",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(
+            args.proxy_env.http_proxy.as_deref(),
+            Some("http://10.255.0.1:8080")
+        );
+        assert_eq!(
+            args.proxy_env.https_proxy.as_deref(),
+            Some("http://10.255.0.1:8080")
+        );
+        assert_eq!(
+            args.proxy_env.all_proxy.as_deref(),
+            Some("socks5h://10.255.0.1:1080")
+        );
+        assert_eq!(
+            args.proxy_env.no_proxy.as_deref(),
+            Some("localhost,127.0.0.1")
+        );
+    }
+
+    #[test]
+    fn apply_proxy_env_sets_upper_and_lower_case_variables() {
+        let proxy_env = ProxyEnv {
+            http_proxy: Some("http://10.255.0.1:8080".to_string()),
+            https_proxy: Some("http://10.255.0.1:8080".to_string()),
+            all_proxy: Some("socks5h://10.255.0.1:1080".to_string()),
+            no_proxy: Some("localhost".to_string()),
+        };
+        let mut command = Command::new("/bin/true");
+        apply_proxy_env(&mut command, &proxy_env);
+        let envs: std::collections::BTreeMap<_, _> = command
+            .get_envs()
+            .filter_map(|(key, value)| Some((key.to_str()?, value?.to_str()?)))
+            .collect();
+
+        assert_eq!(envs.get("HTTP_PROXY"), Some(&"http://10.255.0.1:8080"));
+        assert_eq!(envs.get("http_proxy"), Some(&"http://10.255.0.1:8080"));
+        assert_eq!(envs.get("HTTPS_PROXY"), Some(&"http://10.255.0.1:8080"));
+        assert_eq!(envs.get("https_proxy"), Some(&"http://10.255.0.1:8080"));
+        assert_eq!(envs.get("ALL_PROXY"), Some(&"socks5h://10.255.0.1:1080"));
+        assert_eq!(envs.get("all_proxy"), Some(&"socks5h://10.255.0.1:1080"));
+        assert_eq!(envs.get("NO_PROXY"), Some(&"localhost"));
+        assert_eq!(envs.get("no_proxy"), Some(&"localhost"));
     }
 
     #[test]
