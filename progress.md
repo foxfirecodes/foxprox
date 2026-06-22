@@ -675,3 +675,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * audit sink callers now have a bounded drain primitive instead of needing to pop/serialize arbitrarily many events in one unbounded loop.
 * Audit evidence: unit tests assert serialized JSON line ordering and bounded batch accounting.
 * Residual risk: no OS file/stdout sink, async runtime integration, or durable write error policy exists yet; this commit only adds the bounded core drain primitive.
+* Commit hash: cabc9ff add bounded audit json drain batches.
