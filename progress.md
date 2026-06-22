@@ -500,3 +500,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Residual risk: DNS response audit fields, serialized sink output, audit drain/backpressure policy in async runtime, and actual DNS socket handler integration remain future work.
 
 * Commit hash: 7309f22 preserve dns query metadata in audit.
+
+## 2026-06-21 - Stable audit JSON line serialization
+
+* Invariant under work: audit records for allow, deny, fail-closed, DNS, HTTP, and endpoint-bearing decisions must serialize to a deterministic structured line without dropping security-relevant fields or relying on ad hoc debug formatting.
+* Threat or failure mode addressed: if audit sinks receive lossy or unstable text, reviewers and tests can miss denial reasons, query types, attribution source/confidence, or requested ports that explain security decisions.
+* Planned verification: add JSON-line serialization helpers and tests for denied HTTP policy events, DNS query events, fail-closed reasons, endpoint objects, null optional fields, and string escaping; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Stable audit JSON line serialization results
+
+* Tests added/updated:
+  * denied HTTP policy audit events serialize kind, source/destination endpoints, requested port, hostname attribution, decision, deny behavior, denial reason, rule ID, HTTP path, and null DNS query type.
+  * DNS query audit events serialize DNS query type, hostname source, null endpoints, fail-closed decision, and malformed-input reason.
+  * unsupported protocol audit serialization preserves the protocol number as `unsupported:<number>`.
+  * JSON string escaping covers quotes in rule IDs and HTTP path/query values.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 88 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * allow/deny/fail-closed decisions retain structured fields through audit serialization rather than relying on debug formatting.
+  * optional fields serialize as explicit `null`, which makes missing attribution or endpoints auditable.
+* Audit evidence: unit tests assert deterministic JSON fragments for denial context, DNS query metadata, fail-closed reason, endpoint objects, and unsupported protocol numbers.
+* Residual risk: no async audit drain or file/stdout sink exists yet; lifecycle/flow-specific event constructors and response audit serialization coverage remain future work.

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::fmt::Write as _;
 use std::net::IpAddr;
 
 use crate::attribution::Hostname;
@@ -129,6 +130,77 @@ impl AuditEvent {
             byte_count: None,
         }
     }
+
+    pub fn to_json_line(&self) -> String {
+        let mut out = String::new();
+        out.push('{');
+        push_json_u64_field(&mut out, "timestamp_millis", self.timestamp_millis, true);
+        push_json_string_field(&mut out, "sandbox_id", self.sandbox_id.as_str(), false);
+        push_json_string_field(&mut out, "kind", audit_event_kind_name(self.kind), false);
+        push_json_option_string_field(
+            &mut out,
+            "frontend",
+            self.frontend.map(frontend_name),
+            false,
+        );
+        push_json_protocol_field(&mut out, "protocol", self.protocol, false);
+        push_json_endpoint_field(&mut out, "source", self.source, false);
+        push_json_endpoint_field(&mut out, "destination", self.destination, false);
+        push_json_option_u16_field(&mut out, "requested_port", self.requested_port, false);
+        push_json_option_string_field(
+            &mut out,
+            "hostname",
+            self.hostname.as_ref().map(|hostname| hostname.as_str()),
+            false,
+        );
+        push_json_string_field(
+            &mut out,
+            "hostname_source",
+            hostname_source_name(self.hostname_source),
+            false,
+        );
+        push_json_string_field(
+            &mut out,
+            "hostname_confidence",
+            hostname_confidence_name(self.hostname_confidence),
+            false,
+        );
+        push_json_option_string_field(
+            &mut out,
+            "dns_query_type",
+            self.dns_query_type.map(dns_query_type_name),
+            false,
+        );
+        push_json_option_string_field(
+            &mut out,
+            "decision",
+            self.decision.map(audit_decision_name),
+            false,
+        );
+        push_json_option_string_field(
+            &mut out,
+            "deny_behavior",
+            self.decision.and_then(audit_deny_behavior_name),
+            false,
+        );
+        push_json_option_string_field(&mut out, "rule_id", self.rule_id.as_deref(), false);
+        push_json_option_string_field(
+            &mut out,
+            "reason",
+            self.reason.map(denial_reason_name),
+            false,
+        );
+        push_json_option_string_field(&mut out, "http_method", self.http_method.as_deref(), false);
+        push_json_option_string_field(
+            &mut out,
+            "http_path_query",
+            self.http_path_query.as_deref(),
+            false,
+        );
+        push_json_option_u64_field(&mut out, "byte_count", self.byte_count, false);
+        out.push('}');
+        out
+    }
 }
 
 fn audit_decision_fields(
@@ -148,6 +220,218 @@ fn audit_decision_fields(
             Some(*reason),
         ),
         Decision::FailClosed { reason } => (Some(AuditDecision::FailClosed), None, Some(*reason)),
+    }
+}
+
+fn push_json_u64_field(out: &mut String, key: &str, value: u64, first: bool) {
+    push_json_key(out, key, first);
+    write!(out, "{value}").expect("writing to String cannot fail");
+}
+
+fn push_json_option_u64_field(out: &mut String, key: &str, value: Option<u64>, first: bool) {
+    push_json_key(out, key, first);
+    if let Some(value) = value {
+        write!(out, "{value}").expect("writing to String cannot fail");
+    } else {
+        out.push_str("null");
+    }
+}
+
+fn push_json_option_u16_field(out: &mut String, key: &str, value: Option<u16>, first: bool) {
+    push_json_key(out, key, first);
+    if let Some(value) = value {
+        write!(out, "{value}").expect("writing to String cannot fail");
+    } else {
+        out.push_str("null");
+    }
+}
+
+fn push_json_string_field(out: &mut String, key: &str, value: &str, first: bool) {
+    push_json_key(out, key, first);
+    push_json_string(out, value);
+}
+
+fn push_json_option_string_field(out: &mut String, key: &str, value: Option<&str>, first: bool) {
+    push_json_key(out, key, first);
+    if let Some(value) = value {
+        push_json_string(out, value);
+    } else {
+        out.push_str("null");
+    }
+}
+
+fn push_json_endpoint_field(out: &mut String, key: &str, endpoint: Option<Endpoint>, first: bool) {
+    push_json_key(out, key, first);
+    let Some(endpoint) = endpoint else {
+        out.push_str("null");
+        return;
+    };
+
+    out.push('{');
+    push_json_string_field(out, "ip", &endpoint.ip.to_string(), true);
+    push_json_option_u16_field(out, "port", endpoint.port, false);
+    out.push('}');
+}
+
+fn push_json_protocol_field(out: &mut String, key: &str, protocol: Option<Protocol>, first: bool) {
+    push_json_key(out, key, first);
+    let Some(protocol) = protocol else {
+        out.push_str("null");
+        return;
+    };
+
+    match protocol {
+        Protocol::Unsupported(number) => push_json_string(out, &format!("unsupported:{number}")),
+        protocol => push_json_string(out, protocol_name(protocol)),
+    }
+}
+
+fn push_json_key(out: &mut String, key: &str, first: bool) {
+    if !first {
+        out.push(',');
+    }
+    push_json_string(out, key);
+    out.push(':');
+}
+
+fn push_json_string(out: &mut String, value: &str) {
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            ch if ch.is_control() => {
+                write!(out, "\\u{:04x}", ch as u32).expect("writing to String cannot fail");
+            }
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+}
+
+fn audit_event_kind_name(kind: AuditEventKind) -> &'static str {
+    match kind {
+        AuditEventKind::NetworkSessionStart => "network_session_start",
+        AuditEventKind::BrokerStart => "broker_start",
+        AuditEventKind::TunConfigured => "tun_configured",
+        AuditEventKind::ProxyListenerConfigured => "proxy_listener_configured",
+        AuditEventKind::DnsQuery => "dns_query",
+        AuditEventKind::TcpConnect => "tcp_connect",
+        AuditEventKind::TcpFlowClosed => "tcp_flow_closed",
+        AuditEventKind::UdpFlowCreated => "udp_flow_created",
+        AuditEventKind::UdpPacket => "udp_packet",
+        AuditEventKind::UdpFlowExpired => "udp_flow_expired",
+        AuditEventKind::QuicCandidateFlowCreated => "quic_candidate_flow_created",
+        AuditEventKind::IcmpMessage => "icmp_message",
+        AuditEventKind::HttpRequest => "http_request",
+        AuditEventKind::HttpsConnect => "https_connect",
+        AuditEventKind::SocksConnect => "socks_connect",
+        AuditEventKind::TlsClientHello => "tls_client_hello",
+        AuditEventKind::UnsupportedNetworkEvent => "unsupported_network_event",
+        AuditEventKind::PolicyReload => "policy_reload",
+        AuditEventKind::BrokerError => "broker_error",
+        AuditEventKind::NetworkSessionExit => "network_session_exit",
+    }
+}
+
+fn frontend_name(frontend: Frontend) -> &'static str {
+    match frontend {
+        Frontend::Tun => "tun",
+        Frontend::HttpProxy => "http_proxy",
+        Frontend::Socks5 => "socks5",
+        Frontend::SetupHelper => "setup_helper",
+    }
+}
+
+fn protocol_name(protocol: Protocol) -> &'static str {
+    match protocol {
+        Protocol::Tcp => "tcp",
+        Protocol::Udp => "udp",
+        Protocol::Dns => "dns",
+        Protocol::Icmp => "icmp",
+        Protocol::Http => "http",
+        Protocol::HttpsConnect => "https_connect",
+        Protocol::TlsSni => "tls_sni",
+        Protocol::Socks => "socks",
+        Protocol::QuicCandidate => "quic_candidate",
+        Protocol::Unsupported(_) => "unsupported",
+    }
+}
+
+fn hostname_source_name(source: HostnameSource) -> &'static str {
+    match source {
+        HostnameSource::None => "none",
+        HostnameSource::IpOnly => "ip_only",
+        HostnameSource::BrokerDnsQuery => "broker_dns_query",
+        HostnameSource::DnsCache => "dns_cache",
+        HostnameSource::PlaintextHttpHost => "plaintext_http_host",
+        HostnameSource::TlsSni => "tls_sni",
+        HostnameSource::QuicTls => "quic_tls",
+        HostnameSource::ExplicitProxy => "explicit_proxy",
+    }
+}
+
+fn hostname_confidence_name(confidence: HostnameConfidence) -> &'static str {
+    match confidence {
+        HostnameConfidence::None => "none",
+        HostnameConfidence::Low => "low",
+        HostnameConfidence::Medium => "medium",
+        HostnameConfidence::High => "high",
+    }
+}
+
+fn dns_query_type_name(query_type: DnsQueryType) -> &'static str {
+    match query_type {
+        DnsQueryType::A => "A",
+        DnsQueryType::Aaaa => "AAAA",
+        DnsQueryType::Cname => "CNAME",
+        DnsQueryType::Mx => "MX",
+        DnsQueryType::Txt => "TXT",
+        DnsQueryType::Srv => "SRV",
+        DnsQueryType::Ptr => "PTR",
+        DnsQueryType::Other(_) => "OTHER",
+    }
+}
+
+fn audit_decision_name(decision: AuditDecision) -> &'static str {
+    match decision {
+        AuditDecision::Allow => "allow",
+        AuditDecision::Deny { .. } => "deny",
+        AuditDecision::FailClosed => "fail_closed",
+    }
+}
+
+fn audit_deny_behavior_name(decision: AuditDecision) -> Option<&'static str> {
+    match decision {
+        AuditDecision::Deny { behavior } => Some(deny_behavior_name(behavior)),
+        AuditDecision::Allow | AuditDecision::FailClosed => None,
+    }
+}
+
+fn deny_behavior_name(behavior: DenyBehavior) -> &'static str {
+    match behavior {
+        DenyBehavior::Drop => "drop",
+        DenyBehavior::Reset => "reset",
+        DenyBehavior::IcmpUnreachable => "icmp_unreachable",
+    }
+}
+
+fn denial_reason_name(reason: DenialReason) -> &'static str {
+    match reason {
+        DenialReason::DefaultDeny => "default_deny",
+        DenialReason::RuleDeny => "rule_deny",
+        DenialReason::MalformedInput => "malformed_input",
+        DenialReason::UnsupportedProtocol => "unsupported_protocol",
+        DenialReason::DirectDnsBypass => "direct_dns_bypass",
+        DenialReason::MulticastOrBroadcast => "multicast_or_broadcast",
+        DenialReason::AttributionRequired => "attribution_required",
+        DenialReason::AttributionMismatch => "attribution_mismatch",
+        DenialReason::HiddenSni => "hidden_sni",
+        DenialReason::IcmpTypeDenied => "icmp_type_denied",
+        DenialReason::InvalidConfig => "invalid_config",
     }
 }
 
@@ -390,5 +674,107 @@ mod tests {
         assert_eq!(event.dns_query_type, Some(crate::dns::DnsQueryType::Aaaa));
         assert_eq!(event.decision, Some(AuditDecision::Allow));
         assert_eq!(event.reason, None);
+    }
+
+    #[test]
+    fn audit_json_line_preserves_denial_context_and_escapes_strings() {
+        let request = PolicyRequest {
+            sandbox_id: SandboxId::new("sandbox-json"),
+            source: Some(Endpoint::tcp(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 43210)),
+            ..PolicyRequest::new(Protocol::Http)
+                .with_destination(Endpoint::tcp(
+                    IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+                    80,
+                ))
+                .with_attribution(crate::attribution::HostAttribution::plaintext_http(
+                    Hostname::parse("www.example.com").unwrap(),
+                ))
+                .with_http_metadata("GET", "/deny?x=\"quoted\"")
+        };
+        let event = AuditEvent::from_policy_decision(
+            AuditPolicyContext::from_request(7, AuditEventKind::HttpRequest, &request),
+            &Decision::Deny {
+                behavior: DenyBehavior::Drop,
+                reason: DenialReason::RuleDeny,
+                rule_id: Some("deny \"quoted\"".into()),
+            },
+        );
+
+        let line = event.to_json_line();
+        assert!(line.starts_with('{'));
+        assert!(line.ends_with('}'));
+        assert!(line.contains("\"kind\":\"http_request\""));
+        assert!(line.contains("\"source\":{\"ip\":\"10.0.0.2\",\"port\":43210}"));
+        assert!(line.contains("\"destination\":{\"ip\":\"203.0.113.10\",\"port\":80}"));
+        assert!(line.contains("\"requested_port\":80"));
+        assert!(line.contains("\"hostname\":\"www.example.com\""));
+        assert!(line.contains("\"decision\":\"deny\""));
+        assert!(line.contains("\"deny_behavior\":\"drop\""));
+        assert!(line.contains("\"reason\":\"rule_deny\""));
+        assert!(line.contains("\"rule_id\":\"deny \\\"quoted\\\"\""));
+        assert!(line.contains("\"http_path_query\":\"/deny?x=\\\"quoted\\\"\""));
+        assert!(line.contains("\"dns_query_type\":null"));
+    }
+
+    #[test]
+    fn audit_json_line_preserves_dns_and_fail_closed_fields() {
+        let metadata = crate::dns::parse_dns_query(
+            &[
+                0xab, 0xcd, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x07, b'e',
+                b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'n', b'e', b't', 0x00, 0x00, 0x01, 0x00,
+                0x01,
+            ],
+            512,
+        )
+        .unwrap();
+        let event = AuditEvent::from_dns_query_metadata(
+            8,
+            SandboxId::new("sandbox-dns"),
+            Frontend::Tun,
+            None,
+            None,
+            &metadata,
+            &Decision::FailClosed {
+                reason: DenialReason::MalformedInput,
+            },
+        );
+
+        let line = event.to_json_line();
+        assert!(line.contains("\"kind\":\"dns_query\""));
+        assert!(line.contains("\"source\":null"));
+        assert!(line.contains("\"destination\":null"));
+        assert!(line.contains("\"hostname_source\":\"broker_dns_query\""));
+        assert!(line.contains("\"dns_query_type\":\"A\""));
+        assert!(line.contains("\"decision\":\"fail_closed\""));
+        assert!(line.contains("\"deny_behavior\":null"));
+        assert!(line.contains("\"reason\":\"malformed_input\""));
+    }
+
+    #[test]
+    fn audit_json_line_preserves_unsupported_protocol_number() {
+        let event = AuditEvent::from_policy_decision(
+            AuditPolicyContext {
+                timestamp_millis: 10,
+                sandbox_id: SandboxId::new("sandbox-unsupported"),
+                kind: AuditEventKind::UnsupportedNetworkEvent,
+                frontend: Frontend::Tun,
+                protocol: Protocol::Unsupported(99),
+                source: None,
+                destination: None,
+                requested_port: None,
+                hostname: None,
+                hostname_source: HostnameSource::None,
+                hostname_confidence: HostnameConfidence::None,
+                http_method: None,
+                http_path_query: None,
+            },
+            &Decision::FailClosed {
+                reason: DenialReason::UnsupportedProtocol,
+            },
+        );
+
+        assert!(event
+            .to_json_line()
+            .contains("\"protocol\":\"unsupported:99\""));
     }
 }

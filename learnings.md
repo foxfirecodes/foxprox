@@ -85,3 +85,7 @@ DNS response parsing and pending transaction validation need a single helper pat
 ## 2026-06-21 - DNS query type is audit-critical
 
 DNS audit events need first-class query type metadata. A generic DNS protocol audit record is not enough to review A/AAAA attribution decisions or spot unsupported query-type policy gaps. Growing the audit schema can also trip `large_enum_variant`; keep backpressure return types size-bounded without weakening bounded queue behavior.
+
+## 2026-06-21 - Audit serialization must preserve numeric unsupported protocols
+
+Audit JSON should not collapse `Protocol::Unsupported(n)` to a generic string. The unsupported protocol number is security-relevant evidence for fail-closed packet decisions and must survive structured serialization along with explicit nulls for absent attribution fields.
