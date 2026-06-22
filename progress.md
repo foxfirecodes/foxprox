@@ -613,3 +613,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: QUIC classification is still UDP/443 candidate-only; no visible QUIC/TLS metadata parser, host reply receive loop, or HTTP/3 semantic inspection exists.
 - Exact next step: commit QUIC policy coverage, then add a minimal explicit HTTP proxy frontend runtime path that gates parsed HTTP/CONNECT requests through the shared policy and host egress boundary.
+
+## 2026-06-22T01:19:20Z
+- Current objective: continue after QUIC policy coverage toward explicit proxy networking alpha gaps.
+- Git status summary: clean worktree after commit `45f2a62`.
+- Intended slice: add a minimal explicit HTTP proxy runtime path that converts already-parsed HTTP absolute-form and HTTPS CONNECT request lines into normalized policy events and opens host TCP egress only after verification-kernel approval.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with deterministic fake egress.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`, and `learnings.md` only if proxy parser/runtime boundaries reveal a new invariant.
+- Remaining risks: this slice should not add socket listener loops, HTTP body forwarding, CONNECT byte bridging, or proxy authentication.
+- Exact next step: implement policy-gated HTTP proxy request-line handling for plaintext HTTP and CONNECT using the shared host egress trait.
+
+## 2026-06-22T01:28:05Z
+- Current objective: add minimal explicit HTTP proxy runtime gating through the shared policy/audit and host egress boundary.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on rustfmt wrapping; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 54 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 48 runtime tests, and 7 setup tests passed. New runtime tests prove parsed explicit HTTP proxy request lines are denied before host egress by default, plaintext HTTP origin/path rules can open host TCP egress, and HTTPS CONNECT origin rules can open host TCP egress through the same verification kernel.
+- Commit hash when committed: pending.
+- Remaining risks: the runtime accepts a caller-resolved IP for now; it does not yet run a listener, resolve proxy hostnames, forward request bytes, bridge CONNECT streams, or support SOCKS runtime handling.
+- Exact next step: commit the HTTP proxy runtime slice, then add SOCKS5 CONNECT runtime gating through the shared policy and host egress boundary.

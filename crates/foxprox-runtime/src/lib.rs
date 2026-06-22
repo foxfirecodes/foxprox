@@ -7,12 +7,13 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    classify_udp, parse_dns_query, parse_http_request, parse_ip_packet, parse_tls_client_hello_sni,
-    synthesize_icmpv4_echo_reply, synthesize_udpv4_response, AttributionConfidence,
-    AttributionSource, AuditSink, Decision, DecisionAction, DecisionReason, DnsCache,
-    DnsParseError, Endpoint, FlowKey, FlowTable, FrontendKind, HostnameAttribution, InspectError,
-    NormalizedEvent, PacketError, ParsedIpPacket, Protocol, QuicStatus, SandboxId, SniStatus,
-    StaticDnsResolver, Tcpv4Segment, UdpFlow, Udpv4Packet, UnsupportedIpv4Protocol,
+    classify_udp, parse_dns_query, parse_http_proxy_request_line, parse_http_request,
+    parse_ip_packet, parse_tls_client_hello_sni, synthesize_icmpv4_echo_reply,
+    synthesize_udpv4_response, AttributionConfidence, AttributionSource, AuditSink, Decision,
+    DecisionAction, DecisionReason, DnsCache, DnsParseError, Endpoint, FlowKey, FlowTable,
+    FrontendKind, HostnameAttribution, HttpProxyRequestLine, HttpRequestMetadata, InspectError,
+    NormalizedEvent, PacketError, ParsedIpPacket, Protocol, ProxyParseError, QuicStatus, SandboxId,
+    SniStatus, StaticDnsResolver, Tcpv4Segment, UdpFlow, Udpv4Packet, UnsupportedIpv4Protocol,
     VerificationKernel,
 };
 use std::io::{self, Read, Write};
@@ -195,6 +196,123 @@ pub enum TcpStackOutcome {
         attempt: TcpStackConnectAttempt,
         error: EgressError,
     },
+}
+
+pub struct HttpProxyRuntime<E, S> {
+    egress: E,
+    kernel: VerificationKernel<S>,
+    sandbox_id: SandboxId,
+}
+
+impl<E, S> HttpProxyRuntime<E, S> {
+    pub fn new(egress: E, kernel: VerificationKernel<S>, sandbox_id: SandboxId) -> Self {
+        Self {
+            egress,
+            kernel,
+            sandbox_id,
+        }
+    }
+
+    pub fn egress(&self) -> &E {
+        &self.egress
+    }
+
+    pub fn kernel(&self) -> &VerificationKernel<S> {
+        &self.kernel
+    }
+
+    pub fn into_parts(self) -> (E, VerificationKernel<S>) {
+        (self.egress, self.kernel)
+    }
+}
+
+impl<E: HostEgress, S: AuditSink> HttpProxyRuntime<E, S> {
+    pub fn handle_request_line(
+        &mut self,
+        line: &str,
+        resolved_ip: IpAddr,
+        timestamp_millis: u128,
+    ) -> Result<HttpProxyOutcome, ProxyParseError> {
+        let parsed = parse_http_proxy_request_line(line)?;
+        let (event, destination) =
+            http_proxy_line_to_event_and_destination(self.sandbox_id.clone(), parsed, resolved_ip);
+        let decision = self.kernel.decide_and_audit(&event, timestamp_millis);
+        if decision.action != DecisionAction::Allow {
+            return Ok(HttpProxyOutcome::Denied { decision, event });
+        }
+        match self.egress.open_tcp(TcpConnectRequest {
+            frontend: FrontendKind::HttpProxy,
+            destination,
+        }) {
+            Ok(()) => Ok(HttpProxyOutcome::HostConnectOpened { decision, event }),
+            Err(error) => Ok(HttpProxyOutcome::HostConnectFailed {
+                decision,
+                event,
+                error,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HttpProxyOutcome {
+    Denied {
+        decision: Decision,
+        event: NormalizedEvent,
+    },
+    HostConnectOpened {
+        decision: Decision,
+        event: NormalizedEvent,
+    },
+    HostConnectFailed {
+        decision: Decision,
+        event: NormalizedEvent,
+        error: EgressError,
+    },
+}
+
+fn http_proxy_line_to_event_and_destination(
+    sandbox_id: SandboxId,
+    parsed: HttpProxyRequestLine,
+    resolved_ip: IpAddr,
+) -> (NormalizedEvent, Endpoint) {
+    match parsed {
+        HttpProxyRequestLine::PlainHttp {
+            method,
+            origin,
+            path_query,
+        } => {
+            let destination = Endpoint::new(resolved_ip, origin.port);
+            (
+                NormalizedEvent::HttpRequest {
+                    sandbox_id,
+                    frontend: FrontendKind::HttpProxy,
+                    source: None,
+                    destination: Some(destination.clone()),
+                    metadata: HttpRequestMetadata {
+                        method,
+                        host: origin.host,
+                        port: origin.port,
+                        path_query,
+                        scheme: origin.scheme,
+                    },
+                },
+                destination,
+            )
+        }
+        HttpProxyRequestLine::Connect { origin } => {
+            let destination = Endpoint::new(resolved_ip, origin.port);
+            (
+                NormalizedEvent::HttpsConnect {
+                    sandbox_id,
+                    frontend: FrontendKind::HttpProxy,
+                    hostname: HostnameAttribution::explicit_proxy(origin.host),
+                    port: origin.port,
+                },
+                destination,
+            )
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1100,12 +1218,14 @@ mod tests {
     struct FakeEgress {
         tcp_attempts: usize,
         udp_attempts: usize,
+        last_tcp_destination: Option<Endpoint>,
         last_udp_payload: Vec<u8>,
     }
 
     impl HostEgress for FakeEgress {
-        fn open_tcp(&mut self, _request: TcpConnectRequest) -> Result<(), EgressError> {
+        fn open_tcp(&mut self, request: TcpConnectRequest) -> Result<(), EgressError> {
             self.tcp_attempts += 1;
+            self.last_tcp_destination = Some(request.destination);
             Ok(())
         }
 
@@ -1244,6 +1364,120 @@ mod tests {
         assert_eq!(runtime.stack().resets, 0);
         assert_eq!(runtime.stack().opened, 1);
         assert_eq!(runtime.egress().tcp_attempts, 1);
+    }
+
+    #[test]
+    fn http_proxy_runtime_denies_plain_http_before_host_egress_by_default() {
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = HttpProxyRuntime::new(
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("http-proxy-deny").unwrap(),
+        );
+
+        let outcome = runtime
+            .handle_request_line(
+                "GET http://www.example.com/blocked HTTP/1.1",
+                IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+                100,
+            )
+            .unwrap();
+
+        assert!(matches!(outcome, HttpProxyOutcome::Denied { .. }));
+        assert_eq!(runtime.egress().tcp_attempts, 0);
+        assert_eq!(runtime.kernel().audit_sink().events().len(), 1);
+    }
+
+    #[test]
+    fn http_proxy_runtime_opens_plain_http_after_origin_path_policy_allows() {
+        let mut rule = PolicyRule::allow("allow-http-origin-path");
+        rule.protocol = Some(Protocol::Http);
+        rule.domain_suffix = Some(Hostname::normalize("example.com").unwrap());
+        rule.minimum_confidence = Some(AttributionConfidence::High);
+        rule.http_method = Some("GET".to_string());
+        rule.http_path_prefix = Some("/allowed".to_string());
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = HttpProxyRuntime::new(
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("http-proxy-allow").unwrap(),
+        );
+
+        let outcome = runtime
+            .handle_request_line(
+                "GET http://www.example.com/allowed?q=1 HTTP/1.1",
+                IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+                100,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            HttpProxyOutcome::HostConnectOpened { .. }
+        ));
+        assert_eq!(runtime.egress().tcp_attempts, 1);
+        assert_eq!(
+            runtime.egress().last_tcp_destination,
+            Some(Endpoint::new(
+                IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+                80
+            ))
+        );
+    }
+
+    #[test]
+    fn http_proxy_runtime_opens_connect_after_origin_policy_allows() {
+        let mut rule = PolicyRule::allow("allow-connect-origin");
+        rule.protocol = Some(Protocol::HttpsConnect);
+        rule.destination_port = Some(foxprox_core::PortMatcher::Exact(443));
+        rule.domain_suffix = Some(Hostname::normalize("example.com").unwrap());
+        rule.minimum_confidence = Some(AttributionConfidence::High);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = HttpProxyRuntime::new(
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("connect-proxy-allow").unwrap(),
+        );
+
+        let outcome = runtime
+            .handle_request_line(
+                "CONNECT api.example.com:443 HTTP/1.1",
+                IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+                100,
+            )
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            HttpProxyOutcome::HostConnectOpened { .. }
+        ));
+        assert_eq!(runtime.egress().tcp_attempts, 1);
+        assert_eq!(
+            runtime.egress().last_tcp_destination,
+            Some(Endpoint::new(
+                IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+                443
+            ))
+        );
     }
 
     #[test]

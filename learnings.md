@@ -29,3 +29,6 @@
 
 ## 2026-06-22T01:11:45Z
 - Hidden or absent SNI must not be governed by broad allow rules: only explicit destination rules can intentionally allow no-visible-SNI HTTPS, while SNI/DNS mismatches still fail closed before any allow rule.
+
+## 2026-06-22T01:28:05Z
+- Explicit proxy runtime needs a resolution boundary: policy can evaluate hostname/origin metadata, but the current host egress trait still requires an IP endpoint, so this slice accepts a caller-resolved IP until DNS/egress resolution is integrated.
