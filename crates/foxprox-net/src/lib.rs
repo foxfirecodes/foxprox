@@ -15,6 +15,7 @@ use foxprox_core::{
     parse_http_request_head, parse_tls_client_hello, Attribution, AttributionConfidence,
     AttributionSource, AuditBackpressure, AuditBuffer, AuditEvent, AuditEventKind, Decision,
     Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, SandboxId, TransportEndpoint,
+    UnsupportedReason,
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, TunTapInterface};
@@ -328,6 +329,20 @@ fn audit_backpressure_error(error: AuditBackpressure) -> io::Error {
     )
 }
 
+fn emit_tcp_unsupported_audit(
+    audit: &mut AuditBuffer,
+    sandbox_id: &SandboxId,
+    detail: impl Into<String>,
+) -> io::Result<()> {
+    let event = NetworkEvent::Unsupported {
+        sandbox_id: Some(sandbox_id.clone()),
+        frontend: Frontend::Tun,
+        reason: UnsupportedReason::Malformed(detail.into()),
+    };
+    let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+    emit_tcp_audit(audit, &event, decision)
+}
+
 fn transparent_tcp_audit_event(event: &NetworkEvent, decision: Decision) -> AuditEvent {
     let kind = match event {
         NetworkEvent::TcpConnectAttempt { .. } => AuditEventKind::TcpConnect,
@@ -393,6 +408,9 @@ fn transparent_tcp_audit_event(event: &NetworkEvent, decision: Decision) -> Audi
                 audit.attribution = Some(Attribution::ip_only());
             }
         }
+        NetworkEvent::Unsupported { reason, .. } => {
+            audit.detail = Some(format!("{reason:?}"));
+        }
         _ => {}
     }
     audit
@@ -440,16 +458,26 @@ impl InspectingHttpFlow {
             pending_limit,
             &mut self.last_activity,
         )?;
-        let inspection =
-            match parse_http_request_head(&self.pending_to_host, self.destination.port()) {
-                Ok(inspection) => inspection,
-                Err(foxprox_core::InspectionError::Truncated) => return Ok(None),
-                Err(error) => {
-                    return Err(io::Error::other(format!(
-                        "malformed or unsupported HTTP request head: {error:?}"
-                    )))
-                }
-            };
+        let inspection = match parse_http_request_head(
+            &self.pending_to_host,
+            self.destination.port(),
+        ) {
+            Ok(inspection) => inspection,
+            Err(foxprox_core::InspectionError::Truncated) => return Ok(None),
+            Err(error) => {
+                emit_tcp_unsupported_audit(
+                        audit,
+                        sandbox_id,
+                        format!(
+                            "malformed or unsupported HTTP request head source={}:{} destination={} error={error:?}",
+                            self.source.ip, self.source.port, self.destination
+                        ),
+                    )?;
+                return Err(io::Error::other(format!(
+                    "malformed or unsupported HTTP request head: {error:?}"
+                )));
+            }
+        };
         let event = NetworkEvent::HttpRequest {
             sandbox_id: sandbox_id.clone(),
             frontend: Frontend::Tun,
@@ -515,9 +543,17 @@ impl InspectingTlsFlow {
             Ok(inspection) => inspection,
             Err(foxprox_core::InspectionError::Truncated) => return Ok(None),
             Err(error) => {
+                emit_tcp_unsupported_audit(
+                    audit,
+                    sandbox_id,
+                    format!(
+                        "malformed or unsupported TLS ClientHello source={}:{} destination={} error={error:?}",
+                        self.source.ip, self.source.port, self.destination
+                    ),
+                )?;
                 return Err(io::Error::other(format!(
                     "malformed or unsupported TLS ClientHello: {error:?}"
-                )))
+                )));
             }
         };
         let event = NetworkEvent::TlsClientHello {
@@ -801,7 +837,7 @@ fn set_nonblocking(fd: i32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use foxprox_core::{Hostname, HttpMethod, Origin, Protocol};
+    use foxprox_core::{DecisionAction, Hostname, HttpMethod, Origin, Protocol};
 
     #[test]
     fn default_config_is_bounded() {
@@ -933,6 +969,150 @@ mod tests {
         assert_eq!(audit.hostname.unwrap().as_str(), "dns.example.com");
         assert_eq!(attribution.source, AttributionSource::DnsCache);
         assert_eq!(attribution.confidence, AttributionConfidence::Medium);
+    }
+
+    fn empty_tcp_socket() -> tcp::Socket<'static> {
+        let rx = tcp::SocketBuffer::new(vec![0; 1024]);
+        let tx = tcp::SocketBuffer::new(vec![0; 1024]);
+        tcp::Socket::new(rx, tx)
+    }
+
+    #[test]
+    fn transparent_tcp_audit_event_records_unsupported_metadata() {
+        let event = NetworkEvent::Unsupported {
+            sandbox_id: Some(SandboxId::new("test").unwrap()),
+            frontend: Frontend::Tun,
+            reason: UnsupportedReason::Malformed("bad transparent data".to_string()),
+        };
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let audit = transparent_tcp_audit_event(&event, decision);
+
+        assert_eq!(audit.kind, AuditEventKind::UnsupportedDenied);
+        assert_eq!(audit.protocol, Some(Protocol::Unsupported));
+        assert_eq!(audit.frontend, Frontend::Tun);
+        assert_eq!(
+            audit.decision.as_ref().map(|decision| decision.action),
+            Some(DecisionAction::FailClosed)
+        );
+        assert!(audit
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("bad transparent data")));
+    }
+
+    #[test]
+    fn malformed_transparent_http_head_emits_unsupported_audit() {
+        let sandbox_id = SandboxId::new("test").unwrap();
+        let policy = PolicyRuleSet::default();
+        let mut audit = audit_buffer(8).unwrap();
+        let mut socket = empty_tcp_socket();
+        let mut flow = InspectingHttpFlow::new(
+            TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)), 44_444),
+            SocketAddr::from(([93, 184, 216, 34], 80)),
+        );
+        flow.pending_to_host
+            .extend_from_slice(b"GET / HTTP/1.1\r\n\r\n");
+
+        let error = match flow.pump(
+            &mut socket,
+            &sandbox_id,
+            &policy,
+            &mut audit,
+            4096,
+            Duration::from_secs(1),
+        ) {
+            Ok(_) => panic!("malformed transparent HTTP unexpectedly succeeded"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        let event = audit.pop_front().unwrap();
+        assert_eq!(event.kind, AuditEventKind::UnsupportedDenied);
+        assert_eq!(event.protocol, Some(Protocol::Unsupported));
+        assert_eq!(
+            event.decision.as_ref().map(|decision| decision.action),
+            Some(DecisionAction::FailClosed)
+        );
+        assert!(event
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("HTTP request head")));
+    }
+
+    #[test]
+    fn malformed_transparent_tls_hello_emits_unsupported_audit() {
+        let sandbox_id = SandboxId::new("test").unwrap();
+        let policy = PolicyRuleSet::default();
+        let mut audit = audit_buffer(8).unwrap();
+        let mut socket = empty_tcp_socket();
+        let mut flow = InspectingTlsFlow::new(
+            TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)), 44_445),
+            SocketAddr::from(([93, 184, 216, 34], 443)),
+        );
+        flow.pending_to_host
+            .extend_from_slice(&[0x15, 0x03, 0x03, 0x00, 0x04, 0, 0, 0, 0]);
+
+        let error = match flow.pump(
+            &mut socket,
+            &sandbox_id,
+            &policy,
+            &mut audit,
+            4096,
+            Duration::from_secs(1),
+        ) {
+            Ok(_) => panic!("malformed transparent TLS unexpectedly succeeded"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        let event = audit.pop_front().unwrap();
+        assert_eq!(event.kind, AuditEventKind::UnsupportedDenied);
+        assert_eq!(event.protocol, Some(Protocol::Unsupported));
+        assert_eq!(
+            event.decision.as_ref().map(|decision| decision.action),
+            Some(DecisionAction::FailClosed)
+        );
+        assert!(event
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("TLS ClientHello")));
+    }
+
+    #[test]
+    fn malformed_transparent_http_backpressure_fails_closed() {
+        let sandbox_id = SandboxId::new("test").unwrap();
+        let policy = PolicyRuleSet::default();
+        let mut audit = audit_buffer(1).unwrap();
+        let filled = NetworkEvent::TcpConnectAttempt {
+            sandbox_id: sandbox_id.clone(),
+            frontend: Frontend::Tun,
+            source: None,
+            destination: TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 80),
+            attribution: Attribution::ip_only(),
+        };
+        let decision = PolicyEngine::new(policy.clone()).evaluate(&filled);
+        emit_tcp_audit(&mut audit, &filled, decision).unwrap();
+        let mut socket = empty_tcp_socket();
+        let mut flow = InspectingHttpFlow::new(
+            TransportEndpoint::new(IpAddr::V4(Ipv4Addr::new(10, 255, 0, 2)), 44_444),
+            SocketAddr::from(([93, 184, 216, 34], 80)),
+        );
+        flow.pending_to_host
+            .extend_from_slice(b"GET / HTTP/1.1\r\n\r\n");
+
+        let error = match flow.pump(
+            &mut socket,
+            &sandbox_id,
+            &policy,
+            &mut audit,
+            4096,
+            Duration::from_secs(1),
+        ) {
+            Ok(_) => panic!("malformed transparent HTTP unexpectedly bypassed audit backpressure"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
     }
 
     #[test]

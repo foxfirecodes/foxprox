@@ -1270,6 +1270,54 @@
 - Current git status summary: UDP/progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit malformed broker DNS audit coverage, then continue unsupported-path audit consistency for transparent HTTP/TLS inspection failures.
 
+## 2026-06-22T00:34:05Z — malformed broker DNS audit committed; next objective selected
+
+- Commit created: `2a5d16e` (`audit malformed broker dns`).
+- Current objective: audit malformed transparent HTTP/TLS inspection failures.
+- Rationale: malformed broker DNS and explicit proxy unsupported paths now emit `UnsupportedDenied`. The next remaining transparent audit-consistency gap is HTTP/TLS inspection parse failures, which previously only logged and aborted after accepting a TCP flow.
+- Expected commit boundary: `UnsupportedDenied` audit for transparent HTTP request-head parse failures and TLS ClientHello parse failures, fail-closed on audit backpressure, tests for metadata/runtime behavior, no policy or dependency changes.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: implement transparent HTTP/TLS unsupported audit in `crates/foxprox-net/src/lib.rs`.
+
+## 2026-06-22T00:38:29Z — transparent HTTP/TLS unsupported audit pending review
+
+- Current objective: commit malformed transparent HTTP/TLS inspection audit coverage.
+- Changes implemented:
+  - Added transparent TCP unsupported audit helper that emits `NetworkEvent::Unsupported` with `UnsupportedReason::Malformed`, evaluates it fail-closed, and records `AuditEventKind::UnsupportedDenied`.
+  - `transparent_tcp_audit_event` now preserves unsupported reason detail.
+  - Transparent HTTP inspection parse failures emit unsupported audit before returning an error to abort the socket.
+  - Transparent TLS ClientHello parse failures emit unsupported audit before returning an error to abort the socket.
+  - Audit backpressure on malformed HTTP/TLS inspection propagates before any `ConnectingFlow`/host connect creation.
+  - Added tests for unsupported TCP audit metadata, malformed HTTP runtime audit, malformed TLS runtime audit, and malformed HTTP backpressure.
+- Subagents/reviews requested: pending request after this entry.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-net -- --nocapture` passed: 27 net tests.
+  - `cargo test --workspace` passed: 51 core tests, 9 device tests, 27 net tests, 28 proxy tests, 7 CLI tests, setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net` and `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-net/src/lib.rs`, `progress.md`.
+- Current git status summary: net/progress modified; review artifact pending.
+- Next exact action: request/read transparent HTTP/TLS unsupported audit review, fix blockers if any, then commit.
+
+## 2026-06-22T00:40:25Z — transparent HTTP/TLS unsupported audit review passed
+
+- Current objective: commit malformed transparent HTTP/TLS inspection audit coverage.
+- Review result: `transparent-inspection-unsupported-audit-final` found no blockers.
+- Confirmed behavior:
+  - HTTP parse errors emit unsupported audit before abort.
+  - TLS parse errors emit unsupported audit before abort.
+  - Audit metadata uses `UnsupportedDenied`, `Frontend::Tun`, `Protocol::Unsupported`, and preserved detail.
+  - Audit backpressure propagates as `WouldBlock` before `ConnectingFlow` construction/host connect.
+  - Tests cover metadata, runtime, and backpressure paths.
+  - No Cargo manifest changes.
+- Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed; reviewer also ran focused net fmt/tests successfully.
+- Files changed: `crates/foxprox-net/src/lib.rs`, `progress.md`.
+- Current git status summary: net/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit transparent HTTP/TLS unsupported audit coverage, then reassess remaining alpha gaps.
+
 ## 2026-06-22T00:12:18Z — ICMP audit/cleanup rereview passed
 
 - Current objective: commit cleanup-safe setup socket binding plus ICMP proof audit coverage.
