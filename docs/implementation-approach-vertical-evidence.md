@@ -23,7 +23,7 @@ This approach values working proof, real feedback, and rapid discovery of incorr
 4. Choose the smallest vertical slice that crosses at least one real architectural boundary.
 5. Implement the minimum production-quality code needed for that slice.
 6. Remove or quarantine temporary scaffolding before commit unless it is an intentional test harness.
-7. Verify the slice with compile checks, tests, and runtime evidence where applicable.
+7. Verify the slice with compile checks, tests, and live evidence where applicable.
 8. Append evidence and remaining gaps to `progress.md`.
 9. Append approach changes or technical discoveries to `learnings.md`.
 10. Commit the verified slice.
@@ -39,7 +39,7 @@ Prefer slices that expose real behavior through:
 * frontend-to-egress boundaries
 * integration-backend boundaries
 * parser-to-normalized-event boundaries
-* runtime setup-to-broker boundaries
+* setup-to-broker boundaries
 
 Do not choose a slice that only creates unused abstractions unless the abstraction itself is verified by compile-time or test evidence.
 
@@ -51,7 +51,7 @@ Acceptable evidence includes:
 
 * a passing focused test that fails before the change
 * a compile-time boundary check
-* a runtime command with captured output
+* a command with captured output
 * a structured audit event assertion
 * a packet, request, DNS, policy, or parser fixture test
 * an integration harness result
@@ -62,7 +62,7 @@ Always run:
 * formatting checks for touched Rust code
 * clippy with denied warnings when feasible
 * the focused test suite for the changed boundary
-* broader cargo tests before committing when runtime permits
+* broader cargo tests before committing when feasible
 
 Record exact commands and outcomes in `progress.md`.
 
@@ -115,7 +115,7 @@ Do not batch unrelated slices into one commit. Do not commit failing checks unle
 
 ## Autonomy Rules
 
-The agent should keep moving by choosing the next smallest evidence slice that reduces uncertainty. Prefer direct runtime or test evidence over discussion.
+The agent should keep moving by choosing the next smallest evidence slice that reduces uncertainty. Prefer direct command or test evidence over discussion.
 
 Autonomy means proceed by default. Pause only for decisions that are scope-changing, security-sensitive, hard to reverse, or explicitly outside the source docs. For ordinary implementation choices, choose the safest documented option, record the assumption in `progress.md`, and continue.
 
@@ -130,4 +130,3 @@ Stop only when one of these is true:
 * the next step requires a scope-changing, security-sensitive, hard-to-reverse, or outside-docs decision;
 * verification is impossible after reducing the issue to a minimal repro;
 * two consecutive work cycles produce no meaningful product or verification progress;
-* an explicit runtime or turn budget is reached.
