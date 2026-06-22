@@ -17,8 +17,9 @@ use std::fs::{self, File};
 use std::io::{self, IoSliceMut, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
 
 fn main() {
     if let Err(error) = run() {
@@ -78,8 +79,7 @@ where
         )
     })?;
 
-    let listener = UnixListener::bind(&setup_socket)?;
-    fs::set_permissions(&setup_socket, fs::Permissions::from_mode(0o600))?;
+    let listener = BoundSetupListener::bind(&setup_socket)?;
     eprintln!("foxprox: waiting for foxproxsetup on {setup_socket}");
     let (mut stream, _) = listener.accept()?;
     verify_peer_credentials(&stream)?;
@@ -194,8 +194,7 @@ where
         )
     })?;
 
-    let listener = UnixListener::bind(&setup_socket)?;
-    fs::set_permissions(&setup_socket, fs::Permissions::from_mode(0o600))?;
+    let listener = BoundSetupListener::bind(&setup_socket)?;
     eprintln!("foxprox: waiting for foxproxsetup on {setup_socket}");
     let (mut stream, _) = listener.accept()?;
     verify_peer_credentials(&stream)?;
@@ -262,8 +261,7 @@ where
         )
     })?;
 
-    let listener = UnixListener::bind(&setup_socket)?;
-    fs::set_permissions(&setup_socket, fs::Permissions::from_mode(0o600))?;
+    let listener = BoundSetupListener::bind(&setup_socket)?;
     eprintln!("foxprox: waiting for foxproxsetup on {setup_socket}");
     let (mut stream, _) = listener.accept()?;
     verify_peer_credentials(&stream)?;
@@ -484,6 +482,35 @@ fn parse_nonzero_usize(value: &str) -> io::Result<usize> {
     Ok(parsed)
 }
 
+struct BoundSetupListener {
+    listener: UnixListener,
+    path: PathBuf,
+}
+
+impl BoundSetupListener {
+    fn bind(path: impl AsRef<Path>) -> io::Result<Self> {
+        let path = path.as_ref().to_path_buf();
+        let listener = UnixListener::bind(&path)?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        Ok(Self { listener, path })
+    }
+
+    fn accept(&self) -> io::Result<(UnixStream, std::os::unix::net::SocketAddr)> {
+        self.listener.accept()
+    }
+}
+
+impl Drop for BoundSetupListener {
+    fn drop(&mut self) {
+        match fs::symlink_metadata(&self.path) {
+            Ok(metadata) if metadata.file_type().is_socket() => {
+                let _ = fs::remove_file(&self.path);
+            }
+            _ => {}
+        }
+    }
+}
+
 fn verify_peer_credentials(stream: &UnixStream) -> io::Result<()> {
     let mut credentials = libc::ucred {
         pid: 0,
@@ -547,4 +574,54 @@ fn recv_fd(socket_fd: RawFd) -> io::Result<OwnedFd> {
         io::ErrorKind::InvalidData,
         "setup message did not contain a TUN fd",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_socket_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "foxprox-{name}-{}-{nanos}.sock",
+            std::process::id()
+        ))
+    }
+
+    #[test]
+    fn bound_setup_listener_removes_socket_on_drop() {
+        let path = unique_socket_path("cleanup");
+        {
+            let _listener = BoundSetupListener::bind(&path).unwrap();
+            let metadata = fs::symlink_metadata(&path).unwrap();
+            assert!(metadata.file_type().is_socket());
+            assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        }
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn bound_setup_listener_does_not_preunlink_existing_file() {
+        let path = unique_socket_path("existing");
+        fs::write(&path, b"not a socket").unwrap();
+        let result = BoundSetupListener::bind(&path);
+        assert!(result.is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"not a socket");
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn bound_setup_listener_does_not_remove_replaced_non_socket() {
+        let path = unique_socket_path("replaced");
+        let listener = BoundSetupListener::bind(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, b"replacement").unwrap();
+        drop(listener);
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        let _ = fs::remove_file(path);
+    }
 }

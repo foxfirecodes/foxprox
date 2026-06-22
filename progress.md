@@ -1019,3 +1019,49 @@
 - Files changed: `crates/foxprox-core/src/inspection.rs`, `crates/foxprox-core/src/dns.rs`, `crates/foxprox-device/src/lib.rs`, `crates/foxprox-proxy/src/lib.rs`, `progress.md`.
 - Current git status summary: core/device/proxy test sources and progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit fuzz smoke coverage, then compare remaining alpha cleanup robustness gaps.
+
+## 2026-06-21T23:59:55Z — fuzz smoke committed; next objective selected
+
+- Commit created: `68dec5a` (`add parser fuzz smoke tests`).
+- Current objective: improve setup socket cleanup robustness for proof CLI commands.
+- Rationale: Milestone 7 requires cleanup robustness. `proof-icmp`, `proof-tcp`, and `proof-udp-dns` currently bind setup Unix sockets directly and leave filesystem socket paths behind after exit/error. The smallest safe slice is an RAII setup-listener wrapper that sets `0600` permissions and removes the bound socket path on drop without pre-unlinking existing paths.
+- Expected commit boundary: CLI setup socket cleanup helper plus focused unit tests only; no runtime policy/audit behavior changes.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: implement cleanup-safe setup socket binding in `crates/foxprox-cli/src/main.rs`.
+
+## 2026-06-22T00:02:54Z — setup socket cleanup pending review
+
+- Current objective: commit cleanup-safe setup socket binding for proof CLI commands.
+- Changes implemented:
+  - Added `BoundSetupListener`, an RAII wrapper around `UnixListener` and its filesystem path.
+  - `BoundSetupListener::bind` binds without pre-unlinking existing paths and sets socket permissions to `0600`.
+  - `Drop` removes the path only if `symlink_metadata` still reports a Unix socket, preserving missing/replaced non-socket paths.
+  - `proof-icmp`, `proof-tcp`, and `proof-udp-dns` now bind setup sockets via `BoundSetupListener`.
+  - Tests cover socket removal on drop, no pre-unlink of existing files, and preserving a replaced non-socket path on drop.
+- Subagents/reviews requested: `setup-socket-cleanup-final` is running.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-cli -- --nocapture` passed: 3 CLI tests.
+  - `cargo test --workspace` passed: 51 core tests, 9 device tests, 18 net tests, 22 proxy tests, 3 CLI tests, setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: CLI/progress modified; review artifact pending.
+- Next exact action: read setup socket cleanup review, fix blockers if any, then commit.
+
+## 2026-06-22T00:04:24Z — setup socket cleanup review passed
+
+- Current objective: commit cleanup-safe setup socket binding for proof CLI commands.
+- Review result: `setup-socket-cleanup-final` found no blockers.
+- Confirmed behavior:
+  - ICMP/TCP/UDP setup sockets all use `BoundSetupListener::bind`.
+  - Wrapper binds without pre-unlinking and then sets mode `0600`.
+  - Drop uses `symlink_metadata` and removes only entries whose file type is a Unix socket.
+  - Tests cover normal cleanup/permissions, existing non-socket preservation, and replaced non-socket preservation.
+  - No dependency changes.
+- Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed; CLI cleanup tests cover 3 cases.
+- Files changed: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: CLI/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit setup socket cleanup robustness, then compare remaining alpha gaps.
