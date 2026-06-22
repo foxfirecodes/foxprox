@@ -26,3 +26,8 @@
 
 - When a proof runtime adds richer attribution/classification, add a real policy gate in the same slice; otherwise the proof can log correct events while still bypassing fail-closed policy.
 - For proof CLI shortcuts, install explicit allow rules only for user-requested proof ports so default runtime config remains deny-by-default.
+
+## 2026-06-22T22:07:22Z — TUN bridge host-service exposure guard
+
+- When exposing a broker-local service to the sandbox via TUN/smoltcp, keep the host-side backend listener loopback-only and validate both the requested bind address and the bound address reported after `TcpListener::bind`.
+- Starting long-lived proof backend threads should happen only after earlier fallible setup validation/binding has succeeded, so invalid CLI/setup input does not leave stray host listeners.

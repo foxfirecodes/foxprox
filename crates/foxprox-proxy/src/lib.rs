@@ -110,10 +110,20 @@ impl Socks5ProxyProofConfig {
 /// Each accepted connection is handled on a short-lived thread. This is an
 /// alpha proof, not the final async/resource-limited proxy runtime.
 pub fn run_http_proxy_proof(config: HttpProxyProofConfig) -> io::Result<()> {
+    run_http_proxy_proof_with_ready(config, |_| Ok(()))
+}
+
+/// Runs the blocking HTTP proxy proof listener and reports its bound address before accepting.
+pub fn run_http_proxy_proof_with_ready<F>(config: HttpProxyProofConfig, ready: F) -> io::Result<()>
+where
+    F: FnOnce(SocketAddr) -> io::Result<()>,
+{
     let audit = shared_audit_buffer(config.audit_queue_capacity)?;
     let limiter = ConnectionLimiter::new(config.max_connections)?;
     let listener = TcpListener::bind(config.listen_addr)?;
-    eprintln!("foxprox-proxy: listening on {}", listener.local_addr()?);
+    let local_addr = listener.local_addr()?;
+    ready(local_addr)?;
+    eprintln!("foxprox-proxy: listening on {local_addr}");
     for accepted in listener.incoming() {
         let config = config.clone();
         let audit = Arc::clone(&audit);

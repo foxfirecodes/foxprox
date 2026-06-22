@@ -1685,3 +1685,59 @@
 - Files changed: `crates/foxprox-core/src/audit.rs`, `crates/foxprox-core/src/lib.rs`, `crates/foxprox-net/src/lib.rs`, `crates/foxprox-net/src/udp.rs`, `crates/foxprox-proxy/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
 - Current git status summary: audit drain sink files and progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit audit drain sink, then reassess remaining alpha gaps.
+
+## 2026-06-22T21:47:20Z — audit drain sink committed; next objective selected
+
+- Commit created: `0d0c4b2` (`drain audit events to json lines`).
+- Current objective: address the next remaining alpha gap: explicit proxy proof reachability from the sandbox/TUN path.
+- Completed in commit:
+  - Added dependency-free JSON-lines audit serialization/drain helpers in `foxprox-core`.
+  - Live TCP, UDP/DNS, ICMP, and proxy audit emitters drain stale queued events before enqueue and drain again after successful enqueue.
+  - Drain is non-lossy: queued events are popped only after successful sink writes, and sink failures fail closed.
+- Verification evidence from pre-commit entries remains valid: focused tests, full workspace fmt/check/test/clippy/doc, and dependency trees passed after blocker fix and rereview found no blockers.
+- Current git status summary after commit: clean `autonomous-crew` branch before this progress checkpoint entry.
+- Next exact action: inspect explicit proxy reachability options, then implement the smallest safe slice that makes at least one explicit HTTP proxy proof reachable from the bwrap/TUN sandbox path.
+
+## 2026-06-22T22:03:13Z — explicit HTTP proxy TUN bridge pending review
+
+- Current objective: make the explicit HTTP/CONNECT proxy proof reachable from the sandbox over the broker-owned TUN path.
+- Planner result: `explicit-proxy-reachability-plan` recommended a small local-service bridge in the combined transparent runtime: expose `10.255.0.1:<proxy_port>` via a second smoltcp TCP listener, raw-bridge that TUN-side connection to a loopback-only `foxprox-proxy` HTTP listener, and keep parser/policy/audit in `foxprox-proxy` without adding dependencies to `foxprox-core` or `foxprox-net`.
+- Changes implemented:
+  - Added optional `tcp_egress_override` to `TcpProofConfig`; when set, transparent TCP skips HTTP/TLS inspection and raw-bridges to the override backend while preserving the sandbox-requested destination for policy/audit/flow-close records.
+  - Added `ExplicitHttpProxyBridgeConfig` and optional `http_proxy_bridge` to `CombinedTransparentProofConfig`; combined proof now installs and polls a second TCP state/socket for the proxy bridge and validates non-zero, non-conflicting proxy/backend ports before TUN setup.
+  - Added `run_http_proxy_proof_with_ready` so CLI wiring can safely learn the loopback listener address after bind and before accept.
+  - Extended `proof-transparent` with `--http-proxy-port`, repeatable `--http-proxy-allow-port`, and `--http-proxy-backend-listen`; when enabled it starts a loopback HTTP proxy proof, configures the TUN bridge, adds a broker-IP-scoped TCP allow rule for the proxy bridge port, and prints the `HTTP_PROXY=http://<broker-ip>:<port>` hint.
+  - Added focused tests for default disabled bridge/override, bridge validation/listener install, usage flag visibility, and existing proof behavior.
+- Verification commands and outcomes:
+  - `cargo test -p foxprox-net -p foxprox-proxy -p foxprox-cli -- --nocapture` passed: 45 net tests, 28 proxy tests, 8 CLI tests.
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 8 CLI tests, 53 core tests, 9 device tests, 45 net tests, 28 proxy tests, 2 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-core`, `cargo tree -p foxprox-net`, `cargo tree -p foxprox-proxy`, and `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-net/src/lib.rs`, `crates/foxprox-net/src/combined.rs`, `crates/foxprox-proxy/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Current git status summary: net/proxy/CLI/progress modified; `reviews/` contains transient planner artifact.
+- Next exact action: request/read explicit proxy bridge blocker review, fix blockers if any, then commit.
+
+## 2026-06-22T22:07:22Z — explicit HTTP proxy bridge blocker fixed
+
+- Review result: `reviews/explicit-proxy-bridge-final.md` found one blocker: `--http-proxy-backend-listen` accepted non-loopback host addresses, which could expose the proof HTTP proxy on host LAN interfaces despite the bridge plan requiring loopback-only backend listeners.
+- Fix applied: `proof-transparent` now validates the configured HTTP proxy backend listen address before starting the backend thread and validates the reported bound address after the ready callback returns; non-loopback addresses fail with `InvalidInput` and no backend thread is started.
+- Added CLI regression coverage for loopback-only backend validation (`127.0.0.1` and `::1` accepted, `0.0.0.0` rejected).
+- Focused verification after fix:
+  - `cargo test -p foxprox-cli` passed: 9 tests.
+  - `cargo test -p foxprox-net -p foxprox-proxy -p foxprox-cli` passed: 45 net tests, 28 proxy tests, 9 CLI tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+- Next action: run final full workspace verification, remove transient `reviews/`, commit the explicit HTTP proxy TUN bridge checkpoint, then reassess remaining alpha gaps.
+
+## 2026-06-22T22:09:12Z — explicit HTTP proxy bridge final verification
+
+- Final verification after loopback blocker fix:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test --workspace` passed: 9 CLI tests, 53 core tests, 9 device tests, 45 net tests, 28 proxy tests, 2 setup tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - Dependency checks passed: `cargo tree -p foxprox-core`, `cargo tree -p foxprox-net`, `cargo tree -p foxprox-proxy`, `cargo tree -p foxprox-cli`; `foxprox-core` remains dependency-free and parser/policy/audit code was not moved into it.
+- Removed transient review artifacts before commit.

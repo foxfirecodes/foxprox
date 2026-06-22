@@ -1,7 +1,7 @@
 use foxprox_core::{
-    classify_udp_candidate, AuditBackpressure, AuditBuffer, AuditEvent, AuditEventKind, Decision,
-    DecisionAction, Frontend, NetworkEvent, PolicyRule, PortRange, Protocol, RuleEffect, SandboxId,
-    TransportEndpoint,
+    classify_udp_candidate, AuditBackpressure, AuditBuffer, AuditEvent, AuditEventKind, Cidr,
+    Decision, DecisionAction, Frontend, NetworkEvent, PolicyRule, PortRange, Protocol, RuleEffect,
+    SandboxId, TransportEndpoint,
 };
 use foxprox_device::{
     icmp_event, parse_icmpv4_metadata, parse_ipv4_metadata, synthesize_icmpv4_echo_reply,
@@ -9,11 +9,12 @@ use foxprox_device::{
 };
 use foxprox_net::{
     run_combined_transparent_proof_with_ready, run_tcp_proof_with_ready,
-    run_udp_dns_proof_with_ready, CombinedTransparentProofConfig, TcpProofConfig,
-    UdpDnsProofConfig,
+    run_udp_dns_proof_with_ready, CombinedTransparentProofConfig, ExplicitHttpProxyBridgeConfig,
+    TcpProofConfig, UdpDnsProofConfig,
 };
 use foxprox_proxy::{
-    run_http_proxy_proof, run_socks5_proxy_proof, HttpProxyProofConfig, Socks5ProxyProofConfig,
+    run_http_proxy_proof, run_http_proxy_proof_with_ready, run_socks5_proxy_proof,
+    HttpProxyProofConfig, Socks5ProxyProofConfig,
 };
 use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
 use std::env;
@@ -50,7 +51,7 @@ fn run() -> io::Result<()> {
 }
 
 fn usage() -> &'static str {
-    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1] [--audit-queue-capacity N]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--audit-queue-capacity N]\n       foxprox proof-udp-dns --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N] [--max-udp-flows N]\n       foxprox proof-transparent --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N] [--max-udp-flows N]\n       foxprox proof-http-proxy [--listen 10.255.0.1:8080] [--allow-port PORT]... [--request-head-limit BYTES] [--request-head-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]\n       foxprox proof-socks5-proxy [--listen 10.255.0.1:1080] [--allow-port PORT]... [--request-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]"
+    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1] [--audit-queue-capacity N]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--audit-queue-capacity N]\n       foxprox proof-udp-dns --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N] [--max-udp-flows N]\n       foxprox proof-transparent --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N] [--max-udp-flows N] [--http-proxy-port PORT] [--http-proxy-allow-port PORT]... [--http-proxy-backend-listen 127.0.0.1:0]\n       foxprox proof-http-proxy [--listen 10.255.0.1:8080] [--allow-port PORT]... [--request-head-limit BYTES] [--request-head-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]\n       foxprox proof-socks5-proxy [--listen 10.255.0.1:1080] [--allow-port PORT]... [--request-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]"
 }
 
 fn proof_icmp<I>(mut args: I) -> io::Result<()>
@@ -317,15 +318,17 @@ fn proof_transparent<I>(mut args: I) -> io::Result<()>
 where
     I: Iterator<Item = String>,
 {
+    let sandbox_id = SandboxId::new("proof-transparent").map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid sandbox id: {error}"),
+        )
+    })?;
     let mut setup_socket = env::var("FOXPROX_SETUP_SOCKET").ok();
-    let mut config = CombinedTransparentProofConfig::new(
-        SandboxId::new("proof-transparent").map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("invalid sandbox id: {error}"),
-            )
-        })?,
-    );
+    let mut config = CombinedTransparentProofConfig::new(sandbox_id.clone());
+    let mut http_proxy_port = None;
+    let mut http_proxy_config =
+        HttpProxyProofConfig::new(sandbox_id, SocketAddr::from(([127, 0, 0, 1], 0)));
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -360,6 +363,27 @@ where
             "--max-udp-flows" => {
                 config.max_udp_flows =
                     parse_nonzero_usize(&required_value(&mut args, "--max-udp-flows")?)?
+            }
+            "--http-proxy-port" => {
+                http_proxy_port = Some(parse_nonzero_u16(&required_value(
+                    &mut args,
+                    "--http-proxy-port",
+                )?)?)
+            }
+            "--http-proxy-allow-port" => {
+                let port = parse_value(&required_value(&mut args, "--http-proxy-allow-port")?)?;
+                http_proxy_config
+                    .policy
+                    .rules
+                    .push(allow_http_proxy_rule(port));
+                http_proxy_config
+                    .policy
+                    .rules
+                    .push(allow_connect_proxy_rule(port));
+            }
+            "--http-proxy-backend-listen" => {
+                http_proxy_config.listen_addr =
+                    parse_socket_addr(&required_value(&mut args, "--http-proxy-backend-listen")?)?
             }
             "--help" | "-h" => return Err(io::Error::new(io::ErrorKind::InvalidInput, usage())),
             other => {
@@ -399,6 +423,29 @@ where
     })?;
 
     let listener = BoundSetupListener::bind(&setup_socket)?;
+    if let Some(proxy_port) = http_proxy_port {
+        if proxy_port == config.tcp_port {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "HTTP proxy port must differ from transparent TCP port",
+            ));
+        }
+        validate_http_proxy_backend_loopback(http_proxy_config.listen_addr)?;
+        let backend_addr = start_http_proxy_backend(http_proxy_config)?;
+        validate_http_proxy_backend_loopback(backend_addr)?;
+        config.http_proxy_bridge = Some(ExplicitHttpProxyBridgeConfig {
+            sandbox_port: proxy_port,
+            backend_addr,
+        });
+        config
+            .policy
+            .rules
+            .push(allow_proxy_bridge_rule(config.broker_ip, proxy_port));
+        eprintln!(
+            "foxprox: transparent HTTP proxy reachable as HTTP_PROXY=http://{}:{} (backend {backend_addr})",
+            config.broker_ip, proxy_port
+        );
+    }
     eprintln!("foxprox: waiting for foxproxsetup on {setup_socket}");
     let (mut stream, _) = listener.accept()?;
     verify_peer_credentials(&stream)?;
@@ -408,6 +455,45 @@ where
         config.tcp_port, config.broker_ip, config.dns_port, config.upstream_dns
     );
     run_combined_transparent_proof_with_ready(tun_fd, config, || stream.write_all(b"ready\n"))
+}
+
+fn validate_http_proxy_backend_loopback(addr: SocketAddr) -> io::Result<()> {
+    if addr.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("HTTP proxy backend listen address must be loopback-only, got {addr}"),
+        ))
+    }
+}
+
+fn start_http_proxy_backend(config: HttpProxyProofConfig) -> io::Result<SocketAddr> {
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let reported = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reported_for_thread = std::sync::Arc::clone(&reported);
+    std::thread::spawn(move || {
+        let error_tx = ready_tx.clone();
+        let result = run_http_proxy_proof_with_ready(config, move |addr| {
+            reported_for_thread.store(true, std::sync::atomic::Ordering::Release);
+            ready_tx
+                .send(Ok(addr))
+                .map_err(|error| io::Error::new(io::ErrorKind::BrokenPipe, error.to_string()))
+        });
+        if !reported.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = error_tx.send(result.map(|_| SocketAddr::from(([127, 0, 0, 1], 0))));
+        } else if let Err(error) = result {
+            eprintln!("foxprox: HTTP proxy backend exited: {error}");
+        }
+    });
+    ready_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("HTTP proxy backend did not become ready: {error}"),
+            )
+        })?
 }
 
 fn proof_http_proxy<I>(mut args: I) -> io::Result<()>
@@ -533,6 +619,16 @@ fn allow_tcp_forward_rule(port: u16) -> PolicyRule {
         .with_destination_ports(PortRange::single(port))
 }
 
+fn allow_proxy_bridge_rule(broker_ip: Ipv4Addr, port: u16) -> PolicyRule {
+    PolicyRule::new(
+        format!("proof-allow-http-proxy-bridge-{port}"),
+        RuleEffect::Allow,
+    )
+    .with_protocol(Protocol::Tcp)
+    .with_destination_cidr(Cidr::v4(broker_ip, 32).expect("valid IPv4 /32"))
+    .with_destination_ports(PortRange::single(port))
+}
+
 fn allow_http_forward_rule(port: u16) -> PolicyRule {
     PolicyRule::new(format!("proof-allow-http-{port}"), RuleEffect::Allow)
         .with_protocol(Protocol::Http)
@@ -617,6 +713,17 @@ fn parse_millis(value: &str) -> io::Result<std::time::Duration> {
 }
 
 fn parse_nonzero_usize(value: &str) -> io::Result<usize> {
+    let parsed = parse_value(value)?;
+    if parsed == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "value must be greater than zero",
+        ));
+    }
+    Ok(parsed)
+}
+
+fn parse_nonzero_u16(value: &str) -> io::Result<u16> {
     let parsed = parse_value(value)?;
     if parsed == 0 {
         return Err(io::Error::new(
@@ -843,6 +950,18 @@ mod tests {
         assert!(usage().contains("proof-transparent"));
         assert!(usage().contains("--max-workers"));
         assert!(usage().contains("--udp-forward-port"));
+        assert!(usage().contains("--http-proxy-port"));
+    }
+
+    #[test]
+    fn http_proxy_backend_loopback_validation_accepts_loopback_only() {
+        validate_http_proxy_backend_loopback(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        validate_http_proxy_backend_loopback("[::1]:0".parse().unwrap()).unwrap();
+
+        let error =
+            validate_http_proxy_backend_loopback(SocketAddr::from(([0, 0, 0, 0], 0))).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("loopback-only"));
     }
 
     #[test]

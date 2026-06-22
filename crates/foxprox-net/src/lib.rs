@@ -12,7 +12,7 @@ mod udp;
 
 pub use combined::{
     run_combined_transparent_proof, run_combined_transparent_proof_with_ready,
-    CombinedTransparentProofConfig,
+    CombinedTransparentProofConfig, ExplicitHttpProxyBridgeConfig,
 };
 pub use udp::{run_udp_dns_proof, run_udp_dns_proof_with_ready, UdpDnsProofConfig};
 
@@ -56,6 +56,8 @@ pub struct TcpProofConfig {
     pub policy: PolicyRuleSet,
     /// Maximum queued audit events before TCP proof paths fail closed.
     pub audit_queue_capacity: usize,
+    /// Optional host-side TCP destination override used for local service bridges.
+    pub tcp_egress_override: Option<SocketAddr>,
 }
 
 impl TcpProofConfig {
@@ -72,6 +74,7 @@ impl TcpProofConfig {
             idle_timeout: Duration::from_secs(30),
             policy: PolicyRuleSet::default(),
             audit_queue_capacity: 8192,
+            tcp_egress_override: None,
         }
     }
 }
@@ -346,17 +349,27 @@ impl TransparentTcpState {
                     eprintln!("foxprox-net: tcp audit backpressure: {error}");
                     socket.abort();
                 } else if decision.is_allowed() {
-                    self.flow = Some(if should_inspect_http(destination.port()) {
-                        FlowState::InspectingHttp(InspectingHttpFlow::new(source, destination))
-                    } else if should_inspect_tls(destination.port()) {
-                        FlowState::InspectingTls(InspectingTlsFlow::new(source, destination))
-                    } else {
-                        FlowState::Connecting(ConnectingFlow::new(
-                            source,
-                            destination,
-                            config.connect_timeout,
-                        ))
-                    });
+                    self.flow = Some(
+                        if let Some(override_destination) = config.tcp_egress_override {
+                            FlowState::Connecting(ConnectingFlow::new_with_egress(
+                                source,
+                                destination,
+                                override_destination,
+                                config.connect_timeout,
+                                Vec::new(),
+                            ))
+                        } else if should_inspect_http(destination.port()) {
+                            FlowState::InspectingHttp(InspectingHttpFlow::new(source, destination))
+                        } else if should_inspect_tls(destination.port()) {
+                            FlowState::InspectingTls(InspectingTlsFlow::new(source, destination))
+                        } else {
+                            FlowState::Connecting(ConnectingFlow::new(
+                                source,
+                                destination,
+                                config.connect_timeout,
+                            ))
+                        },
+                    );
                 } else {
                     socket.abort();
                 }
@@ -650,7 +663,8 @@ impl InspectingTlsFlow {
 
 struct ConnectingFlow {
     source: TransportEndpoint,
-    destination: SocketAddr,
+    requested_destination: SocketAddr,
+    host_destination: SocketAddr,
     receiver: Receiver<io::Result<TcpStream>>,
     pending_to_host: Vec<u8>,
     started_at: StdInstant,
@@ -668,18 +682,30 @@ impl ConnectingFlow {
         timeout: Duration,
         pending_to_host: Vec<u8>,
     ) -> Self {
+        Self::new_with_egress(source, destination, destination, timeout, pending_to_host)
+    }
+
+    fn new_with_egress(
+        source: TransportEndpoint,
+        requested_destination: SocketAddr,
+        host_destination: SocketAddr,
+        timeout: Duration,
+        pending_to_host: Vec<u8>,
+    ) -> Self {
         let (sender, receiver) = mpsc::channel();
         std::thread::spawn(move || {
-            let result = TcpStream::connect_timeout(&destination, timeout).and_then(|stream| {
-                stream.set_nonblocking(true)?;
-                Ok(stream)
-            });
+            let result =
+                TcpStream::connect_timeout(&host_destination, timeout).and_then(|stream| {
+                    stream.set_nonblocking(true)?;
+                    Ok(stream)
+                });
             let _ = sender.send(result);
         });
         let now = StdInstant::now();
         Self {
             source,
-            destination,
+            requested_destination,
+            host_destination,
             receiver,
             pending_to_host,
             started_at: now,
@@ -700,12 +726,15 @@ impl ConnectingFlow {
         match self.receiver.try_recv() {
             Ok(Ok(stream)) => {
                 eprintln!(
-                    "foxprox-net: host connected sandbox={}:{} destination={}",
-                    self.source.ip, self.source.port, self.destination
+                    "foxprox-net: host connected sandbox={}:{} destination={} host_destination={}",
+                    self.source.ip,
+                    self.source.port,
+                    self.requested_destination,
+                    self.host_destination
                 );
                 Ok(Some(ActiveFlow::new(
                     self.source,
-                    self.destination,
+                    self.requested_destination,
                     stream,
                     std::mem::take(&mut self.pending_to_host),
                 )))
@@ -939,6 +968,14 @@ mod tests {
         assert!(config.idle_timeout <= Duration::from_secs(30));
         assert_eq!(config.pending_buffer_limit, 256 * 1024);
         assert!(config.audit_queue_capacity > 0);
+        assert!(config.tcp_egress_override.is_none());
+    }
+
+    #[test]
+    fn tcp_egress_override_uses_raw_connecting_flow() {
+        let mut config = TcpProofConfig::new(SandboxId::new("test").unwrap());
+        config.tcp_egress_override = Some(SocketAddr::from(([127, 0, 0, 1], 18080)));
+        assert_eq!(config.tcp_egress_override.unwrap().port(), 18080);
     }
 
     #[test]
