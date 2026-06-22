@@ -201,3 +201,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — TUN read failures must be ledger-visible
 
 - Packet loops can fail before a packet exists to parse or authorize. TUN/device read failures still need structured `broker_error` evidence (`device_io_error=read_failed`) so runtime shutdown can explain why packet processing stopped.
+
+## 2026-06-22 — Task reports must prove coverage, not just success
+
+- A non-empty task report with only successful outcomes can still be incomplete. Runtime exit must compare task outcomes with the components started for the session and fail closed with `task_join_status=incomplete` when any component is missing.

@@ -2229,3 +2229,32 @@ Closed a packet-loop observability gap: `TunPacketHarness::process_next_packet` 
 
 ### Remaining blind spots
 - TUN processing is still a single-step harness. A concrete runtime loop still needs to convert read/write failures into task join outcomes, cleanup ordering, aggregate audit fan-in, and final `network_session_exit` evidence.
+
+## 2026-06-22 — Fail closed on incomplete runtime task reports
+
+### Commands run
+- `cargo fmt` — applied formatting for task-report completeness checks.
+- `cargo test -p foxprox-core runtime::tests::runtime_lifecycle_missing_task_join_is_fail_closed --all-targets --all-features` — passed.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_exit_fails_closed_for_partial_task_report --all-targets --all-features` — passed.
+- `cargo test -p foxprox-core runtime::tests --all-targets --all-features` — passed, 21 runtime tests.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_exit --all-targets --all-features` — passed, 2 blocking proxy runtime exit tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 135 core tests, 3 device tests, 38 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_lifecycle_missing_task_join_is_fail_closed ... ok`
+- `tests::blocking_proxy_runtime_exit_fails_closed_for_partial_task_report ... ok`
+- `runtime::tests::runtime_lifecycle_task_join_failure_is_fail_closed ... ok`
+
+### Interpretation
+Addressed round-41 high finding. A supplied `RuntimeTaskJoinReport` is now checked against the components that were started for the runtime session. Missing component outcomes produce `task_join_status=incomplete`, structured `missing_runtime_tasks` / `missing_runtime_task_count`, and a fail-closed `network_session_exit` with `DenialReason::RuntimeState`. Blocking proxy runtime coverage proves a DNS-only successful report for a DNS/HTTP/SOCKS runtime no longer overclaims a clean exit.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Component-level coverage is still coarse: final async runtime should derive concrete expected task names from spawned handles rather than only checking that each component has at least one outcome.

@@ -171,7 +171,7 @@ impl RuntimeTaskJoinReport {
         Self { outcomes }
     }
 
-    fn status_detail(&self) -> &'static str {
+    fn status_detail(&self, expected_components: &[RuntimeComponent]) -> &'static str {
         if self
             .outcomes
             .iter()
@@ -180,15 +180,34 @@ impl RuntimeTaskJoinReport {
             "failed"
         } else if self.outcomes.is_empty() {
             "not_recorded"
+        } else if !self.missing_components(expected_components).is_empty() {
+            "incomplete"
         } else {
             "complete"
         }
     }
 
-    fn has_failures(&self) -> bool {
+    fn has_failures_or_missing(&self, expected_components: &[RuntimeComponent]) -> bool {
         self.outcomes
             .iter()
             .any(|outcome| outcome.status.is_failed())
+            || !self.missing_components(expected_components).is_empty()
+    }
+
+    fn missing_components(
+        &self,
+        expected_components: &[RuntimeComponent],
+    ) -> Vec<RuntimeComponent> {
+        expected_components
+            .iter()
+            .copied()
+            .filter(|component| {
+                !self
+                    .outcomes
+                    .iter()
+                    .any(|outcome| outcome.component == *component)
+            })
+            .collect()
     }
 }
 
@@ -563,7 +582,7 @@ impl RuntimeLifecycleHarness {
             || child_exit.as_ref().is_some_and(RuntimeChildExit::is_failed)
             || task_report
                 .as_ref()
-                .is_some_and(RuntimeTaskJoinReport::has_failures)
+                .is_some_and(|report| report.has_failures_or_missing(&self.components))
         {
             (Decision::FailClosed, Some(DenialReason::RuntimeState))
         } else {
@@ -594,8 +613,12 @@ impl RuntimeLifecycleHarness {
         )
         .with_detail("failed_cleanup_count", cleanup.failed.len().to_string());
         if let Some(task_report) = task_report {
+            let missing_components = task_report.missing_components(&self.components);
             audit = audit
-                .with_detail("task_join_status", task_report.status_detail())
+                .with_detail(
+                    "task_join_status",
+                    task_report.status_detail(&self.components),
+                )
                 .with_detail("runtime_tasks", task_outcome_list(&task_report.outcomes))
                 .with_detail("runtime_task_count", task_report.outcomes.len().to_string())
                 .with_detail(
@@ -606,6 +629,11 @@ impl RuntimeLifecycleHarness {
                         .filter(|outcome| outcome.status.is_failed())
                         .count()
                         .to_string(),
+                )
+                .with_detail("missing_runtime_tasks", component_list(&missing_components))
+                .with_detail(
+                    "missing_runtime_task_count",
+                    missing_components.len().to_string(),
                 );
         }
         if missing_child_status {
@@ -1065,6 +1093,50 @@ mod tests {
         );
         assert_eq!(records[1].details["runtime_task_count"], "2");
         assert_eq!(records[1].details["failed_runtime_task_count"], "0");
+        assert_eq!(records[1].details["missing_runtime_tasks"], "");
+        assert_eq!(records[1].details["missing_runtime_task_count"], "0");
+    }
+
+    #[test]
+    fn runtime_lifecycle_missing_task_join_is_fail_closed() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start(
+                vec![
+                    RuntimeComponent::DnsListener,
+                    RuntimeComponent::HttpProxyListener,
+                ],
+                1_000,
+            )
+            .unwrap();
+        runtime
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![
+                    RuntimeCleanupAction::DnsListener,
+                    RuntimeCleanupAction::HttpProxyListener,
+                ]),
+                None,
+                Some(RuntimeTaskJoinReport::new(vec![RuntimeTaskOutcome::new(
+                    RuntimeComponent::DnsListener,
+                    "dns_accept_loop",
+                    RuntimeTaskStatus::Completed,
+                )])),
+                1_100,
+            )
+            .unwrap();
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["task_join_status"], "incomplete");
+        assert_eq!(
+            records[1].details["missing_runtime_tasks"],
+            "http_proxy_listener"
+        );
+        assert_eq!(records[1].details["missing_runtime_task_count"], "1");
     }
 
     #[test]

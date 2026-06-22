@@ -3608,6 +3608,68 @@ mod tests {
     }
 
     #[test]
+    fn blocking_proxy_runtime_exit_fails_closed_for_partial_task_report() {
+        let query = dns_query(0x7b7b, "Partial.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+
+        let mut runtime = BlockingProxyRuntime::bind(
+            "s1",
+            8,
+            SharedDnsCache::default(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            3_700,
+        )
+        .unwrap();
+
+        runtime
+            .exit_with_task_report(
+                RuntimeExitStatus::Clean,
+                Some(RuntimeTaskJoinReport::new(vec![RuntimeTaskOutcome::new(
+                    RuntimeComponent::DnsListener,
+                    "dns_accept_loop",
+                    RuntimeTaskStatus::Completed,
+                )])),
+                3_800,
+            )
+            .unwrap();
+
+        let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
+        let exit = lifecycle_records.last().unwrap();
+        assert_eq!(exit.kind, AuditKind::NetworkSessionExit);
+        assert_eq!(exit.decision, Some(Decision::FailClosed));
+        assert_eq!(exit.reason, Some(DenialReason::RuntimeState));
+        assert_eq!(exit.details["task_join_status"], "incomplete");
+        assert_eq!(
+            exit.details["missing_runtime_tasks"],
+            "http_proxy_listener,socks5_listener"
+        );
+        assert_eq!(exit.details["missing_runtime_task_count"], "2");
+    }
+
+    #[test]
     fn blocking_proxy_runtime_aggregate_preserves_interleaved_component_order() {
         let query = dns_query(0x8d8d, "Later.TEST", 1);
         let response = dns_a_response(&query, [127, 0, 0, 1], 30);
