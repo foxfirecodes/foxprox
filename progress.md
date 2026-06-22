@@ -1652,3 +1652,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: close auditing is explicit-call based; automatic FIN/RST close detection and continuous live TUN session orchestration are still absent.
 - Exact next step: commit session close audit emission, then assess the remaining Milestone 2 gap: replacing fake host egress in policy-open with real host stream construction inside a unified TCP session factory.
+
+## 2026-06-22T22:41:35Z
+- Current objective: continue after session close audit emission toward a unified TCP session factory.
+- Git status summary: clean worktree after commit `a463438`.
+- Intended slice: replace fake host egress in the packet-pumped policy-open proof with a small factory boundary that creates `StdTcpStreamBridge` for an allowed `TcpStackConnectAttempt` using a caller-provided host `TcpStream`.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: this remains caller-provided host stream construction; address resolution and real outbound connect dialing are still separate.
+- Exact next step: add the factory/helper and a regression that builds an open `SmoltcpTcpBridgeSession<StdTcpStreamBridge<Vec<u8>>>` directly from the allowed attempt.
+
+## 2026-06-22T22:43:10Z
+- Current objective: add a factory boundary for allowed smoltcp TCP bridge sessions.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on wrapped `StdTcpStreamBridge::new`; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 31 smoltcp adapter tests passed. `SmoltcpTcpBridgeSession::from_allowed_connect` now constructs a `StdTcpStreamBridge<Vec<u8>>`, opens the matching flow in `TcpFlowRuntime`, and returns the session plus `FlowKey`; regression proves a policy-allowed packet-pumped connect can build the open session and forward payload to a real localhost host stream.
+- Commit hash when committed: pending.
+- Remaining risks: the host `TcpStream` is still caller-provided; dialing/resolution and live TUN loop ownership remain to be unified.
+- Exact next step: commit the allowed-connect session factory, then add an explicit stop-gap note or next slice for real host dialing once address resolution policy is ready.
