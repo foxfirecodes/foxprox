@@ -1138,3 +1138,34 @@ Round-10 high finding is fixed. Smoltcp TCP response packet device write failure
 
 ### Remaining blind spots
 - The failing write path is covered with an in-memory failing `PacketDevice`; real TUN fd write errors remain part of future runtime integration.
+
+## 2026-06-21 — Concrete DNS UDP upstream egress cycle
+
+### Behavior under work
+Close the DNS upstream blind spot by adding a concrete UDP socket `DnsUpstream` implementation outside `foxprox-core`, so the DNS broker handler can exchange real UDP datagrams with an upstream resolver while preserving core policy/audit validation.
+
+### Expected evidence
+- A local UDP resolver receives the original DNS query bytes through `BlockingDnsUpstream` and returns a response that `DnsBrokerHandler` validates, audits, and commits to DNS attribution cache.
+- UDP socket timeout/IO failures map to `DnsUpstreamError::Unavailable` so the handler fails closed with structured `dns_upstream_error=unavailable`/`malformed_response` paths rather than panicking.
+
+### Commands run
+- `cargo fmt` — applied formatting for concrete DNS upstream egress.
+- `cargo test -p foxprox-egress --all-targets --all-features` — initially failed on an ambiguous `parse()` type in the new DNS test; fixed with explicit `IpAddr` type and reran successfully with 5 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 103 core tests, 3 device tests, 5 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_egress::tests::blocking_dns_upstream_exchanges_query_through_dns_handler ... ok`
+- `foxprox_egress::tests::blocking_dns_upstream_unavailable_maps_to_handler_fail_closed ... ok`
+
+### Interpretation
+DNS upstream forwarding now has a concrete host UDP socket implementation behind the core `DnsUpstream` trait. A local UDP resolver test proves the broker sends the original DNS query bytes, validates the returned response, emits structured returned-address audit, and commits attribution. Timeout/IO failure maps to `DnsUpstreamError::Unavailable`, which the handler converts into fail-closed REFUSED plus structured `dns_upstream_error` evidence.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This is a blocking UDP upstream proof, not the final async DNS runtime listener. Real resolver configuration, retry policy, and socket lifecycle integration remain runtime work.

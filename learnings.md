@@ -71,3 +71,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-21 — Smoltcp stream identity and packet-device writes
 
 - When bridging smoltcp TCP stream bytes to host egress, preserve `tcp::Socket` remote/local endpoints before auditing egress. Host responses sent into a smoltcp socket must also be collected from the stack's emitted packet queue, audited as `to_sandbox` write attempts, and written through the `PacketDevice`; `packets_emitted` alone is not sufficient runtime evidence.
+
+## 2026-06-21 — Concrete DNS upstream boundary
+
+- DNS upstream socket code can live in `foxprox-egress` by implementing the core `DnsUpstream` trait. Tests should run a local UDP resolver and assert that `DnsBrokerHandler` still owns response validation, audit, and cache commit behavior, while socket timeout/IO errors map to `DnsUpstreamError::Unavailable`.
