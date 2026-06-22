@@ -269,9 +269,6 @@ mod linux_tun {
 
     const RTF_UP: u16 = 0x0001;
 
-    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
-    const CAP_NET_ADMIN: usize = 12;
-
     #[repr(C)]
     #[derive(Clone, Copy)]
     struct SockAddr {
@@ -309,26 +306,9 @@ mod linux_tun {
         rt_irtt: u16,
     }
 
-    #[repr(C)]
-    struct CapUserHeader {
-        version: u32,
-        pid: c_int,
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy)]
-    struct CapUserData {
-        effective: u32,
-        permitted: u32,
-        inheritable: u32,
-    }
-
     extern "C" {
         fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
-        fn close(fd: c_int) -> c_int;
         fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
-        fn capget(header: *mut CapUserHeader, data: *mut CapUserData) -> c_int;
-        fn capset(header: *mut CapUserHeader, data: *const CapUserData) -> c_int;
     }
 
     pub(super) fn configure_tun(
@@ -363,9 +343,7 @@ mod linux_tun {
     }
 
     pub(super) fn close_fd(fd: RawFd) {
-        unsafe {
-            close(fd);
-        }
+        foxprox_device::fd::close_fd(fd);
     }
 
     pub(super) fn send_fd(socket_path: &str, fd_to_send: RawFd) -> Result<(), String> {
@@ -374,43 +352,7 @@ mod linux_tun {
     }
 
     pub(super) fn drop_net_admin_capability() -> Result<(), String> {
-        let mut header = CapUserHeader {
-            version: LINUX_CAPABILITY_VERSION_3,
-            pid: 0,
-        };
-        let mut data = [
-            CapUserData {
-                effective: 0,
-                permitted: 0,
-                inheritable: 0,
-            },
-            CapUserData {
-                effective: 0,
-                permitted: 0,
-                inheritable: 0,
-            },
-        ];
-        let rc = unsafe { capget(&mut header, data.as_mut_ptr()) };
-        if rc != 0 {
-            return Err(format!(
-                "capget before target exec failed: {}",
-                io::Error::last_os_error()
-            ));
-        }
-        let word = CAP_NET_ADMIN / 32;
-        let bit = 1_u32 << (CAP_NET_ADMIN % 32);
-        data[word].effective &= !bit;
-        data[word].permitted &= !bit;
-        data[word].inheritable &= !bit;
-        let rc = unsafe { capset(&mut header, data.as_ptr()) };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(format!(
-                "capset dropping CAP_NET_ADMIN before target exec failed: {}",
-                io::Error::last_os_error()
-            ))
-        }
+        foxprox_device::caps::drop_net_admin_capability()
     }
 
     struct FdGuard(RawFd);

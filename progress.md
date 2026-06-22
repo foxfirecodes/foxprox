@@ -924,3 +924,16 @@
 - Recent structural commit hashes: egress crate extraction `cb9e664`; core CONNECT parsing `579fb4a`.
 - Next verification gap: commit explicit proxy forwarding migration; remaining meaningful production work is moving Linux TUN setup helpers into the device crate or designing async long-lived broker loops.
 - Commit hash after commit: pending.
+
+## 2026-06-22T07:50:00Z — Capability drop helper moved to device crate
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run handoff-smoke`
+- Environment assumptions: Unix/Linux capability syscalls and SCM_RIGHTS handoff are available; bwrap/TUN fd handoff works locally.
+- Expected result: setup-side `CAP_NET_ADMIN` dropping and fd close wrappers should use the reusable `foxprox-device` crate instead of setup-local syscall code, without regressing TUN fd handoff.
+- Observed result: pass. `foxprox-device` now has 3 tests (`caps` plus fd helpers); workspace tests passed (`foxprox-core` 59, `foxprox-cli` 2, `foxproxsetup` 6, `foxprox-egress` 1). `handoff-smoke` emitted `"fd_valid_after_helper_exit":"true"`.
+- Relevant output excerpt: `caps::tests::net_admin_capability_bit_is_in_first_word ... ok`; handoff `"reason":"foxproxsetup handed off a live TUN fd and target exited"`.
+- Changed files: `crates/foxprox-device/src/lib.rs`, `crates/foxprox-setup/src/main.rs`, `progress.md`.
+- Interpretation: more Linux device/capability mechanics now live behind the device crate boundary, reducing duplicated low-level setup code.
+- Recent structural commit hash: explicit proxy forwarding migration `e1fc3a0`.
+- Next verification gap: commit capability helper extraction; remaining production-factoring work is moving the actual Linux TUN ioctl configurator into `foxprox-device` or designing async long-lived broker loops.
+- Commit hash after commit: pending.

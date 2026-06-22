@@ -220,3 +220,82 @@ pub mod fd {
         }
     }
 }
+
+#[cfg(unix)]
+pub mod caps {
+    use std::io;
+    use std::os::raw::c_int;
+
+    const LINUX_CAPABILITY_VERSION_3: u32 = 0x2008_0522;
+    const CAP_NET_ADMIN: usize = 12;
+
+    #[repr(C)]
+    struct CapUserHeader {
+        version: u32,
+        pid: c_int,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct CapUserData {
+        effective: u32,
+        permitted: u32,
+        inheritable: u32,
+    }
+
+    extern "C" {
+        fn capget(header: *mut CapUserHeader, data: *mut CapUserData) -> c_int;
+        fn capset(header: *mut CapUserHeader, data: *const CapUserData) -> c_int;
+    }
+
+    pub fn drop_net_admin_capability() -> Result<(), String> {
+        let mut header = CapUserHeader {
+            version: LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
+        let mut data = [
+            CapUserData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            },
+            CapUserData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            },
+        ];
+        let rc = unsafe { capget(&mut header, data.as_mut_ptr()) };
+        if rc != 0 {
+            return Err(format!(
+                "capget before target exec failed: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        let word = CAP_NET_ADMIN / 32;
+        let bit = 1_u32 << (CAP_NET_ADMIN % 32);
+        data[word].effective &= !bit;
+        data[word].permitted &= !bit;
+        data[word].inheritable &= !bit;
+        let rc = unsafe { capset(&mut header, data.as_ptr()) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "capset dropping CAP_NET_ADMIN before target exec failed: {}",
+                io::Error::last_os_error()
+            ))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn net_admin_capability_bit_is_in_first_word() {
+            assert_eq!(CAP_NET_ADMIN / 32, 0);
+            assert_eq!(1_u32 << (CAP_NET_ADMIN % 32), 0x1000);
+        }
+    }
+}
