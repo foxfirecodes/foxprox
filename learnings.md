@@ -20,3 +20,6 @@
 
 ## 2026-06-22T00:10:05Z
 - UDP host-reply routing must stay address-family explicit: the current packet synthesis boundary supports IPv4 only and should reject IPv6 routes until IPv6 packet synthesis has its own verified checksum tests.
+
+## 2026-06-22T00:27:10Z
+- Once protocol 6 became a parsed TCP path, unsupported-protocol tests had to switch to a truly unsupported IPv4 protocol number; otherwise they no longer proved fail-closed unsupported handling.

@@ -487,3 +487,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: the session is fake-IO and one-packet-at-a-time; it does not yet poll a real host UDP socket for replies, integrate with DNS/ICMP in one session type, or run against a live TUN fd.
 - Exact next step: commit the UDP TUN egress session, then add TCP packet parsing/normalized connect attempt handling as the next step toward the smoltcp TCP forwarding gate.
+
+## 2026-06-22T00:20:00Z
+- Current objective: continue toward the smoltcp TCP gate by adding the smallest TCP packet parsing and normalized connect-attempt event slice.
+- Git status summary: clean worktree after commit `9a3c818`.
+- Intended slice: parse validated IPv4 TCP headers well enough to recognize sandbox SYN connect attempts and convert them into shared `TcpConnectAttempt` policy events, without implementing TCP forwarding or state transitions.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`; record any existing tests that assumed TCP was unsupported and update them to an actually unsupported protocol.
+- Files expected to change: `crates/foxprox-core/src/packet.rs`, `crates/foxprox-runtime/src/lib.rs`, `progress.md`, and `learnings.md` if TCP checksum/header constraints change the approach.
+- Remaining risks: parsing SYN packets is not TCP stream forwarding; smoltcp or a stack adapter is still required for Milestone 2.
+- Exact next step: implement checksum-checked TCP header parsing and a runtime event conversion for SYN connect attempts.
+
+## 2026-06-22T00:27:10Z
+- Current objective: add checksum-checked IPv4 TCP SYN parsing and normalized connect-attempt event handling.
+- Files changed: `crates/foxprox-core/src/lib.rs`, `crates/foxprox-core/src/packet.rs`, `crates/foxprox-runtime/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed due rustfmt changes after new enum variants/tests; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features` (initially failed because an old unsupported-protocol test still expected protocol 6 after TCP became parsed; fixed to use protocol 99)
+- Observed result: final verification passed; 52 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 35 runtime tests, and 7 setup tests passed. New tests prove TCP SYN packets parse with mandatory checksum validation, invalid TCP header lengths fail closed, SYN packets become `TcpConnectAttempt` events, non-SYN TCP is unsupported/fail-closed for now, and unified TUN policy handling audits TCP connect attempts.
+- Commit hash when committed: pending.
+- Remaining risks: this does not implement TCP stream state, SYN/ACK synthesis, smoltcp integration, host TCP bridging, or close/error lifecycle logging.
+- Exact next step: commit TCP connect-attempt parsing, then add a TCP stack adapter trait boundary for future smoltcp integration so TCP forwarding cannot bypass policy/audit.

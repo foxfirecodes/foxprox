@@ -8,10 +8,11 @@
 
 use foxprox_core::{
     classify_udp, parse_dns_query, parse_ip_packet, synthesize_icmpv4_echo_reply,
-    synthesize_udpv4_response, AuditSink, Decision, DecisionAction, DnsCache, DnsParseError,
-    Endpoint, FlowKey, FlowTable, FrontendKind, HostnameAttribution, NormalizedEvent, PacketError,
-    ParsedIpPacket, Protocol, QuicStatus, SandboxId, StaticDnsResolver, UdpFlow, Udpv4Packet,
-    UnsupportedIpv4Protocol, VerificationKernel,
+    synthesize_udpv4_response, AuditSink, Decision, DecisionAction, DecisionReason, DnsCache,
+    DnsParseError, Endpoint, FlowKey, FlowTable, FrontendKind, HostnameAttribution,
+    NormalizedEvent, PacketError, ParsedIpPacket, Protocol, QuicStatus, SandboxId, SniStatus,
+    StaticDnsResolver, Tcpv4Segment, UdpFlow, Udpv4Packet, UnsupportedIpv4Protocol,
+    VerificationKernel,
 };
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
@@ -337,6 +338,9 @@ impl<T: Read + Write, E: HostEgress, S: AuditSink> TunUdpEgressSession<T, E, S> 
         let packet = &self.buffer[..bytes_read];
         let udp = match parse_ip_packet(packet) {
             Ok(ParsedIpPacket::Udpv4Packet(udp)) => udp,
+            Ok(ParsedIpPacket::Tcpv4Segment(_)) => {
+                return Ok(TunUdpSessionOutcome::NotUdp);
+            }
             Ok(ParsedIpPacket::Icmpv4EchoRequest(_)) => {
                 return Ok(TunUdpSessionOutcome::NotUdp);
             }
@@ -440,6 +444,13 @@ pub enum TunPacketOutcome {
         destination_port: u16,
         payload_len: usize,
     },
+    TcpConnectObserved {
+        decision: Decision,
+        source: IpAddr,
+        destination: IpAddr,
+        source_port: u16,
+        destination_port: u16,
+    },
     DnsResponseWritten {
         bytes: usize,
         cached: bool,
@@ -498,6 +509,17 @@ pub fn handle_one_tun_packet_with_policy<R: Read, W: Write, S: AuditSink>(
             let reply = synthesize_icmpv4_echo_reply(&request);
             writer.write_all(&reply)?;
             Ok(TunPacketOutcome::EchoReplyWritten { bytes: reply.len() })
+        }
+        Ok(ParsedIpPacket::Tcpv4Segment(tcp)) => {
+            let event = tcpv4_segment_to_event(runtime.sandbox_id.clone(), &tcp);
+            let decision = runtime.kernel.decide_and_audit(&event, timestamp_millis);
+            Ok(TunPacketOutcome::TcpConnectObserved {
+                decision,
+                source: IpAddr::V4(tcp.source),
+                destination: IpAddr::V4(tcp.destination),
+                source_port: tcp.source_port,
+                destination_port: tcp.destination_port,
+            })
         }
         Ok(ParsedIpPacket::Udpv4Packet(udp)) => {
             let event = udpv4_packet_to_event_with_broker_dns(
@@ -581,6 +603,16 @@ pub fn handle_one_tun_packet_with_icmp_policy<R: Read, W: Write, S: AuditSink>(
             writer.write_all(&reply)?;
             Ok(TunPacketOutcome::EchoReplyWritten { bytes: reply.len() })
         }
+        Ok(ParsedIpPacket::Tcpv4Segment(tcp)) => Ok(TunPacketOutcome::TcpConnectObserved {
+            decision: Decision::denied(
+                DecisionAction::FailClosed,
+                DecisionReason::UnsupportedProtocol,
+            ),
+            source: IpAddr::V4(tcp.source),
+            destination: IpAddr::V4(tcp.destination),
+            source_port: tcp.source_port,
+            destination_port: tcp.destination_port,
+        }),
         Ok(ParsedIpPacket::Udpv4Packet(udp)) => Ok(TunPacketOutcome::UdpObserved {
             source: IpAddr::V4(udp.source),
             destination: IpAddr::V4(udp.destination),
@@ -603,6 +635,16 @@ pub fn handle_one_tun_packet_with_dns_policy<R: Read, W: Write, S: AuditSink>(
     let bytes_read = reader.read(buffer)?;
     let packet = &buffer[..bytes_read];
     match parse_ip_packet(packet) {
+        Ok(ParsedIpPacket::Tcpv4Segment(tcp)) => Ok(TunPacketOutcome::TcpConnectObserved {
+            decision: Decision::denied(
+                DecisionAction::FailClosed,
+                DecisionReason::UnsupportedProtocol,
+            ),
+            source: IpAddr::V4(tcp.source),
+            destination: IpAddr::V4(tcp.destination),
+            source_port: tcp.source_port,
+            destination_port: tcp.destination_port,
+        }),
         Ok(ParsedIpPacket::Udpv4Packet(udp)) if udp.destination_port == 53 => {
             let event =
                 udpv4_packet_to_event_with_broker_dns(dns.sandbox_id.clone(), &udp, dns.broker_dns);
@@ -664,6 +706,16 @@ pub fn handle_one_tun_packet_with_dns<R: Read, W: Write>(
     let bytes_read = reader.read(buffer)?;
     let packet = &buffer[..bytes_read];
     match parse_ip_packet(packet) {
+        Ok(ParsedIpPacket::Tcpv4Segment(tcp)) => Ok(TunPacketOutcome::TcpConnectObserved {
+            decision: Decision::denied(
+                DecisionAction::FailClosed,
+                DecisionReason::UnsupportedProtocol,
+            ),
+            source: IpAddr::V4(tcp.source),
+            destination: IpAddr::V4(tcp.destination),
+            source_port: tcp.source_port,
+            destination_port: tcp.destination_port,
+        }),
         Ok(ParsedIpPacket::Udpv4Packet(udp)) => {
             let destination = IpAddr::V4(udp.destination);
             if udp.destination_port == 53 && broker_dns.contains(&destination) {
@@ -692,6 +744,16 @@ pub fn handle_one_tun_packet_with_dns<R: Read, W: Write>(
 
 fn unsupported_or_malformed_outcome(packet: &[u8]) -> io::Result<TunPacketOutcome> {
     match parse_ip_packet(packet) {
+        Ok(ParsedIpPacket::Tcpv4Segment(tcp)) => Ok(TunPacketOutcome::TcpConnectObserved {
+            decision: Decision::denied(
+                DecisionAction::FailClosed,
+                DecisionReason::UnsupportedProtocol,
+            ),
+            source: IpAddr::V4(tcp.source),
+            destination: IpAddr::V4(tcp.destination),
+            source_port: tcp.source_port,
+            destination_port: tcp.destination_port,
+        }),
         Ok(ParsedIpPacket::Udpv4Packet(Udpv4Packet {
             source,
             destination,
@@ -760,6 +822,31 @@ pub fn record_udpv4_flow(
         .clone()
 }
 
+pub fn tcpv4_segment_to_event(
+    sandbox_id: SandboxId,
+    segment: &Tcpv4Segment<'_>,
+) -> NormalizedEvent {
+    if !segment.is_connect_attempt() {
+        return NormalizedEvent::UnsupportedNetworkEvent {
+            sandbox_id,
+            frontend: FrontendKind::Tun,
+            protocol: Protocol::Tcp,
+        };
+    }
+    NormalizedEvent::TcpConnectAttempt {
+        sandbox_id,
+        frontend: FrontendKind::Tun,
+        source: Some(Endpoint::new(
+            IpAddr::V4(segment.source),
+            segment.source_port,
+        )),
+        destination: Endpoint::new(IpAddr::V4(segment.destination), segment.destination_port),
+        hostname: None,
+        sni_status: SniStatus::Missing,
+        sni_dns_mismatch: false,
+    }
+}
+
 pub fn udpv4_packet_to_event(sandbox_id: SandboxId, packet: &Udpv4Packet<'_>) -> NormalizedEvent {
     udpv4_packet_to_event_with_broker_dns(sandbox_id, packet, &[])
 }
@@ -814,7 +901,9 @@ fn tun_packet_reply(packet: &[u8]) -> Result<Option<Vec<u8>>, PacketError> {
         ParsedIpPacket::Icmpv4EchoRequest(request) => {
             Ok(Some(synthesize_icmpv4_echo_reply(&request)))
         }
-        ParsedIpPacket::Udpv4Packet(_) | ParsedIpPacket::UnsupportedIpv4Protocol(_) => Ok(None),
+        ParsedIpPacket::Tcpv4Segment(_)
+        | ParsedIpPacket::Udpv4Packet(_)
+        | ParsedIpPacket::UnsupportedIpv4Protocol(_) => Ok(None),
     }
 }
 
@@ -1438,6 +1527,82 @@ mod tests {
     }
 
     #[test]
+    fn tcp_syn_packet_event_is_normalized_connect_attempt() {
+        let packet = build_tcp_ipv4_packet(53000, 80, 0x02, &[]);
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        let event = tcpv4_segment_to_event(SandboxId::new("tcp-policy").unwrap(), &tcp);
+
+        let NormalizedEvent::TcpConnectAttempt {
+            source,
+            destination,
+            ..
+        } = event
+        else {
+            panic!("expected TCP connect event");
+        };
+        assert_eq!(source.unwrap().port, 53000);
+        assert_eq!(destination.port, 80);
+    }
+
+    #[test]
+    fn non_syn_tcp_packet_is_unsupported_for_now() {
+        let packet = build_tcp_ipv4_packet(53000, 80, 0x10, b"payload");
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        let event = tcpv4_segment_to_event(SandboxId::new("tcp-policy").unwrap(), &tcp);
+
+        let decision =
+            PolicyEngine::new(PolicyConfig::default()).evaluate(&event.to_policy_input());
+        assert_eq!(decision.action, DecisionAction::FailClosed);
+        assert_eq!(decision.reason, DecisionReason::UnsupportedProtocol);
+    }
+
+    #[test]
+    fn unified_tun_policy_handler_audits_tcp_connect_attempts() {
+        let request = build_tcp_ipv4_packet(53000, 80, 0x02, &[]);
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+        let resolver = StaticDnsResolver::new(30);
+        let mut cache = DnsCache::new();
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(4),
+        );
+        let mut runtime = BrokerDnsRuntime {
+            sandbox_id: SandboxId::new("tcp-audit").unwrap(),
+            resolver: &resolver,
+            cache: &mut cache,
+            broker_dns: &[IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+            kernel: &mut kernel,
+        };
+
+        let outcome = handle_one_tun_packet_with_policy(
+            &mut reader,
+            &mut writer,
+            &mut buffer,
+            &mut runtime,
+            100,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            TunPacketOutcome::TcpConnectObserved { decision, destination_port: 80, .. }
+                if decision.action == DecisionAction::DenyDrop
+        ));
+        assert!(writer.is_empty());
+        assert_eq!(kernel.audit_sink().events().len(), 1);
+        assert_eq!(
+            kernel.audit_sink().events()[0].sandbox_id.as_str(),
+            "tcp-audit"
+        );
+    }
+
+    #[test]
     fn udp_dns_packet_event_triggers_direct_dns_policy_denial() {
         let packet = Udpv4Packet {
             source: Ipv4Addr::new(10, 66, 0, 2),
@@ -1505,7 +1670,7 @@ mod tests {
 
     #[test]
     fn tun_unsupported_protocol_is_dropped_without_writeback() {
-        let request = build_ipv4_packet(6, b"tcp-ish");
+        let request = build_ipv4_packet(99, b"unsupported");
         let mut reader = std::io::Cursor::new(request);
         let mut writer = Vec::new();
         let mut buffer = [0u8; 1500];
@@ -1517,7 +1682,7 @@ mod tests {
             TunPacketOutcome::DroppedUnsupportedIpv4 {
                 source: IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)),
                 destination: IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1)),
-                protocol: 6,
+                protocol: 99,
             }
         );
         assert!(writer.is_empty());
@@ -1569,6 +1734,30 @@ mod tests {
         build_ipv4_packet(17, &udp_payload)
     }
 
+    fn build_tcp_ipv4_packet(
+        source_port: u16,
+        destination_port: u16,
+        flags: u8,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut tcp_payload = vec![0u8; 20 + payload.len()];
+        tcp_payload[0..2].copy_from_slice(&source_port.to_be_bytes());
+        tcp_payload[2..4].copy_from_slice(&destination_port.to_be_bytes());
+        tcp_payload[4..8].copy_from_slice(&0x01020304u32.to_be_bytes());
+        tcp_payload[12] = 0x50;
+        tcp_payload[13] = flags;
+        tcp_payload[14..16].copy_from_slice(&4096u16.to_be_bytes());
+        tcp_payload[20..].copy_from_slice(payload);
+        let tcp_checksum = ipv4_pseudo_checksum(
+            Ipv4Addr::new(10, 66, 0, 2),
+            Ipv4Addr::new(10, 66, 0, 1),
+            6,
+            &tcp_payload,
+        );
+        tcp_payload[16..18].copy_from_slice(&tcp_checksum.to_be_bytes());
+        build_ipv4_packet(6, &tcp_payload)
+    }
+
     fn dns_query_payload() -> Vec<u8> {
         let mut packet = vec![0x12, 0x34];
         packet.extend_from_slice(&0x0100u16.to_be_bytes());
@@ -1606,7 +1795,25 @@ mod tests {
     }
 
     fn checksum(bytes: &[u8]) -> u16 {
+        finish_checksum(add_checksum_bytes(0, bytes))
+    }
+
+    fn ipv4_pseudo_checksum(
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+        protocol: u8,
+        payload: &[u8],
+    ) -> u16 {
         let mut sum = 0u32;
+        sum = add_checksum_bytes(sum, &source.octets());
+        sum = add_checksum_bytes(sum, &destination.octets());
+        sum = add_checksum_bytes(sum, &[0, protocol]);
+        sum = add_checksum_bytes(sum, &(payload.len() as u16).to_be_bytes());
+        sum = add_checksum_bytes(sum, payload);
+        finish_checksum(sum)
+    }
+
+    fn add_checksum_bytes(mut sum: u32, bytes: &[u8]) -> u32 {
         let mut chunks = bytes.chunks_exact(2);
         for chunk in &mut chunks {
             sum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
@@ -1614,6 +1821,10 @@ mod tests {
         if let Some(&remaining) = chunks.remainder().first() {
             sum += (remaining as u32) << 8;
         }
+        sum
+    }
+
+    fn finish_checksum(mut sum: u32) -> u16 {
         while (sum >> 16) != 0 {
             sum = (sum & 0xffff) + (sum >> 16);
         }

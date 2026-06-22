@@ -3,22 +3,44 @@ use std::net::{IpAddr, Ipv4Addr};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PacketError {
     Empty,
-    UnsupportedIpVersion { version: u8 },
+    UnsupportedIpVersion {
+        version: u8,
+    },
     TruncatedIpv4Header,
-    InvalidIpv4HeaderLength { ihl_bytes: usize },
-    TruncatedIpv4Packet { total_len: usize, actual_len: usize },
+    InvalidIpv4HeaderLength {
+        ihl_bytes: usize,
+    },
+    TruncatedIpv4Packet {
+        total_len: usize,
+        actual_len: usize,
+    },
     UnsupportedIpv4Options,
     UnsupportedFragmentation,
     InvalidChecksum,
     TruncatedIcmp,
-    UnsupportedIcmpType { type_: u8, code: u8 },
+    UnsupportedIcmpType {
+        type_: u8,
+        code: u8,
+    },
     TruncatedUdp,
-    InvalidUdpLength { udp_len: usize, actual_len: usize },
+    InvalidUdpLength {
+        udp_len: usize,
+        actual_len: usize,
+    },
+    TruncatedTcp,
+    InvalidTcpHeaderLength {
+        data_offset_bytes: usize,
+    },
+    TruncatedTcpOptions {
+        header_len: usize,
+        actual_len: usize,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParsedIpPacket<'a> {
     Icmpv4EchoRequest(Icmpv4EchoRequest<'a>),
+    Tcpv4Segment(Tcpv4Segment<'a>),
     Udpv4Packet(Udpv4Packet<'a>),
     UnsupportedIpv4Protocol(UnsupportedIpv4Protocol<'a>),
 }
@@ -47,6 +69,27 @@ pub struct Udpv4Packet<'a> {
     pub source_port: u16,
     pub destination_port: u16,
     pub payload: &'a [u8],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tcpv4Segment<'a> {
+    pub source: Ipv4Addr,
+    pub destination: Ipv4Addr,
+    pub source_port: u16,
+    pub destination_port: u16,
+    pub sequence: u32,
+    pub acknowledgement: u32,
+    pub syn: bool,
+    pub ack: bool,
+    pub rst: bool,
+    pub fin: bool,
+    pub payload: &'a [u8],
+}
+
+impl Tcpv4Segment<'_> {
+    pub fn is_connect_attempt(&self) -> bool {
+        self.syn && !self.ack && !self.rst
+    }
 }
 
 pub fn parse_ip_packet(bytes: &[u8]) -> Result<ParsedIpPacket<'_>, PacketError> {
@@ -94,6 +137,7 @@ fn parse_ipv4_packet(bytes: &[u8]) -> Result<ParsedIpPacket<'_>, PacketError> {
     let payload = &bytes[ihl_bytes..total_len];
     match protocol {
         1 => parse_icmpv4(source, destination, payload),
+        6 => parse_tcpv4(source, destination, payload),
         17 => parse_udpv4(source, destination, payload),
         other => Ok(ParsedIpPacket::UnsupportedIpv4Protocol(
             UnsupportedIpv4Protocol {
@@ -129,6 +173,43 @@ fn parse_icmpv4<'a>(
         })),
         _ => Err(PacketError::UnsupportedIcmpType { type_, code }),
     }
+}
+
+fn parse_tcpv4<'a>(
+    source: Ipv4Addr,
+    destination: Ipv4Addr,
+    payload: &'a [u8],
+) -> Result<ParsedIpPacket<'a>, PacketError> {
+    if payload.len() < 20 {
+        return Err(PacketError::TruncatedTcp);
+    }
+    let data_offset_bytes = ((payload[12] >> 4) as usize) * 4;
+    if data_offset_bytes < 20 {
+        return Err(PacketError::InvalidTcpHeaderLength { data_offset_bytes });
+    }
+    if payload.len() < data_offset_bytes {
+        return Err(PacketError::TruncatedTcpOptions {
+            header_len: data_offset_bytes,
+            actual_len: payload.len(),
+        });
+    }
+    if ipv4_pseudo_checksum(source, destination, 6, payload) != 0 {
+        return Err(PacketError::InvalidChecksum);
+    }
+    let flags = payload[13];
+    Ok(ParsedIpPacket::Tcpv4Segment(Tcpv4Segment {
+        source,
+        destination,
+        source_port: u16::from_be_bytes([payload[0], payload[1]]),
+        destination_port: u16::from_be_bytes([payload[2], payload[3]]),
+        sequence: u32::from_be_bytes([payload[4], payload[5], payload[6], payload[7]]),
+        acknowledgement: u32::from_be_bytes([payload[8], payload[9], payload[10], payload[11]]),
+        syn: (flags & 0x02) != 0,
+        ack: (flags & 0x10) != 0,
+        rst: (flags & 0x04) != 0,
+        fin: (flags & 0x01) != 0,
+        payload: &payload[data_offset_bytes..],
+    }))
 }
 
 fn parse_udpv4<'a>(
@@ -215,6 +296,9 @@ pub fn packet_addrs(packet: &ParsedIpPacket<'_>) -> (IpAddr, IpAddr) {
         ParsedIpPacket::Icmpv4EchoRequest(echo) => {
             (IpAddr::V4(echo.source), IpAddr::V4(echo.destination))
         }
+        ParsedIpPacket::Tcpv4Segment(segment) => {
+            (IpAddr::V4(segment.source), IpAddr::V4(segment.destination))
+        }
         ParsedIpPacket::Udpv4Packet(packet) => {
             (IpAddr::V4(packet.source), IpAddr::V4(packet.destination))
         }
@@ -297,6 +381,47 @@ mod tests {
         assert_eq!(udp.source_port, 53000);
         assert_eq!(udp.destination_port, 53);
         assert_eq!(udp.payload, b"dns?");
+    }
+
+    #[test]
+    fn parses_tcp_syn_as_connect_attempt() {
+        let packet = build_tcp_packet(0x02, &[]);
+        let parsed = parse_ip_packet(&packet).unwrap();
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parsed else {
+            panic!("expected tcp segment");
+        };
+        assert_eq!(tcp.source, Ipv4Addr::new(10, 0, 0, 2));
+        assert_eq!(tcp.destination, Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(tcp.source_port, 53000);
+        assert_eq!(tcp.destination_port, 80);
+        assert_eq!(tcp.sequence, 0x01020304);
+        assert!(tcp.is_connect_attempt());
+    }
+
+    #[test]
+    fn tcp_checksum_is_mandatory_and_validated() {
+        let mut packet = build_tcp_packet(0x02, &[]);
+        packet[36] = 0x12;
+        packet[37] = 0x34;
+
+        assert_eq!(parse_ip_packet(&packet), Err(PacketError::InvalidChecksum));
+    }
+
+    #[test]
+    fn invalid_tcp_header_length_fails_closed() {
+        let mut packet = build_tcp_packet(0x02, &[]);
+        packet[32] = 0x40;
+        packet[10] = 0;
+        packet[11] = 0;
+        let ip_checksum = checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+
+        assert_eq!(
+            parse_ip_packet(&packet),
+            Err(PacketError::InvalidTcpHeaderLength {
+                data_offset_bytes: 16,
+            })
+        );
     }
 
     #[test]
@@ -408,6 +533,35 @@ mod tests {
         packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
         packet[26..28].copy_from_slice(&0u16.to_be_bytes());
         packet[28..].copy_from_slice(payload);
+        let ip_checksum = checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+        packet
+    }
+
+    fn build_tcp_packet(flags: u8, payload: &[u8]) -> Vec<u8> {
+        let tcp_len = 20 + payload.len();
+        let total_len = 20 + tcp_len;
+        let mut packet = vec![0u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[10, 0, 0, 2]);
+        packet[16..20].copy_from_slice(&[10, 0, 0, 1]);
+        packet[20..22].copy_from_slice(&53000u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&80u16.to_be_bytes());
+        packet[24..28].copy_from_slice(&0x01020304u32.to_be_bytes());
+        packet[32] = 0x50;
+        packet[33] = flags;
+        packet[34..36].copy_from_slice(&4096u16.to_be_bytes());
+        packet[40..].copy_from_slice(payload);
+        let tcp_checksum = ipv4_pseudo_checksum(
+            Ipv4Addr::new(10, 0, 0, 2),
+            Ipv4Addr::new(10, 0, 0, 1),
+            6,
+            &packet[20..],
+        );
+        packet[36..38].copy_from_slice(&tcp_checksum.to_be_bytes());
         let ip_checksum = checksum(&packet[..20]);
         packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
         packet
