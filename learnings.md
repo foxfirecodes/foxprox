@@ -205,3 +205,7 @@ Direct HTTPS bytes should pass through strict ClientHello parsing, SNI/DNS misma
 ## 2026-06-21 - QUIC handler must not convert header parsing into hostname trust
 
 The QUIC decision path should use QUIC headers for classification/audit and DNS cache for domain attribution. A QUIC-shaped UDP/443 packet should not satisfy domain rules unless DNS or future safe QUIC/TLS metadata supplies hostname evidence.
+
+## 2026-06-21 - Transparent HTTP must not fall back to generic TCP on parser failure
+
+For direct plaintext HTTP over TUN, malformed or incomplete request-head metadata should fail closed at the HTTP inspection boundary. Otherwise Host/path policy can be bypassed by relying on broader TCP/IP rules after parser failure.

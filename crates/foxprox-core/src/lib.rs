@@ -13,6 +13,7 @@ pub mod dns_handler;
 pub mod egress;
 pub mod flow;
 pub mod http;
+pub mod http_handler;
 pub mod icmp;
 pub mod packet;
 pub mod packet_handler;
@@ -53,6 +54,9 @@ pub use flow::{
 pub use http::{
     parse_http_request_head, parse_https_connect_head, HttpParseError, HttpRequestMetadata,
     HttpsConnectMetadata,
+};
+pub use http_handler::{
+    handle_transparent_http_request, TransparentHttpContext, TransparentHttpOutcome,
 };
 pub use icmp::{synthesize_icmpv4_echo_reply, IcmpSynthesisError};
 pub use packet::{parse_ip_packet, PacketParseError, PacketSummary};

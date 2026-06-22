@@ -1113,3 +1113,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * allowed QUIC egress still requires shared policy allow and egress permit construction.
 * Audit evidence: QUIC handler tests assert QUIC header metadata, DNS-attribution separation, allow/deny/fail-closed decisions, rule IDs, null hostname fields, and malformed reasons.
 * Residual risk: actual UDP socket forwarding, QUIC TLS CRYPTO/SNI parsing, flow timeout integration, and response routing remain future work.
+
+## 2026-06-21 - Transparent plaintext HTTP decision helper
+
+* Invariant under work: transparent HTTP request bytes observed on a TUN TCP stream must be strictly parsed, evaluated by shared path/method/host policy, audited, and converted to host egress only through allow-derived permits.
+* Threat or failure mode addressed: future TCP stream inspection could forward plaintext HTTP based only on destination IP, ignore Host/path policy, or treat malformed request heads as generic TCP allow traffic.
+* Planned verification: add pure transparent HTTP handler tests for path-scoped allow, path mismatch deny, malformed/missing Host fail-closed, egress permit creation, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Transparent plaintext HTTP decision helper results
+
+* Tests added/updated:
+  * transparent HTTP request heads parse Host/method/path strictly, satisfy path-scoped domain policy, produce allow audit, and create allow-derived egress permits.
+  * path mismatch denies before egress while preserving Host and path evidence in audit.
+  * malformed HTTP request heads such as missing Host fail closed before policy or egress permit creation.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 157 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * transparent plaintext HTTP now has a pure parse-policy-audit-egress boundary like explicit proxy HTTP.
+  * malformed HTTP is not downgraded to generic TCP/IP authorization.
+  * Host/path/method decisions are preserved before any host egress permit is issued.
+* Audit evidence: transparent HTTP handler tests assert frontend, allow/deny/fail-closed decisions, rule IDs, Host attribution, requested path/method, and egress permit behavior.
+* Residual risk: live TCP stream buffering/reassembly, request body forwarding, response bridging, and interaction with smoltcp are still future work.
