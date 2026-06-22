@@ -631,5 +631,5 @@
   - `cargo test --workspace` — passed, 72 tests.
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-frontends` — frontends depend only on `foxprox-core`.
-- Commit hash after commit: pending.
+- Commit hash after commit: 5addd51.
 - Remaining boundary risks: egress-error-to-reply mapping, production SOCKS listener state machine, read timeouts, and CONNECT stream bridging remain.
