@@ -610,4 +610,4 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * Empty/error DNS responses can be audited with response code and zero answer evidence instead of disappearing behind generic DNS logs.
 * Audit evidence: unit tests assert DNS response audit fields and JSON fragments for response code, answer count, and TTL.
 * Residual risk: actual DNS socket handler/upstream forwarding, DNS response synthesis, async audit drain/backpressure policy, and automatic response audit emission remain future work.
-* Commit hash: 9c275f2 preserve dns response audit metadata.
+* Commit hash: ad00a4b preserve dns response audit metadata.
