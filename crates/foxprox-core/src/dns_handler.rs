@@ -3,7 +3,7 @@ use crate::broker::BrokerCore;
 use crate::dns::{
     build_refused_response, parse_dns_query, DnsParseError, DnsQueryMetadata, DnsQueryType,
 };
-use crate::flow::{DnsCache, DnsObservation};
+use crate::flow::{DnsCache, DnsObservation, SharedDnsCache};
 use crate::policy::{PolicyDecision, PolicyRequest};
 use crate::types::{
     normalize_hostname, AuditKind, Decision, DenialReason, Frontend, NetworkEndpoint, Protocol,
@@ -36,7 +36,7 @@ pub trait DnsUpstream {
 #[derive(Clone, Debug)]
 pub struct DnsBrokerHandler<U> {
     broker: BrokerCore,
-    cache: DnsCache,
+    cache: SharedDnsCache,
     upstream: U,
     broker_dns_ip: IpAddr,
     fallback_ttl_ms: u64,
@@ -46,7 +46,7 @@ impl<U: DnsUpstream> DnsBrokerHandler<U> {
     pub fn new(broker: BrokerCore, upstream: U, broker_dns_ip: IpAddr) -> Self {
         Self {
             broker,
-            cache: DnsCache::default(),
+            cache: SharedDnsCache::default(),
             upstream,
             broker_dns_ip,
             fallback_ttl_ms: 60_000,
@@ -146,8 +146,17 @@ impl<U: DnsUpstream> DnsBrokerHandler<U> {
         &mut self.broker
     }
 
-    pub fn cache(&self) -> &DnsCache {
-        &self.cache
+    pub fn with_shared_cache(mut self, cache: SharedDnsCache) -> Self {
+        self.cache = cache;
+        self
+    }
+
+    pub fn shared_cache(&self) -> SharedDnsCache {
+        self.cache.clone()
+    }
+
+    pub fn cache(&self) -> DnsCache {
+        self.cache.snapshot()
     }
 
     pub fn rollback_observation(&mut self, observation: &DnsObservation) {
@@ -155,7 +164,7 @@ impl<U: DnsUpstream> DnsBrokerHandler<U> {
     }
 
     pub fn into_parts(self) -> (BrokerCore, DnsCache, U) {
-        (self.broker, self.cache, self.upstream)
+        (self.broker, self.cache.snapshot(), self.upstream)
     }
 
     fn fail_closed_upstream_error(
@@ -425,6 +434,7 @@ fn dns_upstream_error_detail(error: &DnsUpstreamError) -> &'static str {
 mod tests {
     use super::*;
     use crate::policy::{PolicyConfig, PolicyEngine, PolicyRule};
+    use crate::proxy_frontend::{ExplicitProxyFrontend, InMemoryExplicitProxyEgress};
     use crate::types::{AuditKind, Protocol};
     use pretty_assertions::assert_eq;
 
@@ -485,6 +495,63 @@ mod tests {
         assert_eq!(records[1].details["returned_addresses"], "93.184.216.34");
         let (_, _, upstream) = handler.into_parts();
         assert_eq!(upstream.calls, 1);
+    }
+
+    #[test]
+    fn shared_dns_cache_feeds_proxy_resolution_after_delivered_query() {
+        let query = dns_query(0x1234, "Example.COM", 1);
+        let response = dns_a_response(&query, [93, 184, 216, 34], 30);
+        let shared_cache = SharedDnsCache::default();
+        let mut dns_config = PolicyConfig::default();
+        dns_config.rules.push(
+            PolicyRule::allow("allow-example-dns")
+                .protocol(Protocol::Dns)
+                .hostname("example.com"),
+        );
+        let dns_broker = BrokerCore::new(PolicyEngine::new(dns_config), 8);
+        let mut handler = DnsBrokerHandler::new(
+            dns_broker,
+            MockUpstream {
+                response: response.clone(),
+                calls: 0,
+            },
+            "10.0.2.3".parse().unwrap(),
+        )
+        .with_shared_cache(shared_cache.clone());
+        let result = handler.handle_query("s1", &query, 1_000);
+        assert!(result.observation.is_some());
+
+        let mut proxy_config = PolicyConfig::default();
+        proxy_config.rules.push(
+            PolicyRule::allow("allow-example-http")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Http)
+                .origin("http", "example.com", 80),
+        );
+        let proxy_broker = BrokerCore::new(PolicyEngine::new(proxy_config), 8);
+        let mut frontend =
+            ExplicitProxyFrontend::new("s1", proxy_broker, InMemoryExplicitProxyEgress::default())
+                .with_shared_dns_cache(shared_cache);
+
+        let result = frontend
+            .handle_http_proxy_bytes_at(
+                b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n",
+                1_100,
+            )
+            .unwrap();
+        assert_eq!(result.decision, Decision::Allow);
+        assert!(result.forwarded);
+        assert_eq!(
+            frontend.egress().forwarded_http()[0]
+                .0
+                .resolved_destination_ip,
+            Some("93.184.216.34".parse().unwrap())
+        );
+        let records: Vec<_> = frontend.broker().audit().records().collect();
+        assert_eq!(records[0].kind, AuditKind::ProxyDestinationResolved);
+        assert_eq!(records[0].details["resolution_source"], "broker_dns");
+        assert_eq!(records[0].details["selected_ip"], "93.184.216.34");
+        assert_eq!(records[1].kind, AuditKind::HttpRequestDecision);
     }
 
     #[test]

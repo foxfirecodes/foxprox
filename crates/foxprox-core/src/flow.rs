@@ -6,6 +6,7 @@ use crate::types::{
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -299,6 +300,54 @@ pub struct DnsResolution {
 #[derive(Clone, Debug, Default)]
 pub struct DnsCache {
     by_ip: BTreeMap<IpAddr, Vec<DnsObservation>>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SharedDnsCache {
+    inner: Arc<Mutex<DnsCache>>,
+}
+
+impl SharedDnsCache {
+    pub fn new(cache: DnsCache) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(cache)),
+        }
+    }
+
+    pub fn snapshot(&self) -> DnsCache {
+        self.inner
+            .lock()
+            .expect("dns cache mutex not poisoned")
+            .clone()
+    }
+
+    pub fn commit_observation(&self, observation: DnsObservation) {
+        self.inner
+            .lock()
+            .expect("dns cache mutex not poisoned")
+            .commit_observation(observation);
+    }
+
+    pub fn rollback_observation(&self, observation: &DnsObservation) {
+        self.inner
+            .lock()
+            .expect("dns cache mutex not poisoned")
+            .rollback_observation(observation);
+    }
+
+    pub fn resolve_hostname(&self, hostname: &str, now_ms: u64) -> Option<DnsResolution> {
+        self.inner
+            .lock()
+            .expect("dns cache mutex not poisoned")
+            .resolve_hostname(hostname, now_ms)
+    }
+
+    pub fn addresses_for_hostname(&self, hostname: &str, now_ms: u64) -> Vec<IpAddr> {
+        self.inner
+            .lock()
+            .expect("dns cache mutex not poisoned")
+            .addresses_for_hostname(hostname, now_ms)
+    }
 }
 
 impl DnsCache {

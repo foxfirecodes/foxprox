@@ -1,6 +1,6 @@
 use crate::audit::AuditRecord;
 use crate::broker::BrokerCore;
-use crate::flow::{DnsCache, DnsResolution};
+use crate::flow::{DnsCache, DnsResolution, SharedDnsCache};
 use crate::policy::{PolicyDecision, PolicyRequest};
 use crate::proxy::{
     malformed_proxy_request, parse_http_proxy_request, parse_socks5_connect_request,
@@ -43,7 +43,7 @@ pub struct ExplicitProxyFrontend<E> {
     sandbox_id: String,
     broker: BrokerCore,
     egress: E,
-    dns_cache: Option<DnsCache>,
+    dns_cache: Option<SharedDnsCache>,
 }
 
 impl<E: ExplicitProxyEgress> ExplicitProxyFrontend<E> {
@@ -57,6 +57,11 @@ impl<E: ExplicitProxyEgress> ExplicitProxyFrontend<E> {
     }
 
     pub fn with_dns_cache(mut self, dns_cache: DnsCache) -> Self {
+        self.dns_cache = Some(SharedDnsCache::new(dns_cache));
+        self
+    }
+
+    pub fn with_shared_dns_cache(mut self, dns_cache: SharedDnsCache) -> Self {
         self.dns_cache = Some(dns_cache);
         self
     }

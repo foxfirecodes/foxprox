@@ -1665,3 +1665,29 @@ Round-20 high finding is fixed. HTTP proxy and CONNECT IP-literal authorities no
 
 ### Remaining blind spots
 - Live runtime still needs shared mutable DNS-cache wiring and async proxy/TUN lifecycle integration, but IP-literal proxy destinations are now policy/audit-visible in the core contract.
+
+## 2026-06-22 — Shared DNS cache wiring proof
+
+### Commands run
+- `cargo fmt` — applied formatting for shared DNS cache wiring.
+- `cargo test -p foxprox-core --all-targets --all-features` — passed, 113 core tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 113 core tests, 3 device tests, 25 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_core::dns_handler::tests::shared_dns_cache_feeds_proxy_resolution_after_delivered_query ... ok`
+
+### Interpretation
+The DNS/proxy cache wiring blind spot is reduced from snapshot-only injection to a shared cache contract. `SharedDnsCache` allows `DnsBrokerHandler` to commit/rollback delivered DNS observations into a shared cache while `ExplicitProxyFrontend` resolves proxy domain destinations from that same cache with per-request timestamps. The regression proves a DNS handler observation can feed a separate proxy frontend, which then emits `proxy_destination_resolved` evidence and forwards with selected IP metadata.
+
+### Changed files
+- `crates/foxprox-core/src/dns_handler.rs`
+- `crates/foxprox-core/src/flow.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-core/src/proxy_frontend.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This is still a synchronous shared-cache proof, not full async runtime supervision. The runtime must wire DNS listener delivery rollback and proxy accept loops to the same shared cache under real task scheduling.

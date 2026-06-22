@@ -116,3 +116,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Audit-gated proxy DNS resolution
 
 - Explicit proxy domain egress must resolve hostnames in the frontend with a per-request timestamp, append `proxy_destination_resolved` evidence containing selected IP/source/query type/TTL, and only then evaluate policy/open egress. Keeping resolution outside egress avoids hidden libc DNS and makes audit backpressure fail closed before sockets open.
+
+## 2026-06-22 — Shared DNS cache runtime boundary
+
+- Live DNS-to-proxy attribution can be modeled with `SharedDnsCache`: DNS handlers commit/rollback delivered observations into the shared cache, while explicit proxy frontends resolve per request from that same cache and append resolution audit evidence before policy/egress.
