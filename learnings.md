@@ -153,3 +153,8 @@
 
 - Audit JSON serialization can be implemented in `foxprox-audit` from the stable normalized schema without introducing serde or frontend-specific dependencies.
 - Enum values in audit output should use explicit stable snake-case labels rather than Debug formatting so log consumers do not depend on Rust variant spelling.
+
+## 2026-06-21 — JSON line audit sink
+
+- Concrete audit sinks should live in `foxprox-audit`; runtime code can then record normalized `AuditRecord`s through `AuditSink` without owning serialization details.
+- Audit IO errors need an audit-layer error variant so broker orchestration can distinguish sink backpressure from writer failures.

@@ -8,6 +8,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::io::Write;
 use std::net::SocketAddr;
 use std::time::Duration;
 
@@ -516,15 +517,40 @@ impl AuditSink for BoundedAuditSink {
     }
 }
 
+/// Audit sink that writes one stable JSON record per line to the wrapped writer.
+pub struct JsonLineAuditSink<W> {
+    writer: W,
+}
+
+impl<W> JsonLineAuditSink<W> {
+    pub fn new(writer: W) -> Self {
+        Self { writer }
+    }
+
+    pub fn into_inner(self) -> W {
+        self.writer
+    }
+}
+
+impl<W: Write> AuditSink for JsonLineAuditSink<W> {
+    fn record(&mut self, record: AuditRecord) -> Result<(), AuditError> {
+        self.writer
+            .write_all(record.to_json_line().as_bytes())
+            .map_err(|error| AuditError::Io(error.to_string()))
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum AuditError {
     Backpressure { capacity: usize },
+    Io(String),
 }
 
 impl fmt::Display for AuditError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Backpressure { capacity } => write!(f, "audit sink capacity {capacity} reached"),
+            Self::Io(error) => write!(f, "audit sink io error: {error}"),
         }
     }
 }
@@ -692,6 +718,31 @@ mod tests {
         assert_eq!(record.destination.as_deref(), Some("203.0.113.10:443"));
         assert_eq!(record.byte_counts, Some(ByteCounts::new(10, 20)));
         assert_eq!(record.flow_duration_millis, Some(2500));
+    }
+
+    #[test]
+    fn json_line_sink_writes_stable_audit_output() {
+        let event = NormalizedEvent::TcpConnectAttempt(TcpConnectAttempt {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:50000".parse().unwrap(),
+            destination: "203.0.113.10:443".parse().unwrap(),
+            hostname: None,
+        });
+        let decision = PolicyDecision::Deny(DenyDecision {
+            action: DenialAction::Reset,
+            rule_id: None,
+            reason: "blocked".into(),
+        });
+        let record = AuditRecord::from_event(1, 1000, &event, &decision);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+
+        sink.record(record).unwrap();
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+
+        assert!(output.contains("\"kind\":\"tcp_connect\""));
+        assert!(output.contains("\"decision\":\"deny_reset\""));
+        assert_eq!(output.lines().count(), 1);
     }
 
     #[test]

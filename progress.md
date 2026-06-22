@@ -652,3 +652,21 @@
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
 - Commit hash after commit: d2f2d8e.
 - Remaining boundary risks: file/stdout sinks, async audit backpressure integration, and schema versioning remain.
+
+## 2026-06-21 — Boundary objective: JSON line audit sink
+
+- Boundary under work: concrete audit sink that emits stable JSON lines through a bounded writer boundary.
+- Allowed dependency direction: `foxprox-audit` may own serialization and writer sinks over normalized `AuditRecord`; broker/network code should depend on the `AuditSink` trait and not format audit records itself.
+- Dependency-risk assessment: without a concrete sink, production/runtime code may add ad-hoc log formatting outside the audit crate. Keep IO errors typed in audit and retain normalized schema ownership.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: added `JsonLineAuditSink<W: Write>` that writes `AuditRecord::to_json_line()` output and returns typed audit IO errors. Added tests proving one-line JSON output through the sink. All verification passed.
+- Changed files:
+  - `crates/foxprox-audit/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 74 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: async/nonblocking audit backpressure and log rotation remain.
