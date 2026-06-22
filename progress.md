@@ -963,3 +963,16 @@
 - Recent verification record commit hash: `bfe8bd4`.
 - Next verification gap: commit TUN configurator extraction; then run a final status sweep and identify remaining async long-lived broker integration as the main non-alpha production gap.
 - Commit hash after commit: pending.
+
+## 2026-06-22T08:45:00Z — Explicit proxy wire helpers moved to core frontend module
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run http-proxy-smoke && cargo run -p foxprox-cli --bin foxprox-lab -- run https-connect-smoke && cargo run -p foxprox-cli --bin foxprox-lab -- run socks5-smoke && cargo run -p foxprox-cli --bin foxprox-lab -- run proxy-deny-smoke`
+- Environment assumptions: explicit proxy verification uses local loopback fixtures only.
+- Expected result: move reusable explicit frontend wire details (HTTP origin-form request generation, HTTP CONNECT/deny responses, SOCKS5 no-auth greeting validation, SOCKS5 success response formatting) out of CLI smoke code into platform-independent core helpers.
+- Observed result: pass. `foxprox-core` increased to 62 tests; workspace tests passed (`foxprox-device` 5, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). HTTP proxy, HTTPS CONNECT, SOCKS5, and proxy-deny smokes all completed.
+- Relevant output excerpt: `frontend::tests::builds_http_origin_form_request ... ok`; `frontend::tests::validates_socks5_no_auth_greeting ... ok`; proxy smokes retained `"egress_calls":"1"` on allow paths and `"egress_calls":"0"` on deny path.
+- Changed files: `crates/foxprox-core/src/{frontend.rs,lib.rs}`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: explicit proxy socket handling in the CLI now depends on reusable frontend byte helpers plus the core runtime and shared egress adapter, further shrinking CLI-owned protocol semantics.
+- Recent structural commit hash: Linux TUN setup extraction `123bb17`.
+- Next verification gap: commit frontend helper extraction; remaining production work is long-lived broker frontend/device loop design and lifecycle management.
+- Commit hash after commit: pending.

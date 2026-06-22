@@ -13,6 +13,10 @@ use foxprox_device::fd as fd_handoff;
 
 use foxprox_core::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
 use foxprox_core::egress::{EgressBackend, EgressRequest};
+use foxprox_core::frontend::{
+    build_http_origin_request, parse_socks5_no_auth_greeting, socks5_connect_success_response,
+    HTTP_CONNECT_ESTABLISHED_RESPONSE, HTTP_FORBIDDEN_CLOSE_RESPONSE, SOCKS5_NO_AUTH_RESPONSE,
+};
 use foxprox_core::origin::parse_socks5_connect_request;
 use foxprox_core::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule, RuleAction};
 use foxprox_core::runtime::{
@@ -2538,14 +2542,10 @@ fn run_http_proxy_smoke() -> Result<AuditRecord, String> {
         .cloned()
         .ok_or_else(|| "HTTP proxy runtime did not emit audit".to_string())?;
 
-    let origin_request = format!(
-        "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        parsed.method, parsed.path, parsed.host
-    );
     let mut origin_egress = LocalTcpStreamEgress::new(origin_addr);
     let origin_outcome = origin_egress.execute(&EgressRequest::TcpStreamData {
         destination: origin_addr,
-        bytes: origin_request.into_bytes(),
+        bytes: build_http_origin_request(&parsed),
     })?;
     client
         .write_all(&origin_outcome.response_payload)
@@ -2708,7 +2708,7 @@ fn run_http_proxy_deny_smoke() -> Result<AuditRecord, String> {
         return Err("HTTP deny smoke policy unexpectedly allowed request".to_string());
     }
     client
-        .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        .write_all(HTTP_FORBIDDEN_CLOSE_RESPONSE)
         .map_err(|err| format!("HTTP deny response write failed: {err}"))?;
     drop(client);
     client_thread
@@ -2846,7 +2846,7 @@ fn run_https_connect_smoke() -> Result<AuditRecord, String> {
         .ok_or_else(|| "HTTPS CONNECT runtime did not emit audit".to_string())?;
 
     client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        .write_all(HTTP_CONNECT_ESTABLISHED_RESPONSE)
         .map_err(|err| format!("HTTPS CONNECT response write failed: {err}"))?;
     let mut tunnel_buf = [0_u8; 64];
     let n = client
@@ -2986,11 +2986,9 @@ fn run_socks5_smoke() -> Result<AuditRecord, String> {
     client
         .read_exact(&mut greeting)
         .map_err(|err| format!("SOCKS5 proxy greeting read failed: {err}"))?;
-    if greeting != [0x05, 0x01, 0x00] {
-        return Err(format!("SOCKS5 proxy received bad greeting: {greeting:?}"));
-    }
+    parse_socks5_no_auth_greeting(&greeting)?;
     client
-        .write_all(&[0x05, 0x00])
+        .write_all(SOCKS5_NO_AUTH_RESPONSE)
         .map_err(|err| format!("SOCKS5 proxy greeting write failed: {err}"))?;
     let mut request_bytes = [0_u8; 512];
     let n = client
@@ -3014,8 +3012,9 @@ fn run_socks5_smoke() -> Result<AuditRecord, String> {
         .cloned()
         .ok_or_else(|| "SOCKS5 runtime did not emit audit".to_string())?;
 
+    let connect_response = socks5_connect_success_response(origin_addr);
     client
-        .write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0])
+        .write_all(&connect_response)
         .map_err(|err| format!("SOCKS5 proxy CONNECT response write failed: {err}"))?;
     let mut tunnel_buf = [0_u8; 64];
     let read_n = client

@@ -11,6 +11,7 @@ pub mod audit;
 pub mod dns;
 pub mod egress;
 pub mod flow;
+pub mod frontend;
 pub mod integration;
 pub mod origin;
 pub mod packet;
