@@ -739,3 +739,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: the session still processes one packet at a time with fake IO; generic UDP host egress and TCP stack handling remain separate session types, and no real TUN fd smoke has run.
 - Exact next step: commit TUN broker session, then add DNS-cache hostname attribution lookup into UDP/TCP event conversion for TUN flows.
+
+## 2026-06-22T02:03:05Z
+- Current objective: continue after owning TUN broker session toward transparent DNS-to-flow hostname attribution.
+- Git status summary: clean worktree after commit `416bf9d`.
+- Intended slice: enrich TUN-derived TCP and UDP policy events with live DNS-cache hostname attribution when destination IPs match broker-observed DNS results.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`, and `learnings.md` only if cache lifetime assumptions change.
+- Remaining risks: attribution remains medium-confidence DNS correlation; SNI/HTTP Host mismatch logic and stream buffering are separate paths.
+- Exact next step: add DNS-cache enrichment helper and tests proving cached hostnames allow domain policy for TUN TCP/UDP flows.
+
+## 2026-06-22T02:11:45Z
+- Current objective: enrich TUN-derived TCP/UDP policy events with broker DNS cache attribution.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on rustfmt wrapping; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 54 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 57 runtime tests, and 7 setup tests passed. New tests prove live DNS-cache observations enrich TUN TCP and UDP/QUIC policy events with medium-confidence hostname attribution so domain policies can allow matching flows.
+- Commit hash when committed: pending.
+- Remaining risks: DNS attribution is IP-based and medium-confidence only; HTTP Host and TLS SNI stream reassembly/mismatch handling still need integration with full TCP forwarding.
+- Exact next step: commit DNS-cache flow attribution, then add policy/audit coverage for expired DNS attribution failing closed instead of allowing stale domain decisions.

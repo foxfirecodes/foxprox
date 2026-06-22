@@ -940,7 +940,8 @@ fn handle_tun_packet_with_policy<W: Write, S: AuditSink>(
             Ok(TunPacketOutcome::EchoReplyWritten { bytes: reply.len() })
         }
         Ok(ParsedIpPacket::Tcpv4Segment(tcp)) => {
-            let event = tcpv4_segment_to_event(runtime.sandbox_id.clone(), &tcp);
+            let mut event = tcpv4_segment_to_event(runtime.sandbox_id.clone(), &tcp);
+            enrich_event_with_dns_cache(&mut event, runtime.cache, timestamp_millis);
             let decision = runtime.kernel.decide_and_audit(&event, timestamp_millis);
             Ok(TunPacketOutcome::TcpConnectObserved {
                 decision,
@@ -951,11 +952,12 @@ fn handle_tun_packet_with_policy<W: Write, S: AuditSink>(
             })
         }
         Ok(ParsedIpPacket::Udpv4Packet(udp)) => {
-            let event = udpv4_packet_to_event_with_broker_dns(
+            let mut event = udpv4_packet_to_event_with_broker_dns(
                 runtime.sandbox_id.clone(),
                 &udp,
                 runtime.broker_dns,
             );
+            enrich_event_with_dns_cache(&mut event, runtime.cache, timestamp_millis);
             let decision = runtime.kernel.decide_and_audit(&event, timestamp_millis);
             if decision.action != DecisionAction::Allow {
                 return Ok(TunPacketOutcome::PolicyDenied { decision });
@@ -1408,6 +1410,24 @@ pub fn udpv4_packet_to_event_with_attribution(
     }
 }
 
+fn enrich_event_with_dns_cache(event: &mut NormalizedEvent, cache: &DnsCache, now_millis: u128) {
+    match event {
+        NormalizedEvent::TcpConnectAttempt {
+            destination,
+            hostname,
+            ..
+        }
+        | NormalizedEvent::UdpFlowAttempt {
+            destination,
+            hostname,
+            ..
+        } if hostname.is_none() => {
+            *hostname = cache.lookup_ip(destination.ip, now_millis);
+        }
+        _ => {}
+    }
+}
+
 fn tun_packet_reply(packet: &[u8]) -> Result<Option<Vec<u8>>, PacketError> {
     match parse_ip_packet(packet)? {
         ParsedIpPacket::Icmpv4EchoRequest(request) => {
@@ -1423,8 +1443,8 @@ fn tun_packet_reply(packet: &[u8]) -> Result<Option<Vec<u8>>, PacketError> {
 mod tests {
     use super::*;
     use foxprox_core::{
-        DecisionAction, DecisionReason, Hostname, PolicyConfig, PolicyEngine, PolicyRule, RuleSet,
-        SniStatus, UdpClass, UdpTimeouts, VecAuditSink,
+        DecisionAction, DecisionReason, DnsObservation, Hostname, PolicyConfig, PolicyEngine,
+        PolicyRule, RuleSet, SniStatus, UdpClass, UdpTimeouts, VecAuditSink,
     };
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -1725,6 +1745,117 @@ mod tests {
         assert!(matches!(outcome, TunPacketOutcome::EchoReplyWritten { .. }));
         assert!(!fake.output.is_empty());
         assert_eq!(kernel.audit_sink().events().len(), 1);
+    }
+
+    #[test]
+    fn tun_tcp_policy_uses_live_dns_cache_attribution() {
+        let mut rule = PolicyRule::allow("allow-cached-tcp-domain");
+        rule.protocol = Some(Protocol::Tcp);
+        rule.domain_suffix = Some(Hostname::normalize("example.com").unwrap());
+        rule.minimum_confidence = Some(AttributionConfidence::Medium);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let mut cache = DnsCache::new();
+        cache.record(DnsObservation::new(
+            Hostname::normalize("www.example.com").unwrap(),
+            vec![IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+            100,
+            1_000,
+        ));
+        let resolver = StaticDnsResolver::new(30);
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = BrokerDnsRuntime {
+            sandbox_id: SandboxId::new("cached-tcp").unwrap(),
+            resolver: &resolver,
+            cache: &mut cache,
+            broker_dns: &[],
+            kernel: &mut kernel,
+        };
+        let request = build_tcp_ipv4_packet(53000, 80, 0x02, &[]);
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+
+        let outcome = handle_one_tun_packet_with_policy(
+            &mut reader,
+            &mut writer,
+            &mut buffer,
+            &mut runtime,
+            100,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            TunPacketOutcome::TcpConnectObserved { decision, .. }
+                if decision.action == DecisionAction::Allow
+                    && decision.rule_id.as_deref() == Some("allow-cached-tcp-domain")
+        ));
+    }
+
+    #[test]
+    fn tun_udp_policy_uses_live_dns_cache_attribution() {
+        let mut rule = PolicyRule::allow("allow-cached-quic-domain");
+        rule.protocol = Some(Protocol::Udp);
+        rule.destination_port = Some(foxprox_core::PortMatcher::Exact(443));
+        rule.domain_suffix = Some(Hostname::normalize("example.com").unwrap());
+        rule.minimum_confidence = Some(AttributionConfidence::Medium);
+        rule.quic_status = Some(QuicStatus::Candidate);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let mut cache = DnsCache::new();
+        cache.record(DnsObservation::new(
+            Hostname::normalize("www.example.com").unwrap(),
+            vec![IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+            100,
+            1_000,
+        ));
+        let resolver = StaticDnsResolver::new(30);
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = BrokerDnsRuntime {
+            sandbox_id: SandboxId::new("cached-udp").unwrap(),
+            resolver: &resolver,
+            cache: &mut cache,
+            broker_dns: &[],
+            kernel: &mut kernel,
+        };
+        let request = build_udp_ipv4_packet(53000, 443, b"quic?");
+        let mut reader = std::io::Cursor::new(request);
+        let mut writer = Vec::new();
+        let mut buffer = [0u8; 1500];
+
+        let outcome = handle_one_tun_packet_with_policy(
+            &mut reader,
+            &mut writer,
+            &mut buffer,
+            &mut runtime,
+            100,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            TunPacketOutcome::UdpObserved {
+                destination_port: 443,
+                ..
+            }
+        ));
+        assert_eq!(
+            runtime.kernel.audit_sink().events()[0].rule_id.as_deref(),
+            Some("allow-cached-quic-domain")
+        );
     }
 
     #[test]
