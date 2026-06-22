@@ -716,5 +716,5 @@
   - `cargo tree -p foxprox-runtime` — runtime depends on device/core/net/policy/audit/egress with packet as a dev-dependency only for checksum fixtures.
   - `cargo tree -p foxprox-policy` — policy depends only on `foxprox-core`.
   - `cargo tree -p foxprox-audit` — audit depends only on `foxprox-core`.
-- Commit hash after commit: pending.
+- Commit hash after commit: 61ef71c.
 - Remaining boundary risks: continuous async event loop, real TUN fd readiness, smoltcp TCP stream integration, and Linux setup remain.
