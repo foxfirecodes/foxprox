@@ -1,4 +1,5 @@
 use crate::audit::{AuditEvent, AuditEventKind, AuditPolicyContext};
+use crate::icmp::synthesize_icmpv4_echo_reply;
 use crate::packet::{parse_ip_packet, PacketParseError, PacketSummary};
 use crate::policy::{Decision, PolicyEngine};
 use crate::types::{Frontend, SandboxId};
@@ -15,6 +16,12 @@ pub enum TunPacketOutcome {
     Forward {
         summary: PacketSummary,
         wire: Vec<u8>,
+        decision: Decision,
+        audit: Box<AuditEvent>,
+    },
+    WriteBack {
+        summary: PacketSummary,
+        response: Vec<u8>,
         decision: Decision,
         audit: Box<AuditEvent>,
     },
@@ -64,6 +71,16 @@ pub fn handle_tun_packet(
     );
 
     if decision.is_allow() {
+        if summary.icmp.is_some_and(|icmp| icmp.is_echo_request()) {
+            if let Ok(response) = synthesize_icmpv4_echo_reply(wire) {
+                return TunPacketOutcome::WriteBack {
+                    summary,
+                    response,
+                    decision,
+                    audit: Box::new(audit),
+                };
+            }
+        }
         TunPacketOutcome::Forward {
             summary,
             wire: wire.to_vec(),
@@ -193,6 +210,52 @@ mod tests {
     }
 
     #[test]
+    fn allowed_icmp_echo_packets_produce_write_back_replies() {
+        let packet = ipv4_icmp_packet(8, 0, &[0x12, 0x34, 0x00, 0x01]);
+        let config = PolicyConfig {
+            allow_ping: true,
+            ..PolicyConfig::default()
+        };
+
+        let outcome = handle_tun_packet(&packet, &config, context());
+        let TunPacketOutcome::WriteBack {
+            summary,
+            response,
+            decision,
+            audit,
+        } = outcome
+        else {
+            panic!("expected ICMP write-back");
+        };
+
+        assert_eq!(summary.protocol, Protocol::Icmp);
+        assert!(decision.is_allow());
+        let reply = parse_ip_packet(&response).unwrap();
+        assert_eq!(reply.icmp, Some(crate::types::IcmpMessage::ipv4(0, 0)));
+        assert_eq!(reply.source, ip([93, 184, 216, 34]));
+        assert_eq!(reply.destination, ip([10, 0, 0, 2]));
+        assert_eq!(audit.kind, AuditEventKind::IcmpMessage);
+        assert_eq!(audit.decision, Some(AuditDecision::Allow));
+    }
+
+    #[test]
+    fn default_policy_denies_icmp_echo_before_write_back() {
+        let packet = ipv4_icmp_packet(8, 0, &[0x12, 0x34, 0x00, 0x01]);
+
+        let outcome = handle_tun_packet(&packet, &PolicyConfig::default(), context());
+        let TunPacketOutcome::Drop {
+            decision, audit, ..
+        } = outcome
+        else {
+            panic!("expected denied ICMP drop");
+        };
+
+        assert_eq!(decision.reason(), Some(DenialReason::IcmpTypeDenied));
+        assert_eq!(audit.kind, AuditEventKind::IcmpMessage);
+        assert_eq!(audit.reason, Some(DenialReason::IcmpTypeDenied));
+    }
+
+    #[test]
     fn malformed_tun_packets_fail_closed_without_summary() {
         let mut packet = ipv4_packet(6, &tcp_header(49152, 443));
         packet[10] ^= 0xff;
@@ -286,6 +349,14 @@ mod tests {
         header[2..4].copy_from_slice(&destination_port.to_be_bytes());
         header[4..6].copy_from_slice(&8_u16.to_be_bytes());
         header
+    }
+
+    fn ipv4_icmp_packet(type_: u8, code: u8, rest: &[u8]) -> Vec<u8> {
+        let mut icmp = vec![type_, code, 0, 0];
+        icmp.extend_from_slice(rest);
+        let checksum = internet_checksum(&icmp);
+        icmp[2..4].copy_from_slice(&checksum.to_be_bytes());
+        ipv4_packet(1, &icmp)
     }
 
     fn set_tcp_checksum(packet: &mut [u8]) {

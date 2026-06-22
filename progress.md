@@ -971,3 +971,22 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * byte-count audit uses saturating arithmetic so hostile traffic cannot overflow lifecycle counters.
 * Audit evidence: unit tests assert TCP close audit fields and deterministic JSON fragments.
 * Residual risk: actual TCP forwarder runtime still needs to call the builder on close/error/expiration; no smoltcp or host-socket bridge exists yet.
+
+## 2026-06-21 - TUN ICMP echo write-back decision helper
+
+* Invariant under work: allowed sandbox ping traffic should use the validated ICMP echo synthesis proof to produce a write-back packet, while denied or malformed ICMP remains dropped/audited.
+* Threat or failure mode addressed: a future TUN loop could forward ping externally or synthesize replies without checking policy/parser results; unusual ICMP must not be answered by the write-back proof.
+* Planned verification: extend TUN packet handler with a write-back outcome for allowed ICMP echo requests, test allow_ping produces a valid reply while default policy still denies ping, then run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - TUN ICMP echo write-back decision helper results
+
+* Tests added/updated:
+  * allowed ICMP echo requests with `allow_ping` produce TUN write-back outcomes containing synthesized echo replies accepted by the strict packet parser.
+  * default policy still denies ICMP echo before write-back synthesis and audits `IcmpTypeDenied`.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 138 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * ICMP echo synthesis is now coupled to successful parse and policy allow in the pure TUN packet handler.
+  * denied ping traffic cannot trigger synthetic replies.
+* Audit evidence: packet handler tests assert ICMP allow and deny audit decisions around write-back behavior.
+* Residual risk: no live TUN fd writer exists yet; write-back is limited to IPv4 echo replies and does not cover IPv6 echo or ICMP unreachable synthesis.

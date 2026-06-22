@@ -177,3 +177,7 @@ TCP flow expiry uses `expires_at_millis <= now` semantics, matching UDP flow cle
 ## 2026-06-21 - TCP lifecycle audit should consume flow state
 
 TCP close/expiration audit records should be built from the `TcpFlowEntry` returned by close or expiration collection. That links bounded cleanup with complete endpoint, counter, and duration evidence instead of requiring stale state retention.
+
+## 2026-06-21 - ICMP write-back must be policy-gated
+
+Synthetic ping replies should be produced only after the TUN packet handler has both parsed the packet and received an allow decision, such as `allow_ping`. Default-denied echo requests should drop with ICMP denial audit and must not reach synthesis.
