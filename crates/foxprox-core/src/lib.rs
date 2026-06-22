@@ -20,7 +20,8 @@ pub mod types;
 
 pub use attribution::{HostAttribution, Hostname, HostnameError};
 pub use audit::{
-    AuditDecision, AuditEvent, AuditEventKind, AuditPolicyContext, BoundedAuditBuffer, PushOutcome,
+    AuditDecision, AuditDrainBatch, AuditEvent, AuditEventKind, AuditPolicyContext,
+    BoundedAuditBuffer, PushOutcome,
 };
 pub use config::{Cidr, ConfigError, HostMatcher, PolicyConfig, PolicyRule, RuleAction};
 pub use dns::{

@@ -637,6 +637,23 @@ impl BoundedAuditBuffer {
         self.queue.pop_front()
     }
 
+    pub fn drain_json_lines(&mut self, max_events: usize) -> AuditDrainBatch {
+        let limit = max_events.min(self.queue.len());
+        let mut lines = Vec::with_capacity(limit);
+        for _ in 0..limit {
+            let event = self
+                .queue
+                .pop_front()
+                .expect("limit is bounded by queue length");
+            lines.push(event.to_json_line());
+        }
+        AuditDrainBatch {
+            drained: lines.len(),
+            remaining: self.queue.len(),
+            lines,
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.queue.len()
     }
@@ -654,6 +671,13 @@ impl BoundedAuditBuffer {
 pub enum PushOutcome {
     Accepted,
     Backpressure { event: Box<AuditEvent> },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AuditDrainBatch {
+    pub lines: Vec<String>,
+    pub drained: usize,
+    pub remaining: usize,
 }
 
 /// Utility for audit callers that need to record a destination IP without a
@@ -731,6 +755,50 @@ mod tests {
         );
         assert_eq!(buffer.len(), 1);
         assert_eq!(buffer.capacity(), 1);
+    }
+
+    #[test]
+    fn audit_buffer_drains_json_lines_in_bounded_fifo_batches() {
+        let mut buffer = BoundedAuditBuffer::new(3);
+        assert_eq!(
+            buffer.push(event(Decision::Allow {
+                rule_id: Some("first".into()),
+            })),
+            PushOutcome::Accepted
+        );
+        assert_eq!(
+            buffer.push(event(Decision::Deny {
+                behavior: DenyBehavior::Drop,
+                reason: DenialReason::DefaultDeny,
+                rule_id: Some("second".into()),
+            })),
+            PushOutcome::Accepted
+        );
+        assert_eq!(
+            buffer.push(event(Decision::FailClosed {
+                reason: DenialReason::MalformedInput,
+            })),
+            PushOutcome::Accepted
+        );
+
+        let batch = buffer.drain_json_lines(2);
+        assert_eq!(batch.drained, 2);
+        assert_eq!(batch.remaining, 1);
+        assert_eq!(buffer.len(), 1);
+        assert_eq!(batch.lines.len(), 2);
+        assert!(batch.lines[0].contains("\"rule_id\":\"first\""));
+        assert!(batch.lines[1].contains("\"rule_id\":\"second\""));
+
+        let empty = buffer.drain_json_lines(0);
+        assert_eq!(empty.drained, 0);
+        assert_eq!(empty.remaining, 1);
+        assert!(empty.lines.is_empty());
+
+        let rest = buffer.drain_json_lines(usize::MAX);
+        assert_eq!(rest.drained, 1);
+        assert_eq!(rest.remaining, 0);
+        assert!(buffer.is_empty());
+        assert!(rest.lines[0].contains("\"decision\":\"fail_closed\""));
     }
 
     #[test]

@@ -655,3 +655,23 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; invalid config surfaces as `Decision::FailClosed { reason: InvalidConfig }` for future audit emission.
 * Residual risk: config file deserialization/loading and interface-aware validation of broker resolver reachability remain future work.
 * Commit hash: 231b9cc fail closed invalid broker dns exemptions.
+
+## 2026-06-21 - Bounded audit JSON drain batches
+
+* Invariant under work: draining audit events toward a JSON-lines sink must be explicit, FIFO, and bounded by a caller-supplied batch size so slow sinks do not require unbounded memory growth.
+* Threat or failure mode addressed: a future audit sink that drains all queued events without a bound could create latency spikes or large transient allocations, weakening the bounded audit-buffer invariant under hostile traffic.
+* Planned verification: add a bounded JSON-line drain API to `BoundedAuditBuffer`, verify FIFO ordering, zero-sized drain behavior, remaining-count reporting, and full-suite/clippy checks.
+
+## 2026-06-21 - Bounded audit JSON drain batches results
+
+* Tests added/updated:
+  * audit buffer drains JSON lines in FIFO order up to `max_events` and leaves the remaining queue intact.
+  * zero-sized drain returns no lines without mutating the queue.
+  * oversized drain consumes only available queued events and reports zero remaining.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 98 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * audit backpressure behavior remains unchanged for a full queue.
+  * audit sink callers now have a bounded drain primitive instead of needing to pop/serialize arbitrarily many events in one unbounded loop.
+* Audit evidence: unit tests assert serialized JSON line ordering and bounded batch accounting.
+* Residual risk: no OS file/stdout sink, async runtime integration, or durable write error policy exists yet; this commit only adds the bounded core drain primitive.

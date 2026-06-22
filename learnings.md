@@ -113,3 +113,7 @@ Packet parsing should validate IPv4 header and transport checksums before exposi
 ## 2026-06-21 - DNS bypass exemptions need config validation
 
 Direct-DNS bypass checks are only as safe as the broker DNS server list. Treating multicast, broadcast, directed-broadcast, or unspecified addresses as broker-controlled DNS would weaken bypass prevention, so those addresses should be rejected during policy config validation.
+
+## 2026-06-21 - Audit drain batches need explicit bounds
+
+Bounded audit queues also need bounded drain APIs. Even if queue capacity is fixed, a sink path that serializes every queued event in one unbounded operation can create avoidable latency and allocation spikes under hostile traffic.
