@@ -8,8 +8,8 @@ use crate::audit::{
 use crate::dns::{parse_dns_query, synthesize_a_response, DnsCache};
 use crate::egress::{EgressBackend, EgressRequest};
 use crate::origin::{
-    parse_connect_target, parse_http_request, parse_socks5_connect_request, parse_tls_client_hello,
-    ConnectTarget, HttpRequestMeta, SocksConnectRequest,
+    parse_connect_request, parse_connect_target, parse_http_request, parse_socks5_connect_request,
+    parse_tls_client_hello, ConnectTarget, HttpRequestMeta, SocksConnectRequest,
 };
 use crate::packet::{
     parse_icmp_echo_request, parse_ipv4, parse_tcp, parse_udp, synthesize_icmp_echo_reply,
@@ -268,6 +268,32 @@ impl ExplicitProxyRuntime {
         Ok(allowed.then_some(parsed))
     }
 
+    pub fn evaluate_https_connect_request(
+        &mut self,
+        sandbox_id: impl Into<String>,
+        bytes: &[u8],
+        egress_destination: SocketAddr,
+    ) -> Result<Option<ConnectTarget>, String> {
+        let sandbox_id = sandbox_id.into();
+        let parsed = match parse_connect_request(bytes) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                self.audit.push(
+                    AuditRecord::new(
+                        EventKind::HttpsConnect,
+                        sandbox_id,
+                        Decision::FailClosed,
+                        format!("malformed CONNECT request fails closed: {err}"),
+                    )
+                    .with_frontend(Frontend::HttpProxy)
+                    .with_protocol(Protocol::HttpsConnect),
+                );
+                return Ok(None);
+            }
+        };
+        self.evaluate_https_connect_target(sandbox_id, parsed, egress_destination)
+    }
+
     pub fn evaluate_https_connect(
         &mut self,
         sandbox_id: impl Into<String>,
@@ -291,6 +317,15 @@ impl ExplicitProxyRuntime {
                 return Ok(None);
             }
         };
+        self.evaluate_https_connect_target(sandbox_id, parsed, egress_destination)
+    }
+
+    fn evaluate_https_connect_target(
+        &mut self,
+        sandbox_id: String,
+        parsed: ConnectTarget,
+        egress_destination: SocketAddr,
+    ) -> Result<Option<ConnectTarget>, String> {
         let request = PolicyRequest::new(&sandbox_id, Frontend::HttpProxy, Protocol::HttpsConnect)
             .with_destination(egress_destination.ip(), parsed.port)
             .with_hostname(&parsed.host, AttributionConfidence::High);

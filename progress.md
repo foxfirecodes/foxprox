@@ -899,3 +899,15 @@
 - Interpretation: host egress mechanics now have a crate boundary matching the documented architecture, and the CLI harness is further reduced to orchestration and fixture setup.
 - Next verification gap: commit egress crate extraction; remaining work is production async integration or more crate decomposition for proxy frontends.
 - Commit hash after commit: pending.
+
+## 2026-06-22T07:20:00Z — CONNECT request parsing in core runtime
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run https-connect-smoke && cargo run -p foxprox-cli --bin foxprox-lab -- run proxy-deny-smoke`
+- Environment assumptions: explicit proxy smokes use local loopback fixtures only; no external network.
+- Expected result: move raw HTTP CONNECT request-line parsing into core origin/runtime helpers so CLI no longer owns CONNECT target parsing logic.
+- Observed result: pass. `foxprox-core` increased to 59 tests; `foxprox-device` 2 tests, `foxprox-egress` 1 test, `foxprox-cli` 2 tests, and `foxproxsetup` 6 tests all passed. HTTPS CONNECT allow and malformed CONNECT deny smokes emitted nested core runtime audit.
+- Relevant output excerpt: `origin::tests::parses_connect_request_line ... ok`; HTTPS smoke `"event":"https_connect","decision":"allow"`; proxy deny `"reason":"malformed CONNECT request denied before egress: malformed CONNECT request fails closed: request is not CONNECT"`.
+- Changed files: `crates/foxprox-core/src/{origin.rs,runtime.rs}`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: explicit proxy CONNECT parsing/policy/audit is now entirely in reusable core runtime/origin code, leaving the CLI with only socket IO and fixture orchestration for that path.
+- Next verification gap: commit CONNECT parsing move; remaining work is larger production integration or further extraction of proxy socket accept/tunnel loops into a frontend crate.
+- Commit hash after commit: pending.

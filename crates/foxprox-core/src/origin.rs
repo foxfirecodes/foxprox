@@ -81,6 +81,38 @@ pub fn parse_connect_target(target: &str) -> Result<ConnectTarget, String> {
     })
 }
 
+/// Parse an HTTP CONNECT request and return its normalized target.
+pub fn parse_connect_request(bytes: &[u8]) -> Result<ConnectTarget, String> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| "CONNECT request is not UTF-8".to_string())?;
+    let header_end = text
+        .find("\r\n\r\n")
+        .or_else(|| text.find("\n\n"))
+        .ok_or_else(|| "CONNECT headers are incomplete".to_string())?;
+    let headers = &text[..header_end];
+    let request_line = headers
+        .lines()
+        .next()
+        .ok_or_else(|| "CONNECT request line missing".to_string())?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| "CONNECT method missing".to_string())?;
+    let target = parts
+        .next()
+        .ok_or_else(|| "CONNECT target missing".to_string())?;
+    let version = parts
+        .next()
+        .ok_or_else(|| "CONNECT HTTP version missing".to_string())?;
+    if method != "CONNECT" {
+        return Err("request is not CONNECT".to_string());
+    }
+    if !version.starts_with("HTTP/") {
+        return Err("CONNECT HTTP version missing".to_string());
+    }
+    parse_connect_target(target)
+}
+
 /// Parsed SOCKS5 TCP CONNECT request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SocksConnectRequest {
@@ -310,6 +342,17 @@ mod tests {
         let target = parse_connect_target("Example.COM:8443").unwrap();
         assert_eq!(target.host, "example.com");
         assert_eq!(target.port, 8443);
+    }
+
+    #[test]
+    fn parses_connect_request_line() {
+        let target = parse_connect_request(
+            b"CONNECT Example.COM:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(target.host, "example.com");
+        assert_eq!(target.port, 443);
+        assert!(parse_connect_request(b"GET / HTTP/1.1\r\n\r\n").is_err());
     }
 
     #[test]

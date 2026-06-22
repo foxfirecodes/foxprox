@@ -2601,18 +2601,37 @@ fn proxy_deny_smoke_records() -> Vec<AuditRecord> {
         .with_protocol(Protocol::Http),
     });
 
-    let connect_err = parse_connect_request_target("GET / HTTP/1.1\r\n\r\n")
-        .expect_err("malformed CONNECT fixture should fail");
-    records.push(
+    let mut connect_runtime =
+        ExplicitProxyRuntime::new(PolicyEngine::new(PolicyConfig::deny_by_default()));
+    let _ = connect_runtime.evaluate_https_connect_request(
+        "proxy-deny-smoke",
+        b"GET / HTTP/1.1\r\n\r\n",
+        "127.0.0.1:0".parse().expect("static socket valid"),
+    );
+    let connect_audit = connect_runtime.audit.last().cloned().unwrap_or_else(|| {
         AuditRecord::new(
             EventKind::HttpsConnect,
             "proxy-deny-smoke",
             Decision::FailClosed,
-            format!("malformed CONNECT request denied before egress: {connect_err}"),
+            "malformed CONNECT request denied before egress: missing audit",
         )
         .with_frontend(Frontend::HttpProxy)
         .with_protocol(Protocol::HttpsConnect)
-        .with_metadata("egress_calls", "0"),
+    });
+    records.push(
+        AuditRecord::new(
+            EventKind::HttpsConnect,
+            "proxy-deny-smoke",
+            connect_audit.decision,
+            format!(
+                "malformed CONNECT request denied before egress: {}",
+                connect_audit.reason
+            ),
+        )
+        .with_frontend(Frontend::HttpProxy)
+        .with_protocol(Protocol::HttpsConnect)
+        .with_metadata("egress_calls", "0")
+        .with_metadata("runtime_audit", connect_audit.to_json_line()),
     );
 
     let socks_err = parse_socks5_connect_request(&[0x05, 0x03, 0x00, 0x01, 127, 0, 0, 1, 0, 53])
@@ -2811,7 +2830,6 @@ fn run_https_connect_smoke() -> Result<AuditRecord, String> {
         .set_read_timeout(Some(Duration::from_secs(5)))
         .map_err(|err| format!("HTTPS CONNECT proxy timeout setup failed: {err}"))?;
     let request = read_http_headers(&mut client, "HTTPS CONNECT proxy")?;
-    let target = parse_connect_request_target(&request)?;
     let policy = PolicyEngine::new(
         PolicyConfig::deny_by_default().with_rule(
             PolicyRule::new("allow-https-connect-example", RuleAction::Allow)
@@ -2822,7 +2840,7 @@ fn run_https_connect_smoke() -> Result<AuditRecord, String> {
     );
     let mut proxy_runtime = ExplicitProxyRuntime::new(policy);
     let parsed = proxy_runtime
-        .evaluate_https_connect("https-connect-smoke", &target, origin_addr)?
+        .evaluate_https_connect_request("https-connect-smoke", request.as_bytes(), origin_addr)?
         .ok_or_else(|| "HTTPS CONNECT smoke policy denied request".to_string())?;
     let proxy_audit = proxy_runtime
         .audit
@@ -3072,30 +3090,6 @@ fn read_http_headers(stream: &mut TcpStream, context: &str) -> Result<String, St
         }
     }
     Err(format!("{context} headers were incomplete"))
-}
-
-fn parse_connect_request_target(headers: &str) -> Result<String, String> {
-    let request_line = headers
-        .lines()
-        .next()
-        .ok_or_else(|| "CONNECT request line missing".to_string())?;
-    let mut parts = request_line.split_whitespace();
-    let method = parts
-        .next()
-        .ok_or_else(|| "CONNECT method missing".to_string())?;
-    let target = parts
-        .next()
-        .ok_or_else(|| "CONNECT target missing".to_string())?;
-    let version = parts
-        .next()
-        .ok_or_else(|| "CONNECT HTTP version missing".to_string())?;
-    if method != "CONNECT" {
-        return Err("request is not CONNECT".to_string());
-    }
-    if !version.starts_with("HTTP/") {
-        return Err("CONNECT HTTP version missing".to_string());
-    }
-    Ok(target.to_string())
 }
 
 #[cfg(unix)]
