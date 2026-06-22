@@ -89,3 +89,7 @@ DNS audit events need first-class query type metadata. A generic DNS protocol au
 ## 2026-06-21 - Audit serialization must preserve numeric unsupported protocols
 
 Audit JSON should not collapse `Protocol::Unsupported(n)` to a generic string. The unsupported protocol number is security-relevant evidence for fail-closed packet decisions and must survive structured serialization along with explicit nulls for absent attribution fields.
+
+## 2026-06-21 - UDP expiration needs auditable entry data
+
+A flow table that only reports an expiration count cannot emit complete expiration audit records by itself. Lifecycle audit builders need the expired `UdpFlowEntry` data so byte counts, endpoints, class, and duration survive cleanup.

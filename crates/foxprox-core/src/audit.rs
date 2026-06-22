@@ -4,6 +4,7 @@ use std::net::IpAddr;
 
 use crate::attribution::Hostname;
 use crate::dns::{DnsQueryMetadata, DnsQueryType};
+use crate::flow::{UdpFlowClass, UdpFlowEntry};
 use crate::policy::{Decision, DenialReason, DenyBehavior, PolicyRequest};
 use crate::types::{Endpoint, Frontend, HostnameConfidence, HostnameSource, Protocol, SandboxId};
 
@@ -29,6 +30,7 @@ pub struct AuditEvent {
     pub http_method: Option<String>,
     pub http_path_query: Option<String>,
     pub byte_count: Option<u64>,
+    pub flow_duration_millis: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -95,6 +97,7 @@ impl AuditEvent {
             http_method: context.http_method,
             http_path_query: context.http_path_query,
             byte_count: None,
+            flow_duration_millis: None,
         }
     }
 
@@ -128,6 +131,36 @@ impl AuditEvent {
             http_method: None,
             http_path_query: None,
             byte_count: None,
+            flow_duration_millis: None,
+        }
+    }
+
+    pub fn from_udp_flow_entry(
+        timestamp_millis: u64,
+        sandbox_id: SandboxId,
+        kind: AuditEventKind,
+        entry: &UdpFlowEntry,
+    ) -> Self {
+        Self {
+            timestamp_millis,
+            sandbox_id,
+            kind,
+            frontend: Some(Frontend::Tun),
+            protocol: Some(protocol_for_udp_flow_class(entry.class)),
+            source: Some(entry.key.source),
+            destination: Some(entry.key.destination),
+            requested_port: entry.key.destination.port,
+            hostname: None,
+            hostname_source: HostnameSource::None,
+            hostname_confidence: HostnameConfidence::None,
+            dns_query_type: None,
+            decision: None,
+            rule_id: None,
+            reason: None,
+            http_method: None,
+            http_path_query: None,
+            byte_count: Some(entry.bytes_from_sandbox),
+            flow_duration_millis: Some(timestamp_millis.saturating_sub(entry.created_at_millis)),
         }
     }
 
@@ -198,8 +231,22 @@ impl AuditEvent {
             false,
         );
         push_json_option_u64_field(&mut out, "byte_count", self.byte_count, false);
+        push_json_option_u64_field(
+            &mut out,
+            "flow_duration_millis",
+            self.flow_duration_millis,
+            false,
+        );
         out.push('}');
         out
+    }
+}
+
+fn protocol_for_udp_flow_class(class: UdpFlowClass) -> Protocol {
+    match class {
+        UdpFlowClass::Dns => Protocol::Dns,
+        UdpFlowClass::QuicCandidate => Protocol::QuicCandidate,
+        UdpFlowClass::NtpLike | UdpFlowClass::Generic => Protocol::Udp,
     }
 }
 
@@ -776,5 +823,68 @@ mod tests {
         assert!(event
             .to_json_line()
             .contains("\"protocol\":\"unsupported:99\""));
+    }
+
+    #[test]
+    fn udp_flow_audit_preserves_lifecycle_counters_and_classification() {
+        let entry = UdpFlowEntry {
+            key: crate::flow::UdpFlowKey::new(
+                Endpoint::udp(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 40000),
+                Endpoint::udp(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 20)), 443),
+            ),
+            class: UdpFlowClass::QuicCandidate,
+            created_at_millis: 1_000,
+            last_seen_millis: 1_100,
+            expires_at_millis: 181_100,
+            bytes_from_sandbox: 42,
+        };
+
+        let event = AuditEvent::from_udp_flow_entry(
+            1_250,
+            SandboxId::new("sandbox-udp"),
+            AuditEventKind::QuicCandidateFlowCreated,
+            &entry,
+        );
+
+        assert_eq!(event.protocol, Some(Protocol::QuicCandidate));
+        assert_eq!(event.source, Some(entry.key.source));
+        assert_eq!(event.destination, Some(entry.key.destination));
+        assert_eq!(event.requested_port, Some(443));
+        assert_eq!(event.byte_count, Some(42));
+        assert_eq!(event.flow_duration_millis, Some(250));
+        let line = event.to_json_line();
+        assert!(line.contains("\"kind\":\"quic_candidate_flow_created\""));
+        assert!(line.contains("\"protocol\":\"quic_candidate\""));
+        assert!(line.contains("\"byte_count\":42"));
+        assert!(line.contains("\"flow_duration_millis\":250"));
+    }
+
+    #[test]
+    fn udp_expiration_audit_uses_udp_protocol_for_generic_flows() {
+        let entry = UdpFlowEntry {
+            key: crate::flow::UdpFlowKey::new(
+                Endpoint::udp(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 40001),
+                Endpoint::udp(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 10)), 9999),
+            ),
+            class: UdpFlowClass::Generic,
+            created_at_millis: 500,
+            last_seen_millis: 550,
+            expires_at_millis: 1_000,
+            bytes_from_sandbox: u64::MAX,
+        };
+
+        let event = AuditEvent::from_udp_flow_entry(
+            1_000,
+            SandboxId::new("sandbox-udp"),
+            AuditEventKind::UdpFlowExpired,
+            &entry,
+        );
+
+        assert_eq!(event.protocol, Some(Protocol::Udp));
+        assert_eq!(event.flow_duration_millis, Some(500));
+        let line = event.to_json_line();
+        assert!(line.contains("\"kind\":\"udp_flow_expired\""));
+        assert!(line.contains("\"byte_count\":18446744073709551615"));
+        assert!(line.contains("\"flow_duration_millis\":500"));
     }
 }

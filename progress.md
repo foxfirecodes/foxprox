@@ -523,3 +523,23 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Residual risk: no async audit drain or file/stdout sink exists yet; lifecycle/flow-specific event constructors and response audit serialization coverage remain future work.
 
 * Commit hash: e9613d8 serialize audit events as structured json.
+
+## 2026-06-21 - UDP flow lifecycle audit builders
+
+* Invariant under work: UDP pseudo-flow creation and expiration audit records must preserve source/destination endpoints, protocol class, byte counts, and bounded lifetime metadata so flow decisions remain reviewable when state expires.
+* Threat or failure mode addressed: UDP flow tracking currently bounds memory and counters, but lifecycle audit records could omit byte totals or duration, hiding stale-flow cleanup behavior and QUIC/DNS/generic classification.
+* Planned verification: add audit constructors/tests for UDP flow created, QUIC candidate flow created, and UDP flow expired events with byte counts and duration; ensure JSON serialization includes flow duration and byte count; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - UDP flow lifecycle audit builders results
+
+* Tests added/updated:
+  * QUIC candidate UDP flow creation audit records preserve source/destination endpoints, requested port, byte count, duration, and QUIC protocol classification.
+  * generic UDP expiration audit records preserve saturated byte counts and flow duration.
+  * JSON audit serialization includes `byte_count` and `flow_duration_millis` for flow lifecycle records.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 90 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * UDP lifecycle events can now be reviewed after state cleanup without losing counters or timeout-derived lifetime evidence.
+  * QUIC candidate flow audit records remain distinguishable from generic UDP records.
+* Audit evidence: unit tests assert lifecycle event fields and serialized byte/duration output.
+* Residual risk: the flow table still returns only expiration counts rather than expired entries for automatic audit emission; UDP socket forwarding and reply routing remain future work.
