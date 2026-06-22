@@ -8,3 +8,6 @@ rust-version.workspace = true
 
 [lib]
 path = "src/lib.rs"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.30", features = ["socket", "uio"] }

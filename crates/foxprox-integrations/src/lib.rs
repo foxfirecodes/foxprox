@@ -4,7 +4,7 @@
 //! `foxproxsetup` wrapper shape. It does not execute commands or import broker
 //! core internals.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -156,9 +156,164 @@ fn validate_program(field: &'static str, path: &Path) -> Result<(), IntegrationP
     Ok(())
 }
 
+#[cfg(unix)]
+pub mod fd_handoff {
+    //! Unix fd handoff helpers for `foxproxsetup` → broker control channels.
+
+    use std::fmt;
+    use std::io::{IoSlice, IoSliceMut};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::os::unix::net::UnixStream;
+
+    use nix::cmsg_space;
+    use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
+
+    const HANDOFF_MARKER: &[u8] = b"foxprox-fd";
+
+    /// File descriptor received by the broker side of the setup handoff.
+    #[derive(Debug)]
+    pub struct ReceivedFd {
+        pub marker: Vec<u8>,
+        pub fd: OwnedFd,
+    }
+
+    /// Errors from SCM_RIGHTS setup fd handoff.
+    #[derive(Debug)]
+    pub enum FdHandoffError {
+        Send(String),
+        Receive(String),
+        TruncatedControlMessage,
+        MissingFileDescriptor,
+        UnexpectedMarker(Vec<u8>),
+    }
+
+    impl fmt::Display for FdHandoffError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Send(error) => write!(f, "fd-handoff-send-error: {error}"),
+                Self::Receive(error) => write!(f, "fd-handoff-receive-error: {error}"),
+                Self::TruncatedControlMessage => {
+                    f.write_str("fd-handoff-truncated-control-message")
+                }
+                Self::MissingFileDescriptor => f.write_str("fd-handoff-missing-file-descriptor"),
+                Self::UnexpectedMarker(marker) => {
+                    write!(f, "fd-handoff-unexpected-marker: {:?}", marker)
+                }
+            }
+        }
+    }
+
+    impl std::error::Error for FdHandoffError {}
+
+    /// Send one fd from setup-helper side to broker side over a Unix stream.
+    pub fn send_setup_fd(socket: &UnixStream, fd: RawFd) -> Result<(), FdHandoffError> {
+        let iov = [IoSlice::new(HANDOFF_MARKER)];
+        let fds = [fd];
+        let cmsg = ControlMessage::ScmRights(&fds);
+        sendmsg::<()>(socket.as_raw_fd(), &iov, &[cmsg], MsgFlags::empty(), None)
+            .map_err(|error| FdHandoffError::Send(error.to_string()))?;
+        Ok(())
+    }
+
+    /// Receive one setup fd on the broker side as an owned descriptor.
+    pub fn receive_setup_fd(socket: &UnixStream) -> Result<ReceivedFd, FdHandoffError> {
+        let mut marker = [0_u8; HANDOFF_MARKER.len()];
+        let (bytes, flags, received_fds) = {
+            let mut iov = [IoSliceMut::new(&mut marker)];
+            let mut cmsgspace = cmsg_space!([RawFd; 1]);
+            let msg = recvmsg::<()>(
+                socket.as_raw_fd(),
+                &mut iov,
+                Some(&mut cmsgspace),
+                MsgFlags::empty(),
+            )
+            .map_err(|error| FdHandoffError::Receive(error.to_string()))?;
+
+            let mut received_fds = Vec::new();
+            for cmsg in msg
+                .cmsgs()
+                .map_err(|error| FdHandoffError::Receive(error.to_string()))?
+            {
+                if let ControlMessageOwned::ScmRights(fds) = cmsg {
+                    received_fds.extend(fds);
+                }
+            }
+            (msg.bytes, msg.flags, received_fds)
+        };
+
+        if flags.contains(MsgFlags::MSG_CTRUNC) {
+            return Err(FdHandoffError::TruncatedControlMessage);
+        }
+
+        let received_marker = marker[..bytes].to_vec();
+        if received_marker != HANDOFF_MARKER {
+            return Err(FdHandoffError::UnexpectedMarker(received_marker));
+        }
+
+        let Some(first_fd) = received_fds.first().copied() else {
+            return Err(FdHandoffError::MissingFileDescriptor);
+        };
+        let mut owned_fds: Vec<OwnedFd> = received_fds.into_iter().map(raw_fd_to_owned).collect();
+        let first = owned_fds.remove(
+            owned_fds
+                .iter()
+                .position(|fd| fd.as_raw_fd() == first_fd)
+                .unwrap_or(0),
+        );
+        drop(owned_fds);
+
+        Ok(ReceivedFd {
+            marker: received_marker,
+            fd: first,
+        })
+    }
+
+    fn raw_fd_to_owned(fd: RawFd) -> OwnedFd {
+        // SAFETY: `recvmsg` with SCM_RIGHTS returns fresh file descriptors owned
+        // by this process. This function immediately wraps each raw descriptor
+        // exactly once in `OwnedFd` so it will be closed on drop.
+        unsafe { OwnedFd::from_raw_fd(fd) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_fd_handoff_transfers_readable_descriptor_to_broker_side() {
+        use std::fs::{remove_file, OpenOptions};
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-fd-handoff-{}-{}",
+            std::process::id(),
+            "proof"
+        ));
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.write_all(b"tun-fd-proof").unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        let (setup_side, broker_side) = UnixStream::pair().unwrap();
+
+        fd_handoff::send_setup_fd(&setup_side, file.as_raw_fd()).unwrap();
+        let received = fd_handoff::receive_setup_fd(&broker_side).unwrap();
+        let mut received_file = std::fs::File::from(received.fd);
+        let mut contents = String::new();
+        received_file.read_to_string(&mut contents).unwrap();
+
+        assert_eq!(received.marker, b"foxprox-fd".to_vec());
+        assert_eq!(contents, "tun-fd-proof");
+        remove_file(path).unwrap();
+    }
 
     #[test]
     fn bwrap_plan_uses_foxproxsetup_with_temporary_net_admin_and_tun_access() {

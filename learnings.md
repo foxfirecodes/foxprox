@@ -160,3 +160,7 @@ The SOCKS5 listener should treat method negotiation as protocol state, write the
 ## 2026-06-21 — bwrap command shape belongs outside broker core
 
 Keep bwrap-specific flags, `foxproxsetup -- target` wrapping, `/dev/net/tun` exposure, and proxy env injection in an integrations crate. The broker core should continue to see only normalized sessions, policy, audit, and device/egress abstractions.
+
+## 2026-06-21 — fd handoff needs one reviewed unsafe conversion
+
+SCM_RIGHTS delivers raw file descriptors owned by the receiving process. Wrap each received raw fd exactly once in `OwnedFd` immediately after `recvmsg`; drop extras to avoid leaks. Keep this unsafe conversion isolated in the integration handoff module, not in broker core.

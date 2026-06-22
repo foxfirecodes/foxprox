@@ -875,3 +875,25 @@
 - What failed or surprised the agent: no behavior failures; the command contract can be verified without executing bwrap, keeping bwrap semantics isolated in an integration crate.
 - What remains unproven: actual `foxproxsetup` helper execution, TUN creation/configuration, fd handoff, capability drop, bwrap process lifecycle, and live sandbox packet logs are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — setup helper fd handoff slice
+
+- Slice attempted: prove the setup-to-broker file-descriptor handoff boundary with SCM_RIGHTS over a Unix socket pair.
+- Why next: bwrap command planning now wraps `foxproxsetup`, but alpha setup still needs the helper to pass the TUN fd to the host broker; fd passing is the narrowest privileged-adjacent boundary that can be verified without creating a real TUN device.
+- Verification plan: add fd handoff helpers in `foxprox-integrations`, send a temporary file descriptor over a Unix socket pair, receive it as owned broker-side state, verify the received fd can read the expected contents, then run formatting, clippy, focused integration tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — setup helper fd handoff
+
+- Slice attempted: prove the setup-helper-to-broker fd handoff boundary with SCM_RIGHTS over a Unix stream.
+- Why next: bwrap command planning verified `foxproxsetup -- target`, but alpha setup requires the helper to send the TUN fd to the host-side broker; fd passing is the narrowest setup boundary that can be tested without privileged TUN creation.
+- What changed: added Unix-only `fd_handoff` helpers in `foxprox-integrations`, including `send_setup_fd`, `receive_setup_fd`, `ReceivedFd`, and `FdHandoffError`; the crate now uses a small documented unsafe conversion from SCM_RIGHTS raw fds to `OwnedFd` and closes any extra received fds.
+- Verification:
+  - `cargo fmt --check` initially failed on formatting in the new fd handoff module; `cargo fmt` was run.
+  - Focused check passed: `cargo test -p foxprox-integrations fd_handoff -- --nocapture` sent a temporary file descriptor over a Unix socket pair and verified the broker-side owned fd could read `tun-fd-proof`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 audit, 7 broker, 4 cli, 7 config, 16 core, 6 dns, 5 egress, 6 flow, 20 inspect, 3 integrations, 15 packet, 23 proxy tests, and doc tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: `recvmsg` borrows the receive buffer through its message object, so marker bytes must be read after extracting fd/control-message data inside a narrower scope.
+- What remains unproven: opening `/dev/net/tun`, creating/configuring a real TUN device, passing that real TUN fd through this channel, helper capability drop, and broker consumption of the received fd are still absent.
+- Commit: this commit.
