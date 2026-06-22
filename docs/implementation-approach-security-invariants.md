@@ -122,4 +122,3 @@ Stop only when one of these is true:
 * the next step requires a scope-changing, security-sensitive, hard-to-reverse, or outside-docs decision;
 * verification is impossible after reducing the issue to a minimal repro;
 * two consecutive work cycles produce no meaningful product or verification progress;
-* an explicit runtime or turn budget is reached.
