@@ -13,6 +13,7 @@ pub mod dns_handler;
 pub mod flow;
 pub mod http;
 pub mod packet;
+pub mod packet_handler;
 pub mod policy;
 pub mod proxy_handler;
 pub mod quic;
@@ -48,6 +49,7 @@ pub use http::{
     HttpsConnectMetadata,
 };
 pub use packet::{parse_ip_packet, PacketParseError, PacketSummary};
+pub use packet_handler::{handle_tun_packet, TunPacketContext, TunPacketOutcome};
 pub use policy::{Decision, DenialReason, DenyBehavior, PolicyEngine, PolicyRequest};
 pub use proxy_handler::{
     handle_http_proxy_request, HttpProxyRequestContext, HttpProxyRequestOutcome,

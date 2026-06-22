@@ -157,3 +157,7 @@ Explicit HTTP and CONNECT handlers should parse bounded headers, normalize into 
 ## 2026-06-21 - SOCKS helpers must keep IP-only attribution distinct
 
 SOCKS domain CONNECT requests can be high-confidence explicit-proxy hostname evidence, but SOCKS IP CONNECT requests must remain IP-only/low-confidence and should not satisfy domain rules. The handler boundary should preserve that distinction in both policy requests and audit records.
+
+## 2026-06-21 - TUN forwarding should start from a pure parse-policy-audit boundary
+
+A live TUN loop should call a core helper that strictly parses packet bytes, normalizes metadata, decides policy, and builds audit before any forwarding. Malformed and unsupported packets should not return forwardable bytes; bypass denials such as direct DNS should be visible at this boundary.

@@ -868,3 +868,26 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * denial and malformed replies are bounded; when bounds are too small, the helper drops rather than allocating or emitting partial untracked data.
 * Audit evidence: SOCKS handler tests assert allow, deny, and fail-closed audit decisions, rule IDs, denial reasons, frontend/protocol, endpoint, hostname attribution, and requested-port behavior.
 * Residual risk: no async SOCKS listener, state machine sequencing between greeting and CONNECT, host TCP egress, or stream bridging/backpressure exists yet; this is the pure core decision boundary.
+
+## 2026-06-21 - TUN packet policy decision helper
+
+* Invariant under work: TUN packet bytes must be strictly parsed before policy, converted through normalized packet metadata, audited for allow/deny/fail-closed outcomes, and never expose malformed bytes as forwardable traffic.
+* Threat or failure mode addressed: future TUN loops could parse packets, policy-check, and audit in separate ad hoc steps, accidentally forwarding malformed packets or losing direct-DNS/multicast/unsupported-protocol denial evidence.
+* Planned verification: add pure packet handler tests for allowed TCP metadata forwarding, direct DNS bypass denial, malformed checksum/unsupported protocol fail-closed audit, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - TUN packet policy decision helper results
+
+* Tests added/updated:
+  * valid TUN TCP packets with matching IP/port allow rules produce forward outcomes preserving original wire bytes, parsed packet summary, allow decision, and TCP connect audit metadata.
+  * direct DNS bypass packets to non-broker UDP/53 drop before broad allow rules and preserve DNS-query audit evidence with `DirectDnsBypass` reason.
+  * malformed packets with invalid IPv4 checksums fail closed without packet summaries and produce malformed-input unsupported-network audit.
+  * unsupported IP protocol packets fail closed with numeric `Protocol::Unsupported(n)` audit evidence.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` failed because the new packet audit-kind mapping referenced a nonexistent audit variant.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 128 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * TUN packet bytes now have a single pure core path for strict parse, normalized policy request conversion, decision, audit event construction, and forward/drop outcome.
+  * malformed or unsupported packet bytes never expose forwardable wire bytes.
+  * bypass-sensitive denials such as direct DNS are applied before allow rules and remain auditable at the packet-handler boundary.
+* Audit evidence: packet handler tests assert audit kinds, endpoints, decisions, denial reasons, rule IDs, and unsupported protocol number preservation.
+* Residual risk: no live TUN fd read/write loop, smoltcp integration, host egress forwarding, packet response synthesis, or audit-buffer push/drain integration exists yet; this is the pure packet decision boundary.
