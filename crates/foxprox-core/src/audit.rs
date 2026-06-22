@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use std::net::IpAddr;
 
 use crate::attribution::Hostname;
-use crate::dns::{DnsQueryMetadata, DnsQueryType};
+use crate::dns::{DnsAddressResponseMetadata, DnsQueryMetadata, DnsQueryType, DnsResponseCode};
 use crate::flow::{UdpFlowClass, UdpFlowEntry};
 use crate::policy::{Decision, DenialReason, DenyBehavior, PolicyRequest};
 use crate::types::{Endpoint, Frontend, HostnameConfidence, HostnameSource, Protocol, SandboxId};
@@ -24,6 +24,9 @@ pub struct AuditEvent {
     pub hostname_source: HostnameSource,
     pub hostname_confidence: HostnameConfidence,
     pub dns_query_type: Option<DnsQueryType>,
+    pub dns_response_code: Option<DnsResponseCode>,
+    pub dns_answer_count: Option<usize>,
+    pub dns_min_ttl_seconds: Option<u32>,
     pub decision: Option<AuditDecision>,
     pub rule_id: Option<String>,
     pub reason: Option<DenialReason>,
@@ -91,6 +94,9 @@ impl AuditEvent {
             hostname_source: context.hostname_source,
             hostname_confidence: context.hostname_confidence,
             dns_query_type: None,
+            dns_response_code: None,
+            dns_answer_count: None,
+            dns_min_ttl_seconds: None,
             decision: audit_decision,
             rule_id,
             reason,
@@ -125,6 +131,46 @@ impl AuditEvent {
             hostname_source: HostnameSource::BrokerDnsQuery,
             hostname_confidence: HostnameConfidence::High,
             dns_query_type: Some(metadata.query_type),
+            dns_response_code: None,
+            dns_answer_count: None,
+            dns_min_ttl_seconds: None,
+            decision: audit_decision,
+            rule_id,
+            reason,
+            http_method: None,
+            http_path_query: None,
+            byte_count: None,
+            flow_duration_millis: None,
+        }
+    }
+
+    pub fn from_dns_response_metadata(
+        timestamp_millis: u64,
+        sandbox_id: SandboxId,
+        frontend: Frontend,
+        source: Option<Endpoint>,
+        destination: Option<Endpoint>,
+        metadata: &DnsAddressResponseMetadata,
+        decision: &Decision,
+    ) -> Self {
+        let (audit_decision, rule_id, reason) = audit_decision_fields(decision);
+
+        Self {
+            timestamp_millis,
+            sandbox_id,
+            kind: AuditEventKind::DnsResponse,
+            frontend: Some(frontend),
+            protocol: Some(Protocol::Dns),
+            source,
+            destination,
+            requested_port: destination.and_then(|endpoint| endpoint.port),
+            hostname: Some(metadata.hostname.clone()),
+            hostname_source: HostnameSource::DnsCache,
+            hostname_confidence: HostnameConfidence::Medium,
+            dns_query_type: Some(metadata.query_type),
+            dns_response_code: Some(metadata.response_code),
+            dns_answer_count: Some(metadata.addresses.len()),
+            dns_min_ttl_seconds: metadata.min_ttl_seconds,
             decision: audit_decision,
             rule_id,
             reason,
@@ -154,6 +200,9 @@ impl AuditEvent {
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
+            dns_response_code: None,
+            dns_answer_count: None,
+            dns_min_ttl_seconds: None,
             decision: None,
             rule_id: None,
             reason: None,
@@ -202,6 +251,19 @@ impl AuditEvent {
             &mut out,
             "dns_query_type",
             self.dns_query_type.map(dns_query_type_name),
+            false,
+        );
+        push_json_option_string_field(
+            &mut out,
+            "dns_response_code",
+            self.dns_response_code.map(dns_response_code_name),
+            false,
+        );
+        push_json_option_usize_field(&mut out, "dns_answer_count", self.dns_answer_count, false);
+        push_json_option_u32_field(
+            &mut out,
+            "dns_min_ttl_seconds",
+            self.dns_min_ttl_seconds,
             false,
         );
         push_json_option_string_field(
@@ -276,6 +338,24 @@ fn push_json_u64_field(out: &mut String, key: &str, value: u64, first: bool) {
 }
 
 fn push_json_option_u64_field(out: &mut String, key: &str, value: Option<u64>, first: bool) {
+    push_json_key(out, key, first);
+    if let Some(value) = value {
+        write!(out, "{value}").expect("writing to String cannot fail");
+    } else {
+        out.push_str("null");
+    }
+}
+
+fn push_json_option_u32_field(out: &mut String, key: &str, value: Option<u32>, first: bool) {
+    push_json_key(out, key, first);
+    if let Some(value) = value {
+        write!(out, "{value}").expect("writing to String cannot fail");
+    } else {
+        out.push_str("null");
+    }
+}
+
+fn push_json_option_usize_field(out: &mut String, key: &str, value: Option<usize>, first: bool) {
     push_json_key(out, key, first);
     if let Some(value) = value {
         write!(out, "{value}").expect("writing to String cannot fail");
@@ -366,6 +446,7 @@ fn audit_event_kind_name(kind: AuditEventKind) -> &'static str {
         AuditEventKind::TunConfigured => "tun_configured",
         AuditEventKind::ProxyListenerConfigured => "proxy_listener_configured",
         AuditEventKind::DnsQuery => "dns_query",
+        AuditEventKind::DnsResponse => "dns_response",
         AuditEventKind::TcpConnect => "tcp_connect",
         AuditEventKind::TcpFlowClosed => "tcp_flow_closed",
         AuditEventKind::UdpFlowCreated => "udp_flow_created",
@@ -430,6 +511,18 @@ fn hostname_confidence_name(confidence: HostnameConfidence) -> &'static str {
     }
 }
 
+fn dns_response_code_name(response_code: DnsResponseCode) -> &'static str {
+    match response_code {
+        DnsResponseCode::NoError => "NOERROR",
+        DnsResponseCode::FormErr => "FORMERR",
+        DnsResponseCode::ServFail => "SERVFAIL",
+        DnsResponseCode::NxDomain => "NXDOMAIN",
+        DnsResponseCode::NotImp => "NOTIMP",
+        DnsResponseCode::Refused => "REFUSED",
+        DnsResponseCode::Other(_) => "OTHER",
+    }
+}
+
 fn dns_query_type_name(query_type: DnsQueryType) -> &'static str {
     match query_type {
         DnsQueryType::A => "A",
@@ -489,6 +582,7 @@ pub enum AuditEventKind {
     TunConfigured,
     ProxyListenerConfigured,
     DnsQuery,
+    DnsResponse,
     TcpConnect,
     TcpFlowClosed,
     UdpFlowCreated,
@@ -721,6 +815,51 @@ mod tests {
         assert_eq!(event.dns_query_type, Some(crate::dns::DnsQueryType::Aaaa));
         assert_eq!(event.decision, Some(AuditDecision::Allow));
         assert_eq!(event.reason, None);
+    }
+
+    #[test]
+    fn dns_response_audit_preserves_response_code_ttl_and_answer_count() {
+        let response = [
+            0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x07, b'e',
+            b'x', b'a', b'm', b'p', b'l', b'e', 0x03, b'c', b'o', b'm', 0x00, 0x00, 0x01, 0x00,
+            0x01, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1e, 0x00, 0x04, 93, 184,
+            216, 34,
+        ];
+        let metadata = crate::dns::parse_dns_address_response(&response, 512, 8).unwrap();
+        let source = Endpoint::udp(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53);
+        let destination = Endpoint::udp(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 40000);
+
+        let event = AuditEvent::from_dns_response_metadata(
+            100,
+            SandboxId::new("sandbox-dns"),
+            Frontend::Tun,
+            Some(source),
+            Some(destination),
+            &metadata,
+            &Decision::Allow { rule_id: None },
+        );
+
+        assert_eq!(event.kind, AuditEventKind::DnsResponse);
+        assert_eq!(event.protocol, Some(Protocol::Dns));
+        assert_eq!(event.source, Some(source));
+        assert_eq!(event.destination, Some(destination));
+        assert_eq!(event.requested_port, Some(40000));
+        assert_eq!(event.hostname.as_ref().unwrap().as_str(), "example.com");
+        assert_eq!(event.hostname_source, HostnameSource::DnsCache);
+        assert_eq!(event.hostname_confidence, HostnameConfidence::Medium);
+        assert_eq!(event.dns_query_type, Some(crate::dns::DnsQueryType::A));
+        assert_eq!(
+            event.dns_response_code,
+            Some(crate::dns::DnsResponseCode::NoError)
+        );
+        assert_eq!(event.dns_answer_count, Some(1));
+        assert_eq!(event.dns_min_ttl_seconds, Some(30));
+
+        let line = event.to_json_line();
+        assert!(line.contains("\"kind\":\"dns_response\""));
+        assert!(line.contains("\"dns_response_code\":\"NOERROR\""));
+        assert!(line.contains("\"dns_answer_count\":1"));
+        assert!(line.contains("\"dns_min_ttl_seconds\":30"));
     }
 
     #[test]

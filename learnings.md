@@ -101,3 +101,7 @@ For bounded state tables, auditability and cleanup should be linked: returning e
 ## 2026-06-21 - Rule IDs are part of audit integrity
 
 Policy rule IDs are not just labels; audit records depend on them for provenance. Duplicate IDs should be invalid configuration, even when first-match evaluation would still be deterministic.
+
+## 2026-06-21 - DNS response audit must distinguish cache confidence
+
+DNS response audit records should preserve response code, answer count, and TTL data, but they must not imply high-confidence domain attribution. Even correlated DNS answers feed the attribution cache at medium confidence, so response audit builders should reflect DNS-cache semantics instead of broker-query or explicit-host semantics.

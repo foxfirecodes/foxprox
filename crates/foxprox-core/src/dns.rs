@@ -145,8 +145,34 @@ pub struct DnsAddressResponseMetadata {
     pub transaction_id: u16,
     pub hostname: Hostname,
     pub query_type: DnsQueryType,
+    pub response_code: DnsResponseCode,
     pub addresses: Vec<IpAddr>,
     pub min_ttl_seconds: Option<u32>,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DnsResponseCode {
+    NoError,
+    FormErr,
+    ServFail,
+    NxDomain,
+    NotImp,
+    Refused,
+    Other(u8),
+}
+
+impl DnsResponseCode {
+    fn from_code(code: u8) -> Self {
+        match code {
+            0 => Self::NoError,
+            1 => Self::FormErr,
+            2 => Self::ServFail,
+            3 => Self::NxDomain,
+            4 => Self::NotImp,
+            5 => Self::Refused,
+            other => Self::Other(other),
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -430,6 +456,7 @@ pub fn parse_dns_address_response(
                 transaction_id: header.transaction_id,
                 hostname,
                 query_type: DnsQueryType::from_code(qtype),
+                response_code: header.response_code,
                 addresses: Vec::new(),
                 min_ttl_seconds: None,
             });
@@ -482,6 +509,7 @@ pub fn parse_dns_address_response(
         transaction_id: header.transaction_id,
         hostname,
         query_type: DnsQueryType::from_code(qtype),
+        response_code: header.response_code,
         addresses,
         min_ttl_seconds,
     })
@@ -492,6 +520,7 @@ struct DnsHeader {
     transaction_id: u16,
     flags: u16,
     is_response: bool,
+    response_code: DnsResponseCode,
     answer_count: u16,
     authority_count: u16,
     additional_count: u16,
@@ -520,6 +549,7 @@ fn parse_dns_header(bytes: &[u8], max_message_bytes: usize) -> Result<DnsHeader,
         transaction_id,
         flags,
         is_response: flags & 0x8000 != 0,
+        response_code: DnsResponseCode::from_code((flags & 0x000f) as u8),
         answer_count: read_u16(bytes, 6)?,
         authority_count: read_u16(bytes, 8)?,
         additional_count: read_u16(bytes, 10)?,
@@ -922,6 +952,7 @@ mod tests {
         assert_eq!(parsed.transaction_id, 0x1234);
         assert_eq!(parsed.hostname.as_str(), "example.com");
         assert_eq!(parsed.query_type, DnsQueryType::A);
+        assert_eq!(parsed.response_code, DnsResponseCode::NoError);
         assert_eq!(
             parsed.addresses,
             vec![
@@ -940,6 +971,7 @@ mod tests {
 
         let parsed = parse_dns_address_response(&response, 512, 8).unwrap();
         assert_eq!(parsed.hostname.as_str(), "missing.example");
+        assert_eq!(parsed.response_code, DnsResponseCode::NxDomain);
         assert!(parsed.addresses.is_empty());
         assert_eq!(parsed.min_ttl_seconds, None);
     }

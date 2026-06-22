@@ -589,3 +589,25 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Residual risk: config file parsing/loading and broader normalization of externally supplied configs remain future work.
 
 * Commit hash: 0a8a87f reject duplicate policy rule ids.
+
+## 2026-06-21 - DNS response audit metadata preservation
+
+* Invariant under work: DNS response audit records must preserve response code, query type, answer count, and TTL evidence from strict parsed DNS responses without implying high-confidence hostname authorization.
+* Threat or failure mode addressed: DNS responses that create, skip, or deny attribution could otherwise be audited as generic DNS events, hiding NXDOMAIN/error outcomes, empty answers, zero-TTL answers, or the TTL evidence used for bounded cache insertion.
+* Planned verification: add parsed response-code metadata to DNS response parsing, add DNS response audit event builders/serialization coverage, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - DNS response audit metadata preservation results
+
+* Tests added/updated:
+  * DNS address response parser now exposes `DnsResponseCode` and tests assert `NOERROR` and `NXDOMAIN` preservation.
+  * DNS response audit builder preserves source/destination endpoints, response hostname, query type, response code, answer count, minimum TTL, and medium-confidence DNS-cache attribution semantics.
+  * JSON audit serialization includes `dns_response_code`, `dns_answer_count`, and `dns_min_ttl_seconds` fields.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 94 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * DNS response metadata remains produced only by the strict DNS response parser.
+  * Response audit metadata reports DNS-derived attribution as medium confidence rather than upgrading it to high-confidence domain policy evidence.
+  * Empty/error DNS responses can be audited with response code and zero answer evidence instead of disappearing behind generic DNS logs.
+* Audit evidence: unit tests assert DNS response audit fields and JSON fragments for response code, answer count, and TTL.
+* Residual risk: actual DNS socket handler/upstream forwarding, DNS response synthesis, async audit drain/backpressure policy, and automatic response audit emission remain future work.
+* Commit hash: 9c275f2 preserve dns response audit metadata.
