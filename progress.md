@@ -1054,3 +1054,16 @@
 - Recent verification record commit hash: `dbe5d86`.
 - Next verification gap: commit broker crate; then wire at least one environment smoke through `foxprox-broker::TransparentBroker` if it can be done without destabilizing the current harness.
 - Commit hash after commit: pending.
+
+## 2026-06-22T10:55:00Z — DNS attribution smoke uses broker orchestration crate
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run dns-attribution-smoke`
+- Environment assumptions: bwrap/TUN fd handoff works locally; DNS attribution smoke uses broker-local DNS answer and loopback UDP egress fixture.
+- Expected result: wire one environment smoke through `foxprox-broker::TransparentBroker` so packet dispatch, broker DNS handling, DNS cache synchronization, UDP policy, egress, and audit are exercised through the reusable broker orchestration crate instead of CLI-local runtime coordination.
+- Observed result: pass. Workspace tests passed (`foxprox-broker` 2, `foxprox-core` 64, `foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). DNS attribution smoke emitted `"dns_answered":"true"`, `"forwarded":"true"`, and `"attributed_hostname":"lab.example"`.
+- Relevant output excerpt: DNS attribution `"event":"udp_flow_created"`, `"decision":"allow"`, `"runtime_audit":"{...\"hostname\":\"lab.example\"...}"`.
+- Changed files: `Cargo.lock`, `crates/foxprox-cli/{Cargo.toml,src/main.rs}`, `progress.md`.
+- Interpretation: the new broker orchestration crate is now used by a Linux/TUN environment smoke, not just unit tests. This proves the factoring path from device fd packet IO into reusable broker/runtime/egress boundaries.
+- Recent structural commit hash: broker crate `f1acf95`.
+- Next verification gap: commit broker smoke integration; if continuing, consider migrating UDP forward or ICMP writeback smokes onto `TransparentBroker`, or run a final full sweep first.
+- Commit hash after commit: pending.

@@ -72,6 +72,7 @@ dependencies = [
 name = "foxprox-cli"
 version = "0.1.0"
 dependencies = [
+ "foxprox-broker",
  "foxprox-core",
  "foxprox-device",
  "foxprox-egress",

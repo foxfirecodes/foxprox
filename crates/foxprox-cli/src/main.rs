@@ -11,8 +11,9 @@ use std::os::unix::net::UnixListener;
 #[cfg(unix)]
 use foxprox_device::fd as fd_handoff;
 
+use foxprox_broker::TransparentBroker;
 use foxprox_core::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
-use foxprox_core::egress::{EgressBackend, EgressRequest};
+use foxprox_core::egress::{EgressBackend, EgressRequest, MockEgressBackend};
 use foxprox_core::frontend::{
     build_http_origin_request, parse_socks5_no_auth_greeting, read_http_headers,
     socks5_connect_success_response, HTTP_CONNECT_ESTABLISHED_RESPONSE,
@@ -21,9 +22,8 @@ use foxprox_core::frontend::{
 use foxprox_core::origin::parse_socks5_connect_request;
 use foxprox_core::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule, RuleAction};
 use foxprox_core::runtime::{
-    route_transparent_ipv4_packet, ExplicitProxyRuntime, TransparentDnsRuntime,
-    TransparentPacketRoute, TransparentTcpBridgeRuntime, TransparentTcpRuntime,
-    TransparentUdpRuntime,
+    ExplicitProxyRuntime, TransparentDnsRuntime, TransparentTcpBridgeRuntime,
+    TransparentTcpRuntime, TransparentUdpRuntime,
 };
 use foxprox_core::scenario::{run_scenario, ScenarioName};
 use foxprox_core::smoltcp_gate::feed_tcp_syn_to_smoltcp_listener;
@@ -1159,7 +1159,6 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
     let answer_ip = "203.0.113.77"
         .parse()
         .map_err(|err| format!("invalid DNS attribution answer IP: {err}"))?;
-    let mut dns_runtime = TransparentDnsRuntime::new([("lab.example".to_string(), answer_ip)]);
     let policy = PolicyEngine::new(
         PolicyConfig::deny_by_default().with_rule(
             PolicyRule::new("allow-dns-attributed-example", RuleAction::Allow)
@@ -1169,7 +1168,16 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
                 .require_hostname_attribution(),
         ),
     );
-    let mut runtime = TransparentUdpRuntime::new(policy, LocalUdpEgress::new(echo_addr)?);
+    let mut broker = TransparentBroker::new(
+        "10.0.2.1:53".parse().expect("static broker DNS addr valid"),
+        [("lab.example".to_string(), answer_ip)],
+        policy,
+        LocalUdpEgress::new(echo_addr)?,
+        PolicyEngine::new(PolicyConfig::deny_by_default()),
+        MockEgressBackend::new(),
+        PolicyEngine::new(PolicyConfig::deny_by_default()),
+    );
+    broker.set_tick(2);
     let mut buf = [0_u8; 2048];
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut packets_read = 0_u64;
@@ -1181,35 +1189,18 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
-                match route_transparent_ipv4_packet(
-                    packet,
-                    "10.0.2.1:53".parse().expect("static broker DNS addr valid"),
-                ) {
-                    Ok(TransparentPacketRoute::BrokerDns) => {
-                        if let Some(reply) =
-                            dns_runtime.handle_ipv4_packet("dns-attribution-smoke", packet)?
-                        {
-                            fd.write_packet(&reply)?;
-                            runtime.dns_cache = dns_runtime.dns_cache.clone();
-                            runtime.now_tick = 2;
-                            dns_answered = true;
-                        }
+                let step = broker.handle_ipv4_packet("dns-attribution-smoke", packet)?;
+                for reply in step.packets_to_device {
+                    fd.write_packet(&reply)?;
+                }
+                if let Some(audit) = broker.audit.last() {
+                    if audit.kind == EventKind::DnsQuery && audit.decision.is_allow() {
+                        dns_answered = true;
                     }
-                    Ok(TransparentPacketRoute::Udp) => {
-                        if let Some(reply) =
-                            runtime.handle_ipv4_packet("dns-attribution-smoke", packet)?
-                        {
-                            fd.write_packet(&reply)?;
-                            forwarded = true;
-                            break;
-                        }
+                    if audit.kind == EventKind::UdpFlowCreated && audit.decision.is_allow() {
+                        forwarded = true;
+                        break;
                     }
-                    Ok(
-                        TransparentPacketRoute::Tcp
-                        | TransparentPacketRoute::Icmp
-                        | TransparentPacketRoute::Unsupported(_),
-                    ) => {}
-                    Err(_) => {}
                 }
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -1251,7 +1242,12 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
         .join()
         .map_err(|_| "DNS attribution echo fixture thread panicked".to_string())?;
     echo_result?;
-    let runtime_audit = runtime.audit.last().cloned();
+    let runtime_audit = broker
+        .audit
+        .iter()
+        .rev()
+        .find(|audit| audit.kind == EventKind::UdpFlowCreated)
+        .cloned();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let mut record = AuditRecord::new(

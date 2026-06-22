@@ -11,6 +11,7 @@ name = "foxprox-lab"
 path = "src/main.rs"
 
 [dependencies]
+foxprox-broker = { path = "../foxprox-broker" }
 foxprox-core = { path = "../foxprox-core" }
 foxprox-device = { path = "../foxprox-device" }
 foxprox-egress = { path = "../foxprox-egress" }
