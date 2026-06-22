@@ -1064,3 +1064,24 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 4bda7b1.
 - Remaining boundary risks: detecting real smoltcp close events, teardown/audit reasons, and half-close semantics remain.
+
+## 2026-06-22 — Boundary objective: nonblocking host TCP stream behavior
+
+- Boundary under work: make standard host TCP stream handles safe for runtime bridge polling without blocking the broker loop.
+- Allowed dependency direction: `foxprox-egress` owns std socket mode and `WouldBlock` handling behind `HostTcpStream`; runtime continues to use only the trait; policy/audit stay independent of socket IO.
+- Dependency-risk assessment: runtime now has a bridge flush step that calls `read_to_sandbox`. If std streams remain blocking, a continuous loop can hang on one idle connection. The egress contract should normalize non-ready reads/writes as zero progress instead of leaking OS errors or blocking semantics upward.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for egress/runtime/audit.
+- Observed results: updated `StdHostEgress` TCP connect/CONNECT/SOCKS stream paths to configure returned bridge streams as nonblocking, and normalized `WouldBlock` in the `HostTcpStream for TcpStream` implementation to zero progress for reads/writes. Added a localhost contract test proving an idle standard stream read returns an empty buffer instead of blocking or erroring. All verification passed.
+- Changed files:
+  - `crates/foxprox-egress/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 100 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-egress` — std socket behavior remains behind egress.
+  - `cargo tree -p foxprox-runtime` — runtime still uses only `HostTcpStream`.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: async connect timeouts, readiness registration, write fairness, and handling repeated zero-progress streams remain.

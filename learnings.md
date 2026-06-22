@@ -248,3 +248,8 @@
 
 - Runtime should remove host stream bridge state from normalized `StackFlowClosed` events, not from adapter-specific socket handles, so cleanup remains stack-neutral.
 - Flow-close audit and bridge cleanup can share the same normalized close event while keeping audit concerned only with lifecycle records.
+
+## 2026-06-22 — nonblocking host streams
+
+- Runtime bridge polling must not call blocking std TCP reads. Configure standard TCP streams returned for bridge-like CONNECT paths as nonblocking in egress, and normalize `WouldBlock` to zero progress in `HostTcpStream`.
+- Keep explicit HTTP request forwarding on its separate response path so changing bridge stream readiness does not affect synchronous one-shot HTTP proxy forwarding.

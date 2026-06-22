@@ -6,7 +6,7 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 
 use foxprox_core::{
@@ -45,15 +45,20 @@ pub trait HostTcpStream {
 
 impl HostTcpStream for TcpStream {
     fn write_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
-        self.write(bytes)
-            .map_err(|error| EgressError::StreamIo(error.to_string()))
+        match self.write(bytes) {
+            Ok(written) => Ok(written),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(0),
+            Err(error) => Err(EgressError::StreamIo(error.to_string())),
+        }
     }
 
     fn read_to_sandbox(&mut self, max_bytes: usize) -> Result<Vec<u8>, EgressError> {
         let mut buffer = vec![0_u8; max_bytes];
-        let len = self
-            .read(&mut buffer)
-            .map_err(|error| EgressError::StreamIo(error.to_string()))?;
+        let len = match self.read(&mut buffer) {
+            Ok(len) => len,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => 0,
+            Err(error) => return Err(EgressError::StreamIo(error.to_string())),
+        };
         buffer.truncate(len);
         Ok(buffer)
     }
@@ -143,8 +148,9 @@ impl HostEgress for StdHostEgress {
     type HttpResponse = StdHttpResponse;
 
     fn connect_tcp(&mut self, event: &TcpConnectAttempt) -> Result<Self::TcpStream, EgressError> {
-        TcpStream::connect(event.destination)
-            .map_err(|error| EgressError::ConnectFailed(error.to_string()))
+        let stream = TcpStream::connect(event.destination)
+            .map_err(|error| EgressError::ConnectFailed(error.to_string()))?;
+        configure_bridge_stream(stream)
     }
 
     fn open_udp_flow(&mut self, event: &UdpFlowAttempt) -> Result<Self::UdpHandle, EgressError> {
@@ -182,11 +188,11 @@ impl HostEgress for StdHostEgress {
     }
 
     fn proxy_connect(&mut self, event: &HttpsConnect) -> Result<Self::TcpStream, EgressError> {
-        connect_destination(&event.host, event.port)
+        connect_destination(&event.host, event.port).and_then(configure_bridge_stream)
     }
 
     fn socks_connect(&mut self, event: &SocksConnect) -> Result<Self::TcpStream, EgressError> {
-        connect_destination(&event.destination, event.port)
+        connect_destination(&event.destination, event.port).and_then(configure_bridge_stream)
     }
 
     fn resolve_dns(&mut self, event: &DnsQuery) -> Result<Vec<SocketAddr>, EgressError> {
@@ -217,6 +223,13 @@ fn connect_destination(host: &DestinationHost, port: u16) -> Result<TcpStream, E
                     .map_err(|error| EgressError::ConnectFailed(error.to_string()))
             }),
     }
+}
+
+fn configure_bridge_stream(stream: TcpStream) -> Result<TcpStream, EgressError> {
+    stream
+        .set_nonblocking(true)
+        .map_err(|error| EgressError::ConnectFailed(error.to_string()))?;
+    Ok(stream)
 }
 
 fn http_method_as_str(method: &HttpMethod) -> &str {
@@ -317,6 +330,8 @@ pub fn destination_host_to_string(host: &DestinationHost) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
+
     use foxprox_core::{FrontendKind, SandboxId, UdpClassification};
 
     #[test]
@@ -362,6 +377,25 @@ mod tests {
             DestinationHost::Hostname(foxprox_core::Hostname::new("Example.COM").unwrap());
         assert_eq!(destination_host_to_string(&hostname), "example.com");
         assert_eq!(http_method_as_str(&foxprox_core::HttpMethod::Post), "POST");
+    }
+
+    #[test]
+    fn std_tcp_stream_readiness_is_nonblocking_for_bridge_polling() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut egress = StdHostEgress;
+        let event = TcpConnectAttempt {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:49152".parse().unwrap(),
+            destination: addr,
+            hostname: None,
+        };
+
+        let mut stream = egress.connect_tcp(&event).unwrap();
+        let _accepted = listener.accept().unwrap();
+
+        assert_eq!(stream.read_to_sandbox(16).unwrap(), Vec::<u8>::new());
     }
 
     #[test]
