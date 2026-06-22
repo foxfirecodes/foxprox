@@ -128,3 +128,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Delivery-gated shared DNS cache
 
 - Shared DNS cache publication must happen after the DNS listener successfully sends the response to the sandbox client. Handler-level query processing should return a pending observation and audit evidence, but must not publish it to shared proxy-visible cache before delivery.
+
+## 2026-06-22 — Runtime lifecycle state must be terminal
+
+- Runtime lifecycle evidence needs an explicit state machine rather than an optional start timestamp. Invalid transitions (`exit` before `start`, duplicate `start`, duplicate `exit`, or `start` after `exit`) should emit structured `broker_error` records and must not create misleading extra `network_session_start` or `network_session_exit` records.

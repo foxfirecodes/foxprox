@@ -143,6 +143,7 @@ pub enum DenialReason {
     ResourceLimit,
     AuditBackpressure,
     SetupFailed,
+    RuntimeState,
     PolicyConfig,
 }
 

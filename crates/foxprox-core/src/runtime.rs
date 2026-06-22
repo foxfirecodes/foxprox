@@ -40,10 +40,35 @@ impl RuntimeExitStatus {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeLifecycleError {
     AuditBackpressure { attempted_kind: AuditKind },
     NotStarted,
+    AlreadyRunning,
+    AlreadyExited,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum RuntimeLifecycleState {
+    NotStarted,
+    Running {
+        started_at_ms: u64,
+    },
+    Exited {
+        started_at_ms: u64,
+        exited_at_ms: u64,
+        status: RuntimeExitStatus,
+    },
+}
+
+impl RuntimeLifecycleState {
+    fn as_detail(&self) -> &'static str {
+        match self {
+            Self::NotStarted => "not_started",
+            Self::Running { .. } => "running",
+            Self::Exited { .. } => "exited",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -51,7 +76,7 @@ pub struct RuntimeLifecycleHarness {
     sandbox_id: String,
     audit: BoundedAuditLedger,
     components: Vec<RuntimeComponent>,
-    started_at_ms: Option<u64>,
+    state: RuntimeLifecycleState,
 }
 
 impl RuntimeLifecycleHarness {
@@ -60,7 +85,7 @@ impl RuntimeLifecycleHarness {
             sandbox_id: sandbox_id.into(),
             audit: BoundedAuditLedger::new(audit_capacity),
             components: Vec::new(),
-            started_at_ms: None,
+            state: RuntimeLifecycleState::NotStarted,
         }
     }
 
@@ -69,6 +94,23 @@ impl RuntimeLifecycleHarness {
         components: Vec<RuntimeComponent>,
         now_ms: u64,
     ) -> Result<(), RuntimeLifecycleError> {
+        match self.state {
+            RuntimeLifecycleState::NotStarted => {}
+            RuntimeLifecycleState::Running { .. } => {
+                return self.reject_invalid_transition(
+                    RuntimeLifecycleError::AlreadyRunning,
+                    "start",
+                    now_ms,
+                );
+            }
+            RuntimeLifecycleState::Exited { .. } => {
+                return self.reject_invalid_transition(
+                    RuntimeLifecycleError::AlreadyExited,
+                    "start",
+                    now_ms,
+                );
+            }
+        }
         let audit = AuditRecord::new_at(
             AuditKind::NetworkSessionStart,
             self.sandbox_id.clone(),
@@ -80,7 +122,9 @@ impl RuntimeLifecycleHarness {
         .with_detail("component_count", components.len().to_string());
         self.append_required(audit)?;
         self.components = components;
-        self.started_at_ms = Some(now_ms);
+        self.state = RuntimeLifecycleState::Running {
+            started_at_ms: now_ms,
+        };
         Ok(())
     }
 
@@ -89,9 +133,23 @@ impl RuntimeLifecycleHarness {
         status: RuntimeExitStatus,
         now_ms: u64,
     ) -> Result<(), RuntimeLifecycleError> {
-        let started_at_ms = self
-            .started_at_ms
-            .ok_or(RuntimeLifecycleError::NotStarted)?;
+        let started_at_ms = match self.state {
+            RuntimeLifecycleState::Running { started_at_ms } => started_at_ms,
+            RuntimeLifecycleState::NotStarted => {
+                return self.reject_invalid_transition(
+                    RuntimeLifecycleError::NotStarted,
+                    "exit",
+                    now_ms,
+                );
+            }
+            RuntimeLifecycleState::Exited { .. } => {
+                return self.reject_invalid_transition(
+                    RuntimeLifecycleError::AlreadyExited,
+                    "exit",
+                    now_ms,
+                );
+            }
+        };
         let (decision, reason) = match status {
             RuntimeExitStatus::Clean => (Decision::Allow, None),
             RuntimeExitStatus::Failed => (Decision::FailClosed, Some(DenialReason::SetupFailed)),
@@ -107,7 +165,13 @@ impl RuntimeLifecycleHarness {
         .with_detail("runtime_status", status.as_detail())
         .with_detail("runtime_components", component_list(&self.components))
         .with_detail("component_count", self.components.len().to_string());
-        self.append_required(audit)
+        self.append_required(audit)?;
+        self.state = RuntimeLifecycleState::Exited {
+            started_at_ms,
+            exited_at_ms: now_ms,
+            status,
+        };
+        Ok(())
     }
 
     pub fn audit(&self) -> &BoundedAuditLedger {
@@ -116,6 +180,38 @@ impl RuntimeLifecycleHarness {
 
     pub fn into_audit(self) -> BoundedAuditLedger {
         self.audit
+    }
+
+    fn reject_invalid_transition(
+        &mut self,
+        error: RuntimeLifecycleError,
+        attempted_transition: &'static str,
+        now_ms: u64,
+    ) -> Result<(), RuntimeLifecycleError> {
+        let mut audit = AuditRecord::new_at(
+            AuditKind::BrokerError,
+            self.sandbox_id.clone(),
+            now_ms as u128,
+        )
+        .with_frontend(Frontend::Core)
+        .with_decision(Decision::FailClosed, Some(DenialReason::RuntimeState))
+        .with_detail("runtime_error", runtime_error_detail(error))
+        .with_detail("attempted_transition", attempted_transition)
+        .with_detail("lifecycle_state", self.state.as_detail())
+        .with_detail("runtime_components", component_list(&self.components))
+        .with_detail("component_count", self.components.len().to_string());
+        if let RuntimeLifecycleState::Exited {
+            started_at_ms,
+            exited_at_ms,
+            status,
+        } = self.state
+        {
+            audit = audit
+                .with_duration_ms(exited_at_ms.saturating_sub(started_at_ms))
+                .with_detail("runtime_status", status.as_detail());
+        }
+        self.append_required(audit)?;
+        Err(error)
     }
 
     fn append_required(&mut self, audit: AuditRecord) -> Result<(), RuntimeLifecycleError> {
@@ -134,6 +230,15 @@ impl RuntimeLifecycleHarness {
                 Err(RuntimeLifecycleError::AuditBackpressure { attempted_kind })
             }
         }
+    }
+}
+
+fn runtime_error_detail(error: RuntimeLifecycleError) -> &'static str {
+    match error {
+        RuntimeLifecycleError::AuditBackpressure { .. } => "audit_backpressure",
+        RuntimeLifecycleError::NotStarted => "not_started",
+        RuntimeLifecycleError::AlreadyRunning => "already_running",
+        RuntimeLifecycleError::AlreadyExited => "already_exited",
     }
 }
 
@@ -201,12 +306,74 @@ mod tests {
     }
 
     #[test]
-    fn runtime_lifecycle_exit_before_start_is_rejected_without_audit() {
+    fn runtime_lifecycle_exit_before_start_is_audited_and_rejected() {
         let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
         assert_eq!(
             runtime.exit(RuntimeExitStatus::Clean, 1_000),
             Err(RuntimeLifecycleError::NotStarted)
         );
-        assert!(runtime.audit().is_empty());
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::BrokerError);
+        assert_eq!(records[0].decision, Some(Decision::FailClosed));
+        assert_eq!(records[0].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[0].details["runtime_error"], "not_started");
+        assert_eq!(records[0].details["attempted_transition"], "exit");
+        assert_eq!(records[0].details["lifecycle_state"], "not_started");
+    }
+
+    #[test]
+    fn runtime_lifecycle_duplicate_start_is_audited_without_new_start_record() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start(vec![RuntimeComponent::TunDevice], 1_000)
+            .unwrap();
+        assert_eq!(
+            runtime.start(vec![RuntimeComponent::DnsListener], 1_050),
+            Err(RuntimeLifecycleError::AlreadyRunning)
+        );
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::NetworkSessionStart);
+        assert_eq!(records[0].details["runtime_components"], "tun_device");
+        assert_eq!(records[1].kind, AuditKind::BrokerError);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["runtime_error"], "already_running");
+        assert_eq!(records[1].details["attempted_transition"], "start");
+        assert_eq!(records[1].details["lifecycle_state"], "running");
+    }
+
+    #[test]
+    fn runtime_lifecycle_exit_is_terminal() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 6);
+        runtime
+            .start(vec![RuntimeComponent::TunDevice], 1_000)
+            .unwrap();
+        runtime.exit(RuntimeExitStatus::Clean, 1_100).unwrap();
+        assert_eq!(
+            runtime.exit(RuntimeExitStatus::Failed, 1_200),
+            Err(RuntimeLifecycleError::AlreadyExited)
+        );
+        assert_eq!(
+            runtime.start(vec![RuntimeComponent::DnsListener], 1_300),
+            Err(RuntimeLifecycleError::AlreadyExited)
+        );
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 4);
+        assert_eq!(records[0].kind, AuditKind::NetworkSessionStart);
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[2].kind, AuditKind::BrokerError);
+        assert_eq!(records[2].details["runtime_error"], "already_exited");
+        assert_eq!(records[2].details["attempted_transition"], "exit");
+        assert_eq!(records[2].details["lifecycle_state"], "exited");
+        assert_eq!(records[2].details["runtime_status"], "clean");
+        assert_eq!(records[2].duration_ms, Some(100));
+        assert_eq!(records[3].kind, AuditKind::BrokerError);
+        assert_eq!(records[3].details["runtime_error"], "already_exited");
+        assert_eq!(records[3].details["attempted_transition"], "start");
+        assert_eq!(records[3].details["lifecycle_state"], "exited");
     }
 }

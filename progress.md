@@ -1744,3 +1744,30 @@ Round-23 blocker is fixed. DNS handler query processing now returns a pending ob
 
 ### Remaining blind spots
 - Delivery-gated shared-cache semantics are proven in the blocking DNS listener. Final async DNS runtime must preserve the same commit-after-send boundary under concurrent task scheduling.
+
+## 2026-06-22 — Round-24 runtime lifecycle state hardening
+
+### Commands run
+- `cargo fmt` — applied formatting for runtime lifecycle state-machine changes.
+- `cargo test -p foxprox-core runtime::tests --all-targets --all-features` — passed, 5 runtime lifecycle tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 118 core tests, 3 device tests, 26 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_lifecycle_exit_before_start_is_audited_and_rejected ... ok`
+- `runtime::tests::runtime_lifecycle_duplicate_start_is_audited_without_new_start_record ... ok`
+- `runtime::tests::runtime_lifecycle_exit_is_terminal ... ok`
+- `runtime::tests::runtime_lifecycle_records_start_and_clean_exit ... ok`
+
+### Interpretation
+Round-24 lifecycle findings are fixed. `RuntimeLifecycleHarness` now uses an explicit lifecycle state (`not_started`, `running`, `exited`) instead of an optional start timestamp. Invalid transitions are fail-closed and externally observable through structured `broker_error` audit records with `runtime_error`, `attempted_transition`, and `lifecycle_state`; successful exit is terminal, preventing duplicate or orphan lifecycle records for one sandbox session.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/types.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Lifecycle state is still a platform-independent harness. Final async runtime supervision must attach real listener tasks, TUN fd loops, child process exit status, and cleanup actions while preserving the same terminal lifecycle ledger semantics.
