@@ -1867,19 +1867,80 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
 
     let fd = accept_handoff_fd(&handoff_listener, &mut child, Duration::from_secs(10))?;
     fd_handoff::set_nonblocking(fd)?;
-    let mut stack = SmoltcpTcpServerHarness::listen("203.0.113.22".parse().unwrap(), 8082)?;
+    let bridge_destination: std::net::Ipv4Addr = "203.0.113.22"
+        .parse()
+        .map_err(|err| format!("invalid TCP bridge destination IP: {err}"))?;
+    let policy = PolicyEngine::new(
+        PolicyConfig::deny_by_default().with_rule(
+            PolicyRule::new("allow-tcp-bridge-smoke", RuleAction::Allow)
+                .protocol(Protocol::Tcp)
+                .destination(Cidr::host(std::net::IpAddr::V4(bridge_destination)))
+                .port(8082),
+        ),
+    );
+    let mut stack = SmoltcpTcpServerHarness::listen(bridge_destination, 8082)?;
     let mut buf = [0_u8; 4096];
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut packets_read = 0_u64;
     let mut emitted_packets = 0_u64;
     let mut bridged_bytes = 0_usize;
     let mut response_written = false;
+    let mut policy_allowed = false;
+    let mut policy_audit = None;
     while Instant::now() < deadline {
         match fd_handoff::read_fd(fd, &mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
-                stack.receive_packet(buf[..n].to_vec())?;
+                let packet = &buf[..n];
+                if policy_audit.is_none() {
+                    if let Ok(parsed) = foxprox_core::packet::parse_ipv4(packet) {
+                        if parsed.protocol_number == 6 {
+                            if let Ok(tcp) = foxprox_core::packet::parse_tcp(parsed.payload) {
+                                if tcp.destination_port == 8082 && tcp.syn && !tcp.ack {
+                                    let source = std::net::SocketAddr::new(
+                                        std::net::IpAddr::V4(parsed.source),
+                                        tcp.source_port,
+                                    );
+                                    let destination = std::net::SocketAddr::new(
+                                        std::net::IpAddr::V4(parsed.destination),
+                                        tcp.destination_port,
+                                    );
+                                    let request = PolicyRequest::new(
+                                        "tcp-bridge-smoke",
+                                        Frontend::Tun,
+                                        Protocol::Tcp,
+                                    )
+                                    .with_source(source.ip(), source.port())
+                                    .with_destination(destination.ip(), destination.port());
+                                    let outcome = policy.evaluate(&request);
+                                    policy_allowed = outcome.decision.is_allow();
+                                    policy_audit = Some(
+                                        AuditRecord::new(
+                                            EventKind::TcpConnectAttempt,
+                                            "tcp-bridge-smoke",
+                                            outcome.decision,
+                                            outcome.reason,
+                                        )
+                                        .with_frontend(Frontend::Tun)
+                                        .with_protocol(Protocol::Tcp)
+                                        .with_addresses(Some(source), Some(destination))
+                                        .with_rule(outcome.rule_id),
+                                    );
+                                    if !policy_allowed {
+                                        let rst = foxprox_core::packet::synthesize_tcp_rst(packet)?;
+                                        fd_handoff::write_all_fd(fd, &rst)?;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if !policy_allowed {
+                    continue;
+                }
+                stack.receive_packet(packet.to_vec())?;
                 for emitted in stack.drain_emitted_packets() {
                     emitted_packets += 1;
                     fd_handoff::write_all_fd(fd, &emitted)?;
@@ -1887,6 +1948,11 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
                 if let Some(data) = stack.recv_available()? {
                     if !data.is_empty() && !response_written {
                         bridged_bytes = data.len();
+                        if !policy_allowed {
+                            return Err(
+                                "TCP bridge attempted host egress before policy allow".to_string()
+                            );
+                        }
                         let mut stream =
                             TcpStream::connect_timeout(&echo_addr, Duration::from_secs(2))
                                 .map_err(|err| {
@@ -1946,7 +2012,11 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
         .join()
         .map_err(|_| "TCP bridge echo fixture thread panicked".to_string())?;
     echo_result?;
-    let success = output.status.success() && response_written && bridged_bytes == b"probe".len();
+    let runtime_audit = policy_audit.clone();
+    let success = output.status.success()
+        && response_written
+        && bridged_bytes == b"probe".len()
+        && policy_allowed;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let mut record = AuditRecord::new(
@@ -1970,7 +2040,17 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
     .with_metadata("emitted_packets", emitted_packets.to_string())
     .with_metadata("bridged_bytes", bridged_bytes.to_string())
     .with_metadata("response_written", response_written.to_string())
+    .with_metadata("policy_allowed", policy_allowed.to_string())
     .with_metadata("egress_fixture", echo_addr.to_string());
+    if let Some(audit) = runtime_audit {
+        record = record
+            .with_metadata("policy_decision", audit.decision.as_str())
+            .with_metadata("policy_reason", audit.reason.clone())
+            .with_metadata("runtime_audit", audit.to_json_line());
+        if let Some(rule_id) = audit.rule_id {
+            record = record.with_metadata("rule_id", rule_id);
+        }
+    }
     if !stdout.is_empty() {
         record = record.with_metadata("stdout", stdout);
     }

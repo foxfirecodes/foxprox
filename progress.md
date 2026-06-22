@@ -467,3 +467,27 @@
 - Interpretation: denied TCP connects now match the architecture's reset-denial behavior instead of relying on timeout-only fail-closed behavior. This improves the TCP negative path while keeping host egress blocked.
 - Next verification gap: factor the positive TCP bridge path into a reusable broker runtime boundary with policy-before-egress built in, instead of keeping bridge orchestration inside the CLI harness.
 - Commit hash after commit: pending.
+
+## 2026-06-22T02:00:00Z — TCP reset synthesis commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs crates/foxprox-core/src/packet.rs learnings.md progress.md && git commit -m "Synthesize TCP resets for denied connects"`
+- Environment assumptions: TCP RST helper tests and denied bridge reset smoke above were verified before commit.
+- Expected result: commit captures TCP RST synthesis and reset-based denied TCP bridge behavior.
+- Observed result: commit `f12f830` created with 5 files changed.
+- Relevant output excerpt: `[harness-lab f12f830] Synthesize TCP resets for denied connects`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: TCP reset denial checkpoint is preserved.
+- Next verification gap: reusable TCP bridge runtime boundary with policy-before-egress in the positive path.
+- Commit hash after commit: f12f830.
+
+## 2026-06-22T02:15:00Z — Policy-gated TCP bridge allow path
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run tcp-bridge-smoke && target/debug/foxprox-lab run tcp-bridge-deny-smoke`
+- Environment assumptions: positive TCP bridge smoke uses an explicit allow rule before smoltcp accepts the SYN or host egress receives bytes; denied smoke continues to prove reset/no-egress behavior.
+- Expected result: tests remain green; TCP bridge allow path records policy allow metadata before forwarding; TCP bridge deny path still resets and performs zero egress.
+- Observed result: pass. `tcp-bridge-smoke` emitted `policy_allowed":"true"`, `policy_decision":"allow"`, `rule_id":"allow-tcp-bridge-smoke"`, and `response_written":"true"`; `tcp-bridge-deny-smoke` still emitted `decision":"deny_reset"` and `rst_written":"true"`.
+- Relevant output excerpt: `"runtime_audit":"{...\"event\":\"tcp_connect_attempt\",...\"decision\":\"allow\",\"rule_id\":\"allow-tcp-bridge-smoke\"...}"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: both positive and negative TCP bridge environment proofs now include policy-before-smoltcp/egress enforcement evidence. The remaining quality gap is factoring this orchestration out of the CLI harness into a reusable broker runtime boundary.
+- Next verification gap: reusable TCP bridge runtime boundary or explicit proxy networking smoke.
+- Commit hash after commit: pending.
