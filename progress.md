@@ -1223,6 +1223,53 @@
 - Current git status summary: proxy/progress modified; review artifacts summarized and ready for removal.
 - Next exact action: remove transient `reviews/`, commit explicit proxy unsupported audit coverage, then continue remaining unsupported-path audit consistency for transparent UDP/DNS/TCP paths.
 
+## 2026-06-22T00:28:54Z — explicit proxy unsupported audit committed; next objective selected
+
+- Commit created: `e0fce8e` (`audit unsupported proxy requests`).
+- Current objective: audit malformed broker DNS queries in UDP/DNS proof.
+- Rationale: explicit proxy unsupported paths now emit `UnsupportedDenied`. The next smallest transparent audit-consistency gap is malformed DNS query handling on the broker DNS path, which previously only logged and dropped after receiving sandbox traffic.
+- Expected commit boundary: `UnsupportedDenied` audit for malformed broker DNS query, fail-closed on audit backpressure, tests for metadata/runtime behavior, no policy or dependency changes.
+- Current git status summary after commit: clean `autonomous-crew` branch.
+- Next exact action: implement malformed broker DNS unsupported audit in `crates/foxprox-net/src/udp.rs`.
+
+## 2026-06-22T00:30:51Z — malformed broker DNS audit pending review
+
+- Current objective: commit malformed broker DNS query audit coverage.
+- Changes implemented:
+  - Added UDP unsupported audit helper that emits `NetworkEvent::Unsupported` with `UnsupportedReason::Malformed`, evaluates it fail-closed, and records `AuditEventKind::UnsupportedDenied`.
+  - `udp_audit_event` now preserves unsupported reason detail.
+  - Broker DNS malformed-query path emits unsupported audit and propagates audit backpressure before returning, preserving fail-closed semantics.
+  - Added tests for unsupported UDP audit metadata, malformed broker DNS runtime audit, and backpressure behavior that returns `WouldBlock` without spawning a worker.
+- Subagents/reviews requested: pending request after this entry.
+- Verification commands and outcomes:
+  - `cargo fmt --all -- --check` passed.
+  - `cargo check --workspace` passed.
+  - `cargo test -p foxprox-net -- --nocapture` passed: 23 net tests.
+  - `cargo test --workspace` passed: 51 core tests, 9 device tests, 23 net tests, 28 proxy tests, 7 CLI tests, setup 0 tests.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps` passed.
+  - `cargo tree -p foxprox-net` and `cargo tree -p foxprox-cli` showed expected dependencies/no dependency creep.
+- Files changed: `crates/foxprox-net/src/udp.rs`, `progress.md`.
+- Current git status summary: UDP/progress modified; review artifact pending.
+- Next exact action: request/read malformed broker DNS audit review, fix blockers if any, then commit.
+
+## 2026-06-22T00:33:36Z — malformed broker DNS audit review passed
+
+- Current objective: commit malformed broker DNS query audit coverage.
+- Review result: `udp-malformed-dns-audit-final` found no blockers.
+- Confirmed behavior:
+  - Malformed broker DNS parse errors emit an unsupported audit before returning.
+  - Unsupported UDP audit uses `Frontend::Tun`, `UnsupportedReason::Malformed`, normal audit path, `Protocol::Unsupported`, and preserved detail.
+  - Audit backpressure propagates as `WouldBlock` before worker acquisition/spawn/upstream DNS egress on malformed path.
+  - Direct DNS bypass branch remains before DNS parsing and unchanged.
+  - Valid DNS query audit/forward path remains intact.
+  - Runtime/metadata/backpressure tests cover the new unsupported audit path.
+  - No dependency changes.
+- Verification evidence remains valid from prior entry: full workspace fmt/check/test/clippy/doc passed; reviewer also ran focused net checks/tests successfully.
+- Files changed: `crates/foxprox-net/src/udp.rs`, `progress.md`.
+- Current git status summary: UDP/progress modified; review artifacts summarized and ready for removal.
+- Next exact action: remove transient `reviews/`, commit malformed broker DNS audit coverage, then continue unsupported-path audit consistency for transparent HTTP/TLS inspection failures.
+
 ## 2026-06-22T00:12:18Z — ICMP audit/cleanup rereview passed
 
 - Current objective: commit cleanup-safe setup socket binding plus ICMP proof audit coverage.

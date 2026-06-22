@@ -8,7 +8,7 @@ use foxprox_core::{
     classify_udp_candidate, parse_dns_query, parse_dns_response, Attribution, AuditBackpressure,
     AuditBuffer, AuditEvent, AuditEventKind, Decision, DnsCache, DnsCacheEntry, FlowKey,
     FlowTimeoutClass, Frontend, NetworkEvent, PolicyEngine, PolicyRuleSet, Protocol, SandboxId,
-    TransportEndpoint, UdpFlowTable,
+    TransportEndpoint, UdpFlowTable, UnsupportedReason,
 };
 use smoltcp::iface::{Config, Interface, SocketSet};
 use smoltcp::phy::{Medium, PacketMeta, TunTapInterface};
@@ -471,6 +471,14 @@ fn handle_dns_datagram(
                 "foxprox-net: drop malformed DNS query sandbox={}:{} error={:?}",
                 source.ip, source.port, error
             );
+            emit_udp_unsupported_audit(
+                audit,
+                &config.sandbox_id,
+                format!(
+                    "malformed broker DNS query source={}:{} destination={}:{} error={error:?}",
+                    source.ip, source.port, destination.ip, destination.port
+                ),
+            )?;
             return Ok(());
         }
     };
@@ -625,6 +633,20 @@ fn audit_backpressure_error(error: AuditBackpressure) -> io::Error {
     )
 }
 
+fn emit_udp_unsupported_audit(
+    audit: &mut AuditBuffer,
+    sandbox_id: &SandboxId,
+    detail: impl Into<String>,
+) -> io::Result<()> {
+    let event = NetworkEvent::Unsupported {
+        sandbox_id: Some(sandbox_id.clone()),
+        frontend: Frontend::Tun,
+        reason: UnsupportedReason::Malformed(detail.into()),
+    };
+    let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+    emit_udp_audit(audit, &event, decision)
+}
+
 fn udp_audit_event(event: &NetworkEvent, decision: Decision) -> AuditEvent {
     let kind = match event {
         NetworkEvent::DnsQuery { .. } => AuditEventKind::DnsQuery,
@@ -662,6 +684,9 @@ fn udp_audit_event(event: &NetworkEvent, decision: Decision) -> AuditEvent {
             audit = audit.with_endpoints(Some(*source), Some(*destination));
             audit.attribution = Some(attribution.clone());
             audit.hostname = attribution.hostname.clone();
+        }
+        NetworkEvent::Unsupported { reason, .. } => {
+            audit.detail = Some(format!("{reason:?}"));
         }
         _ => {}
     }
@@ -801,7 +826,8 @@ fn set_nonblocking(fd: i32) -> io::Result<()> {
 mod tests {
     use super::*;
     use foxprox_core::{
-        AttributionConfidence, AttributionSource, DnsObservation, DnsQueryType, Hostname,
+        AttributionConfidence, AttributionSource, DecisionAction, DnsObservation, DnsQueryType,
+        Hostname,
     };
 
     #[test]
@@ -863,6 +889,102 @@ mod tests {
             Err(error) => error,
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    fn udp_metadata(source_ip: Ipv4Addr, source_port: u16, local_ip: Ipv4Addr) -> udp::UdpMetadata {
+        udp::UdpMetadata {
+            endpoint: smoltcp::wire::IpEndpoint {
+                addr: IpAddress::Ipv4(smoltcp_ipv4(source_ip)),
+                port: source_port,
+            },
+            local_address: Some(IpAddress::Ipv4(smoltcp_ipv4(local_ip))),
+            meta: PacketMeta::default(),
+        }
+    }
+
+    #[test]
+    fn udp_audit_event_records_unsupported_metadata() {
+        let event = NetworkEvent::Unsupported {
+            sandbox_id: Some(SandboxId::new("test").unwrap()),
+            frontend: Frontend::Tun,
+            reason: UnsupportedReason::Malformed("bad dns".to_string()),
+        };
+        let decision = PolicyEngine::new(PolicyRuleSet::default()).evaluate(&event);
+        let audit = udp_audit_event(&event, decision);
+
+        assert_eq!(audit.kind, AuditEventKind::UnsupportedDenied);
+        assert_eq!(audit.protocol, Some(Protocol::Unsupported));
+        assert_eq!(audit.frontend, Frontend::Tun);
+        assert_eq!(
+            audit.decision.as_ref().map(|decision| decision.action),
+            Some(DecisionAction::FailClosed)
+        );
+        assert!(audit
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("bad dns")));
+    }
+
+    #[test]
+    fn malformed_broker_dns_query_emits_unsupported_audit() {
+        let config = UdpDnsProofConfig::new(SandboxId::new("test").unwrap());
+        let mut audit = audit_buffer(8).unwrap();
+        let limiter = WorkerLimiter::new(1).unwrap();
+        let (worker_tx, _worker_rx) = mpsc::channel();
+        let metadata = udp_metadata(Ipv4Addr::new(10, 255, 0, 2), 44_444, config.broker_ip);
+
+        handle_dns_datagram(
+            &config,
+            &mut audit,
+            &limiter,
+            worker_tx,
+            vec![0xde, 0xad, 0xbe, 0xef],
+            metadata,
+        )
+        .unwrap();
+
+        let event = audit.pop_front().unwrap();
+        assert_eq!(event.kind, AuditEventKind::UnsupportedDenied);
+        assert_eq!(event.protocol, Some(Protocol::Unsupported));
+        assert_eq!(event.frontend, Frontend::Tun);
+        assert_eq!(
+            event.decision.as_ref().map(|decision| decision.action),
+            Some(DecisionAction::FailClosed)
+        );
+        assert!(event
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("malformed broker DNS query")));
+        assert_eq!(limiter.active_count(), 0);
+    }
+
+    #[test]
+    fn malformed_broker_dns_query_backpressure_fails_closed() {
+        let config = UdpDnsProofConfig::new(SandboxId::new("test").unwrap());
+        let mut audit = audit_buffer(1).unwrap();
+        let limiter = WorkerLimiter::new(1).unwrap();
+        let (worker_tx, _worker_rx) = mpsc::channel();
+        let filled = NetworkEvent::DnsQuery {
+            sandbox_id: config.sandbox_id.clone(),
+            hostname: Hostname::parse("example.com").unwrap(),
+            query_type: "A".to_string(),
+            frontend: Frontend::Tun,
+        };
+        emit_udp_audit(&mut audit, &filled, Decision::allow("broker-dns")).unwrap();
+        let metadata = udp_metadata(Ipv4Addr::new(10, 255, 0, 2), 44_444, config.broker_ip);
+
+        let error = handle_dns_datagram(
+            &config,
+            &mut audit,
+            &limiter,
+            worker_tx,
+            vec![0xde, 0xad, 0xbe, 0xef],
+            metadata,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(limiter.active_count(), 0);
     }
 
     #[test]
