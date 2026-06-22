@@ -1094,3 +1094,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: the configured metadata buffer size is not yet applied by a helper that creates per-flow TCP metadata buffers.
 - Exact next step: commit TCP metadata buffer configuration, then add a helper that fetches per-flow metadata buffers using `BrokerRuntimeComponents::tcp_metadata_buffer_bytes`.
+
+## 2026-06-22T21:44:21Z
+- Current objective: continue after TCP metadata buffer config toward applying configured inspection buffer limits.
+- Git status summary: clean worktree after commit `8145f65`.
+- Intended slice: add a helper that creates/fetches per-flow TCP metadata buffers using `BrokerRuntimeComponents::tcp_metadata_buffer_bytes` so callers do not accidentally bypass the configured limit.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this still does not attach metadata buffers to a live TCP adapter; it applies config to the existing deterministic buffer table.
+- Exact next step: implement the configured-buffer helper and a regression test for limit enforcement.
+
+## 2026-06-22T21:45:16Z
+- Current objective: apply configured TCP metadata buffer limits to per-flow buffer creation.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on a long assertion; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 82 runtime tests, and 7 setup tests passed. New test proves `configured_tcp_metadata_buffer` creates a flow buffer using `BrokerRuntimeComponents::tcp_metadata_buffer_bytes` and enforces that configured limit during HTTP metadata accumulation.
+- Commit hash when committed: pending.
+- Remaining risks: per-flow metadata buffers are still not automatically pruned by a live TCP lifecycle manager.
+- Exact next step: commit configured metadata buffer helper, then prune TCP metadata buffers when TCP bridge flows close to prevent stale inspection state.

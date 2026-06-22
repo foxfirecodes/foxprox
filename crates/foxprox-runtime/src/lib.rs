@@ -1250,6 +1250,14 @@ pub fn build_tcp_stream_bridge_runtime<B>(
     TcpStreamBridgeRuntime::with_max_open_flows(bridge, components.tcp_max_open_flows)
 }
 
+pub fn configured_tcp_metadata_buffer<'a>(
+    components: &BrokerRuntimeComponents,
+    table: &'a mut TcpMetadataBufferTable,
+    flow: FlowKey,
+) -> &'a mut TcpMetadataBuffer {
+    table.buffer_for(flow, components.tcp_metadata_buffer_bytes)
+}
+
 pub struct BrokerDnsRuntime<'a, S> {
     pub sandbox_id: SandboxId,
     pub resolver: &'a StaticDnsResolver,
@@ -2692,6 +2700,32 @@ mod tests {
 
         assert_eq!(bridge.max_open_flows(), 1);
         assert_eq!(error, TcpBridgeError::OpenFlowLimitReached { limit: 1 });
+    }
+
+    #[test]
+    fn configured_tcp_metadata_buffer_uses_runtime_component_limit() {
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("metadata-limit-builder").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 64,
+            tcp_metadata_buffer_bytes: 4,
+        })
+        .unwrap();
+        let packet = build_tcp_ipv4_packet(53000, 80, 0x18, b"GET / HTTP/1.1\r\n\r\n");
+        let ParsedIpPacket::Tcpv4Segment(tcp) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected TCP segment");
+        };
+        let mut table = TcpMetadataBufferTable::new();
+        let buffer = configured_tcp_metadata_buffer(&components, &mut table, tcp_flow_key());
+
+        let outcome = buffer.push_http(SandboxId::new("metadata-limit").unwrap(), &tcp);
+
+        assert_eq!(
+            outcome,
+            TcpMetadataBufferOutcome::LimitExceeded { limit: 4 }
+        );
     }
 
     #[test]
