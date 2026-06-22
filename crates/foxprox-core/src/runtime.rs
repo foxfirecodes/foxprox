@@ -94,7 +94,12 @@ impl<B: EgressBackend> TransparentUdpRuntime<B> {
 
         let destination = SocketAddr::new(IpAddr::V4(parsed.destination), udp.destination_port);
         let source = SocketAddr::new(IpAddr::V4(parsed.source), udp.source_port);
-        let mut request = PolicyRequest::new(&sandbox_id, Frontend::Tun, Protocol::Udp)
+        let policy_protocol = if udp.class == crate::flow::UdpClass::QuicCandidate {
+            Protocol::Quic
+        } else {
+            Protocol::Udp
+        };
+        let mut request = PolicyRequest::new(&sandbox_id, Frontend::Tun, policy_protocol)
             .with_source(source.ip(), source.port())
             .with_destination(destination.ip(), destination.port());
         let attribution = self
@@ -107,16 +112,17 @@ impl<B: EgressBackend> TransparentUdpRuntime<B> {
         request.quic_candidate = udp.class == crate::flow::UdpClass::QuicCandidate;
 
         let outcome = self.policy.evaluate(&request);
-        let mut record = AuditRecord::new(
-            EventKind::UdpFlowCreated,
-            &sandbox_id,
-            outcome.decision,
-            &outcome.reason,
-        )
-        .with_frontend(Frontend::Tun)
-        .with_protocol(Protocol::Udp)
-        .with_addresses(Some(source), Some(destination))
-        .with_rule(outcome.rule_id.clone());
+        let event_kind = if policy_protocol == Protocol::Quic {
+            EventKind::QuicCandidateFlow
+        } else {
+            EventKind::UdpFlowCreated
+        };
+        let mut record =
+            AuditRecord::new(event_kind, &sandbox_id, outcome.decision, &outcome.reason)
+                .with_frontend(Frontend::Tun)
+                .with_protocol(policy_protocol)
+                .with_addresses(Some(source), Some(destination))
+                .with_rule(outcome.rule_id.clone());
         if let Some(attr) = attribution {
             record = record.with_hostname(Some(attr.hostname), attr.source, attr.confidence);
         }
@@ -585,6 +591,46 @@ mod tests {
             runtime.audit[0].rule_id.as_deref(),
             Some("allow-attributed-example")
         );
+    }
+
+    #[test]
+    fn quic_candidate_uses_quic_policy_and_audit_event() {
+        let destination = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 77)), 443);
+        let policy = PolicyEngine::new(
+            PolicyConfig::deny_by_default().allow_quic(true).with_rule(
+                PolicyRule::new("allow-attributed-quic", RuleAction::Allow)
+                    .protocol(Protocol::Quic)
+                    .domain_suffix("example")
+                    .port(443)
+                    .require_hostname_attribution(),
+            ),
+        );
+        let egress = MockEgressBackend::new().with_response(
+            destination,
+            EgressOutcome {
+                connected: true,
+                bytes_sent: 5,
+                bytes_received: 10,
+                message: "mock QUIC UDP forwarded".to_string(),
+                response_payload: b"quic-reply".to_vec(),
+            },
+        );
+        let mut cache = DnsCache::new();
+        cache
+            .observe_response("lab.example", [destination.ip()], 1, 60)
+            .unwrap();
+        let mut runtime = TransparentUdpRuntime::new(policy, egress).with_dns_cache(cache, 2);
+        let packet = udp_probe_packet(destination.ip(), destination.port(), &[0xc3, 1, 2, 3, 4]);
+        let reply = runtime.handle_ipv4_packet("lab", &packet).unwrap();
+        assert!(reply.is_some());
+        assert_eq!(runtime.audit[0].kind, EventKind::QuicCandidateFlow);
+        assert_eq!(runtime.audit[0].protocol, Some(Protocol::Quic));
+        assert_eq!(runtime.audit[0].decision, Decision::Allow);
+        assert_eq!(
+            runtime.audit[0].rule_id.as_deref(),
+            Some("allow-attributed-quic")
+        );
+        assert_eq!(runtime.egress.requests.len(), 1);
     }
 
     #[test]

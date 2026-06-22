@@ -635,3 +635,27 @@
 - Interpretation: Milestone 7 audit-backpressure behavior is now represented by a reusable core type and deterministic harness evidence. Production forwarding code still needs to wire this bounded sink into all hot paths.
 - Next verification gap: final alpha coverage review and any missing documented success criteria that can be reduced to local harness checks.
 - Commit hash after commit: pending.
+
+## 2026-06-22T02:18:00Z — audit backpressure commit recorded
+
+- Command executed: `git add README.md crates/foxprox-core/src/audit.rs crates/foxprox-core/src/scenario.rs progress.md && git commit -m "Model audit backpressure"`
+- Environment assumptions: bounded audit buffer tests and robustness scenario above were verified before commit.
+- Expected result: commit captures audit backpressure model and prior TCP bridge inspection ledger note.
+- Observed result: commit `25601ec` created with 4 files changed.
+- Relevant output excerpt: `[harness-lab 25601ec] Model audit backpressure`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: audit robustness checkpoint is preserved.
+- Next verification gap: final alpha coverage review and any missing documented success criteria that can be reduced to local harness checks.
+- Commit hash after commit: 25601ec.
+
+## 2026-06-22T02:28:00Z — QUIC candidate policy/audit path in UDP runtime
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run all | rg 'quic_candidate|broker_error'`
+- Environment assumptions: deterministic in-memory UDP packet fixtures; no Linux namespace or external network required.
+- Expected result: UDP/443 long-header payloads are treated as QUIC candidate policy events rather than generic UDP-only audit records, and existing workspace/harness checks remain green.
+- Observed result: pass. `foxprox-core` increased to 46 tests; `foxprox-cli` ran 2 tests; `foxproxsetup` ran 7 tests. The new runtime test proves DNS-attributed QUIC candidate traffic uses `Protocol::Quic`, `EventKind::QuicCandidateFlow`, `allow_quic(true)`, and a domain rule before egress.
+- Relevant output excerpt: `runtime::tests::quic_candidate_uses_quic_policy_and_audit_event ... ok`; `"event":"quic_candidate_flow","frontend":"tun","protocol":"quic"`.
+- Changed files: `crates/foxprox-core/src/runtime.rs`, `progress.md`.
+- Interpretation: transparent QUIC candidate handling now has a reusable policy/audit/egress boundary in the UDP runtime instead of being only a standalone classifier fixture.
+- Next verification gap: optional end-to-end bwrap/TUN QUIC smoke, or final alpha coverage review if no more local gaps are high-value.
+- Commit hash after commit: pending.
