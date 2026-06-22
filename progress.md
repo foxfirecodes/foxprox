@@ -543,3 +543,5 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * QUIC candidate flow audit records remain distinguishable from generic UDP records.
 * Audit evidence: unit tests assert lifecycle event fields and serialized byte/duration output.
 * Residual risk: the flow table still returns only expiration counts rather than expired entries for automatic audit emission; UDP socket forwarding and reply routing remain future work.
+
+* Commit hash: 07c37ac audit udp flow lifecycle metadata.
