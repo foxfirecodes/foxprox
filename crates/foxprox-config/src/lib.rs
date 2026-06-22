@@ -13,8 +13,8 @@ use std::time::Duration;
 use foxprox_core::{
     DefaultPolicy, DenialAction, DestinationMatcher, DirectDnsPolicy, DomainSuffix,
     HostnameConfidence, HttpMethod, HttpMethodMatcher, HttpPathMatcher, HttpScheme,
-    HttpSchemeMatcher, IpCidr, PolicyRule, PortMatcher, Protocol, ProtocolMatcher, QuicPolicy,
-    ResourceLimits, RuleId, RuntimeConfig, UdpTimeouts,
+    HttpSchemeMatcher, IpCidr, ParserLimits, PolicyRule, PortMatcher, Protocol, ProtocolMatcher,
+    QuicPolicy, ResourceLimits, RuleId, RuntimeConfig, UdpTimeouts,
 };
 
 /// User-facing alpha policy config document.
@@ -27,6 +27,7 @@ pub struct ConfigDocument {
     pub broker_dns_addrs: Vec<IpAddr>,
     pub udp_timeouts: Option<UdpTimeoutsConfig>,
     pub resource_limits: Option<ResourceLimitsConfig>,
+    pub parser_limits: Option<ParserLimitsConfig>,
     pub rules: Vec<RuleConfig>,
 }
 
@@ -62,6 +63,9 @@ impl ConfigDocument {
         }
         if let Some(resource_limits) = self.resource_limits {
             runtime.resource_limits = resource_limits.validate()?;
+        }
+        if let Some(parser_limits) = self.parser_limits {
+            runtime.parser_limits = parser_limits.validate()?;
         }
         runtime.rules = self
             .rules
@@ -153,6 +157,34 @@ impl ResourceLimitsConfig {
         }
         Ok(ResourceLimits {
             max_flows: self.max_flows,
+        })
+    }
+}
+
+/// User-facing parser limits.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ParserLimitsConfig {
+    pub max_http_request_head_bytes: usize,
+}
+
+impl Default for ParserLimitsConfig {
+    fn default() -> Self {
+        let defaults = ParserLimits::default();
+        Self {
+            max_http_request_head_bytes: defaults.max_http_request_head_bytes,
+        }
+    }
+}
+
+impl ParserLimitsConfig {
+    fn validate(self) -> Result<ParserLimits, ConfigError> {
+        if self.max_http_request_head_bytes == 0 {
+            return Err(ConfigError::InvalidParserLimit {
+                field: "parser_limits.max_http_request_head_bytes",
+            });
+        }
+        Ok(ParserLimits {
+            max_http_request_head_bytes: self.max_http_request_head_bytes,
         })
     }
 }
@@ -347,6 +379,7 @@ pub enum ConfigError {
     InvalidPortRange { start: u16, end: u16 },
     InvalidHttpPath,
     InvalidResourceLimit { field: &'static str },
+    InvalidParserLimit { field: &'static str },
 }
 
 impl fmt::Display for ConfigError {
@@ -359,6 +392,7 @@ impl fmt::Display for ConfigError {
             }
             Self::InvalidHttpPath => f.write_str("HTTP path matchers must start with '/'"),
             Self::InvalidResourceLimit { field } => write!(f, "{field} must be greater than zero"),
+            Self::InvalidParserLimit { field } => write!(f, "{field} must be greater than zero"),
         }
     }
 }
@@ -380,6 +414,9 @@ mod tests {
             broker_dns_addrs: vec!["10.255.0.1".parse().unwrap()],
             udp_timeouts: Some(UdpTimeoutsConfig::default()),
             resource_limits: Some(ResourceLimitsConfig { max_flows: 128 }),
+            parser_limits: Some(ParserLimitsConfig {
+                max_http_request_head_bytes: 4096,
+            }),
             rules: vec![RuleConfig {
                 id: "allow-api".to_string(),
                 action: RuleActionConfig::Allow,
@@ -401,6 +438,7 @@ mod tests {
             vec!["10.255.0.1".parse::<IpAddr>().unwrap()]
         );
         assert_eq!(runtime.resource_limits.max_flows, 128);
+        assert_eq!(runtime.parser_limits.max_http_request_head_bytes, 4096);
         assert_eq!(runtime.rules.len(), 1);
         assert_eq!(
             runtime.rules[0].protocol,
@@ -475,6 +513,19 @@ mod tests {
             bad_resource_limit.validate(),
             Err(ConfigError::InvalidResourceLimit {
                 field: "resource_limits.max_flows"
+            })
+        ));
+
+        let bad_parser_limit = ConfigDocument {
+            parser_limits: Some(ParserLimitsConfig {
+                max_http_request_head_bytes: 0,
+            }),
+            ..ConfigDocument::default()
+        };
+        assert!(matches!(
+            bad_parser_limit.validate(),
+            Err(ConfigError::InvalidParserLimit {
+                field: "parser_limits.max_http_request_head_bytes"
             })
         ));
     }

@@ -10,7 +10,8 @@ use std::net::IpAddr;
 
 use foxprox_core::{
     DestinationHost, FrontendKind, Hostname, HttpMethod, HttpRequest, HttpScheme, HttpsConnect,
-    NormalizedEvent, SandboxId, SocksConnect, UnsupportedNetworkEvent, UnsupportedReason,
+    NormalizedEvent, ParserLimits, SandboxId, SocksConnect, UnsupportedNetworkEvent,
+    UnsupportedReason,
 };
 
 /// Maximum request head bytes accepted by the alpha HTTP proxy parser.
@@ -107,7 +108,18 @@ pub fn parse_http_request(
     frontend: FrontendKind,
     bytes: &[u8],
 ) -> NormalizedEvent {
-    match parse_http_request_inner(sandbox_id.clone(), frontend, bytes) {
+    parse_http_request_with_limits(sandbox_id, frontend, bytes, ParserLimits::default())
+}
+
+/// Parse an HTTP request while enforcing caller-provided normalized parser
+/// limits before UTF-8 conversion or request-line parsing.
+pub fn parse_http_request_with_limits(
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    bytes: &[u8],
+    limits: ParserLimits,
+) -> NormalizedEvent {
+    match parse_http_request_inner(sandbox_id.clone(), frontend, bytes, limits) {
         Ok(event) => event,
         Err(error) => {
             let reason = match error {
@@ -128,8 +140,9 @@ fn parse_http_request_inner(
     sandbox_id: SandboxId,
     frontend: FrontendKind,
     bytes: &[u8],
+    limits: ParserLimits,
 ) -> Result<NormalizedEvent, FrontendError> {
-    if bytes.len() > MAX_HTTP_REQUEST_HEAD_BYTES {
+    if bytes.len() > limits.max_http_request_head_bytes {
         return Err(FrontendError::RequestTooLarge);
     }
     let text = std::str::from_utf8(bytes).map_err(|_| FrontendError::MalformedHttp("utf8"))?;
@@ -473,6 +486,33 @@ mod tests {
             panic!("expected unsupported event");
         };
         assert_eq!(unsupported.reason, UnsupportedReason::ParserLimitExceeded);
+    }
+
+    #[test]
+    fn http_parser_enforces_normalized_runtime_limit() {
+        let request = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let event = parse_http_request_with_limits(
+            sandbox(),
+            FrontendKind::HttpProxy,
+            request,
+            ParserLimits {
+                max_http_request_head_bytes: request.len() - 1,
+            },
+        );
+        let NormalizedEvent::UnsupportedNetworkEvent(unsupported) = event else {
+            panic!("expected unsupported event");
+        };
+        assert_eq!(unsupported.reason, UnsupportedReason::ParserLimitExceeded);
+
+        let event = parse_http_request_with_limits(
+            sandbox(),
+            FrontendKind::HttpProxy,
+            request,
+            ParserLimits {
+                max_http_request_head_bytes: request.len(),
+            },
+        );
+        assert!(matches!(event, NormalizedEvent::HttpRequest(_)));
     }
 
     #[test]

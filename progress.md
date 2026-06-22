@@ -572,3 +572,25 @@
   - `cargo tree -p foxprox-net` — net orchestrates core/audit/dns/egress/packet/policy; packet remains behind the net orchestration boundary.
 - Commit hash after commit: ba162f1.
 - Remaining boundary risks: real TUN fd IO, userspace stack handoff for non-proof TCP segments, TCP reset denial synthesis, and production device event loops remain.
+
+## 2026-06-21 — Boundary objective: configurable HTTP parser limit contract
+
+- Boundary under work: normalized runtime/config contract for HTTP parser request-head size limits and frontend enforcement.
+- Allowed dependency direction: config validates user-facing parser limits into `foxprox-core`; `foxprox-frontends` enforces typed limits locally and emits normalized unsupported events; policy/audit must not see raw request buffers or parser state.
+- Dependency-risk assessment: keeping parser limits as frontend constants makes production listener robustness hard to configure and can encourage ad-hoc per-frontend knobs. The limit should be typed in runtime config while malformed/oversized inputs stay normalized.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: added `ParserLimits` to the normalized runtime config, config validation for nonzero HTTP request-head limits, and `parse_http_request_with_limits` enforcement before UTF-8/request parsing. All verification passed.
+- Changed files:
+  - `crates/foxprox-core/src/lib.rs`
+  - `crates/foxprox-config/src/lib.rs`
+  - `crates/foxprox-frontends/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 70 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-config` — config depends only on `foxprox-core`.
+  - `cargo tree -p foxprox-frontends` — frontends depend only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: streaming listener read limits, SOCKS handshake limits/timeouts, and fuzzing proxy parser inputs remain.

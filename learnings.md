@@ -133,3 +133,8 @@
 
 - Packet write-back should be gated by policy in `foxprox-net`: the packet crate may discover a possible echo reply, but the orchestrator only returns it after the normalized ICMP event is allowed.
 - Policy-driven ICMP unreachable synthesis can use the original packet bytes locally in the net/packet boundary while audit and policy continue to see only normalized events and denial actions.
+
+## 2026-06-21 — Configurable parser limit boundary
+
+- HTTP request-head limits belong in the normalized runtime config so production listeners and tests can share one typed robustness contract instead of relying on a frontend-local constant.
+- Frontend parsers should enforce size limits before UTF-8 conversion and request-line parsing, then emit `ParserLimitExceeded` as a normalized unsupported event for policy/audit.

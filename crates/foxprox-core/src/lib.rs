@@ -702,6 +702,7 @@ pub struct RuntimeConfig {
     pub broker_dns_addrs: Vec<IpAddr>,
     pub udp_timeouts: UdpTimeouts,
     pub resource_limits: ResourceLimits,
+    pub parser_limits: ParserLimits,
     pub rules: Vec<PolicyRule>,
 }
 
@@ -715,6 +716,7 @@ impl RuntimeConfig {
             broker_dns_addrs: Vec::new(),
             udp_timeouts: UdpTimeouts::default(),
             resource_limits: ResourceLimits::default(),
+            parser_limits: ParserLimits::default(),
             rules: Vec::new(),
         }
     }
@@ -779,6 +781,21 @@ pub struct ResourceLimits {
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self { max_flows: 4096 }
+    }
+}
+
+/// Parser limits enforced at frontend boundaries before raw request data can
+/// pressure downstream policy, audit, or egress layers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct ParserLimits {
+    pub max_http_request_head_bytes: usize,
+}
+
+impl Default for ParserLimits {
+    fn default() -> Self {
+        Self {
+            max_http_request_head_bytes: 8192,
+        }
     }
 }
 
