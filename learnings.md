@@ -233,3 +233,8 @@
 
 - Return traffic should cross runtime as host-stream bytes plus a normalized stack write request; only the stack adapter should turn those bytes into TCP/IP packets.
 - A separate bridge flush step avoids making the packet-ingest path perform potentially blocking stream reads while still proving the host-to-sandbox forwarding boundary.
+
+## 2026-06-22 — TCP bridge partial writes
+
+- Because `HostTcpStream::write_from_sandbox` returns a byte count, runtime must treat short writes as backpressure and retain the unwritten suffix rather than counting the event as fully forwarded.
+- Pending stream bytes belong in runtime bridge state, not egress or policy, because the queue is a forwarding concern tied to normalized flow keys and host stream handles.

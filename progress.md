@@ -1003,3 +1003,24 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: d101d39.
 - Remaining boundary risks: partial-write/backpressure policy, async readiness, FIN/RST lifecycle, and real continuous loop scheduling remain.
+
+## 2026-06-22 — Boundary objective: TCP bridge partial-write backpressure
+
+- Boundary under work: prevent sandbox-to-host TCP payload loss when a host stream accepts only a partial write.
+- Allowed dependency direction: runtime bridge state may buffer normalized payload bytes for `HostTcpStream` handles; egress implementations keep owning actual socket IO; policy/audit remain unaware of buffers and stream backpressure internals.
+- Dependency-risk assessment: `HostTcpStream::write_from_sandbox` returns a byte count, so partial writes are part of the contract. Dropping unwritten bytes would silently corrupt forwarded streams. Runtime should retain unwritten bytes in bridge-owned pending state before later async readiness work.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: refactored runtime bridge entries to own a `HostTcpStream` plus a pending sandbox-to-host byte queue. `StackTcpBridgeTable::write_from_sandbox` now stores unwritten suffix bytes on short writes, exposes pending byte counts, and can flush queued bytes later through the same egress stream contract. Added a test proving `hello` written to a two-byte stream is retained and flushed as `he`/`ll`/`o` without data loss. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 98 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — backpressure state stays in runtime bridge.
+  - `cargo tree -p foxprox-egress` — egress remains core-only and socket-IO focused.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: real async wakeups, maximum pending-buffer limits, connection teardown on repeated zero writes, and fair scheduling remain.

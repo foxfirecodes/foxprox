@@ -5,7 +5,11 @@
 
 #![forbid(unsafe_code)]
 
-use std::{collections::HashMap, fmt, net::SocketAddr};
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt,
+    net::SocketAddr,
+};
 
 use foxprox_audit::{AuditRecord, AuditSink, FlowClosedAudit};
 use foxprox_core::{FrontendKind, NormalizedEvent, Protocol, SandboxId, TcpConnectAttempt};
@@ -109,7 +113,28 @@ impl StackTcpFlowKey {
 /// TCP streams. The table deliberately stores only `HostTcpStream` handles; it
 /// never exposes smoltcp sockets or std socket details to policy or audit.
 pub struct StackTcpBridgeTable<T> {
-    streams: HashMap<StackTcpFlowKey, T>,
+    streams: HashMap<StackTcpFlowKey, StackTcpBridge<T>>,
+}
+
+struct StackTcpBridge<T> {
+    stream: T,
+    pending_sandbox_to_host: VecDeque<Vec<u8>>,
+}
+
+impl<T> StackTcpBridge<T> {
+    fn new(stream: T) -> Self {
+        Self {
+            stream,
+            pending_sandbox_to_host: VecDeque::new(),
+        }
+    }
+
+    fn pending_sandbox_bytes(&self) -> usize {
+        self.pending_sandbox_to_host
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>()
+    }
 }
 
 impl<T> Default for StackTcpBridgeTable<T> {
@@ -134,11 +159,59 @@ impl<T> StackTcpBridgeTable<T> {
     }
 
     pub fn insert(&mut self, key: StackTcpFlowKey, stream: T) -> Option<T> {
-        self.streams.insert(key, stream)
+        self.streams
+            .insert(key, StackTcpBridge::new(stream))
+            .map(|bridge| bridge.stream)
     }
 
     pub fn remove(&mut self, key: &StackTcpFlowKey) -> Option<T> {
-        self.streams.remove(key)
+        self.streams.remove(key).map(|bridge| bridge.stream)
+    }
+
+    pub fn pending_sandbox_bytes(&self, key: &StackTcpFlowKey) -> usize {
+        self.streams
+            .get(key)
+            .map(StackTcpBridge::pending_sandbox_bytes)
+            .unwrap_or(0)
+    }
+
+    pub fn total_pending_sandbox_bytes(&self) -> usize {
+        self.streams
+            .values()
+            .map(StackTcpBridge::pending_sandbox_bytes)
+            .sum()
+    }
+}
+
+impl<T> StackTcpBridge<T>
+where
+    T: HostTcpStream,
+{
+    fn write_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
+        if !self.pending_sandbox_to_host.is_empty() {
+            self.pending_sandbox_to_host.push_back(bytes.to_vec());
+            return Ok(0);
+        }
+        let written = self.stream.write_from_sandbox(bytes)?;
+        if written < bytes.len() {
+            self.pending_sandbox_to_host
+                .push_back(bytes[written..].to_vec());
+        }
+        Ok(written)
+    }
+
+    fn flush_pending_sandbox_writes(&mut self) -> Result<usize, EgressError> {
+        let mut total = 0;
+        while let Some(bytes) = self.pending_sandbox_to_host.pop_front() {
+            let written = self.stream.write_from_sandbox(&bytes)?;
+            total += written;
+            if written < bytes.len() {
+                self.pending_sandbox_to_host
+                    .push_front(bytes[written..].to_vec());
+                break;
+            }
+        }
+        Ok(total)
     }
 }
 
@@ -151,10 +224,18 @@ where
         event: &StackTcpData,
     ) -> Result<Option<usize>, EgressError> {
         let key = StackTcpFlowKey::from_tcp_data(event);
-        let Some(stream) = self.streams.get_mut(&key) else {
+        let Some(bridge) = self.streams.get_mut(&key) else {
             return Ok(None);
         };
-        stream.write_from_sandbox(&event.bytes).map(Some)
+        bridge.write_from_sandbox(&event.bytes).map(Some)
+    }
+
+    pub fn flush_pending_sandbox_writes(&mut self) -> Result<usize, EgressError> {
+        let mut total = 0;
+        for bridge in self.streams.values_mut() {
+            total += bridge.flush_pending_sandbox_writes()?;
+        }
+        Ok(total)
     }
 }
 
@@ -180,8 +261,9 @@ where
     T: HostTcpStream,
 {
     let mut reads = Vec::new();
-    for (key, stream) in &mut bridges.streams {
-        let bytes = stream
+    for (key, bridge) in &mut bridges.streams {
+        let bytes = bridge
+            .stream
             .read_to_sandbox(max_bytes_per_stream)
             .map_err(BrokerError::Egress)
             .map_err(RuntimeError::Broker)?;
@@ -240,6 +322,7 @@ pub struct StackDevicePacketOutcome {
     pub broker_outcomes: Vec<BrokerEventOutcome>,
     pub tcp_data_events: usize,
     pub tcp_bytes_written_to_egress: usize,
+    pub tcp_bytes_pending_to_egress: usize,
     pub tcp_data_without_bridge: usize,
     pub flow_closed_events: usize,
     pub outbound_packets_written: usize,
@@ -338,6 +421,7 @@ where
         broker_outcomes,
         tcp_data_events,
         tcp_bytes_written_to_egress,
+        tcp_bytes_pending_to_egress: ctx.tcp_bridges.total_pending_sandbox_bytes(),
         tcp_data_without_bridge,
         flow_closed_events,
         outbound_packets_written,
@@ -603,6 +687,43 @@ mod tests {
     }
 
     #[test]
+    fn bridge_table_retains_partial_sandbox_writes_for_later_flush() {
+        let key = StackTcpFlowKey::new(
+            SandboxId::new("s1").unwrap(),
+            FrontendKind::Tun,
+            "10.0.0.2:49152".parse().unwrap(),
+            "203.0.113.10:80".parse().unwrap(),
+        );
+        let writes = Rc::new(RefCell::new(Vec::new()));
+        let mut bridges = StackTcpBridgeTable::default();
+        bridges.insert(
+            key.clone(),
+            PartialWriteTcpStream {
+                max_write: 2,
+                writes: Rc::clone(&writes),
+            },
+        );
+        let data = foxprox_net::StackTcpData {
+            sandbox_id: key.sandbox_id.clone(),
+            frontend: key.frontend,
+            source: key.source,
+            destination: key.destination,
+            bytes: b"hello".to_vec(),
+        };
+
+        assert_eq!(bridges.write_from_sandbox(&data).unwrap(), Some(2));
+        assert_eq!(bridges.pending_sandbox_bytes(&key), 3);
+        assert_eq!(bridges.flush_pending_sandbox_writes().unwrap(), 2);
+        assert_eq!(bridges.pending_sandbox_bytes(&key), 1);
+        assert_eq!(bridges.flush_pending_sandbox_writes().unwrap(), 1);
+        assert_eq!(bridges.pending_sandbox_bytes(&key), 0);
+        assert_eq!(
+            writes.borrow().as_slice(),
+            &[b"he".to_vec(), b"ll".to_vec(), b"o".to_vec()]
+        );
+    }
+
+    #[test]
     fn bridge_reads_host_bytes_into_stack_adapter_and_writes_device_packets() {
         let cursor = Cursor::new(Vec::new());
         let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
@@ -776,6 +897,23 @@ mod tests {
         fn write_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
             self.writes.borrow_mut().push(bytes.to_vec());
             Ok(bytes.len())
+        }
+
+        fn read_to_sandbox(&mut self, _max_bytes: usize) -> Result<Vec<u8>, EgressError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct PartialWriteTcpStream {
+        max_write: usize,
+        writes: Rc<RefCell<Vec<Vec<u8>>>>,
+    }
+
+    impl HostTcpStream for PartialWriteTcpStream {
+        fn write_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
+            let len = self.max_write.min(bytes.len());
+            self.writes.borrow_mut().push(bytes[..len].to_vec());
+            Ok(len)
         }
 
         fn read_to_sandbox(&mut self, _max_bytes: usize) -> Result<Vec<u8>, EgressError> {
