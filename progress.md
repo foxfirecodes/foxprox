@@ -592,3 +592,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: SNI metadata is still per-segment without stream buffering/reassembly; ECH detection is represented by explicit metadata status rather than a real parser signal; smoltcp byte bridging remains absent.
 - Exact next step: commit TLS attribution policy hardening, then add QUIC metadata policy coverage beyond UDP/443 classification, including disabled-QUIC denial and DNS-attributed QUIC allow behavior.
+
+## 2026-06-22T01:14:10Z
+- Current objective: continue after TLS attribution policy hardening commit toward QUIC transparent policy coverage.
+- Git status summary: clean worktree after commit `97479ce`.
+- Intended slice: add deterministic QUIC policy/event coverage for disabled QUIC denial and DNS-attributed UDP/443 allow behavior before adding any QUIC forwarding metadata parser.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `crates/foxprox-core/src/policy.rs` if policy gaps appear, and ledgers.
+- Remaining risks: QUIC metadata remains candidate classification only; this slice should not introduce decrypted HTTP/3 semantics or host forwarding changes.
+- Exact next step: prove UDP/443 candidate events are denied when QUIC is disabled and can be allowed by DNS-attributed domain policy when QUIC is enabled.
+
+## 2026-06-22T01:18:35Z
+- Current objective: add deterministic QUIC candidate policy coverage before richer UDP/QUIC metadata parsing.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 54 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 45 runtime tests, and 7 setup tests passed. New runtime tests prove UDP/443 QUIC-candidate events are denied when QUIC is disabled and DNS-attributed QUIC candidates can share the domain policy engine when QUIC is enabled.
+- Commit hash when committed: pending.
+- Remaining risks: QUIC classification is still UDP/443 candidate-only; no visible QUIC/TLS metadata parser, host reply receive loop, or HTTP/3 semantic inspection exists.
+- Exact next step: commit QUIC policy coverage, then add a minimal explicit HTTP proxy frontend runtime path that gates parsed HTTP/CONNECT requests through the shared policy and host egress boundary.

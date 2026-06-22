@@ -1027,6 +1027,15 @@ pub fn udpv4_packet_to_event_with_broker_dns(
     packet: &Udpv4Packet<'_>,
     broker_dns: &[IpAddr],
 ) -> NormalizedEvent {
+    udpv4_packet_to_event_with_attribution(sandbox_id, packet, broker_dns, None)
+}
+
+pub fn udpv4_packet_to_event_with_attribution(
+    sandbox_id: SandboxId,
+    packet: &Udpv4Packet<'_>,
+    broker_dns: &[IpAddr],
+    hostname: Option<HostnameAttribution>,
+) -> NormalizedEvent {
     let source = Endpoint::new(IpAddr::V4(packet.source), packet.source_port);
     let destination = Endpoint::new(IpAddr::V4(packet.destination), packet.destination_port);
     if destination.is_dns_port() {
@@ -1058,7 +1067,7 @@ pub fn udpv4_packet_to_event_with_broker_dns(
         frontend: FrontendKind::Tun,
         source,
         destination: destination.clone(),
-        hostname: None,
+        hostname,
         quic_status: if destination.is_quic_port() {
             QuicStatus::Candidate
         } else {
@@ -2057,6 +2066,62 @@ mod tests {
             panic!("expected UDP flow event");
         };
         assert_eq!(quic_status, QuicStatus::Candidate);
+    }
+
+    #[test]
+    fn quic_candidate_is_denied_when_quic_is_disabled() {
+        let packet = Udpv4Packet {
+            source: Ipv4Addr::new(10, 66, 0, 2),
+            destination: Ipv4Addr::new(93, 184, 216, 34),
+            source_port: 53000,
+            destination_port: 443,
+            payload: b"quic?",
+        };
+        let event = udpv4_packet_to_event(SandboxId::new("quic-policy").unwrap(), &packet);
+        let decision = PolicyEngine::new(PolicyConfig {
+            quic_enabled: false,
+            ..PolicyConfig::default()
+        })
+        .evaluate(&event.to_policy_input());
+        assert_eq!(decision.action, DecisionAction::DenyDrop);
+        assert_eq!(decision.reason, DecisionReason::QuicDisabled);
+    }
+
+    #[test]
+    fn dns_attributed_quic_candidate_can_share_domain_policy() {
+        let packet = Udpv4Packet {
+            source: Ipv4Addr::new(10, 66, 0, 2),
+            destination: Ipv4Addr::new(93, 184, 216, 34),
+            source_port: 53000,
+            destination_port: 443,
+            payload: b"quic?",
+        };
+        let event = udpv4_packet_to_event_with_attribution(
+            SandboxId::new("quic-policy").unwrap(),
+            &packet,
+            &[],
+            Some(HostnameAttribution::broker_dns(
+                Hostname::normalize("www.example.com").unwrap(),
+            )),
+        );
+        let mut rule = PolicyRule::allow("allow-dns-attributed-quic");
+        rule.protocol = Some(Protocol::Udp);
+        rule.destination_port = Some(foxprox_core::PortMatcher::Exact(443));
+        rule.domain_suffix = Some(Hostname::normalize("example.com").unwrap());
+        rule.minimum_confidence = Some(AttributionConfidence::Medium);
+        rule.quic_status = Some(QuicStatus::Candidate);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let decision = PolicyEngine::new(PolicyConfig {
+            rules,
+            ..PolicyConfig::default()
+        })
+        .evaluate(&event.to_policy_input());
+        assert_eq!(decision.action, DecisionAction::Allow);
+        assert_eq!(
+            decision.rule_id.as_deref(),
+            Some("allow-dns-attributed-quic")
+        );
     }
 
     #[test]
