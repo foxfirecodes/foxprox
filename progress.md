@@ -676,3 +676,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: runtime configuration is still in-memory only; no serde/file-format loader, CLI config path, upstream DNS resolver config, or listener binding config exists.
 - Exact next step: commit runtime configuration builder, then add a small launcher/session assembly path that combines prepared bwrap launch, runtime config, and setup control handoff into a fail-early broker session plan.
+
+## 2026-06-22T01:45:00Z
+- Current objective: continue after runtime configuration construction toward fail-early launcher/session assembly.
+- Git status summary: clean worktree after commit `71c073b`.
+- Intended slice: add a small host-side broker session preparation API that validates runtime config before preparing bwrap/setup handoff, tying setup planning and runtime components together without spawning bwrap yet.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-launcher/Cargo.toml`, `crates/foxprox-launcher/src/lib.rs`, `Cargo.lock`, and `progress.md`.
+- Remaining risks: this will still not spawn bwrap, preserve fds across exec, or run a live broker loop.
+- Exact next step: implement a prepared broker session type combining `PreparedBwrapLaunch` and validated runtime components with deterministic fail-early tests.
+
+## 2026-06-22T01:50:20Z
+- Current objective: add fail-early launcher/session assembly that combines setup planning with validated runtime components.
+- Files changed: `crates/foxprox-launcher/Cargo.toml`, `crates/foxprox-launcher/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on rustfmt wrapping; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 54 core tests, 6 device tests, 3 integration tests, 5 launcher tests, 53 runtime tests, and 7 setup tests passed. New launcher tests prove a prepared broker session combines bwrap setup handoff with validated runtime components and rejects invalid runtime config before preparing launch state.
+- Commit hash when committed: pending.
+- Remaining risks: prepared sessions still do not spawn bwrap, preserve fds through exec, wait for TUN handoff, or start a live broker runtime loop.
+- Exact next step: commit broker session preparation, then add a process-spawn command descriptor that records fd-preservation requirements without executing bwrap.

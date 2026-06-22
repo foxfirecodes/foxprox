@@ -27,6 +27,7 @@ dependencies = [
  "foxprox-core",
  "foxprox-device",
  "foxprox-integrations",
+ "foxprox-runtime",
 ]
 
 [[package]]

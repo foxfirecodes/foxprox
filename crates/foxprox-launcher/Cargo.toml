@@ -13,3 +13,4 @@ path = "src/lib.rs"
 foxprox-core = { path = "../foxprox-core" }
 foxprox-device = { path = "../foxprox-device" }
 foxprox-integrations = { path = "../foxprox-integrations" }
+foxprox-runtime = { path = "../foxprox-runtime" }

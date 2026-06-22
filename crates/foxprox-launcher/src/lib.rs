@@ -8,6 +8,9 @@
 
 use foxprox_device::{DeviceError, SetupControlSocket};
 use foxprox_integrations::{BwrapSetupCommand, IntegrationError, SetupPlan};
+use foxprox_runtime::{
+    build_runtime_components, BrokerRuntimeComponents, BrokerRuntimeConfig, RuntimeConfigError,
+};
 use std::fs::File;
 
 #[derive(Debug)]
@@ -30,6 +33,7 @@ impl PreparedBwrapLaunch {
 pub enum LauncherError {
     Device(DeviceError),
     Integration(IntegrationError),
+    RuntimeConfig(RuntimeConfigError),
     InvalidHelperFd { fd: i32 },
 }
 
@@ -43,6 +47,21 @@ impl From<IntegrationError> for LauncherError {
     fn from(error: IntegrationError) -> Self {
         Self::Integration(error)
     }
+}
+
+pub struct PreparedBrokerSession {
+    pub launch: PreparedBwrapLaunch,
+    pub runtime: BrokerRuntimeComponents,
+}
+
+pub fn prepare_bwrap_broker_session(
+    setup_plan: SetupPlan,
+    target: &[String],
+    runtime_config: BrokerRuntimeConfig,
+) -> Result<PreparedBrokerSession, LauncherError> {
+    let runtime = build_runtime_components(runtime_config).map_err(LauncherError::RuntimeConfig)?;
+    let launch = prepare_bwrap_launch(setup_plan, target)?;
+    Ok(PreparedBrokerSession { launch, runtime })
 }
 
 pub fn prepare_bwrap_launch(
@@ -62,7 +81,7 @@ pub fn prepare_bwrap_launch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use foxprox_core::SandboxId;
+    use foxprox_core::{PolicyConfig, PolicyRule, SandboxId, StaticDnsRecord};
     use foxprox_integrations::{ProxyListenerConfig, TunDeviceConfig};
     use std::net::{IpAddr, Ipv4Addr};
 
@@ -83,6 +102,53 @@ mod tests {
             }),
             tun_handoff_fd: 0,
         }
+    }
+
+    fn runtime_config() -> BrokerRuntimeConfig {
+        BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("launcher-runtime").unwrap(),
+            policy: PolicyConfig {
+                broker_dns: vec![IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))],
+                ..PolicyConfig::default()
+            },
+            static_dns_ttl_secs: 30,
+            static_dns_records: vec![StaticDnsRecord {
+                hostname: foxprox_core::Hostname::normalize("example.com").unwrap(),
+                addresses: vec![IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))],
+            }],
+        }
+    }
+
+    #[test]
+    fn prepared_broker_session_combines_launch_and_runtime_components() {
+        let prepared =
+            prepare_bwrap_broker_session(plan(), &["curl".to_string()], runtime_config()).unwrap();
+
+        assert!(prepared
+            .launch
+            .command
+            .contains_required_network_isolation());
+        assert_eq!(prepared.runtime.sandbox_id.as_str(), "launcher-runtime");
+        assert_eq!(
+            prepared.runtime.broker_dns,
+            vec![IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))]
+        );
+    }
+
+    #[test]
+    fn broker_session_rejects_runtime_config_before_launch_preparation() {
+        let mut invalid_runtime = runtime_config();
+        let mut rules = foxprox_core::RuleSet::default();
+        rules.push(PolicyRule::allow("same"));
+        rules.push(PolicyRule::deny_drop("same"));
+        invalid_runtime.policy.rules = rules;
+
+        assert!(matches!(
+            prepare_bwrap_broker_session(plan(), &["curl".to_string()], invalid_runtime),
+            Err(LauncherError::RuntimeConfig(
+                RuntimeConfigError::InvalidPolicy(_)
+            ))
+        ));
     }
 
     #[test]
