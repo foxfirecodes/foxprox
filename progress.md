@@ -911,3 +911,22 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * unsupported ICMP types and malformed packets cannot produce outbound replies.
 * Audit evidence: no new audit builder was needed for synthesis itself; packet handler and ICMP policy tests already audit ICMP allow/deny/fail-closed decisions before a runtime would call synthesis.
 * Residual risk: synthesis is IPv4 echo-only; no live TUN write-back, IPv6 echo reply, ICMP unreachable synthesis, rate limiting, or policy-to-synthesis runtime coupling exists yet.
+
+## 2026-06-21 - Lifecycle and broker-error audit builders
+
+* Invariant under work: lifecycle/setup/error events required by the architecture must have structured core constructors so runtime code does not emit ad hoc text or omit sandbox/frontend/protocol context.
+* Threat or failure mode addressed: broker start, TUN setup, proxy listener setup, policy reload, session exit, or broker error paths could otherwise be logged inconsistently or without structured audit fields needed for security review.
+* Planned verification: add audit constructors/tests for lifecycle and broker-error events, JSON serialization coverage for lifecycle/error kinds and reasons, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Lifecycle and broker-error audit builders results
+
+* Tests added/updated:
+  * lifecycle audit constructor preserves timestamp, sandbox ID, event kind, frontend, and explicit null decision/reason fields for events such as TUN configured.
+  * broker-error audit constructor preserves frontend/protocol context, fail-closed decision, structured denial reason, and JSON serialization for error review.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 132 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * lifecycle events now have structured audit records without pretending to be allow/deny policy decisions.
+  * broker error paths can be represented as fail-closed audit records with typed reasons instead of ad hoc text.
+* Audit evidence: unit tests assert lifecycle/error fields and deterministic JSON fragments for `tun_configured` and `broker_error` events.
+* Residual risk: runtime code still needs to call these constructors during actual broker startup, setup-helper TUN configuration, policy reload, and shutdown/error paths.

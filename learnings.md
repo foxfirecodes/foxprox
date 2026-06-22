@@ -165,3 +165,7 @@ A live TUN loop should call a core helper that strictly parses packet bytes, nor
 ## 2026-06-21 - ICMP synthesis must follow strict packet validation
 
 Synthetic ICMP replies should be generated only after the packet parser validates IP and transport checksums. The echo-reply proof should reject unusual ICMP types and preserve payload/checksum correctness rather than becoming a generic permissive ICMP responder.
+
+## 2026-06-21 - Lifecycle audit events should not masquerade as policy decisions
+
+Startup/setup/shutdown audit records should preserve sandbox and frontend context with null decision fields, while actual broker errors should use explicit fail-closed decisions and typed denial reasons. This keeps lifecycle review separate from allow/deny policy review.

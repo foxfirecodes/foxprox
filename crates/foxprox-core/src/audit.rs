@@ -81,6 +81,71 @@ impl AuditPolicyContext {
 }
 
 impl AuditEvent {
+    pub fn lifecycle(
+        timestamp_millis: u64,
+        sandbox_id: SandboxId,
+        kind: AuditEventKind,
+        frontend: Option<Frontend>,
+    ) -> Self {
+        Self {
+            timestamp_millis,
+            sandbox_id,
+            kind,
+            frontend,
+            protocol: None,
+            source: None,
+            destination: None,
+            requested_port: None,
+            hostname: None,
+            hostname_source: HostnameSource::None,
+            hostname_confidence: HostnameConfidence::None,
+            dns_query_type: None,
+            dns_response_code: None,
+            dns_answer_count: None,
+            dns_min_ttl_seconds: None,
+            decision: None,
+            rule_id: None,
+            reason: None,
+            http_method: None,
+            http_path_query: None,
+            byte_count: None,
+            flow_duration_millis: None,
+        }
+    }
+
+    pub fn broker_error(
+        timestamp_millis: u64,
+        sandbox_id: SandboxId,
+        frontend: Option<Frontend>,
+        protocol: Option<Protocol>,
+        reason: DenialReason,
+    ) -> Self {
+        Self {
+            timestamp_millis,
+            sandbox_id,
+            kind: AuditEventKind::BrokerError,
+            frontend,
+            protocol,
+            source: None,
+            destination: None,
+            requested_port: None,
+            hostname: None,
+            hostname_source: HostnameSource::None,
+            hostname_confidence: HostnameConfidence::None,
+            dns_query_type: None,
+            dns_response_code: None,
+            dns_answer_count: None,
+            dns_min_ttl_seconds: None,
+            decision: Some(AuditDecision::FailClosed),
+            rule_id: None,
+            reason: Some(reason),
+            http_method: None,
+            http_path_query: None,
+            byte_count: None,
+            flow_duration_millis: None,
+        }
+    }
+
     pub fn from_policy_decision(context: AuditPolicyContext, decision: &Decision) -> Self {
         let (audit_decision, rule_id, reason) = audit_decision_fields(decision);
 
@@ -775,6 +840,43 @@ mod tests {
             },
             &decision,
         )
+    }
+
+    #[test]
+    fn lifecycle_and_broker_error_events_preserve_structured_context() {
+        let lifecycle = AuditEvent::lifecycle(
+            7,
+            SandboxId::new("sandbox-life"),
+            AuditEventKind::TunConfigured,
+            Some(Frontend::SetupHelper),
+        );
+        assert_eq!(lifecycle.timestamp_millis, 7);
+        assert_eq!(lifecycle.sandbox_id.as_str(), "sandbox-life");
+        assert_eq!(lifecycle.kind, AuditEventKind::TunConfigured);
+        assert_eq!(lifecycle.frontend, Some(Frontend::SetupHelper));
+        assert_eq!(lifecycle.decision, None);
+        assert_eq!(lifecycle.reason, None);
+        let line = lifecycle.to_json_line();
+        assert!(line.contains("\"kind\":\"tun_configured\""));
+        assert!(line.contains("\"frontend\":\"setup_helper\""));
+        assert!(line.contains("\"decision\":null"));
+
+        let error = AuditEvent::broker_error(
+            8,
+            SandboxId::new("sandbox-life"),
+            Some(Frontend::Tun),
+            Some(Protocol::Dns),
+            DenialReason::InvalidConfig,
+        );
+        assert_eq!(error.kind, AuditEventKind::BrokerError);
+        assert_eq!(error.frontend, Some(Frontend::Tun));
+        assert_eq!(error.protocol, Some(Protocol::Dns));
+        assert_eq!(error.decision, Some(AuditDecision::FailClosed));
+        assert_eq!(error.reason, Some(DenialReason::InvalidConfig));
+        let line = error.to_json_line();
+        assert!(line.contains("\"kind\":\"broker_error\""));
+        assert!(line.contains("\"decision\":\"fail_closed\""));
+        assert!(line.contains("\"reason\":\"invalid_config\""));
     }
 
     #[test]
