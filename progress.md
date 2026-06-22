@@ -1090,3 +1090,26 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * mismatch and hidden-SNI protections remain active before host egress permits are issued.
 * Audit evidence: TLS handler tests assert allow, mismatch deny, hidden-SNI deny/allow, malformed fail-closed, presented/DNS hostname evidence, hidden-SNI flag, and egress permit creation.
 * Residual risk: stream reassembly, fragmented ClientHello support, live TCP forwarding integration, and ECH/QUIC TLS metadata parsing remain future work.
+
+## 2026-06-21 - Transparent QUIC candidate decision helper
+
+* Invariant under work: QUIC candidate UDP payloads must use bounded QUIC header parsing, DNS-only hostname attribution, shared policy decisions, structured QUIC audit metadata, and allow-derived egress permits.
+* Threat or failure mode addressed: future UDP forwarding could treat UDP/443 as generic traffic, invent hostname attribution from QUIC headers, or forward malformed QUIC-shaped payloads without audit evidence.
+* Planned verification: add pure QUIC handler tests for DNS-attributed domain allow, explicit IP allow without hostname, domain default-deny without attribution, malformed QUIC fail-closed audit, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Transparent QUIC candidate decision helper results
+
+* Tests added/updated:
+  * DNS-attributed QUIC candidate payloads can satisfy domain policy without inventing hostname evidence from QUIC headers, then produce allow-derived egress permits and QUIC audit metadata.
+  * domain rules default-deny QUIC candidates without DNS attribution.
+  * explicit IP rules can allow unattributed QUIC candidates while audit keeps hostname null.
+  * malformed QUIC candidate payloads fail closed before policy or egress permit creation.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` passed tests but clippy flagged the QUIC audit builder for too many arguments.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 154 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * QUIC header parsing contributes classification and audit metadata only; domain authorization still requires DNS attribution.
+  * malformed QUIC candidate payloads do not become generic allowed UDP or host egress permits.
+  * allowed QUIC egress still requires shared policy allow and egress permit construction.
+* Audit evidence: QUIC handler tests assert QUIC header metadata, DNS-attribution separation, allow/deny/fail-closed decisions, rule IDs, null hostname fields, and malformed reasons.
+* Residual risk: actual UDP socket forwarding, QUIC TLS CRYPTO/SNI parsing, flow timeout integration, and response routing remain future work.

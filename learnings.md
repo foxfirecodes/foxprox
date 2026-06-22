@@ -201,3 +201,7 @@ QUIC candidate audit records should include bounded header metadata such as form
 ## 2026-06-21 - Transparent TLS inspection should issue egress permits only after SNI policy
 
 Direct HTTPS bytes should pass through strict ClientHello parsing, SNI/DNS mismatch checks, hidden-SNI handling, audit, and allow-derived egress permits before host socket connection. Malformed ClientHello must not fall back to ordinary IP-only authorization.
+
+## 2026-06-21 - QUIC handler must not convert header parsing into hostname trust
+
+The QUIC decision path should use QUIC headers for classification/audit and DNS cache for domain attribution. A QUIC-shaped UDP/443 packet should not satisfy domain rules unless DNS or future safe QUIC/TLS metadata supplies hostname evidence.

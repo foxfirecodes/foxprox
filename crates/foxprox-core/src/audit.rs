@@ -323,46 +323,42 @@ impl AuditEvent {
     }
 
     pub fn from_quic_candidate_metadata(
-        timestamp_millis: u64,
-        sandbox_id: SandboxId,
-        frontend: Frontend,
-        source: Option<Endpoint>,
-        destination: Option<Endpoint>,
+        context: AuditPolicyContext,
         metadata: &QuicPacketMetadata,
         decision: &Decision,
     ) -> Self {
         let (audit_decision, rule_id, reason) = audit_decision_fields(decision);
 
         Self {
-            timestamp_millis,
-            sandbox_id,
-            kind: AuditEventKind::QuicCandidateFlowCreated,
-            frontend: Some(frontend),
-            protocol: Some(Protocol::QuicCandidate),
-            source,
-            destination,
-            requested_port: destination.and_then(|endpoint| endpoint.port),
+            timestamp_millis: context.timestamp_millis,
+            sandbox_id: context.sandbox_id,
+            kind: context.kind,
+            frontend: Some(context.frontend),
+            protocol: Some(context.protocol),
+            source: context.source,
+            destination: context.destination,
+            requested_port: context.requested_port,
             hostname: None,
             presented_hostname: None,
-            dns_attribution: None,
-            hidden_sni: false,
+            dns_attribution: context.dns_attribution,
+            hidden_sni: context.hidden_sni,
             quic_header_form: Some(metadata.header_form),
             quic_long_packet_type: metadata.long_packet_type,
             quic_version: metadata.version,
             quic_version_supported: Some(metadata.version_supported),
             quic_destination_connection_id_len: metadata.destination_connection_id_len,
             quic_source_connection_id_len: metadata.source_connection_id_len,
-            hostname_source: HostnameSource::None,
-            hostname_confidence: HostnameConfidence::None,
-            dns_query_type: None,
+            hostname_source: context.hostname_source,
+            hostname_confidence: context.hostname_confidence,
+            dns_query_type: context.dns_query_type,
             dns_response_code: None,
             dns_answer_count: None,
             dns_min_ttl_seconds: None,
             decision: audit_decision,
             rule_id,
             reason,
-            http_method: None,
-            http_path_query: None,
+            http_method: context.http_method,
+            http_path_query: context.http_path_query,
             byte_count: None,
             flow_duration_millis: None,
         }
@@ -1591,15 +1587,20 @@ mod tests {
             destination_connection_id_len: Some(8),
             source_connection_id_len: Some(4),
         };
-        let event = AuditEvent::from_quic_candidate_metadata(
-            150,
-            SandboxId::new("sandbox-quic"),
-            Frontend::Tun,
-            Some(Endpoint::udp(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 40000)),
-            Some(Endpoint::udp(
+        let request = PolicyRequest {
+            sandbox_id: SandboxId::new("sandbox-quic"),
+            source: Some(Endpoint::udp(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2)), 40000)),
+            ..PolicyRequest::new(Protocol::QuicCandidate).with_destination(Endpoint::udp(
                 IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
                 443,
-            )),
+            ))
+        };
+        let event = AuditEvent::from_quic_candidate_metadata(
+            AuditPolicyContext::from_request(
+                150,
+                AuditEventKind::QuicCandidateFlowCreated,
+                &request,
+            ),
             &metadata,
             &Decision::Allow {
                 rule_id: Some("allow-quic".into()),
