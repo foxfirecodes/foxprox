@@ -1022,5 +1022,5 @@
   - `cargo tree -p foxprox-runtime` — backpressure state stays in runtime bridge.
   - `cargo tree -p foxprox-egress` — egress remains core-only and socket-IO focused.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 7afc89c.
 - Remaining boundary risks: real async wakeups, maximum pending-buffer limits, connection teardown on repeated zero writes, and fair scheduling remain.
