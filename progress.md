@@ -587,3 +587,5 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * invalid policy configuration cannot authorize traffic.
 * Audit evidence: rule IDs emitted in audit records now have a validation invariant that they identify at most one configured rule.
 * Residual risk: config file parsing/loading and broader normalization of externally supplied configs remain future work.
+
+* Commit hash: 0a8a87f reject duplicate policy rule ids.
