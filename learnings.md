@@ -100,3 +100,7 @@ For SOCKS5 CONNECT preflight, policy denials should return reply code 0x02 (conn
 ## 2026-06-21 — explicit HTTP proxy parsing needs absolute-form normalization
 
 Transparent HTTP inspection can consume origin-form paths plus Host headers, but explicit HTTP proxy requests should parse absolute-form URLs and normalize the policy path to `/path?query`. Otherwise path-prefix rules would accidentally match against `http://host/...` instead of the request target path.
+
+## 2026-06-21 — use loopback servers for host egress evidence
+
+Host egress can be verified without external network dependencies by binding a loopback listener in the test, connecting through the egress backend, and exchanging bytes. This proves the socket boundary while keeping tests deterministic and offline.

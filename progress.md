@@ -550,3 +550,24 @@
 - What failed or surprised the agent: no failures; explicit HTTP proxy requests need a separate absolute-form parser so policy path prefixes see `/path?query` rather than the entire URL.
 - What remains unproven: HTTP response forwarding through host egress, CONNECT tunnel bridging, SOCKS5 greeting negotiation, listener sockets, and proxy flow close/byte-count audit are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — host TCP egress proof slice
+
+- Slice attempted: add the first shared host TCP egress backend proof independent of proxy/TUN frontends.
+- Why next: proxy and transparent policy preflights now produce allowed connect intents, but alpha requires all allowed traffic to leave through a shared host egress backend rather than frontend-specific sockets.
+- Verification plan: add a `foxprox-egress` crate with typed TCP targets and a blocking host TCP connector, verify a local loopback listener receives bytes over an egress-owned socket, verify connection failures produce meaningful errors, then run formatting, clippy, focused egress tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — host TCP egress proof
+
+- Slice attempted: shared host TCP egress backend proof with a real loopback socket.
+- Why next: policy/proxy preflights can now authorize connect intents, but alpha requires all egress to go through a shared backend rather than frontend-owned sockets.
+- What changed: added `crates/foxprox-egress` with typed `TcpTarget`, `TcpEgress` trait, blocking `HostTcpEgress`, `TcpEgressConnection`, timeout validation, target validation, resolution/connect errors, and a loopback integration test proving bytes cross an egress-owned TCP stream.
+- Verification:
+  - `cargo test -p foxprox-egress` passed 3 focused tests: loopback connect/byte exchange, target validation, and connect-failure diagnostics.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 3 `foxprox-egress` tests, 5 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 9 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed.
+- What failed or surprised the agent: no failures; a local loopback listener gives concrete egress evidence without depending on external network access.
+- What remains unproven: UDP egress sockets, DNS upstream forwarding, proxy-to-egress stream bridging, TUN TCP forwarding/smoltcp integration, resource limits, and async backpressure are still absent.
+- Commit: this commit.
