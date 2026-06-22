@@ -323,7 +323,7 @@ impl ExplicitProxyEgress for InMemoryExplicitProxyEgress {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::policy::{PolicyConfig, PolicyEngine, PolicyRule};
+    use crate::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule};
     use crate::types::{AuditKind, Protocol};
     use pretty_assertions::assert_eq;
 
@@ -370,6 +370,66 @@ mod tests {
         let record = frontend.broker().audit().records().next().unwrap();
         assert_eq!(record.kind, AuditKind::HttpsConnectDecision);
         assert_eq!(record.reason, Some(DenialReason::DefaultDeny));
+    }
+
+    #[test]
+    fn http_proxy_ip_literal_cidr_deny_blocks_before_egress() {
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            rules: vec![PolicyRule::deny("deny-loopback-http")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Http)
+                .destination_cidr(Cidr::new("127.0.0.0".parse().unwrap(), 8))],
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut frontend =
+            ExplicitProxyFrontend::new("s1", broker, InMemoryExplicitProxyEgress::default());
+
+        let result = frontend
+            .handle_http_proxy_bytes(
+                b"GET http://127.0.0.1/path HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            )
+            .unwrap();
+        assert_eq!(result.decision, Decision::DenyDrop);
+        assert_eq!(result.reason, Some(DenialReason::RuleDenied));
+        assert!(frontend.egress().forwarded_http().is_empty());
+        let record = frontend.broker().audit().records().next().unwrap();
+        assert_eq!(record.kind, AuditKind::HttpRequestDecision);
+        assert_eq!(record.rule_id.as_deref(), Some("deny-loopback-http"));
+        assert_eq!(
+            record.destination.as_ref().unwrap().ip,
+            Some("127.0.0.1".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn http_connect_ip_literal_cidr_deny_blocks_before_egress() {
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            rules: vec![PolicyRule::deny("deny-loopback-connect")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Https)
+                .destination_cidr(Cidr::new("127.0.0.0".parse().unwrap(), 8))],
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 4);
+        let mut frontend =
+            ExplicitProxyFrontend::new("s1", broker, InMemoryExplicitProxyEgress::default());
+
+        let result = frontend
+            .handle_http_proxy_bytes(b"CONNECT 127.0.0.1:443 HTTP/1.1\r\n\r\n")
+            .unwrap();
+        assert_eq!(result.decision, Decision::DenyDrop);
+        assert_eq!(result.reason, Some(DenialReason::RuleDenied));
+        assert!(frontend.egress().forwarded_http().is_empty());
+        let record = frontend.broker().audit().records().next().unwrap();
+        assert_eq!(record.kind, AuditKind::HttpsConnectDecision);
+        assert_eq!(record.rule_id.as_deref(), Some("deny-loopback-connect"));
+        assert_eq!(
+            record.destination.as_ref().unwrap().ip,
+            Some("127.0.0.1".parse().unwrap())
+        );
     }
 
     #[test]

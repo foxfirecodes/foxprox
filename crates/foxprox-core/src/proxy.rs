@@ -25,9 +25,12 @@ impl HttpProxyRequestMetadata {
         } else {
             Protocol::Http
         };
+        let destination_ip = self
+            .resolved_destination_ip
+            .or_else(|| self.host.parse::<IpAddr>().ok());
         let mut request = PolicyRequest::new(sandbox_id, Frontend::HttpProxy, protocol)
             .with_destination(NetworkEndpoint {
-                ip: self.resolved_destination_ip,
+                ip: destination_ip,
                 port: Some(self.port),
             })
             .with_attribution(self.attribution)

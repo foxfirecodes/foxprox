@@ -1641,3 +1641,27 @@ The audit-gated proxy DNS path now proves backpressure behavior and SOCKS host e
 
 ### Remaining blind spots
 - Live runtime still needs shared mutable DNS-cache wiring across the DNS listener and explicit proxy frontends rather than snapshot cache injection.
+
+## 2026-06-22 — Round-20 HTTP IP-literal policy visibility fix
+
+### Commands run
+- `cargo fmt` — applied formatting for HTTP IP-literal policy visibility fix.
+- `cargo test -p foxprox-core --all-targets --all-features` — passed, 112 core tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 112 core tests, 3 device tests, 25 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `foxprox_core::proxy_frontend::tests::http_proxy_ip_literal_cidr_deny_blocks_before_egress ... ok`
+- `foxprox_core::proxy_frontend::tests::http_connect_ip_literal_cidr_deny_blocks_before_egress ... ok`
+
+### Interpretation
+Round-20 high finding is fixed. HTTP proxy and CONNECT IP-literal authorities now populate destination IP in the policy request even without broker-DNS resolution, so CIDR and address-class policy checks are visible before host egress. Regressions prove HTTP and CONNECT loopback CIDR deny rules block before `ExplicitProxyEgress` is called and record the IP destination in structured audit evidence.
+
+### Changed files
+- `crates/foxprox-core/src/proxy.rs`
+- `crates/foxprox-core/src/proxy_frontend.rs`
+- `progress.md`
+
+### Remaining blind spots
+- Live runtime still needs shared mutable DNS-cache wiring and async proxy/TUN lifecycle integration, but IP-literal proxy destinations are now policy/audit-visible in the core contract.
