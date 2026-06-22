@@ -508,3 +508,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: this does not implement TCP stream state, SYN/ACK synthesis, smoltcp integration, host TCP bridging, or close/error lifecycle logging.
 - Exact next step: commit TCP connect-attempt parsing, then add a TCP stack adapter trait boundary for future smoltcp integration so TCP forwarding cannot bypass policy/audit.
+
+## 2026-06-22T00:30:00Z
+- Current objective: continue from TCP connect-attempt parsing by adding a replaceable TCP stack adapter boundary.
+- Git status summary: clean worktree after commit `afeff3e`.
+- Intended slice: define a minimal stack-adapter contract for userspace TCP connect attempts and prove policy/audit gates host TCP egress before a future smoltcp adapter can open sockets.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this adapter boundary will not yet bridge stream bytes or synthesize TCP stack packets.
+- Exact next step: implement fake-stack tests for denied reset and allowed host connect sequencing.
+
+## 2026-06-22T00:35:35Z
+- Current objective: add a replaceable TCP stack adapter boundary gated by policy/audit.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 52 core tests, 6 device tests, 3 integration tests, 3 launcher tests, 37 runtime tests, and 7 setup tests passed. New tests prove a fake userspace TCP stack connect attempt is reset before host egress when policy denies, and allowed connects open host egress only after policy/audit approval and then notify the stack.
+- Commit hash when committed: pending.
+- Remaining risks: no smoltcp implementation, byte bridging, backpressure, TCP close/reset packet synthesis, or real stream lifecycle audit exists yet.
+- Exact next step: commit TCP stack adapter boundary, then add minimal plaintext HTTP inspection wiring from TCP payload metadata into policy events before stream forwarding is implemented.

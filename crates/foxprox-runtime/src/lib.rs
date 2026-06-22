@@ -101,6 +101,102 @@ fn unspecified_socket_addr_for(destination: IpAddr) -> SocketAddr {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TcpStackConnectAttempt {
+    pub source: Endpoint,
+    pub destination: Endpoint,
+}
+
+pub trait TcpStackAdapter {
+    fn next_connect_attempt(&mut self) -> Option<TcpStackConnectAttempt>;
+    fn reset_connect(&mut self, attempt: &TcpStackConnectAttempt);
+    fn mark_connect_opened(&mut self, attempt: &TcpStackConnectAttempt);
+}
+
+pub struct TcpStackRuntime<A, E, S> {
+    stack: A,
+    egress: E,
+    kernel: VerificationKernel<S>,
+    sandbox_id: SandboxId,
+}
+
+impl<A, E, S> TcpStackRuntime<A, E, S> {
+    pub fn new(stack: A, egress: E, kernel: VerificationKernel<S>, sandbox_id: SandboxId) -> Self {
+        Self {
+            stack,
+            egress,
+            kernel,
+            sandbox_id,
+        }
+    }
+
+    pub fn stack(&self) -> &A {
+        &self.stack
+    }
+
+    pub fn egress(&self) -> &E {
+        &self.egress
+    }
+
+    pub fn into_parts(self) -> (A, E, VerificationKernel<S>) {
+        (self.stack, self.egress, self.kernel)
+    }
+}
+
+impl<A: TcpStackAdapter, E: HostEgress, S: AuditSink> TcpStackRuntime<A, E, S> {
+    pub fn handle_next_connect(&mut self, timestamp_millis: u128) -> Option<TcpStackOutcome> {
+        let attempt = self.stack.next_connect_attempt()?;
+        let event = NormalizedEvent::TcpConnectAttempt {
+            sandbox_id: self.sandbox_id.clone(),
+            frontend: FrontendKind::Tun,
+            source: Some(attempt.source.clone()),
+            destination: attempt.destination.clone(),
+            hostname: None,
+            sni_status: SniStatus::Missing,
+            sni_dns_mismatch: false,
+        };
+        let decision = self.kernel.decide_and_audit(&event, timestamp_millis);
+        if decision.action != DecisionAction::Allow {
+            self.stack.reset_connect(&attempt);
+            return Some(TcpStackOutcome::DeniedReset { decision, attempt });
+        }
+        match self.egress.open_tcp(TcpConnectRequest {
+            frontend: FrontendKind::Tun,
+            destination: attempt.destination.clone(),
+        }) {
+            Ok(()) => {
+                self.stack.mark_connect_opened(&attempt);
+                Some(TcpStackOutcome::HostConnectOpened { decision, attempt })
+            }
+            Err(error) => {
+                self.stack.reset_connect(&attempt);
+                Some(TcpStackOutcome::HostConnectFailed {
+                    decision,
+                    attempt,
+                    error,
+                })
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TcpStackOutcome {
+    DeniedReset {
+        decision: Decision,
+        attempt: TcpStackConnectAttempt,
+    },
+    HostConnectOpened {
+        decision: Decision,
+        attempt: TcpStackConnectAttempt,
+    },
+    HostConnectFailed {
+        decision: Decision,
+        attempt: TcpStackConnectAttempt,
+        error: EgressError,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UdpResponseRouteError {
     NonUdpFlow,
     UnsupportedAddressFamily,
@@ -941,6 +1037,27 @@ mod tests {
         output: Vec<u8>,
     }
 
+    #[derive(Default)]
+    struct FakeTcpStack {
+        next: Option<TcpStackConnectAttempt>,
+        resets: usize,
+        opened: usize,
+    }
+
+    impl TcpStackAdapter for FakeTcpStack {
+        fn next_connect_attempt(&mut self) -> Option<TcpStackConnectAttempt> {
+            self.next.take()
+        }
+
+        fn reset_connect(&mut self, _attempt: &TcpStackConnectAttempt) {
+            self.resets += 1;
+        }
+
+        fn mark_connect_opened(&mut self, _attempt: &TcpStackConnectAttempt) {
+            self.opened += 1;
+        }
+    }
+
     impl Read for FakeTunIo {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
             self.input.read(buf)
@@ -979,6 +1096,70 @@ mod tests {
             sni_status: SniStatus::Missing,
             sni_dns_mismatch: false,
         }
+    }
+
+    fn tcp_stack_attempt() -> TcpStackConnectAttempt {
+        TcpStackConnectAttempt {
+            source: Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            destination: Endpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)), 80),
+        }
+    }
+
+    #[test]
+    fn tcp_stack_runtime_resets_denied_connect_before_host_egress() {
+        let stack = FakeTcpStack {
+            next: Some(tcp_stack_attempt()),
+            ..FakeTcpStack::default()
+        };
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = TcpStackRuntime::new(
+            stack,
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("tcp-stack-deny").unwrap(),
+        );
+
+        let outcome = runtime.handle_next_connect(100).unwrap();
+
+        assert!(matches!(outcome, TcpStackOutcome::DeniedReset { .. }));
+        assert_eq!(runtime.stack().resets, 1);
+        assert_eq!(runtime.stack().opened, 0);
+        assert_eq!(runtime.egress().tcp_attempts, 0);
+    }
+
+    #[test]
+    fn tcp_stack_runtime_opens_host_connect_after_policy_allows() {
+        let stack = FakeTcpStack {
+            next: Some(tcp_stack_attempt()),
+            ..FakeTcpStack::default()
+        };
+        let mut rules = RuleSet::default();
+        let mut rule = PolicyRule::allow("allow-tcp-stack");
+        rule.protocol = Some(Protocol::Tcp);
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = TcpStackRuntime::new(
+            stack,
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("tcp-stack-allow").unwrap(),
+        );
+
+        let outcome = runtime.handle_next_connect(100).unwrap();
+
+        assert!(matches!(outcome, TcpStackOutcome::HostConnectOpened { .. }));
+        assert_eq!(runtime.stack().resets, 0);
+        assert_eq!(runtime.stack().opened, 1);
+        assert_eq!(runtime.egress().tcp_attempts, 1);
     }
 
     #[test]
