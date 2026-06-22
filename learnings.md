@@ -188,3 +188,7 @@ The production setup sequence should create the TUN fd first, then configure int
 ## 2026-06-21 — flow limits should reject only new state
 
 When a UDP flow table is at capacity, reject new flow creation but keep allowing updates to existing flows. Otherwise a full table could break cleanup/refresh behavior for flows that are already being tracked.
+
+## 2026-06-21 — resource limits need config-level validation
+
+Resource limit primitives are not enough; runtime config should reject nonsensical values like zero before constructing stateful components. Keep policy-only loading compatible while extending the combined runtime config.

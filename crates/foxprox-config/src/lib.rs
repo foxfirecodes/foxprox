@@ -30,6 +30,7 @@ pub enum ConfigError {
     InvalidEndpoint(String),
     InvalidCidr(String),
     InvalidTimeout(String),
+    InvalidLimit(String),
     InvalidCore(String),
 }
 
@@ -45,6 +46,7 @@ impl fmt::Display for ConfigError {
             Self::InvalidEndpoint(value) => write!(f, "invalid-endpoint: {value}"),
             Self::InvalidCidr(value) => write!(f, "invalid-cidr: {value}"),
             Self::InvalidTimeout(value) => write!(f, "invalid-timeout: {value}"),
+            Self::InvalidLimit(value) => write!(f, "invalid-limit: {value}"),
             Self::InvalidCore(value) => write!(f, "invalid-core-policy: {value}"),
         }
     }
@@ -57,6 +59,13 @@ impl std::error::Error for ConfigError {}
 pub struct FoxproxConfig {
     pub policy: PolicyConfig,
     pub udp_flow_timeouts: UdpFlowTimeouts,
+    pub resource_limits: ResourceLimits,
+}
+
+/// Runtime resource limits loaded from configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub struct ResourceLimits {
+    pub udp_max_flows: Option<usize>,
 }
 
 /// Parse TOML configuration into validated runtime config.
@@ -84,6 +93,8 @@ struct RawPolicyConfig {
     icmp: RawIcmpPolicy,
     #[serde(default)]
     udp_timeouts: RawUdpFlowTimeouts,
+    #[serde(default)]
+    resource_limits: RawResourceLimits,
     #[serde(default)]
     rules: Vec<RawPolicyRule>,
 }
@@ -122,10 +133,12 @@ impl TryFrom<RawPolicyConfig> for FoxproxConfig {
             rules,
         };
         let udp_flow_timeouts = parse_udp_flow_timeouts(value.udp_timeouts)?;
+        let resource_limits = parse_resource_limits(value.resource_limits)?;
 
         Ok(Self {
             policy,
             udp_flow_timeouts,
+            resource_limits,
         })
     }
 }
@@ -157,6 +170,13 @@ struct RawUdpFlowTimeouts {
     generic_seconds: Option<u64>,
     #[serde(default)]
     quic_candidate_seconds: Option<u64>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawResourceLimits {
+    #[serde(default)]
+    udp_max_flows: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -292,6 +312,17 @@ fn parse_udp_flow_timeouts(value: RawUdpFlowTimeouts) -> Result<UdpFlowTimeouts,
             defaults.quic_candidate,
             "udp_timeouts.quic_candidate_seconds",
         )?,
+    })
+}
+
+fn parse_resource_limits(value: RawResourceLimits) -> Result<ResourceLimits, ConfigError> {
+    if value.udp_max_flows == Some(0) {
+        return Err(ConfigError::InvalidLimit(
+            "resource_limits.udp_max_flows must be > 0".to_owned(),
+        ));
+    }
+    Ok(ResourceLimits {
+        udp_max_flows: value.udp_max_flows,
     })
 }
 
@@ -534,6 +565,61 @@ mod tests {
         assert_eq!(state.expires_at, now + Duration::from_secs(3));
         assert!(table.expire(now + Duration::from_secs(2)).is_empty());
         assert_eq!(table.expire(now + Duration::from_secs(3)).len(), 1);
+    }
+
+    #[test]
+    fn loaded_udp_max_flows_limits_flow_table_growth() {
+        let config = config_from_toml(
+            r#"
+            [resource_limits]
+            udp_max_flows = 1
+            "#,
+        )
+        .unwrap();
+        let now = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_200);
+        let max_flows = config.resource_limits.udp_max_flows.unwrap();
+        let mut table = UdpFlowTable::with_max_flows(config.udp_flow_timeouts, max_flows);
+        let first = NormalizedEvent::DnsQuery(DnsQuery {
+            sandbox_id: SandboxId::new("config-limit-test").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: Some(Endpoint::udp("10.0.0.2".parse().unwrap(), 53000)),
+            resolver: Endpoint::udp("10.0.0.1".parse().unwrap(), 53),
+            hostname: "one.example".to_owned(),
+            query_type: "A".to_owned(),
+        });
+        let second = NormalizedEvent::DnsQuery(DnsQuery {
+            sandbox_id: SandboxId::new("config-limit-test").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: Some(Endpoint::udp("10.0.0.3".parse().unwrap(), 53001)),
+            resolver: Endpoint::udp("10.0.0.1".parse().unwrap(), 53),
+            hostname: "two.example".to_owned(),
+            query_type: "A".to_owned(),
+        });
+
+        assert!(matches!(
+            table.observe_event(&first, now, 40),
+            UdpFlowObservation::Created(_)
+        ));
+        assert!(matches!(
+            table.observe_event(&second, now, 40),
+            UdpFlowObservation::LimitReached { max_flows: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn zero_udp_max_flows_is_rejected() {
+        let error = config_from_toml(
+            r#"
+            [resource_limits]
+            udp_max_flows = 0
+            "#,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            ConfigError::InvalidLimit("resource_limits.udp_max_flows must be > 0".to_owned())
+        );
     }
 
     #[test]

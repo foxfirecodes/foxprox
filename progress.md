@@ -1029,3 +1029,24 @@
 - What failed or surprised the agent: no behavior failures; the limit belongs on new-flow creation only so active flows can refresh/close cleanly even when the table is full.
 - What remains unproven: loading max-flow limits from TOML, runtime action when limits are hit, audit events for resource-limit drops, TCP/proxy connection limits, and async backpressure are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — TOML resource limit → UDP flow table slice
+
+- Slice attempted: load the UDP max-flow resource limit from TOML and prove it constructs a limited `UdpFlowTable`.
+- Why next: UDP flow limits exist in code, but runtime configuration cannot yet set them; alpha requires resource limits to be configurable rather than hard-coded.
+- Verification plan: extend `FoxproxConfig` with resource limits, parse `[resource_limits] udp_max_flows`, reject zero values, verify the loaded limit rejects a second flow in `UdpFlowTable`, then run formatting, clippy, focused config tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — TOML resource limit → UDP flow table
+
+- Slice attempted: load the UDP max-flow resource limit from TOML and prove it constructs a limited flow table.
+- Why next: `UdpFlowTable` limits existed but were not user-configurable; alpha robustness requires resource limits to come from runtime config.
+- What changed: `FoxproxConfig` now includes `ResourceLimits`, parses `[resource_limits] udp_max_flows`, rejects zero values, and preserves policy-only config compatibility.
+- Verification:
+  - Focused checks passed: `cargo test -p foxprox-config udp_max_flows -- --nocapture` verified a loaded max flow count rejects a second UDP flow and zero `udp_max_flows` is rejected.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 9 `foxprox-config` tests and all existing workspace tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: the first workspace verification output was interrupted before doc tests, but rerunning `cargo test --workspace && cargo fmt --check` completed successfully.
+- What remains unproven: runtime action/audit when UDP limits are hit, TCP/proxy connection limits, CLI consumption of combined runtime limits beyond tests, and async audit backpressure in live forwarding are still absent.
+- Commit: this commit.
