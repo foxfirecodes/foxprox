@@ -5,8 +5,10 @@
 
 #![forbid(unsafe_code)]
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
+use foxprox_core::Endpoint;
+use foxprox_runtime::TcpStackConnectAttempt;
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Loopback, Medium};
 use smoltcp::socket::tcp;
@@ -34,6 +36,7 @@ pub struct SmoltcpIpLoopback {
     device: Loopback,
     sockets: SocketSet<'static>,
     tcp_handles: Vec<SocketHandle>,
+    listener_ports: Vec<u16>,
     config: SmoltcpIpConfig,
 }
 
@@ -58,6 +61,7 @@ impl SmoltcpIpLoopback {
             device,
             sockets: SocketSet::new(Vec::new()),
             tcp_handles: Vec::new(),
+            listener_ports: Vec::new(),
             config,
         })
     }
@@ -87,6 +91,7 @@ impl SmoltcpIpLoopback {
             .listen(port)
             .map_err(|_| SmoltcpAdapterError::TcpListenRejected)?;
         self.tcp_handles.push(handle);
+        self.listener_ports.push(port);
         Ok(())
     }
 
@@ -124,6 +129,27 @@ impl SmoltcpIpLoopback {
             .count()
     }
 
+    pub fn active_tcp_connect_attempts(&mut self) -> Vec<TcpStackConnectAttempt> {
+        self.tcp_handles
+            .iter()
+            .filter_map(|handle| {
+                let socket = self.sockets.get::<tcp::Socket>(*handle);
+                if !socket.is_active() {
+                    return None;
+                }
+                let local = socket.local_endpoint()?;
+                if self.listener_ports.contains(&local.port) {
+                    return None;
+                }
+                let remote = socket.remote_endpoint()?;
+                Some(TcpStackConnectAttempt {
+                    source: endpoint_to_foxprox(local)?,
+                    destination: endpoint_to_foxprox(remote)?,
+                })
+            })
+            .collect()
+    }
+
     pub fn poll_once(&mut self, now_millis: i64) {
         let _ = self.iface.poll(
             Instant::from_millis(now_millis),
@@ -136,6 +162,14 @@ impl SmoltcpIpLoopback {
 fn ipv4_to_smoltcp(address: Ipv4Addr) -> IpAddress {
     let octets = address.octets();
     IpAddress::v4(octets[0], octets[1], octets[2], octets[3])
+}
+
+fn endpoint_to_foxprox(endpoint: smoltcp::wire::IpEndpoint) -> Option<Endpoint> {
+    match endpoint.addr {
+        IpAddress::Ipv4(address) => Some(Endpoint::new(IpAddr::V4(address), endpoint.port)),
+        #[allow(unreachable_patterns)]
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -197,6 +231,42 @@ mod tests {
         }
 
         assert_eq!(adapter.active_tcp_socket_count(), 2);
+    }
+
+    #[test]
+    fn active_loopback_client_exports_normalized_connect_attempt() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        adapter
+            .connect_tcp(Ipv4Addr::new(10, 66, 0, 1), 8080, 50000, 1024, 1024)
+            .unwrap();
+        for millis in 1..20 {
+            adapter.poll_once(millis);
+            if !adapter.active_tcp_connect_attempts().is_empty() {
+                break;
+            }
+        }
+
+        let attempts = adapter.active_tcp_connect_attempts();
+
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(
+            attempts[0].source.ip,
+            IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))
+        );
+        assert_eq!(attempts[0].source.port, 50000);
+        assert_eq!(
+            attempts[0].destination.ip,
+            IpAddr::V4(Ipv4Addr::new(10, 66, 0, 1))
+        );
+        assert_eq!(attempts[0].destination.port, 8080);
     }
 
     #[test]

@@ -1220,3 +1220,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: active smoltcp sockets are not yet translated into foxprox runtime connect attempts or bridged to host sockets.
 - Exact next step: commit smoltcp loopback connection proof, then translate active smoltcp TCP endpoints into a `TcpStackConnectAttempt` without leaking smoltcp endpoint types.
+
+## 2026-06-22T21:56:10Z
+- Current objective: continue after smoltcp loopback connect proof by translating active smoltcp TCP endpoints into normalized runtime connect attempts.
+- Git status summary: clean worktree before edits after commit `9c0f895`.
+- Intended slice: expose active client-side smoltcp TCP endpoints as `TcpStackConnectAttempt` while filtering listener sockets and keeping smoltcp endpoint types inside the adapter crate.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/Cargo.toml`, `crates/foxprox-smoltcp/src/lib.rs`, `Cargo.lock`, `progress.md`.
+- Remaining risks: normalized attempts are observed from smoltcp loopback only; policy/audit gating and host bridge integration remain separate runtime paths.
+- Exact next step: add endpoint conversion and loopback assertion for source/destination ports.
+
+## 2026-06-22T21:59:35Z
+- Current objective: expose smoltcp active endpoints through the normalized TCP stack adapter boundary.
+- Files changed: `crates/foxprox-smoltcp/Cargo.toml`, `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on one long assertion; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 7 smoltcp adapter tests passed. The smoltcp adapter now filters listener sockets and exports active client endpoints as normalized `TcpStackConnectAttempt` values with source/destination `Endpoint`s.
+- Commit hash when committed: pending.
+- Remaining risks: exported connect attempts are not yet consumed by `TcpStackRuntime`, and duplicate reporting suppression/reset semantics are not implemented.
+- Exact next step: commit smoltcp connect-attempt export, then implement `TcpStackAdapter` for the smoltcp adapter and verify policy-gated host egress with a fake egress.
