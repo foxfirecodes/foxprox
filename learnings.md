@@ -185,3 +185,7 @@ Synthetic ping replies should be produced only after the TUN packet handler has 
 ## 2026-06-21 - Host egress should require an allow-derived permit
 
 Future host socket code should accept an `EgressPermit` built from a shared policy allow decision, not raw parser metadata. This keeps TUN, HTTP, CONNECT, and SOCKS frontends from accidentally bypassing the policy/audit boundary.
+
+## 2026-06-21 - Attribution mismatch audit needs both names
+
+For SNI/DNS mismatch review, logging only the selected hostname and denial reason is insufficient. Audit records should preserve the presented hostname and DNS-correlated hostname together so reviewers can see the conflict without reconstructing flow state.

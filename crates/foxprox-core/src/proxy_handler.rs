@@ -144,6 +144,8 @@ fn malformed_proxy_outcome(
         destination: None,
         requested_port: None,
         hostname: None,
+        presented_hostname: None,
+        dns_attribution: None,
         hostname_source: HostnameSource::None,
         hostname_confidence: HostnameConfidence::None,
         dns_query_type: None,

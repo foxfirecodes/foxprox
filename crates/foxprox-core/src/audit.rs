@@ -22,6 +22,8 @@ pub struct AuditEvent {
     pub destination: Option<Endpoint>,
     pub requested_port: Option<u16>,
     pub hostname: Option<Hostname>,
+    pub presented_hostname: Option<Hostname>,
+    pub dns_attribution: Option<Hostname>,
     pub hostname_source: HostnameSource,
     pub hostname_confidence: HostnameConfidence,
     pub dns_query_type: Option<DnsQueryType>,
@@ -48,6 +50,8 @@ pub struct AuditPolicyContext {
     pub destination: Option<Endpoint>,
     pub requested_port: Option<u16>,
     pub hostname: Option<Hostname>,
+    pub presented_hostname: Option<Hostname>,
+    pub dns_attribution: Option<Hostname>,
     pub hostname_source: HostnameSource,
     pub hostname_confidence: HostnameConfidence,
     pub dns_query_type: Option<DnsQueryType>,
@@ -71,6 +75,8 @@ impl AuditPolicyContext {
             destination: request.destination,
             requested_port: request.requested_port,
             hostname: request.attribution.hostname.clone(),
+            presented_hostname: request.presented_hostname.clone(),
+            dns_attribution: request.dns_attribution.clone(),
             hostname_source: request.attribution.source,
             hostname_confidence: request.attribution.confidence,
             dns_query_type: request.dns_query_type,
@@ -97,6 +103,8 @@ impl AuditEvent {
             destination: None,
             requested_port: None,
             hostname: None,
+            presented_hostname: None,
+            dns_attribution: None,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -130,6 +138,8 @@ impl AuditEvent {
             destination: None,
             requested_port: None,
             hostname: None,
+            presented_hostname: None,
+            dns_attribution: None,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -159,6 +169,8 @@ impl AuditEvent {
             destination: context.destination,
             requested_port: context.requested_port,
             hostname: context.hostname,
+            presented_hostname: context.presented_hostname,
+            dns_attribution: context.dns_attribution,
             hostname_source: context.hostname_source,
             hostname_confidence: context.hostname_confidence,
             dns_query_type: context.dns_query_type,
@@ -196,6 +208,8 @@ impl AuditEvent {
             destination,
             requested_port: destination.and_then(|endpoint| endpoint.port),
             hostname: Some(metadata.hostname.clone()),
+            presented_hostname: None,
+            dns_attribution: None,
             hostname_source: HostnameSource::BrokerDnsQuery,
             hostname_confidence: HostnameConfidence::High,
             dns_query_type: Some(metadata.query_type),
@@ -233,6 +247,8 @@ impl AuditEvent {
             destination,
             requested_port: destination.and_then(|endpoint| endpoint.port),
             hostname: Some(metadata.hostname.clone()),
+            presented_hostname: None,
+            dns_attribution: None,
             hostname_source: HostnameSource::DnsCache,
             hostname_confidence: HostnameConfidence::Medium,
             dns_query_type: Some(metadata.query_type),
@@ -271,6 +287,8 @@ impl AuditEvent {
             destination: None,
             requested_port: None,
             hostname: None,
+            presented_hostname: None,
+            dns_attribution: None,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -303,6 +321,8 @@ impl AuditEvent {
             destination: Some(entry.key.destination),
             requested_port: entry.key.destination.port,
             hostname: None,
+            presented_hostname: None,
+            dns_attribution: None,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -339,6 +359,8 @@ impl AuditEvent {
             destination: Some(entry.key.destination),
             requested_port: entry.key.destination.port,
             hostname: None,
+            presented_hostname: None,
+            dns_attribution: None,
             hostname_source: HostnameSource::None,
             hostname_confidence: HostnameConfidence::None,
             dns_query_type: None,
@@ -375,6 +397,22 @@ impl AuditEvent {
             &mut out,
             "hostname",
             self.hostname.as_ref().map(|hostname| hostname.as_str()),
+            false,
+        );
+        push_json_option_string_field(
+            &mut out,
+            "presented_hostname",
+            self.presented_hostname
+                .as_ref()
+                .map(|hostname| hostname.as_str()),
+            false,
+        );
+        push_json_option_string_field(
+            &mut out,
+            "dns_attribution",
+            self.dns_attribution
+                .as_ref()
+                .map(|hostname| hostname.as_str()),
             false,
         );
         push_json_string_field(
@@ -868,6 +906,8 @@ mod tests {
                 )),
                 requested_port: Some(443),
                 hostname: None,
+                presented_hostname: None,
+                dns_attribution: None,
                 hostname_source: HostnameSource::None,
                 hostname_confidence: HostnameConfidence::None,
                 dns_query_type: None,
@@ -1086,6 +1126,39 @@ mod tests {
     }
 
     #[test]
+    fn audit_context_preserves_hostname_mismatch_evidence() {
+        let sni = Hostname::parse("evil.example").unwrap();
+        let dns = Hostname::parse("good.example").unwrap();
+        let request = PolicyRequest::new(Protocol::TlsSni)
+            .with_destination(Endpoint::tcp(
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+                443,
+            ))
+            .with_attribution(crate::attribution::HostAttribution::tls_sni(sni.clone()))
+            .with_presented_hostname(sni.clone())
+            .with_dns_attribution(dns.clone());
+
+        let event = AuditEvent::from_policy_decision(
+            AuditPolicyContext::from_request(101, AuditEventKind::TlsClientHello, &request),
+            &Decision::Deny {
+                behavior: DenyBehavior::Drop,
+                reason: DenialReason::AttributionMismatch,
+                rule_id: None,
+            },
+        );
+
+        assert_eq!(event.hostname.as_ref(), Some(&sni));
+        assert_eq!(event.presented_hostname.as_ref(), Some(&sni));
+        assert_eq!(event.dns_attribution.as_ref(), Some(&dns));
+        assert_eq!(event.reason, Some(DenialReason::AttributionMismatch));
+        let line = event.to_json_line();
+        assert!(line.contains("\"hostname\":\"evil.example\""));
+        assert!(line.contains("\"presented_hostname\":\"evil.example\""));
+        assert!(line.contains("\"dns_attribution\":\"good.example\""));
+        assert!(line.contains("\"reason\":\"attribution_mismatch\""));
+    }
+
+    #[test]
     fn dns_query_audit_preserves_query_type_and_endpoints() {
         let metadata = crate::dns::parse_dns_query(
             &[
@@ -1256,6 +1329,8 @@ mod tests {
                 destination: None,
                 requested_port: None,
                 hostname: None,
+                presented_hostname: None,
+                dns_attribution: None,
                 hostname_source: HostnameSource::None,
                 hostname_confidence: HostnameConfidence::None,
                 dns_query_type: None,

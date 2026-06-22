@@ -1011,3 +1011,22 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * denied/fail-closed requests and unsupported protocols cannot be converted into host socket intents.
 * Audit evidence: egress permits carry policy rule provenance for later correlation with allow audit records; no new audit event was added in this cycle.
 * Residual risk: actual host TCP/UDP socket code is still absent; runtime code must require `EgressPermit` rather than raw endpoints to preserve this no-bypass boundary.
+
+## 2026-06-21 - Hostname mismatch audit evidence
+
+* Invariant under work: audit records for hostname-based decisions must preserve both presented hostname and DNS-correlated hostname when available so SNI/DNS mismatch denials are independently reviewable.
+* Threat or failure mode addressed: an attribution mismatch denial that logs only the primary hostname can hide the conflicting source and make security review rely on re-parsing traffic or reproducing flow correlation state.
+* Planned verification: extend audit context/JSON with `presented_hostname` and `dns_attribution`, add mismatch audit tests, then run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Hostname mismatch audit evidence results
+
+* Tests added/updated:
+  * policy-derived TLS audit context now preserves primary hostname attribution, presented hostname, DNS-correlated hostname, and attribution-mismatch denial reason.
+  * audit JSON serialization includes `presented_hostname` and `dns_attribution` fields with explicit nulls elsewhere through the common schema.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 144 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * SNI/DNS mismatch denials can now be reviewed from a single audit record without re-parsing traffic or consulting transient DNS cache state.
+  * other audit records retain explicit null mismatch fields, keeping the JSON schema stable.
+* Audit evidence: unit tests assert mismatch hostnames and serialized JSON fragments for hostname, presented hostname, DNS attribution, and mismatch reason.
+* Residual risk: audit schema still does not include QUIC header version/type metadata or hidden-SNI booleans as separate fields; hidden-SNI is currently represented through denial reason and hostname absence.
