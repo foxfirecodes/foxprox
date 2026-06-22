@@ -15,6 +15,7 @@ use foxprox_audit::{audit_record_to_json_line, AuditSinkError};
 use foxprox_broker::IpPacketBroker;
 use foxprox_config::{policy_config_from_toml, ConfigError};
 use foxprox_core::{FrontendKind, PolicyEngine, SandboxId};
+use foxprox_device::{TunIoError, TunPacketIo};
 use foxprox_packet::PacketContext;
 
 /// CLI/runtime errors reported to users.
@@ -26,6 +27,7 @@ pub enum CliError {
     Core(String),
     Audit(AuditSinkError),
     Reply(String),
+    TunIo(TunIoError),
 }
 
 impl fmt::Display for CliError {
@@ -37,6 +39,7 @@ impl fmt::Display for CliError {
             Self::Core(error) => write!(f, "{error}"),
             Self::Audit(error) => write!(f, "{error}"),
             Self::Reply(error) => write!(f, "packet-reply-error: {error}"),
+            Self::TunIo(error) => write!(f, "{error}"),
         }
     }
 }
@@ -47,6 +50,7 @@ impl std::error::Error for CliError {
             Self::Io { error, .. } => Some(error),
             Self::Config(error) => Some(error),
             Self::Audit(error) => Some(error),
+            Self::TunIo(error) => Some(error),
             Self::Usage(_) | Self::Core(_) | Self::Reply(_) => None,
         }
     }
@@ -61,6 +65,12 @@ impl From<ConfigError> for CliError {
 impl From<AuditSinkError> for CliError {
     fn from(value: AuditSinkError) -> Self {
         Self::Audit(value)
+    }
+}
+
+impl From<TunIoError> for CliError {
+    fn from(value: TunIoError) -> Self {
+        Self::TunIo(value)
     }
 }
 
@@ -105,6 +115,22 @@ pub fn process_packet_once(
         outbound_packet_count,
         outbound_byte_count,
     })
+}
+
+/// Process one packet directly from a TUN-like fd and write synthesized replies
+/// back to the same fd.
+pub fn process_tun_io_once(
+    config_toml: &str,
+    sandbox_id: &str,
+    tun: &mut TunPacketIo,
+) -> Result<PacketOnceSummary, CliError> {
+    let packet = tun.read_packet()?;
+    let mut outbound = Vec::new();
+    let summary = process_packet_once(config_toml, sandbox_id, &packet, &mut outbound)?;
+    if !outbound.is_empty() {
+        tun.write_packet(&outbound)?;
+    }
+    Ok(summary)
 }
 
 /// Execute the `packet-once` command using process stdin/stdout semantics.
@@ -228,6 +254,40 @@ mod tests {
             .copy_from_slice(&std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).octets());
         packet[40..].copy_from_slice(&payload);
         packet
+    }
+
+    #[test]
+    fn tun_io_once_reads_packet_emits_audit_and_writes_reply_to_fd() {
+        use std::io::{Read, Write};
+        use std::os::fd::OwnedFd;
+        use std::os::unix::net::UnixStream;
+
+        let (mut peer, broker_side) = UnixStream::pair().unwrap();
+        let owned: OwnedFd = broker_side.into();
+        let mut tun = TunPacketIo::from_owned_fd(owned, 4096).unwrap();
+        let packet = echo_request_packet();
+        peer.write_all(&packet).unwrap();
+
+        let summary = process_tun_io_once(
+            r#"
+            default_policy = "deny"
+
+            [icmp]
+            allow_echo = true
+            "#,
+            "tun-io-test",
+            &mut tun,
+        )
+        .unwrap();
+
+        let mut reply = vec![0_u8; packet.len()];
+        peer.read_exact(&mut reply).unwrap();
+        let audit: Value = serde_json::from_str(&summary.audit_json_line).unwrap();
+        assert_eq!(audit["kind"], "icmp_message");
+        assert_eq!(audit["decision"], "allowed");
+        assert_eq!(summary.outbound_packet_count, 1);
+        assert_eq!(summary.outbound_byte_count, packet.len());
+        assert_eq!(reply[20], 0);
     }
 
     #[test]

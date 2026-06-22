@@ -1096,3 +1096,24 @@
 - What failed or surprised the agent: no behavior failures; a Unix stream fd is enough for packet IO boundary evidence while real TUN fd behavior remains covered by the TUN create primitive.
 - What remains unproven: wiring `TunPacketIo` to the broker loop, continuous TUN read/write scheduling, received real TUN fd from bwrap setup, and live sandbox packet logs are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — TUN fd packet IO → broker/audit/write-back slice
+
+- Slice attempted: process one packet directly from a TUN-like fd adapter through config, broker policy/audit, and write synthesized outbound packets back to the fd.
+- Why next: `TunPacketIo` can read/write a received fd and `packet-once` can process in-memory bytes, but the broker runtime still lacks an fd-to-broker-to-fd proof.
+- Verification plan: add a CLI/runtime helper that reads one packet from `TunPacketIo`, runs `IpPacketBroker`, serializes audit JSON, writes outbound reply packets to the same fd, and verifies over a Unix stream fd stand-in using an ICMP echo request; run formatting, clippy, focused CLI tests, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — TUN fd packet IO → broker/audit/write-back
+
+- Slice attempted: process one packet directly from a TUN-like fd adapter through config, broker policy/audit, and write synthesized outbound packets back to the same fd.
+- Why next: `TunPacketIo` and in-memory `packet-once` processing were separate; broker runtime needed an fd-to-broker-to-fd proof for received setup fds.
+- What changed: `foxprox-cli` now depends on `foxprox-device` and exposes `process_tun_io_once`, which reads one packet from `TunPacketIo`, runs existing TOML policy and `IpPacketBroker`, serializes audit JSON, and writes any synthesized reply packet bytes back through `TunPacketIo`.
+- Verification:
+  - Focused check passed: `cargo test -p foxprox-cli tun_io_once -- --nocapture` verified an ICMP echo request sent over a Unix stream fd stand-in produced allowed JSON audit and wrote an ICMP echo reply back to the fd peer.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 5 `foxprox-cli` tests and all existing workspace tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; the existing packet-once core was reusable once fd IO was isolated in the device crate.
+- What remains unproven: continuous TUN event loop, real received TUN fd from bwrap setup, packet batching/MTU behavior, and live sandbox ping are still absent.
+- Commit: this commit.

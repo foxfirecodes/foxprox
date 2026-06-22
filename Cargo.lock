@@ -59,6 +59,7 @@ dependencies = [
  "foxprox-broker",
  "foxprox-config",
  "foxprox-core",
+ "foxprox-device",
  "foxprox-packet",
  "serde_json",
 ]

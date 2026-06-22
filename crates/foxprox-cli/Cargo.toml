@@ -11,6 +11,7 @@ foxprox-audit = { path = "../foxprox-audit" }
 foxprox-broker = { path = "../foxprox-broker" }
 foxprox-config = { path = "../foxprox-config" }
 foxprox-core = { path = "../foxprox-core" }
+foxprox-device = { path = "../foxprox-device" }
 foxprox-packet = { path = "../foxprox-packet" }
 
 [dev-dependencies]

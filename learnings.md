@@ -200,3 +200,7 @@ Rust tests in one process can run in parallel, so temp paths based only on proce
 ## 2026-06-21 — TUN fd consumption can be tested with fd stand-ins
 
 A broker-facing TUN IO wrapper only needs an owned fd with read/write behavior for boundary tests. Use a Unix stream pair as a deterministic fd stand-in, and keep real `/dev/net/tun` behavior in the create/ioctl tests.
+
+## 2026-06-21 — fd-backed packet processing can reuse packet-once core
+
+Keep packet processing byte-oriented and isolate fd reads/writes in `TunPacketIo`; then a TUN runtime helper can read one packet from a received fd, call the existing broker path, and write replies without duplicating policy/audit logic.
