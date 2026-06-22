@@ -912,7 +912,10 @@ pub struct BlockingDnsHttpRuntime<U, E> {
     lifecycle: RuntimeLifecycleHarness,
     dns_server: Option<BlockingDnsBrokerServer<U>>,
     http_proxy_server: Option<BlockingHttpProxyServer<E>>,
-    archived_audit_records: Vec<AuditRecord>,
+    aggregate_audit_records: Vec<AuditRecord>,
+    lifecycle_audit_len: usize,
+    dns_audit_len: usize,
+    http_proxy_audit_len: usize,
 }
 
 impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
@@ -982,13 +985,18 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
                 now_ms,
             )
             .map_err(BlockingProxyRuntimeError::Lifecycle)?;
+        let aggregate_audit_records: Vec<_> = lifecycle.audit().records().cloned().collect();
+        let lifecycle_audit_len = aggregate_audit_records.len();
         Ok(Self {
             sandbox_id,
             shared_dns_cache,
             lifecycle,
             dns_server: Some(dns_server),
             http_proxy_server: Some(http_proxy_server),
-            archived_audit_records: Vec::new(),
+            aggregate_audit_records,
+            lifecycle_audit_len,
+            dns_audit_len: 0,
+            http_proxy_audit_len: 0,
         })
     }
 
@@ -1010,20 +1018,26 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
         &mut self,
         now_ms: u64,
     ) -> Result<DnsBrokerStepResult, DnsUpstreamError> {
-        self.dns_server
+        let result = self
+            .dns_server
             .as_mut()
             .ok_or(DnsUpstreamError::Unavailable)?
-            .handle_one(self.sandbox_id.clone(), now_ms)
+            .handle_one(self.sandbox_id.clone(), now_ms);
+        self.archive_new_dns_records();
+        result
     }
 
     pub fn handle_http_proxy_once(
         &mut self,
         now_ms: u64,
     ) -> Result<HttpProxyListenerStepResult, ProxyEgressError> {
-        self.http_proxy_server
+        let result = self
+            .http_proxy_server
             .as_mut()
             .ok_or(ProxyEgressError::SendFailed)?
-            .handle_one(now_ms)
+            .handle_one(now_ms);
+        self.archive_new_http_records();
+        result
     }
 
     pub fn exit(
@@ -1032,27 +1046,23 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
         now_ms: u64,
     ) -> Result<(), RuntimeLifecycleError> {
         let mut cleanup_actions = Vec::new();
-        if let Some(dns_server) = self.dns_server.take() {
-            self.archived_audit_records
-                .extend(dns_server.handler().broker().audit().records().cloned());
+        if self.dns_server.is_some() {
             cleanup_actions.push(RuntimeCleanupAction::DnsListener);
         }
-        if let Some(http_proxy_server) = self.http_proxy_server.take() {
-            self.archived_audit_records.extend(
-                http_proxy_server
-                    .frontend()
-                    .broker()
-                    .audit()
-                    .records()
-                    .cloned(),
-            );
+        if self.http_proxy_server.is_some() {
             cleanup_actions.push(RuntimeCleanupAction::HttpProxyListener);
         }
         self.lifecycle.exit_with_cleanup(
             status,
             RuntimeCleanupReport::all_succeeded(cleanup_actions),
             now_ms,
-        )
+        )?;
+        self.archive_new_lifecycle_records();
+        self.archive_new_dns_records();
+        self.archive_new_http_records();
+        self.dns_server = None;
+        self.http_proxy_server = None;
+        Ok(())
     }
 
     pub fn shared_dns_cache(&self) -> SharedDnsCache {
@@ -1064,36 +1074,7 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
     }
 
     pub fn audit_records(&self) -> Vec<AuditRecord> {
-        let mut records = Vec::new();
-        records.extend(
-            self.lifecycle
-                .audit()
-                .records()
-                .filter(|record| record.kind != AuditKind::NetworkSessionExit)
-                .cloned(),
-        );
-        records.extend(self.archived_audit_records.iter().cloned());
-        if let Some(dns_server) = self.dns_server.as_ref() {
-            records.extend(dns_server.handler().broker().audit().records().cloned());
-        }
-        if let Some(http_proxy_server) = self.http_proxy_server.as_ref() {
-            records.extend(
-                http_proxy_server
-                    .frontend()
-                    .broker()
-                    .audit()
-                    .records()
-                    .cloned(),
-            );
-        }
-        records.extend(
-            self.lifecycle
-                .audit()
-                .records()
-                .filter(|record| record.kind == AuditKind::NetworkSessionExit)
-                .cloned(),
-        );
-        records
+        self.aggregate_audit_records.clone()
     }
 
     pub fn dns_server(&self) -> &BlockingDnsBrokerServer<U> {
@@ -1105,6 +1086,48 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
             .as_ref()
             .expect("HTTP proxy server is active")
     }
+
+    fn archive_new_lifecycle_records(&mut self) {
+        let records: Vec<_> = self
+            .lifecycle
+            .audit()
+            .records()
+            .skip(self.lifecycle_audit_len)
+            .cloned()
+            .collect();
+        self.lifecycle_audit_len += records.len();
+        self.aggregate_audit_records.extend(records);
+    }
+
+    fn archive_new_dns_records(&mut self) {
+        if let Some(dns_server) = self.dns_server.as_ref() {
+            let records: Vec<_> = dns_server
+                .handler()
+                .broker()
+                .audit()
+                .records()
+                .skip(self.dns_audit_len)
+                .cloned()
+                .collect();
+            self.dns_audit_len += records.len();
+            self.aggregate_audit_records.extend(records);
+        }
+    }
+
+    fn archive_new_http_records(&mut self) {
+        if let Some(http_proxy_server) = self.http_proxy_server.as_ref() {
+            let records: Vec<_> = http_proxy_server
+                .frontend()
+                .broker()
+                .audit()
+                .records()
+                .skip(self.http_proxy_audit_len)
+                .cloned()
+                .collect();
+            self.http_proxy_audit_len += records.len();
+            self.aggregate_audit_records.extend(records);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1115,7 +1138,11 @@ pub struct BlockingProxyRuntime<U, H, S> {
     dns_server: Option<BlockingDnsBrokerServer<U>>,
     http_proxy_server: Option<BlockingHttpProxyServer<H>>,
     socks5_proxy_server: Option<BlockingSocks5ProxyServer<S>>,
-    archived_audit_records: Vec<AuditRecord>,
+    aggregate_audit_records: Vec<AuditRecord>,
+    lifecycle_audit_len: usize,
+    dns_audit_len: usize,
+    http_proxy_audit_len: usize,
+    socks5_proxy_audit_len: usize,
 }
 
 impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingProxyRuntime<U, H, S> {
@@ -1210,6 +1237,8 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
                 now_ms,
             )
             .map_err(BlockingProxyRuntimeError::Lifecycle)?;
+        let aggregate_audit_records: Vec<_> = lifecycle.audit().records().cloned().collect();
+        let lifecycle_audit_len = aggregate_audit_records.len();
         Ok(Self {
             sandbox_id,
             shared_dns_cache,
@@ -1217,7 +1246,11 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
             dns_server: Some(dns_server),
             http_proxy_server: Some(http_proxy_server),
             socks5_proxy_server: Some(socks5_proxy_server),
-            archived_audit_records: Vec::new(),
+            aggregate_audit_records,
+            lifecycle_audit_len,
+            dns_audit_len: 0,
+            http_proxy_audit_len: 0,
+            socks5_proxy_audit_len: 0,
         })
     }
 
@@ -1246,30 +1279,39 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
         &mut self,
         now_ms: u64,
     ) -> Result<DnsBrokerStepResult, DnsUpstreamError> {
-        self.dns_server
+        let result = self
+            .dns_server
             .as_mut()
             .ok_or(DnsUpstreamError::Unavailable)?
-            .handle_one(self.sandbox_id.clone(), now_ms)
+            .handle_one(self.sandbox_id.clone(), now_ms);
+        self.archive_new_dns_records();
+        result
     }
 
     pub fn handle_http_proxy_once(
         &mut self,
         now_ms: u64,
     ) -> Result<HttpProxyListenerStepResult, ProxyEgressError> {
-        self.http_proxy_server
+        let result = self
+            .http_proxy_server
             .as_mut()
             .ok_or(ProxyEgressError::SendFailed)?
-            .handle_one(now_ms)
+            .handle_one(now_ms);
+        self.archive_new_http_records();
+        result
     }
 
     pub fn handle_socks5_proxy_once(
         &mut self,
         now_ms: u64,
     ) -> Result<Socks5ListenerStepResult, ProxyEgressError> {
-        self.socks5_proxy_server
+        let result = self
+            .socks5_proxy_server
             .as_mut()
             .ok_or(ProxyEgressError::SendFailed)?
-            .handle_one(now_ms)
+            .handle_one(now_ms);
+        self.archive_new_socks5_records();
+        result
     }
 
     pub fn exit(
@@ -1278,38 +1320,28 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
         now_ms: u64,
     ) -> Result<(), RuntimeLifecycleError> {
         let mut cleanup_actions = Vec::new();
-        if let Some(dns_server) = self.dns_server.take() {
-            self.archived_audit_records
-                .extend(dns_server.handler().broker().audit().records().cloned());
+        if self.dns_server.is_some() {
             cleanup_actions.push(RuntimeCleanupAction::DnsListener);
         }
-        if let Some(http_proxy_server) = self.http_proxy_server.take() {
-            self.archived_audit_records.extend(
-                http_proxy_server
-                    .frontend()
-                    .broker()
-                    .audit()
-                    .records()
-                    .cloned(),
-            );
+        if self.http_proxy_server.is_some() {
             cleanup_actions.push(RuntimeCleanupAction::HttpProxyListener);
         }
-        if let Some(socks5_proxy_server) = self.socks5_proxy_server.take() {
-            self.archived_audit_records.extend(
-                socks5_proxy_server
-                    .frontend()
-                    .broker()
-                    .audit()
-                    .records()
-                    .cloned(),
-            );
+        if self.socks5_proxy_server.is_some() {
             cleanup_actions.push(RuntimeCleanupAction::Socks5Listener);
         }
         self.lifecycle.exit_with_cleanup(
             status,
             RuntimeCleanupReport::all_succeeded(cleanup_actions),
             now_ms,
-        )
+        )?;
+        self.archive_new_lifecycle_records();
+        self.archive_new_dns_records();
+        self.archive_new_http_records();
+        self.archive_new_socks5_records();
+        self.dns_server = None;
+        self.http_proxy_server = None;
+        self.socks5_proxy_server = None;
+        Ok(())
     }
 
     pub fn shared_dns_cache(&self) -> SharedDnsCache {
@@ -1321,46 +1353,7 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
     }
 
     pub fn audit_records(&self) -> Vec<AuditRecord> {
-        let mut records = Vec::new();
-        records.extend(
-            self.lifecycle
-                .audit()
-                .records()
-                .filter(|record| record.kind != AuditKind::NetworkSessionExit)
-                .cloned(),
-        );
-        records.extend(self.archived_audit_records.iter().cloned());
-        if let Some(dns_server) = self.dns_server.as_ref() {
-            records.extend(dns_server.handler().broker().audit().records().cloned());
-        }
-        if let Some(http_proxy_server) = self.http_proxy_server.as_ref() {
-            records.extend(
-                http_proxy_server
-                    .frontend()
-                    .broker()
-                    .audit()
-                    .records()
-                    .cloned(),
-            );
-        }
-        if let Some(socks5_proxy_server) = self.socks5_proxy_server.as_ref() {
-            records.extend(
-                socks5_proxy_server
-                    .frontend()
-                    .broker()
-                    .audit()
-                    .records()
-                    .cloned(),
-            );
-        }
-        records.extend(
-            self.lifecycle
-                .audit()
-                .records()
-                .filter(|record| record.kind == AuditKind::NetworkSessionExit)
-                .cloned(),
-        );
-        records
+        self.aggregate_audit_records.clone()
     }
 
     pub fn dns_server(&self) -> &BlockingDnsBrokerServer<U> {
@@ -1377,6 +1370,63 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
         self.socks5_proxy_server
             .as_ref()
             .expect("SOCKS5 proxy server is active")
+    }
+
+    fn archive_new_lifecycle_records(&mut self) {
+        let records: Vec<_> = self
+            .lifecycle
+            .audit()
+            .records()
+            .skip(self.lifecycle_audit_len)
+            .cloned()
+            .collect();
+        self.lifecycle_audit_len += records.len();
+        self.aggregate_audit_records.extend(records);
+    }
+
+    fn archive_new_dns_records(&mut self) {
+        if let Some(dns_server) = self.dns_server.as_ref() {
+            let records: Vec<_> = dns_server
+                .handler()
+                .broker()
+                .audit()
+                .records()
+                .skip(self.dns_audit_len)
+                .cloned()
+                .collect();
+            self.dns_audit_len += records.len();
+            self.aggregate_audit_records.extend(records);
+        }
+    }
+
+    fn archive_new_http_records(&mut self) {
+        if let Some(http_proxy_server) = self.http_proxy_server.as_ref() {
+            let records: Vec<_> = http_proxy_server
+                .frontend()
+                .broker()
+                .audit()
+                .records()
+                .skip(self.http_proxy_audit_len)
+                .cloned()
+                .collect();
+            self.http_proxy_audit_len += records.len();
+            self.aggregate_audit_records.extend(records);
+        }
+    }
+
+    fn archive_new_socks5_records(&mut self) {
+        if let Some(socks5_proxy_server) = self.socks5_proxy_server.as_ref() {
+            let records: Vec<_> = socks5_proxy_server
+                .frontend()
+                .broker()
+                .audit()
+                .records()
+                .skip(self.socks5_proxy_audit_len)
+                .cloned()
+                .collect();
+            self.socks5_proxy_audit_len += records.len();
+            self.aggregate_audit_records.extend(records);
+        }
     }
 }
 
@@ -3074,6 +3124,111 @@ mod tests {
         assert!(aggregate
             .iter()
             .any(|record| record.kind == AuditKind::SocksConnectDecision));
+    }
+
+    #[test]
+    fn blocking_proxy_runtime_aggregate_preserves_interleaved_component_order() {
+        let query = dns_query(0x8d8d, "Later.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let shared_cache = SharedDnsCache::default();
+
+        let mut dns_config = PolicyConfig::default();
+        dns_config.rules.push(
+            PolicyRule::allow("allow-later-dns")
+                .protocol(Protocol::Dns)
+                .hostname("later.test"),
+        );
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(dns_config), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+
+        let mut http_config = PolicyConfig::default();
+        http_config.rules.push(
+            PolicyRule::allow("allow-http-ip")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Http)
+                .origin("http", "127.0.0.1", 80),
+        );
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(http_config), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+
+        let mut runtime = BlockingProxyRuntime::bind(
+            "s1",
+            8,
+            shared_cache,
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            3_000,
+        )
+        .unwrap();
+
+        let mut http_client = TcpStream::connect(runtime.http_proxy_addr().unwrap()).unwrap();
+        http_client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        http_client
+            .write_all(b"GET http://127.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            .unwrap();
+        let http_step = runtime.handle_http_proxy_once(3_010).unwrap();
+        assert_eq!(http_step.decision, Decision::Allow);
+        assert!(http_step.forwarded);
+        let mut http_response = String::new();
+        http_client.read_to_string(&mut http_response).unwrap();
+        assert!(http_response.starts_with("HTTP/1.1 200 OK"));
+
+        let dns_client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        dns_client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        dns_client
+            .send_to(&query, runtime.dns_addr().unwrap())
+            .unwrap();
+        let dns_step = runtime.handle_dns_once(3_020).unwrap();
+        assert_eq!(dns_step.decision, Decision::Allow);
+        let mut dns_reply = [0u8; 512];
+        let (dns_reply_len, _) = dns_client.recv_from(&mut dns_reply).unwrap();
+        assert!(dns_reply_len > query.len());
+
+        runtime.exit(RuntimeExitStatus::Clean, 3_100).unwrap();
+        let aggregate = runtime.audit_records();
+        let http_index = aggregate
+            .iter()
+            .position(|record| record.kind == AuditKind::HttpRequestDecision)
+            .unwrap();
+        let dns_index = aggregate
+            .iter()
+            .position(|record| record.kind == AuditKind::DnsQueryDecision)
+            .unwrap();
+        let exit_index = aggregate
+            .iter()
+            .position(|record| record.kind == AuditKind::NetworkSessionExit)
+            .unwrap();
+        assert!(http_index < dns_index);
+        assert!(dns_index < exit_index);
+        assert_eq!(aggregate[http_index].decision, Some(Decision::Allow));
+        assert_eq!(
+            aggregate[http_index].origin.as_ref().unwrap().host,
+            "127.0.0.1"
+        );
+        assert_eq!(aggregate[dns_index].hostname.as_deref(), Some("later.test"));
+        assert_eq!(aggregate[exit_index].details["cleanup_status"], "complete");
     }
 
     #[test]

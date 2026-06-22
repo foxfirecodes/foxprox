@@ -1956,3 +1956,32 @@ Added `RuntimeChildExit` and `RuntimeLifecycleHarness::exit_with_cleanup_and_chi
 
 ### Remaining blind spots
 - Child process status is still injected into a platform-independent lifecycle harness. Final runtime must wire this to a real spawned child, task joins, and OS process status collection.
+
+## 2026-06-22 — Ordered aggregate runtime audit and unknown child fail-closed
+
+### Commands run
+- `cargo fmt` — applied formatting for ordered aggregate audit and child-status hardening.
+- `cargo test -p foxprox-core runtime::tests --all-targets --all-features` — passed, 12 runtime lifecycle tests.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_aggregate_preserves_interleaved_component_order --all-targets --all-features` — passed, interleaved aggregate ordering regression.
+- `cargo test -p foxprox-egress blocking_proxy_runtime --all-targets --all-features` — passed, blocking proxy runtime regressions.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 125 core tests, 3 device tests, 29 egress tests, and 8 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_lifecycle_unknown_child_status_is_fail_closed ... ok`
+- `foxprox_egress::tests::blocking_proxy_runtime_aggregate_preserves_interleaved_component_order ... ok`
+- `foxprox_egress::tests::blocking_proxy_runtime_shares_delivered_dns_cache_with_socks_listener ... ok`
+
+### Interpretation
+Addressed round-31 and round-32 high findings. Blocking runtime aggregate audit records are now archived after each handled lifecycle/DNS/proxy event instead of grouped by component at read time; a regression drives HTTP activity before a later DNS query and proves aggregate order preserves that interleaving before session exit. Runtime listener cleanup now calls `exit_with_cleanup` before retiring handles, so exit audit backpressure cannot silently retire listeners without session-exit evidence. Unknown/incomplete child status (`RuntimeChildExit::default`) is now fail-closed with structured `child_status=unknown` evidence.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Aggregate ordering is proven for blocking single-step runtime calls. Final runtime still needs a single supervised async audit output path with global backpressure across lifecycle, DNS, proxy, TUN/smoltcp, child wait, task joins, and cleanup.

@@ -160,3 +160,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Child exit status is part of session outcome
 
 - Runtime lifecycle exit should not only record broker status and cleanup. The supervised child process status (PID, exit code, signal) belongs in `network_session_exit`, and abnormal child termination should turn an otherwise clean runtime exit into fail-closed evidence.
+
+## 2026-06-22 — Runtime aggregate ledgers need capture-time ordering
+
+- Aggregating per-component audit ledgers after the fact can misrepresent interleaved runtime activity if records are grouped by component. Runtime proofs should archive new records immediately after each handled event so the aggregate evidence reflects capture order; unknown child status is not a clean exit and must fail closed.

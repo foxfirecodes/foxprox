@@ -141,7 +141,7 @@ impl RuntimeChildExit {
     }
 
     fn is_failed(&self) -> bool {
-        self.signal.is_some() || self.exit_code.is_some_and(|code| code != 0)
+        self.signal.is_some() || self.exit_code != Some(0)
     }
 }
 
@@ -731,6 +731,32 @@ mod tests {
         assert_eq!(records[1].details["child_status"], "signaled");
         assert_eq!(records[1].details["child_process_id"], "43");
         assert_eq!(records[1].details["child_signal"], "15");
+    }
+
+    #[test]
+    fn runtime_lifecycle_unknown_child_status_is_fail_closed() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start(vec![RuntimeComponent::Socks5Listener], 1_000)
+            .unwrap();
+        runtime
+            .exit_with_cleanup_and_child(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::Socks5Listener]),
+                Some(RuntimeChildExit::default()),
+                1_250,
+            )
+            .unwrap();
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["child_status"], "unknown");
+        assert!(!records[1].details.contains_key("child_process_id"));
+        assert!(!records[1].details.contains_key("child_exit_code"));
+        assert!(!records[1].details.contains_key("child_signal"));
     }
 
     #[test]
