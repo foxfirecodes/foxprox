@@ -197,3 +197,7 @@ When policy explicitly allows hidden-SNI traffic by IP/CIDR, the audit record mu
 ## 2026-06-21 - QUIC audit should separate header evidence from attribution
 
 QUIC candidate audit records should include bounded header metadata such as form, type, version, support status, and connection-ID lengths, but should keep hostname attribution null unless future QUIC/TLS parsing safely extracts it.
+
+## 2026-06-21 - Transparent TLS inspection should issue egress permits only after SNI policy
+
+Direct HTTPS bytes should pass through strict ClientHello parsing, SNI/DNS mismatch checks, hidden-SNI handling, audit, and allow-derived egress permits before host socket connection. Malformed ClientHello must not fall back to ordinary IP-only authorization.

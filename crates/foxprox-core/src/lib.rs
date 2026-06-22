@@ -22,6 +22,7 @@ pub mod quic;
 pub mod socks;
 pub mod socks_handler;
 pub mod tls;
+pub mod tls_handler;
 pub mod types;
 
 pub use attribution::{HostAttribution, Hostname, HostnameError};
@@ -72,6 +73,7 @@ pub use socks_handler::{
     Socks5GreetingOutcome, Socks5ResponseError,
 };
 pub use tls::{parse_tls_client_hello, TlsClientHelloMetadata, TlsParseError};
+pub use tls_handler::{handle_tls_client_hello, TlsInspectionContext, TlsInspectionOutcome};
 pub use types::{
     Endpoint, Frontend, HostnameConfidence, HostnameSource, IcmpMessage, Protocol, SandboxId,
 };

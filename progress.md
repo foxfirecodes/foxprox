@@ -1068,3 +1068,25 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * unsupported or unknown QUIC versions can be audited through explicit version/support fields in future runtime paths.
 * Audit evidence: unit tests assert QUIC audit fields and deterministic JSON fragments for form/type/version/connection-ID lengths and null hostname.
 * Residual risk: QUIC TLS CRYPTO frame parsing, SNI/ECH extraction, and runtime UDP/QUIC handler integration remain future work.
+
+## 2026-06-21 - Transparent TLS ClientHello decision helper
+
+* Invariant under work: transparent HTTPS ClientHello bytes must be strictly parsed, normalized with DNS attribution/hidden-SNI state, evaluated by shared policy, and audited before host egress is permitted.
+* Threat or failure mode addressed: future stream inspection could allow direct HTTPS without preserving SNI/DNS mismatch or hidden-SNI semantics, or could treat malformed ClientHello bytes as IP-only traffic.
+* Planned verification: add pure TLS handler tests for visible SNI allow, SNI/DNS mismatch denial, hidden-SNI denial, malformed ClientHello fail-closed audit, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - Transparent TLS ClientHello decision helper results
+
+* Tests added/updated:
+  * visible TLS SNI ClientHello bytes parse strictly, normalize into shared policy, produce allow audit, and create an allow-derived egress permit.
+  * SNI/DNS mismatch is denied even when an IP rule would otherwise match, preserving both names in audit.
+  * missing SNI/hidden-SNI is denied by default and allowed only by explicit IP rule while preserving hidden-SNI audit state.
+  * malformed ClientHello bytes fail closed before policy or egress permit creation.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 150 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * transparent HTTPS inspection now has a pure parse-policy-audit-egress boundary for future stream/TUN integration.
+  * malformed ClientHello data is not downgraded to IP-only traffic.
+  * mismatch and hidden-SNI protections remain active before host egress permits are issued.
+* Audit evidence: TLS handler tests assert allow, mismatch deny, hidden-SNI deny/allow, malformed fail-closed, presented/DNS hostname evidence, hidden-SNI flag, and egress permit creation.
+* Residual risk: stream reassembly, fragmented ClientHello support, live TCP forwarding integration, and ECH/QUIC TLS metadata parsing remain future work.
