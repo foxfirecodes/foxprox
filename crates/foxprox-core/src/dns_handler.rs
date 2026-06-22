@@ -24,6 +24,7 @@ pub struct BrokerDnsQueryContext {
 pub enum BrokerDnsQueryOutcome {
     Forward {
         query: DnsQueryMetadata,
+        wire: Vec<u8>,
         audit: AuditEvent,
         pending: Option<PendingDnsObserveOutcome>,
     },
@@ -54,6 +55,7 @@ pub struct BrokerDnsResponseContext {
 pub enum BrokerDnsResponseOutcome {
     Forward {
         response: DnsAddressResponseMetadata,
+        wire: Vec<u8>,
         cache: DnsResponseObserveOutcome,
         audit: AuditEvent,
     },
@@ -129,6 +131,7 @@ fn handle_broker_dns_query_inner(
         });
         return BrokerDnsQueryOutcome::Forward {
             query,
+            wire: wire.to_vec(),
             audit,
             pending,
         };
@@ -196,6 +199,7 @@ pub fn handle_broker_dns_response(
             );
             BrokerDnsResponseOutcome::Forward {
                 response,
+                wire: wire.to_vec(),
                 cache: cache_outcome,
                 audit,
             }
@@ -356,9 +360,11 @@ mod tests {
             Some(53),
         ));
 
-        let outcome = handle_broker_dns_query(&query("example.com", 1), &config, context());
+        let query_wire = query("example.com", 1);
+        let outcome = handle_broker_dns_query(&query_wire, &config, context());
         let BrokerDnsQueryOutcome::Forward {
             query,
+            wire,
             audit,
             pending,
         } = outcome
@@ -368,6 +374,7 @@ mod tests {
 
         assert_eq!(query.hostname.as_str(), "example.com");
         assert_eq!(query.query_type, DnsQueryType::A);
+        assert_eq!(wire, query_wire);
         assert_eq!(audit.kind, AuditEventKind::DnsQuery);
         assert_eq!(audit.decision, Some(AuditDecision::Allow));
         assert_eq!(audit.rule_id.as_deref(), Some("allow-example-dns"));
@@ -396,6 +403,7 @@ mod tests {
         );
         let BrokerDnsQueryOutcome::Forward {
             query,
+            wire: _,
             audit: _,
             pending,
         } = outcome
@@ -462,6 +470,7 @@ mod tests {
         );
         let BrokerDnsResponseOutcome::Forward {
             response,
+            wire,
             cache: cache_outcome,
             audit,
         } = outcome
@@ -470,6 +479,7 @@ mod tests {
         };
 
         assert_eq!(response.hostname.as_str(), "example.com");
+        assert_eq!(wire, wire_response);
         assert_eq!(cache_outcome.cache.stored, 1);
         assert_eq!(pending_queries.len(), 0);
         assert_eq!(

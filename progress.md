@@ -801,3 +801,22 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * malformed responses fail closed before transaction validation or cache mutation.
 * Audit evidence: response handler tests assert DNS response audit kind, allow/fail-closed decisions, attribution confidence, answer counts, TTLs, and denial reasons for replay/malformed paths.
 * Residual risk: this remains a pure core helper; actual UDP socket IO, forwarding original response bytes back to the sandbox, async audit buffering, and upstream retry/timeout policy remain future work.
+
+## 2026-06-21 - DNS handler preserves bounded wire bytes for forwarding
+
+* Invariant under work: DNS handler outcomes that authorize forwarding must carry the exact bounded wire message that was parsed and audited, so runtime socket code does not need to reserialize or reparse security-sensitive DNS data.
+* Threat or failure mode addressed: forwarding code that reconstructs DNS wire bytes from metadata could alter transaction IDs, flags, or question/answer sections; forwarding code that reparses separately could diverge from audited parser decisions.
+* Planned verification: add outcome wire preservation for allowed query forwards and correlated response forwards, assert bytes match input, and run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - DNS handler preserves bounded wire bytes for forwarding results
+
+* Tests added/updated:
+  * allowed broker DNS query forward outcomes preserve the exact validated query wire bytes that policy/audit evaluated.
+  * correlated DNS response forward outcomes preserve the exact validated upstream response wire bytes that were parsed, transaction-checked, cached, and audited.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 113 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * runtime forwarding callers can now forward the same bounded bytes that the core parser/policy/audit path accepted, without security-sensitive reserialization.
+  * denied, malformed, replayed, or response-synthesis-failed outcomes still do not expose forwardable wire bytes.
+* Audit evidence: handler tests assert forwarded wire bytes match inputs while existing audit assertions preserve DNS query/response decision metadata.
+* Residual risk: actual UDP socket IO and audit-buffer integration still need implementation; this commit only prevents future runtime code from needing to reconstruct accepted DNS wire messages.
