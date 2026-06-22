@@ -34,14 +34,31 @@ impl DnsAttributionCache {
     where
         I: IntoIterator<Item = IpAddr>,
     {
-        let hostname = Hostname::parse(hostname)?;
+        Ok(self.observe_hostname(
+            Hostname::parse(hostname)?,
+            addresses,
+            now_millis,
+            ttl_seconds,
+        ))
+    }
+
+    pub fn observe_hostname<I>(
+        &mut self,
+        hostname: Hostname,
+        addresses: I,
+        now_millis: u64,
+        ttl_seconds: u32,
+    ) -> ObserveOutcome
+    where
+        I: IntoIterator<Item = IpAddr>,
+    {
         self.purge_expired(now_millis);
 
         if self.max_entries == 0 || self.max_ttl_millis == 0 || ttl_seconds == 0 {
-            return Ok(ObserveOutcome {
+            return ObserveOutcome {
                 stored: 0,
                 evicted: 0,
-            });
+            };
         }
 
         let ttl_millis = u64::from(ttl_seconds)
@@ -66,7 +83,7 @@ impl DnsAttributionCache {
             stored += 1;
         }
 
-        Ok(ObserveOutcome { stored, evicted })
+        ObserveOutcome { stored, evicted }
     }
 
     pub fn lookup(&mut self, address: IpAddr, now_millis: u64) -> Vec<HostAttribution> {
@@ -267,6 +284,36 @@ impl PendingDnsQueryTable {
         Ok(pending)
     }
 
+    pub fn validate_response_and_observe(
+        &mut self,
+        cache: &mut DnsAttributionCache,
+        client: Endpoint,
+        upstream: Endpoint,
+        response: &DnsAddressResponseMetadata,
+        now_millis: u64,
+    ) -> Result<DnsResponseObserveOutcome, DnsTransactionError> {
+        let pending = self.validate_response(client, upstream, response, now_millis)?;
+        let cache_outcome = response.min_ttl_seconds.map_or(
+            ObserveOutcome {
+                stored: 0,
+                evicted: 0,
+            },
+            |ttl_seconds| {
+                cache.observe_hostname(
+                    response.hostname.clone(),
+                    response.addresses.iter().copied(),
+                    now_millis,
+                    ttl_seconds,
+                )
+            },
+        );
+
+        Ok(DnsResponseObserveOutcome {
+            pending,
+            cache: cache_outcome,
+        })
+    }
+
     pub fn expire(&mut self, now_millis: u64) -> usize {
         let before = self.entries.len();
         self.entries
@@ -320,6 +367,12 @@ pub struct PendingDnsObserveOutcome {
     pub evicted: usize,
     pub expired: usize,
     pub replaced: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DnsResponseObserveOutcome {
+    pub pending: PendingDnsQuery,
+    pub cache: ObserveOutcome,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1069,5 +1122,107 @@ mod tests {
         let outcome = pending.observe_query(client, upstream, &second, 1);
         assert!(outcome.replaced);
         assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn correlated_dns_response_updates_attribution_cache_once() {
+        let client = udp_endpoint([10, 0, 0, 2], 40000);
+        let upstream = udp_endpoint([8, 8, 8, 8], 53);
+        let query = parse_dns_query(&dns_query("example.com", 1), 512).unwrap();
+        let response = parse_dns_address_response(
+            &dns_response("example.com", 1, &[("@", 1, 30, vec![93, 184, 216, 34])]),
+            512,
+            8,
+        )
+        .unwrap();
+        let mut pending = PendingDnsQueryTable::new(8, 5_000);
+        let mut cache = DnsAttributionCache::new(8, 60_000);
+
+        pending.observe_query(client, upstream, &query, 1_000);
+        let outcome = pending
+            .validate_response_and_observe(&mut cache, client, upstream, &response, 1_100)
+            .unwrap();
+
+        assert_eq!(outcome.pending.hostname.as_str(), "example.com");
+        assert_eq!(
+            outcome.cache,
+            ObserveOutcome {
+                stored: 1,
+                evicted: 0
+            }
+        );
+        assert!(pending.is_empty());
+        assert_eq!(cache.lookup(ip([93, 184, 216, 34]), 1_101).len(), 1);
+        assert_eq!(
+            pending.validate_response_and_observe(&mut cache, client, upstream, &response, 1_102),
+            Err(DnsTransactionError::UnmatchedResponse)
+        );
+        assert_eq!(cache.lookup(ip([93, 184, 216, 34]), 1_103).len(), 1);
+    }
+
+    #[test]
+    fn correlated_empty_or_zero_ttl_dns_responses_do_not_cache() {
+        let client = udp_endpoint([10, 0, 0, 2], 40000);
+        let upstream = udp_endpoint([8, 8, 8, 8], 53);
+        let query = parse_dns_query(&dns_query("empty.example", 1), 512).unwrap();
+        let empty_response =
+            parse_dns_address_response(&dns_response("empty.example", 1, &[]), 512, 8).unwrap();
+        let mut pending = PendingDnsQueryTable::new(8, 5_000);
+        let mut cache = DnsAttributionCache::new(8, 60_000);
+
+        pending.observe_query(client, upstream, &query, 0);
+        let outcome = pending
+            .validate_response_and_observe(&mut cache, client, upstream, &empty_response, 1)
+            .unwrap();
+        assert_eq!(
+            outcome.cache,
+            ObserveOutcome {
+                stored: 0,
+                evicted: 0
+            }
+        );
+        assert!(cache.is_empty());
+
+        let zero_ttl = parse_dns_address_response(
+            &dns_response("empty.example", 1, &[("@", 1, 0, vec![192, 0, 2, 1])]),
+            512,
+            8,
+        )
+        .unwrap();
+        pending.observe_query(client, upstream, &query, 2);
+        let outcome = pending
+            .validate_response_and_observe(&mut cache, client, upstream, &zero_ttl, 3)
+            .unwrap();
+        assert_eq!(
+            outcome.cache,
+            ObserveOutcome {
+                stored: 0,
+                evicted: 0
+            }
+        );
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn mismatched_dns_response_does_not_update_cache() {
+        let client = udp_endpoint([10, 0, 0, 2], 40000);
+        let upstream = udp_endpoint([8, 8, 8, 8], 53);
+        let query = parse_dns_query(&dns_query("example.com", 1), 512).unwrap();
+        let wrong_name = parse_dns_address_response(
+            &dns_response("evil.example", 1, &[("@", 1, 60, vec![127, 0, 0, 1])]),
+            512,
+            8,
+        )
+        .unwrap();
+        let mut pending = PendingDnsQueryTable::new(8, 5_000);
+        let mut cache = DnsAttributionCache::new(8, 60_000);
+
+        pending.observe_query(client, upstream, &query, 0);
+        assert_eq!(
+            pending.validate_response_and_observe(&mut cache, client, upstream, &wrong_name, 1),
+            Err(DnsTransactionError::HostnameMismatch)
+        );
+        assert!(cache.lookup(ip([127, 0, 0, 1]), 2).is_empty());
+        assert!(pending.is_empty());
     }
 }

@@ -77,3 +77,7 @@ TLS parser output should normalize into policy with both presented hostname and 
 ## 2026-06-21 - QUIC policy normalization must not invent attribution
 
 QUIC header metadata is useful for classifying UDP/443 and timeout/policy defaults, but it is not hostname evidence. Domain authorization for QUIC should come from DNS correlation or future safe QUIC/TLS metadata parsing, not from merely recognizing a QUIC-shaped packet.
+
+## 2026-06-21 - DNS cache mutation must be correlation-gated
+
+DNS response parsing and pending transaction validation need a single helper path into attribution cache insertion. Leaving cache insertion to callers risks bypassing correlation checks with a parsed-but-unsolicited response. Empty and zero-TTL responses should consume pending state but store no attribution.

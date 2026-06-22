@@ -453,3 +453,25 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
 * Audit evidence: not applicable in this commit; normalized QUIC requests feed existing audit context builders.
 * Residual risk: QUIC version/type audit fields, visible QUIC TLS SNI/ECH parsing, and UDP frontend integration remain future work.
 * Commit hash: 966e79d normalize quic candidate metadata for policy.
+
+## 2026-06-21 - DNS correlated response cache insertion
+
+* Invariant under work: broker DNS responses must update hostname attribution cache only through the pending-query transaction correlation path, preserving TTL/capacity bounds and never caching mismatched or unsolicited responses.
+* Threat or failure mode addressed: even with strict DNS parsers and pending transaction checks, callers could accidentally insert parsed responses directly into the DNS attribution cache without validating transaction identity, enabling cache poisoning or stale attribution.
+* Planned verification: add DNS state helper tests for correlated response-to-cache insertion, empty successful responses, TTL-zero responses, response replay rejection, and mismatch/no-cache behavior; run `cargo fmt`, `cargo test`, and `cargo clippy --all-targets --all-features -- -D warnings`.
+
+## 2026-06-21 - DNS correlated response cache insertion results
+
+* Tests added/updated:
+  * correlated DNS responses update the attribution cache only after matching a pending query by client/upstream/transaction/host/type.
+  * replayed responses are rejected after the pending transaction is consumed.
+  * empty successful responses and zero-TTL answers remove pending state but store no attribution.
+  * hostname-mismatched responses do not update the cache and leave no ambiguous pending state.
+* Commands run:
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: 84 tests passed and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * parsed DNS address answers cannot enter the hostname attribution cache without transaction correlation.
+  * no-address and zero-TTL responses cannot create stale attribution.
+  * response replay and hostname mismatch are rejected without cache mutation.
+* Audit evidence: not applicable in this commit; this helper wires correlation to cache mutation, while DNS query/response audit event builders remain future work.
+* Residual risk: DNS audit event fields, actual upstream forwarding, response synthesis, retry behavior, and DNS handler socket integration remain future work.
