@@ -1052,3 +1052,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: no config file parser exists, and the limit is not yet automatically applied to a constructed TCP bridge runtime by session assembly.
 - Exact next step: commit runtime TCP limit config, then add a helper that constructs `TcpStreamBridgeRuntime` from `BrokerRuntimeComponents` so configured limits are applied consistently.
+
+## 2026-06-22T21:41:02Z
+- Current objective: continue after runtime TCP limit config toward applying configured limits in bridge construction.
+- Git status summary: clean worktree after commit `48ed78d`.
+- Intended slice: add a helper that constructs `TcpStreamBridgeRuntime` from `BrokerRuntimeComponents` so the validated `tcp_max_open_flows` limit is not forgotten by callers.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this still does not assemble a full TCP session with smoltcp; it only applies validated limits to bridge runtime construction.
+- Exact next step: implement the construction helper and a regression test that the configured limit rejects the second opened flow.
+
+## 2026-06-22T21:42:12Z
+- Current objective: apply configured TCP limits when constructing bridge runtimes.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 81 runtime tests, and 7 setup tests passed. New test proves `build_tcp_stream_bridge_runtime` applies `BrokerRuntimeComponents::tcp_max_open_flows`, causing the second flow open to fail at a configured limit of 1.
+- Commit hash when committed: pending.
+- Remaining risks: full session assembly still does not create a TCP bridge runtime from a real accepted smoltcp stream and host socket pair.
+- Exact next step: commit configured bridge construction, then add explicit TCP metadata buffer size configuration and validation so stream inspection buffers are bounded by runtime config.

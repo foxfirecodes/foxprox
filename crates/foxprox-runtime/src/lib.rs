@@ -1236,6 +1236,13 @@ pub fn build_runtime_components(
     })
 }
 
+pub fn build_tcp_stream_bridge_runtime<B>(
+    components: &BrokerRuntimeComponents,
+    bridge: B,
+) -> TcpStreamBridgeRuntime<B> {
+    TcpStreamBridgeRuntime::with_max_open_flows(bridge, components.tcp_max_open_flows)
+}
+
 pub struct BrokerDnsRuntime<'a, S> {
     pub sandbox_id: SandboxId,
     pub resolver: &'a StaticDnsResolver,
@@ -2634,6 +2641,31 @@ mod tests {
             build_runtime_components(zero_tcp_limit),
             Err(RuntimeConfigError::ZeroTcpOpenFlowLimit)
         ));
+    }
+
+    #[test]
+    fn tcp_bridge_runtime_builder_applies_configured_open_flow_limit() {
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("tcp-limit-builder").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 1,
+        })
+        .unwrap();
+        let flow_a = tcp_flow_key();
+        let flow_b = FlowKey::new(
+            Protocol::Tcp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 3)), 53001),
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 35)), 443),
+        );
+        let mut bridge = build_tcp_stream_bridge_runtime(&components, FakeTcpBridge::default());
+
+        bridge.mark_opened(flow_a).unwrap();
+        let error = bridge.mark_opened(flow_b).unwrap_err();
+
+        assert_eq!(bridge.max_open_flows(), 1);
+        assert_eq!(error, TcpBridgeError::OpenFlowLimitReached { limit: 1 });
     }
 
     #[test]
