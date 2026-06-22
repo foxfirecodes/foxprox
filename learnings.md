@@ -41,3 +41,6 @@
 
 ## 2026-06-22T21:51:42Z
 - `smoltcp` latest 0.13.x requires Rust 1.91, which is above this workspace's Rust 1.80 MSRV; use `smoltcp` 0.12.x for the alpha adapter unless the workspace MSRV changes.
+
+## 2026-06-22T22:03:40Z
+- In smoltcp loopback tests, the client socket can become active before the listener-side socket is counted active; reset tests should compare against the pre-reset active count rather than assuming exactly two active sockets.

@@ -1283,3 +1283,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: `reset_connect` only suppresses reporting; it does not yet abort/close matching smoltcp sockets.
 - Exact next step: commit duplicate suppression, then make smoltcp `reset_connect` abort the matching socket and verify the active socket count drops after polling.
+
+## 2026-06-22T22:02:17Z
+- Current objective: continue after smoltcp duplicate suppression toward denial/reset behavior.
+- Git status summary: clean worktree after commit `29c8431`.
+- Intended slice: make smoltcp `reset_connect` abort the matching active socket instead of only suppressing duplicate reports.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: aborting the client socket is still an adapter-local reset proof, not full TCP reset packet synthesis for a TUN peer.
+- Exact next step: match attempts to smoltcp socket endpoints and abort on reset.
+
+## 2026-06-22T22:04:36Z
+- Current objective: abort matching smoltcp sockets on denied/reset connect callbacks.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features` (initially failed because the reset test assumed exactly two active loopback sockets; fixed to assert the matching client socket is no longer active)
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 11 smoltcp adapter tests passed. `reset_connect` now records the attempt and aborts the matching smoltcp socket; regression checks the matching active socket disappears and no duplicate connect attempt is emitted.
+- Commit hash when committed: pending.
+- Remaining risks: aborting the smoltcp socket is not yet connected to writing a TCP reset packet back to a real TUN peer.
+- Exact next step: commit smoltcp reset abort behavior, then add smoltcp socket byte send/receive proof to prepare for bridging accepted streams.

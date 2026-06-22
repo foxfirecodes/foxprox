@@ -137,6 +137,22 @@ impl SmoltcpIpLoopback {
         }
     }
 
+    fn abort_matching_connect(&mut self, attempt: &TcpStackConnectAttempt) {
+        for handle in &self.tcp_handles {
+            let socket = self.sockets.get_mut::<tcp::Socket>(*handle);
+            if socket_matches_attempt(socket, attempt) {
+                socket.abort();
+            }
+        }
+    }
+
+    pub fn has_active_socket_for_attempt(&mut self, attempt: &TcpStackConnectAttempt) -> bool {
+        self.tcp_handles.iter().any(|handle| {
+            let socket = self.sockets.get::<tcp::Socket>(*handle);
+            socket.is_active() && socket_matches_attempt(socket, attempt)
+        })
+    }
+
     pub fn active_tcp_connect_attempts(&mut self) -> Vec<TcpStackConnectAttempt> {
         self.tcp_handles
             .iter()
@@ -180,6 +196,16 @@ fn endpoint_to_foxprox(endpoint: smoltcp::wire::IpEndpoint) -> Option<Endpoint> 
     }
 }
 
+fn socket_matches_attempt(socket: &tcp::Socket<'_>, attempt: &TcpStackConnectAttempt) -> bool {
+    let Some(local) = socket.local_endpoint().and_then(endpoint_to_foxprox) else {
+        return false;
+    };
+    let Some(remote) = socket.remote_endpoint().and_then(endpoint_to_foxprox) else {
+        return false;
+    };
+    local == attempt.source && remote == attempt.destination
+}
+
 impl TcpStackAdapter for SmoltcpIpLoopback {
     fn next_connect_attempt(&mut self) -> Option<TcpStackConnectAttempt> {
         self.active_tcp_connect_attempts()
@@ -189,6 +215,7 @@ impl TcpStackAdapter for SmoltcpIpLoopback {
 
     fn reset_connect(&mut self, attempt: &TcpStackConnectAttempt) {
         self.remember_reported(attempt);
+        self.abort_matching_connect(attempt);
     }
 
     fn mark_connect_opened(&mut self, attempt: &TcpStackConnectAttempt) {
@@ -393,6 +420,19 @@ mod tests {
 
         adapter.reset_connect(&attempt);
 
+        assert!(adapter.next_connect_attempt().is_none());
+    }
+
+    #[test]
+    fn smoltcp_adapter_reset_aborts_matching_active_socket() {
+        let mut adapter = connected_adapter();
+        let attempt = adapter.next_connect_attempt().unwrap();
+        assert!(adapter.has_active_socket_for_attempt(&attempt));
+
+        adapter.reset_connect(&attempt);
+        adapter.poll_once(30);
+
+        assert!(!adapter.has_active_socket_for_attempt(&attempt));
         assert!(adapter.next_connect_attempt().is_none());
     }
 
