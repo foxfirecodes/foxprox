@@ -1093,3 +1093,16 @@
 - Recent broker migration commit hash: `90cd648`.
 - Next verification gap: commit UDP deny broker migration; then run a final broad sweep over broker-backed transparent paths and explicit proxy paths.
 - Commit hash after commit: pending.
+
+## 2026-06-22T11:45:00Z — Full verification after broker-backed UDP smokes
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo run -p foxprox-cli --bin foxprox-lab -- run all >/tmp/foxprox-all-broker.jsonl && cargo run -p foxprox-cli --bin foxprox-lab -- run robustness >/tmp/foxprox-robust-broker.jsonl && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run handoff-smoke >/tmp/foxprox-handoff-broker.jsonl && target/debug/foxprox-lab run writeback-smoke >/tmp/foxprox-writeback-broker.jsonl && target/debug/foxprox-lab run udp-forward-smoke >/tmp/foxprox-udp-forward-broker.jsonl && target/debug/foxprox-lab run udp-deny-smoke >/tmp/foxprox-udp-deny-broker.jsonl && target/debug/foxprox-lab run dns-smoke >/tmp/foxprox-dns-broker.jsonl && target/debug/foxprox-lab run dns-attribution-smoke >/tmp/foxprox-dns-attr-broker.jsonl && target/debug/foxprox-lab run tcp-bridge-smoke >/tmp/foxprox-tcp-bridge-broker.jsonl && target/debug/foxprox-lab run tcp-bridge-deny-smoke >/tmp/foxprox-tcp-bridge-deny-broker.jsonl && target/debug/foxprox-lab run http-proxy-smoke >/tmp/foxprox-http-broker.jsonl && target/debug/foxprox-lab run https-connect-smoke >/tmp/foxprox-connect-broker.jsonl && target/debug/foxprox-lab run socks5-smoke >/tmp/foxprox-socks-broker.jsonl && target/debug/foxprox-lab run proxy-deny-smoke >/tmp/foxprox-proxy-deny-broker.jsonl && echo OK`
+- Environment assumptions: Linux bwrap/TUN fd handoff works locally; all egress/proxy/DNS/TCP fixtures are local or loopback.
+- Expected result: broker crate integration for UDP allow, UDP deny, and DNS-attributed UDP does not regress deterministic scenario groups or key environment smokes.
+- Observed result: pass. Workspace tests passed (`foxprox-broker` 2, `foxprox-core` 64, `foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). Deterministic `all` and `robustness`, transparent environment smokes, TCP bridge allow/deny, and explicit proxy allow/deny smokes all completed; command printed final `OK`.
+- Relevant output excerpt: `broker_dispatches_udp_to_egress_and_returns_device_packet ... ok`; `broker_dns_answer_attributes_later_udp_flow ... ok`; final `OK`.
+- Changed files: `progress.md`.
+- Interpretation: the broker orchestration boundary is now verified both by unit tests and by multiple Linux/TUN environment smokes, while previous alpha coverage remains intact.
+- Recent broker migration commit hashes: UDP deny `cd43000`; UDP forward `90cd648`; DNS attribution `0a04eb2`; broker crate `f1acf95`.
+- Next verification gap: commit this sweep record. Remaining substantial production work is TCP bridge orchestration in `foxprox-broker` or true async long-lived broker lifecycle integration.
+- Commit hash after commit: pending.
