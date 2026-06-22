@@ -527,3 +527,26 @@
 - What failed or surprised the agent: no behavior failures; SOCKS5 has useful distinct reply codes for policy denial versus malformed/unsupported requests, so the preflight exposes that difference.
 - What remains unproven: SOCKS5 greeting negotiation, TCP egress/tunnel bridging, listener runtime, proxy authentication rejection, and flow byte-count/close audit for proxied streams are still absent.
 - Commit: this commit.
+
+## 2026-06-21 Session Continue — explicit HTTP proxy request → policy/audit/response slice
+
+- Slice attempted: parse explicit HTTP proxy absolute-form requests into normalized HTTP events and add a proxy preflight that evaluates policy/audit and returns denial responses for blocked or malformed requests.
+- Why next: HTTPS CONNECT and SOCKS5 preflights exist, but alpha explicit proxy support also requires plaintext HTTP proxy requests with host/method/path visibility through the same policy/audit backend.
+- Verification plan: add an absolute-form HTTP proxy parser, preserve origin path/query rather than the full URL as the policy path, expose scheme in audit output, add `HttpProxyPreflight::handle_http_request` with allowed-forward/forbidden responses, and run focused inspect/proxy/audit tests plus formatting, clippy, and workspace tests.
+- Commit: pending.
+
+## 2026-06-21 Slice Evidence — explicit HTTP proxy request → policy/audit/response
+
+- Slice attempted: explicit plaintext HTTP proxy absolute-form request preflight through policy/audit and denial response behavior.
+- Why next: HTTPS CONNECT and SOCKS5 preflights were covered; alpha also requires HTTP proxy requests with origin host, method, and path visibility through the shared policy engine.
+- What changed: added `parse_http_proxy_request` for absolute-form `http://host[:port]/path?query` requests, preserving origin path/query for policy; added `http_scheme` to core audit records and JSON output; added `HttpProxyPreflight::handle_http_request` returning a forward action for allowed requests and a 403 response action for denied or malformed requests.
+- Verification:
+  - Focused inspect checks passed: `cargo test -p foxprox-inspect http_proxy` ran 2 tests for absolute-form extraction and origin-form rejection.
+  - Focused proxy checks passed: `cargo test -p foxprox-proxy http_proxy` ran 3 tests for allowed audit/forward, denied 403, and malformed fail-closed 403 behavior.
+  - Focused audit check passed: `cargo test -p foxprox-audit serializes_http_method_scheme_and_path_audit_fields`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed: 3 `foxprox-audit` tests, 7 `foxprox-broker` tests, 4 `foxprox-cli` tests, 7 `foxprox-config` tests, 16 `foxprox-core` tests, 5 `foxprox-flow` tests, 20 `foxprox-inspect` tests, 15 `foxprox-packet` tests, 9 `foxprox-proxy` tests, and doc tests.
+  - `cargo fmt --check` passed.
+- What failed or surprised the agent: no failures; explicit HTTP proxy requests need a separate absolute-form parser so policy path prefixes see `/path?query` rather than the entire URL.
+- What remains unproven: HTTP response forwarding through host egress, CONNECT tunnel bridging, SOCKS5 greeting negotiation, listener sockets, and proxy flow close/byte-count audit are still absent.
+- Commit: this commit.

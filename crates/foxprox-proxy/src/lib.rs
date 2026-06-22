@@ -11,13 +11,29 @@ use foxprox_core::{
     AuditDecision, Endpoint, FrontendKind, NormalizedEvent, PolicyEngine, PolicyEvaluation,
     SandboxId, UnsupportedNetworkEvent,
 };
-use foxprox_inspect::{parse_https_connect_request, parse_socks5_connect_request};
+use foxprox_inspect::{
+    parse_http_proxy_request, parse_https_connect_request, parse_socks5_connect_request,
+};
+
+/// Result of one plaintext HTTP proxy preflight evaluation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HttpRequestPreflight {
+    pub evaluation: PolicyEvaluation,
+    pub action: HttpProxyAction,
+}
 
 /// Result of one HTTP CONNECT preflight evaluation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HttpConnectPreflight {
     pub evaluation: PolicyEvaluation,
     pub response: HttpProxyResponse,
+}
+
+/// Next frontend action after HTTP proxy preflight.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HttpProxyAction {
+    Forward,
+    Respond(HttpProxyResponse),
 }
 
 /// Client-visible HTTP proxy response bytes for the preflight decision.
@@ -70,6 +86,35 @@ pub struct HttpProxyPreflight {
 impl HttpProxyPreflight {
     pub fn new(policy: PolicyEngine) -> Self {
         Self { policy }
+    }
+
+    /// Parse and evaluate one plaintext HTTP proxy request head.
+    ///
+    /// A successful allow decision returns [`HttpProxyAction::Forward`] for a
+    /// future egress bridge. Denied or malformed requests return a 403 response
+    /// and audit evidence; malformed requests are represented as fail-closed
+    /// unsupported events so they do not bypass policy/audit.
+    pub fn handle_http_request(
+        &self,
+        sandbox_id: SandboxId,
+        source: Option<Endpoint>,
+        request_head: &[u8],
+    ) -> HttpRequestPreflight {
+        let event = parse_http_proxy_request(
+            sandbox_id.clone(),
+            FrontendKind::HttpProxy,
+            source,
+            request_head,
+        )
+        .unwrap_or_else(|error| malformed_http_event(sandbox_id, source, error.to_string()));
+        let evaluation = self.policy.evaluate(&event);
+        let action = if evaluation.audit.decision == AuditDecision::Allowed {
+            HttpProxyAction::Forward
+        } else {
+            HttpProxyAction::Respond(HttpProxyResponse::Forbidden)
+        };
+
+        HttpRequestPreflight { evaluation, action }
     }
 
     /// Parse and evaluate one HTTPS CONNECT request head.
@@ -143,6 +188,20 @@ impl Socks5Preflight {
     }
 }
 
+fn malformed_http_event(
+    sandbox_id: SandboxId,
+    source: Option<Endpoint>,
+    reason: String,
+) -> NormalizedEvent {
+    NormalizedEvent::Unsupported(UnsupportedNetworkEvent {
+        sandbox_id,
+        frontend: FrontendKind::HttpProxy,
+        source,
+        destination: None,
+        reason: format!("malformed-http-proxy-request: {reason}"),
+    })
+}
+
 fn malformed_connect_event(
     sandbox_id: SandboxId,
     source: Option<Endpoint>,
@@ -186,6 +245,21 @@ mod tests {
         Endpoint::tcp(Ipv4Addr::new(10, 0, 0, 2).into(), 49152)
     }
 
+    fn allow_example_http_policy() -> PolicyEngine {
+        let rule = PolicyRule::new("allow-example-http", RuleAction::Allow)
+            .unwrap()
+            .with_protocol(Protocol::Http)
+            .with_hostname(HostnamePattern::new(".example.com").unwrap())
+            .with_minimum_hostname_confidence(AttributionConfidence::High)
+            .with_destination_port(80)
+            .with_http_method("GET")
+            .with_http_path_prefix("/public");
+        PolicyEngine::new(PolicyConfig {
+            rules: vec![rule],
+            ..PolicyConfig::default()
+        })
+    }
+
     fn allow_example_connect_policy() -> PolicyEngine {
         let rule = PolicyRule::new("allow-example-connect", RuleAction::Allow)
             .unwrap()
@@ -223,6 +297,84 @@ mod tests {
         let mut request = socks5_domain_connect("api.example.com", 443);
         request[1] = 3;
         request
+    }
+
+    #[test]
+    fn allowed_http_proxy_preflight_emits_audit_and_forward_action() {
+        let handler = HttpProxyPreflight::new(allow_example_http_policy());
+
+        let result = handler.handle_http_request(
+            sandbox_id(),
+            Some(source()),
+            b"GET http://api.example.com/public/index.html?debug=1 HTTP/1.1\r\nHost: ignored.invalid\r\n\r\n",
+        );
+
+        assert_eq!(
+            result.evaluation.decision,
+            PolicyDecision::Allow {
+                rule_id: Some("allow-example-http".to_owned())
+            }
+        );
+        assert_eq!(result.action, HttpProxyAction::Forward);
+
+        let audit: Value =
+            serde_json::from_str(&audit_record_to_json_line(&result.evaluation.audit).unwrap())
+                .unwrap();
+        assert_eq!(audit["kind"], "http_request");
+        assert_eq!(audit["frontend"], "http_proxy");
+        assert_eq!(audit["hostname"], "api.example.com");
+        assert_eq!(audit["http_method"], "GET");
+        assert_eq!(audit["http_scheme"], "http");
+        assert_eq!(audit["http_path_query"], "/public/index.html?debug=1");
+        assert_eq!(audit["decision"], "allowed");
+    }
+
+    #[test]
+    fn denied_http_proxy_preflight_returns_403_response_action() {
+        let handler = HttpProxyPreflight::new(allow_example_http_policy());
+
+        let result = handler.handle_http_request(
+            sandbox_id(),
+            Some(source()),
+            b"POST http://api.example.com/private HTTP/1.1\r\nHost: api.example.com\r\n\r\n",
+        );
+
+        assert!(matches!(
+            result.evaluation.decision,
+            PolicyDecision::Deny { .. }
+        ));
+        assert_eq!(
+            result.action,
+            HttpProxyAction::Respond(HttpProxyResponse::Forbidden)
+        );
+    }
+
+    #[test]
+    fn malformed_http_proxy_preflight_fails_closed_and_returns_403_response_action() {
+        let handler = HttpProxyPreflight::new(allow_example_http_policy());
+
+        let result = handler.handle_http_request(
+            sandbox_id(),
+            Some(source()),
+            b"GET /origin-form HTTP/1.1\r\nHost: api.example.com\r\n\r\n",
+        );
+
+        assert!(matches!(
+            result.evaluation.decision,
+            PolicyDecision::FailClosed { .. }
+        ));
+        assert_eq!(result.evaluation.audit.protocol, Protocol::Unsupported);
+        assert_eq!(
+            result.action,
+            HttpProxyAction::Respond(HttpProxyResponse::Forbidden)
+        );
+        assert!(result
+            .evaluation
+            .audit
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("malformed-http-proxy-request"));
     }
 
     #[test]

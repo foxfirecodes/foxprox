@@ -282,6 +282,7 @@ pub enum HttpInspectError {
     MalformedRequestLine,
     MissingHostHeader,
     InvalidHostPort,
+    InvalidAbsoluteUri,
     UnsupportedMethod,
 }
 
@@ -293,6 +294,7 @@ impl std::fmt::Display for HttpInspectError {
             Self::MalformedRequestLine => f.write_str("http-request-line-malformed"),
             Self::MissingHostHeader => f.write_str("http-host-header-missing"),
             Self::InvalidHostPort => f.write_str("http-host-port-invalid"),
+            Self::InvalidAbsoluteUri => f.write_str("http-absolute-uri-invalid"),
             Self::UnsupportedMethod => f.write_str("http-method-unsupported"),
         }
     }
@@ -346,6 +348,64 @@ pub fn parse_plaintext_http_request(
         scheme: "http".to_owned(),
         host,
         port,
+        path_query,
+    }))
+}
+
+/// Parse one explicit HTTP proxy absolute-form request into a normalized HTTP event.
+pub fn parse_http_proxy_request(
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    source: Option<Endpoint>,
+    bytes: &[u8],
+) -> Result<NormalizedEvent, HttpInspectError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| HttpInspectError::NotUtf8)?;
+    let request_line = text
+        .lines()
+        .next()
+        .ok_or(HttpInspectError::MissingRequestLine)?;
+    let mut request_parts = request_line.split_whitespace();
+    let method = request_parts
+        .next()
+        .ok_or(HttpInspectError::MalformedRequestLine)?
+        .to_ascii_uppercase();
+    if method == "CONNECT" {
+        return Err(HttpInspectError::UnsupportedMethod);
+    }
+    let target = request_parts
+        .next()
+        .ok_or(HttpInspectError::MalformedRequestLine)?;
+    let version = request_parts
+        .next()
+        .ok_or(HttpInspectError::MalformedRequestLine)?;
+    if !version.starts_with("HTTP/") || request_parts.next().is_some() {
+        return Err(HttpInspectError::MalformedRequestLine);
+    }
+
+    let (scheme, rest) = target
+        .split_once("://")
+        .ok_or(HttpInspectError::InvalidAbsoluteUri)?;
+    if !scheme.eq_ignore_ascii_case("http") {
+        return Err(HttpInspectError::UnsupportedMethod);
+    }
+    let (authority, path_query) = match rest.find('/') {
+        Some(index) => (&rest[..index], rest[index..].to_owned()),
+        None => (rest, "/".to_owned()),
+    };
+    if authority.is_empty() {
+        return Err(HttpInspectError::InvalidAbsoluteUri);
+    }
+    let (host, port) = split_host_port(authority)?;
+
+    Ok(NormalizedEvent::HttpRequest(HttpRequest {
+        sandbox_id,
+        frontend,
+        source,
+        destination: None,
+        method,
+        scheme: scheme.to_ascii_lowercase(),
+        host,
+        port: port.unwrap_or(80),
         path_query,
     }))
 }
@@ -959,6 +1019,7 @@ mod tests {
             }
         );
         assert_eq!(evaluation.audit.http_method.as_deref(), Some("GET"));
+        assert_eq!(evaluation.audit.http_scheme.as_deref(), Some("http"));
         assert_eq!(
             evaluation.audit.http_path_query.as_deref(),
             Some("/allowed/item?debug=1")
@@ -1008,6 +1069,55 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, HttpInspectError::MissingHostHeader);
+    }
+
+    #[test]
+    fn http_proxy_absolute_form_request_extracts_origin_path_for_policy() {
+        let event = parse_http_proxy_request(
+            SandboxId::new("http-proxy-test").unwrap(),
+            FrontendKind::HttpProxy,
+            Some(Endpoint::tcp(Ipv4Addr::new(10, 0, 0, 2).into(), 49152)),
+            b"GET http://Example.COM:8080/allowed/item?debug=1 HTTP/1.1\r\nHost: ignored.invalid\r\n\r\n",
+        )
+        .unwrap();
+        let rule = PolicyRule::new("allow-http-proxy", RuleAction::Allow)
+            .unwrap()
+            .with_protocol(Protocol::Http)
+            .with_hostname(HostnamePattern::new("example.com").unwrap())
+            .with_destination_port(8080)
+            .with_http_method("GET")
+            .with_http_path_prefix("/allowed");
+        let evaluation = PolicyEngine::new(PolicyConfig {
+            rules: vec![rule],
+            ..PolicyConfig::default()
+        })
+        .evaluate(&event);
+
+        assert_eq!(event.frontend(), FrontendKind::HttpProxy);
+        assert_eq!(event.hostname(), Some("example.com"));
+        assert_eq!(event.destination_port(), Some(8080));
+        assert_eq!(event.http_method(), Some("GET"));
+        assert_eq!(event.http_scheme(), Some("http"));
+        assert_eq!(event.http_path_query(), Some("/allowed/item?debug=1"));
+        assert_eq!(
+            evaluation.decision,
+            PolicyDecision::Allow {
+                rule_id: Some("allow-http-proxy".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn http_proxy_rejects_origin_form_request_without_absolute_uri() {
+        let error = parse_http_proxy_request(
+            SandboxId::new("http-proxy-test").unwrap(),
+            FrontendKind::HttpProxy,
+            None,
+            b"GET /origin-form HTTP/1.1\r\nHost: example.com\r\n\r\n",
+        )
+        .unwrap_err();
+
+        assert_eq!(error, HttpInspectError::InvalidAbsoluteUri);
     }
 
     #[test]

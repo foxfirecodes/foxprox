@@ -96,6 +96,7 @@ impl ExpiredUdpFlow {
                 .map(|attribution| attribution.hostname.clone()),
             hostname_confidence: self.state.attribution.as_ref().map(|attr| attr.confidence),
             http_method: None,
+            http_scheme: None,
             http_path_query: None,
             decision: AuditDecision::Observed,
             denial_behavior: None,

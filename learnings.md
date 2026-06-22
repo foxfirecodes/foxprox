@@ -96,3 +96,7 @@ Explicit proxy handlers can safely prove request parsing, policy, audit, and res
 ## 2026-06-21 — SOCKS5 denial responses should preserve denial class
 
 For SOCKS5 CONNECT preflight, policy denials should return reply code 0x02 (connection not allowed by ruleset), while malformed or unsupported requests should fail closed in audit and return general failure 0x01. This keeps client-visible behavior aligned with audit semantics.
+
+## 2026-06-21 — explicit HTTP proxy parsing needs absolute-form normalization
+
+Transparent HTTP inspection can consume origin-form paths plus Host headers, but explicit HTTP proxy requests should parse absolute-form URLs and normalize the policy path to `/path?query`. Otherwise path-prefix rules would accidentally match against `http://host/...` instead of the request target path.

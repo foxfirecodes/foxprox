@@ -307,6 +307,13 @@ impl NormalizedEvent {
         }
     }
 
+    pub fn http_scheme(&self) -> Option<&str> {
+        match self {
+            Self::HttpRequest(event) => Some(event.scheme.as_str()),
+            _ => None,
+        }
+    }
+
     pub fn http_path_query(&self) -> Option<&str> {
         match self {
             Self::HttpRequest(event) => Some(event.path_query.as_str()),
@@ -1024,6 +1031,7 @@ pub struct AuditRecord {
     pub hostname: Option<String>,
     pub hostname_confidence: Option<AttributionConfidence>,
     pub http_method: Option<String>,
+    pub http_scheme: Option<String>,
     pub http_path_query: Option<String>,
     pub decision: AuditDecision,
     pub denial_behavior: Option<DenialBehavior>,
@@ -1064,6 +1072,7 @@ impl AuditRecord {
             hostname: event.hostname().map(ToOwned::to_owned),
             hostname_confidence: event.attribution_confidence(),
             http_method: event.http_method().map(ToOwned::to_owned),
+            http_scheme: event.http_scheme().map(ToOwned::to_owned),
             http_path_query: event.http_path_query().map(ToOwned::to_owned),
             decision: audit_decision,
             denial_behavior,

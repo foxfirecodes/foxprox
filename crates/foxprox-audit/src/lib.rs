@@ -96,6 +96,7 @@ struct JsonAuditRecord<'a> {
     hostname: Option<&'a str>,
     hostname_confidence: Option<&'static str>,
     http_method: Option<&'a str>,
+    http_scheme: Option<&'a str>,
     http_path_query: Option<&'a str>,
     decision: &'static str,
     denial_behavior: Option<&'static str>,
@@ -117,6 +118,7 @@ impl<'a> From<&'a AuditRecord> for JsonAuditRecord<'a> {
             hostname: record.hostname.as_deref(),
             hostname_confidence: record.hostname_confidence.map(attribution_confidence),
             http_method: record.http_method.as_deref(),
+            http_scheme: record.http_scheme.as_deref(),
             http_path_query: record.http_path_query.as_deref(),
             decision: audit_decision(record.decision),
             denial_behavior: record.denial_behavior.map(denial_behavior),
@@ -281,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn serializes_http_method_and_path_audit_fields() {
+    fn serializes_http_method_scheme_and_path_audit_fields() {
         let rule = PolicyRule::new("allow-http", RuleAction::Allow)
             .unwrap()
             .with_protocol(Protocol::Http)
@@ -309,6 +311,7 @@ mod tests {
 
         assert_eq!(value["kind"], "http_request");
         assert_eq!(value["http_method"], "GET");
+        assert_eq!(value["http_scheme"], "http");
         assert_eq!(value["http_path_query"], "/public/index.html");
     }
 
