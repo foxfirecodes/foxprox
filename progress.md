@@ -419,3 +419,27 @@
 - Interpretation: this is the first local Milestone 2 TCP forwarding proof over the bwrap-created, handed-off TUN fd: bytes from an unmodified sandbox TCP socket are mediated by smoltcp and bridged through a host-owned TCP socket. Remaining work is to turn the smoke path into reusable broker runtime code with policy/audit integration and multi-flow lifecycle handling.
 - Next verification gap: integrate policy/audit decisions into the smoltcp TCP bridge smoke and fail closed before host egress on a denied TCP bridge attempt.
 - Commit hash after commit: pending.
+
+## 2026-06-22T01:20:00Z — TCP bridge smoke commit recorded
+
+- Command executed: `git add README.md crates/foxprox-cli/src/main.rs crates/foxprox-core/src/smoltcp_gate.rs learnings.md progress.md && git commit -m "Add stateful smoltcp TCP bridge smoke"`
+- Environment assumptions: TCP bridge smoke and deterministic tests above were verified before commit.
+- Expected result: commit captures stateful smoltcp server harness and local TCP byte-bridging environment smoke.
+- Observed result: commit `554aad2` created with 5 files changed.
+- Relevant output excerpt: `[harness-lab 554aad2] Add stateful smoltcp TCP bridge smoke`.
+- Changed files: `progress.md` appended with commit record after the commit.
+- Interpretation: local TCP forwarding proof checkpoint is preserved.
+- Next verification gap: policy/audit-gated TCP bridge allow/deny behavior.
+- Commit hash after commit: 554aad2.
+
+## 2026-06-22T01:35:00Z — TCP bridge deny smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run tcp-bridge-deny-smoke && target/debug/foxprox-lab run tcp-bridge-smoke`
+- Environment assumptions: the denied-path target treats TCP connect timeout/error as success; default policy denies TCP with reset semantics, but this harness currently observes fail-closed timeout rather than synthesizing an RST packet.
+- Expected result: tests remain green; denied sandbox TCP SYN is audited before smoltcp or host egress; no host egress occurs; target exits after observing no connection; existing allow bridge smoke still passes.
+- Observed result: pass. `foxprox-core` ran 40 tests, `foxprox-cli` ran 2 tests, `foxproxsetup` ran 7 tests. `tcp-bridge-deny-smoke` emitted `decision":"deny_reset"`, `egress_calls":"0"`, `policy_reason":"default deny"`, and `status":"exit status: 0"`; `tcp-bridge-smoke` still emitted `decision":"allow"`.
+- Relevant output excerpt: `"reason":"sandbox TCP SYN was denied before smoltcp or host egress and the target timed out"`; `"runtime_audit":"{...\"decision\":\"deny_reset\",\"reason\":\"default deny\"...}"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: TCP forwarding has a positive and negative environment proof. The denial path is policy/audit gated and prevents smoltcp/host egress, but reset synthesis remains a correctness gap because the target observes timeout, not an active TCP RST.
+- Next verification gap: synthesize TCP RST for denied TCP connects or factor TCP bridge smoke into a reusable broker runtime with policy-before-egress built into the positive path.
+- Commit hash after commit: pending.

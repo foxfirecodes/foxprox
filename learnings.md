@@ -47,3 +47,7 @@
 
 - A stateful smoltcp IP-medium interface can complete a sandbox TCP handshake from packets read on the handed-off TUN fd. After writing the SYN-ACK back, subsequent sandbox ACK/data packets can be fed into the same interface and `tcp::Socket::recv` exposes application bytes for host egress bridging.
 - For a minimal TCP forwarding proof, a local `TcpListener` fixture avoids external network dependency while still proving that broker-owned host sockets, not sandbox sockets, perform egress.
+
+## 2026-06-22 — TCP deny smoke behavior
+
+- The current denied TCP environment smoke proves policy-before-smoltcp/egress by withholding SYN-ACK and host egress, causing the sandbox connect to time out. This is fail-closed but does not yet satisfy the desired deny/reset behavior; TCP RST synthesis is the next improvement for denied TCP connects.

@@ -11,7 +11,9 @@ use std::os::unix::net::UnixListener;
 use foxprox_core::audit::{AuditRecord, Decision, EventKind, Frontend, Protocol};
 use foxprox_core::dns::{parse_dns_query, synthesize_a_response, DnsCache};
 use foxprox_core::egress::{EgressBackend, EgressOutcome, EgressRequest};
-use foxprox_core::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule, RuleAction};
+use foxprox_core::policy::{
+    Cidr, PolicyConfig, PolicyEngine, PolicyRequest, PolicyRule, RuleAction,
+};
 use foxprox_core::runtime::{TransparentTcpRuntime, TransparentUdpRuntime};
 use foxprox_core::scenario::{run_scenario, ScenarioName};
 use foxprox_core::smoltcp_gate::{feed_tcp_syn_to_smoltcp_listener, SmoltcpTcpServerHarness};
@@ -53,6 +55,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("tcp-syn-smoke");
             println!("tcp-synack-smoke");
             println!("tcp-bridge-smoke");
+            println!("tcp-bridge-deny-smoke");
             Ok(())
         }
         [cmd, scenario] if cmd == "run" => run_named_scenario(scenario),
@@ -88,6 +91,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         tcp_synack_smoke_records()
     } else if scenario == "tcp-bridge-smoke" {
         tcp_bridge_smoke_records()
+    } else if scenario == "tcp-bridge-deny-smoke" {
+        tcp_bridge_deny_smoke_records()
     } else {
         run_scenario(ScenarioName::parse(scenario)?)
     };
@@ -99,7 +104,7 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke|tcp-bridge-smoke>",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke|tcp-bridge-smoke|tcp-bridge-deny-smoke>",
         ScenarioName::list().join("|")
     );
 }
@@ -1966,6 +1971,215 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
     .with_metadata("bridged_bytes", bridged_bytes.to_string())
     .with_metadata("response_written", response_written.to_string())
     .with_metadata("egress_fixture", echo_addr.to_string());
+    if !stdout.is_empty() {
+        record = record.with_metadata("stdout", stdout);
+    }
+    if !stderr.is_empty() {
+        record = record.with_metadata("stderr", stderr);
+    }
+    Ok(record)
+}
+
+#[cfg(unix)]
+fn tcp_bridge_deny_smoke_records() -> Vec<AuditRecord> {
+    match run_tcp_bridge_deny_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::TcpConnectAttempt,
+            "tcp-bridge-deny-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::Harness)
+        .with_protocol(Protocol::Tcp)],
+    }
+}
+
+#[cfg(not(unix))]
+fn tcp_bridge_deny_smoke_records() -> Vec<AuditRecord> {
+    vec![AuditRecord::new(
+        EventKind::TcpConnectAttempt,
+        "tcp-bridge-deny-smoke",
+        Decision::FailClosed,
+        "TCP bridge deny smoke is only supported on Unix",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Tcp)]
+}
+
+#[cfg(unix)]
+fn run_tcp_bridge_deny_smoke() -> Result<AuditRecord, String> {
+    let helper = setup_helper_path()?;
+    let target_dir = helper
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| {
+            format!(
+                "could not derive target directory from {}",
+                helper.display()
+            )
+        })?
+        .to_path_buf();
+    let socket_dir = target_dir.join(format!("fxbdn-{}", std::process::id()));
+    let socket_path = socket_dir.join("s");
+    let _ = std::fs::remove_file(&socket_path);
+    std::fs::create_dir_all(&socket_dir)
+        .map_err(|err| format!("failed to create TCP bridge deny smoke socket dir: {err}"))?;
+    let handoff_listener = UnixListener::bind(&socket_path)
+        .map_err(|err| format!("failed to bind TCP bridge deny smoke handoff socket: {err}"))?;
+    handoff_listener.set_nonblocking(true).map_err(|err| {
+        format!("failed to make TCP bridge deny handoff listener nonblocking: {err}")
+    })?;
+
+    let mut child = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--ro-bind",
+        ])
+        .arg(&target_dir)
+        .arg(&target_dir)
+        .args(["--bind"])
+        .arg(&socket_dir)
+        .arg(&socket_dir)
+        .args(["--proc", "/proc", "--"])
+        .env("FOXPROX_SETUP_SOCKET", &socket_path)
+        .arg(&helper)
+        .args([
+            "--",
+            "/usr/bin/python3",
+            "-c",
+            "import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.settimeout(1);\ntry:\n s.connect(('203.0.113.23',8083)); sys.exit(4)\nexcept (socket.timeout,OSError):\n sys.exit(0)",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn bwrap TCP bridge deny smoke: {err}"))?;
+
+    let fd = accept_handoff_fd(&handoff_listener, &mut child, Duration::from_secs(10))?;
+    fd_handoff::set_nonblocking(fd)?;
+    let policy = PolicyEngine::new(PolicyConfig::deny_by_default());
+    let mut buf = [0_u8; 2048];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut packets_read = 0_u64;
+    let mut denied_record = None;
+    while Instant::now() < deadline {
+        match fd_handoff::read_fd(fd, &mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                packets_read += 1;
+                let packet = &buf[..n];
+                let parsed = match foxprox_core::packet::parse_ipv4(packet) {
+                    Ok(parsed) => parsed,
+                    Err(_) => continue,
+                };
+                if parsed.protocol_number != 6 {
+                    continue;
+                }
+                let tcp = match foxprox_core::packet::parse_tcp(parsed.payload) {
+                    Ok(tcp) => tcp,
+                    Err(_) => continue,
+                };
+                if tcp.destination_port != 8083 || !tcp.syn || tcp.ack {
+                    continue;
+                }
+                let source =
+                    std::net::SocketAddr::new(std::net::IpAddr::V4(parsed.source), tcp.source_port);
+                let destination = std::net::SocketAddr::new(
+                    std::net::IpAddr::V4(parsed.destination),
+                    tcp.destination_port,
+                );
+                let request =
+                    PolicyRequest::new("tcp-bridge-deny-smoke", Frontend::Tun, Protocol::Tcp)
+                        .with_source(source.ip(), source.port())
+                        .with_destination(destination.ip(), destination.port());
+                let outcome = policy.evaluate(&request);
+                denied_record = Some(
+                    AuditRecord::new(
+                        EventKind::TcpConnectAttempt,
+                        "tcp-bridge-deny-smoke",
+                        outcome.decision,
+                        outcome.reason,
+                    )
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(Protocol::Tcp)
+                    .with_addresses(Some(source), Some(destination))
+                    .with_rule(outcome.rule_id),
+                );
+                break;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to read TUN fd during TCP bridge deny smoke: {err}"
+                ))
+            }
+        }
+        if child
+            .try_wait()
+            .map_err(|err| format!("failed to poll bwrap TCP bridge deny smoke: {err}"))?
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let Some(audit) = denied_record else {
+        return Err("timed out waiting for TCP SYN to deny".to_string());
+    };
+    if audit.decision.is_allow() {
+        return Err("TCP bridge deny smoke unexpectedly allowed the SYN".to_string());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for bwrap TCP bridge deny smoke: {err}"))?;
+    fd_handoff::close_fd(fd);
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir(&socket_dir);
+    let success = output.status.success();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut record = AuditRecord::new(
+        EventKind::TcpConnectAttempt,
+        "tcp-bridge-deny-smoke",
+        if success {
+            audit.decision
+        } else {
+            Decision::FailClosed
+        },
+        if success {
+            "sandbox TCP SYN was denied before smoltcp or host egress and the target timed out"
+        } else {
+            "TCP deny was audited but the sandbox target did not observe a closed path"
+        },
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Tcp)
+    .with_metadata("status", output.status.to_string())
+    .with_metadata("packets_read", packets_read.to_string())
+    .with_metadata("egress_calls", "0")
+    .with_metadata("policy_decision", audit.decision.as_str())
+    .with_metadata("policy_reason", audit.reason.clone())
+    .with_metadata("runtime_audit", audit.to_json_line());
     if !stdout.is_empty() {
         record = record.with_metadata("stdout", stdout);
     }
