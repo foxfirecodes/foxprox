@@ -97,3 +97,8 @@
 
 - HTTP proxy and CONNECT authority parsing must handle bracketed IPv6 before generic `host:port` splitting; otherwise IPv6 literals can be mis-normalized as host strings or malformed ports.
 - Frontend fixes should still emit only `DestinationHost::Ip` plus port, keeping policy and egress independent from request-line syntax.
+
+## 2026-06-21 — Proxy parser size limit
+
+- Parser size limits should map to `UnsupportedReason::ParserLimitExceeded` rather than generic malformed request errors; this preserves audit clarity for robustness failures without exposing raw proxy bytes.
+- Enforcing request-head size before UTF-8 conversion keeps malformed/oversized proxy input contained entirely in the frontend boundary.

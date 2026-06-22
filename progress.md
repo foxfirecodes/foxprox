@@ -458,3 +458,21 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: ea0f3c7.
 - Remaining boundary risks: production proxy listener IO, response/CONNECT stream bridging, request-size limits, and stricter malformed authority coverage remain.
+
+## 2026-06-21 — Boundary objective: proxy parser size limit
+
+- Boundary under work: fail-closed HTTP proxy request-size limit before UTF-8/request-line parsing.
+- Allowed dependency direction: frontend parser enforces a local byte limit and emits normalized `UnsupportedNetworkEvent`; policy sees only `ParserLimitExceeded`, not raw request buffers.
+- Dependency-risk assessment: unbounded proxy parser input violates robustness and could pressure memory before audit/policy. The limit should be enforced at the frontend boundary without adding policy-level raw parser state.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: all verification passed.
+- Changed files:
+  - `crates/foxprox-frontends/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 63 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- Commit hash after commit: pending.
+- Remaining boundary risks: configurable parser limits, streaming read limits in production listener IO, SOCKS negotiation size/timeout handling, and fuzzing proxy parser inputs remain.

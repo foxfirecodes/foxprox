@@ -13,6 +13,9 @@ use foxprox_core::{
     NormalizedEvent, SandboxId, SocksConnect, UnsupportedNetworkEvent, UnsupportedReason,
 };
 
+/// Maximum request head bytes accepted by the alpha HTTP proxy parser.
+pub const MAX_HTTP_REQUEST_HEAD_BYTES: usize = 8192;
+
 /// Generic frontend event producer contract.
 pub trait EventProducer {
     fn frontend_kind(&self) -> FrontendKind;
@@ -106,12 +109,18 @@ pub fn parse_http_request(
 ) -> NormalizedEvent {
     match parse_http_request_inner(sandbox_id.clone(), frontend, bytes) {
         Ok(event) => event,
-        Err(error) => NormalizedEvent::UnsupportedNetworkEvent(UnsupportedNetworkEvent {
-            sandbox_id,
-            frontend,
-            reason: UnsupportedReason::MalformedProxyRequest,
-            safe_metadata: Some(error.to_string()),
-        }),
+        Err(error) => {
+            let reason = match error {
+                FrontendError::RequestTooLarge => UnsupportedReason::ParserLimitExceeded,
+                _ => UnsupportedReason::MalformedProxyRequest,
+            };
+            NormalizedEvent::UnsupportedNetworkEvent(UnsupportedNetworkEvent {
+                sandbox_id,
+                frontend,
+                reason,
+                safe_metadata: Some(error.to_string()),
+            })
+        }
     }
 }
 
@@ -120,6 +129,9 @@ fn parse_http_request_inner(
     frontend: FrontendKind,
     bytes: &[u8],
 ) -> Result<NormalizedEvent, FrontendError> {
+    if bytes.len() > MAX_HTTP_REQUEST_HEAD_BYTES {
+        return Err(FrontendError::RequestTooLarge);
+    }
     let text = std::str::from_utf8(bytes).map_err(|_| FrontendError::MalformedHttp("utf8"))?;
     let mut lines = text.split("\r\n");
     let request_line = lines
@@ -307,6 +319,7 @@ fn parse_socks5_connect_inner(
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum FrontendError {
     EmptyPacket,
+    RequestTooLarge,
     MalformedHttp(&'static str),
     MalformedSocks(&'static str),
     Contract(foxprox_core::ContractError),
@@ -316,6 +329,10 @@ impl fmt::Display for FrontendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyPacket => f.write_str("empty packet"),
+            Self::RequestTooLarge => write!(
+                f,
+                "HTTP request head exceeds {MAX_HTTP_REQUEST_HEAD_BYTES} bytes"
+            ),
             Self::MalformedHttp(reason) => write!(f, "malformed HTTP request: {reason}"),
             Self::MalformedSocks(reason) => write!(f, "malformed SOCKS request: {reason}"),
             Self::Contract(error) => write!(f, "contract error: {error}"),
@@ -391,6 +408,16 @@ mod tests {
         );
         assert_eq!(request.port, 8080);
         assert_eq!(request.path_query, "/path");
+    }
+
+    #[test]
+    fn oversized_http_request_fails_closed_as_parser_limit() {
+        let oversized = vec![b'a'; MAX_HTTP_REQUEST_HEAD_BYTES + 1];
+        let event = parse_http_request(sandbox(), FrontendKind::HttpProxy, &oversized);
+        let NormalizedEvent::UnsupportedNetworkEvent(unsupported) = event else {
+            panic!("expected unsupported event");
+        };
+        assert_eq!(unsupported.reason, UnsupportedReason::ParserLimitExceeded);
     }
 
     #[test]
