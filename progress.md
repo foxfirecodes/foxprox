@@ -976,3 +976,16 @@
 - Recent structural commit hash: Linux TUN setup extraction `123bb17`.
 - Next verification gap: commit frontend helper extraction; remaining production work is long-lived broker frontend/device loop design and lifecycle management.
 - Commit hash after commit: pending.
+
+## 2026-06-22T09:05:00Z — RAII wrapper for handed-off device fd
+
+- Command executed: `cargo fmt --all && cargo test --all`; `cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run handoff-smoke && target/debug/foxprox-lab run writeback-smoke && target/debug/foxprox-lab run udp-forward-smoke && target/debug/foxprox-lab run dns-attribution-smoke && target/debug/foxprox-lab run tcp-bridge-smoke && target/debug/foxprox-lab run tcp-bridge-deny-smoke`
+- Environment assumptions: bwrap/TUN fd handoff works locally; smokes are local-only and use loopback fixtures where host egress is required.
+- Expected result: replace raw handed-off fd management in the CLI harness with a reusable `foxprox-device::fd::DeviceFd` RAII wrapper exposing validity, nonblocking, read, write-all, and close behavior.
+- Observed result: pass. `foxprox-device` increased to 6 tests; workspace tests passed (`foxprox-core` 62, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). Handoff, writeback, UDP forward, DNS attribution, TCP bridge allow, and TCP bridge deny smokes all completed.
+- Relevant output excerpt: `fd::tests::device_fd_rejects_invalid_raw_fd ... ok`; handoff `"fd_valid_after_helper_exit":"true"`; TCP bridge `"response_written":"true"`; TCP bridge deny `"egress_calls":"0"`.
+- Changed files: `crates/foxprox-device/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: broker/device fd lifecycle is now represented by a reusable RAII type instead of bare raw fd integers in the harness, reducing leak/double-close risk and clarifying future long-lived device integration.
+- Recent structural commit hash: frontend helper extraction `18e5f75`.
+- Next verification gap: commit RAII device fd wrapper; remaining work is consolidating repeated bwrap/handoff process setup or designing long-lived async broker loops.
+- Commit hash after commit: pending.

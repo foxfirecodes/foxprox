@@ -386,7 +386,7 @@ fn run_handoff_smoke() -> Result<AuditRecord, String> {
     while Instant::now() < deadline {
         match listener.accept() {
             Ok((stream, _addr)) => {
-                received_fd = Some(fd_handoff::recv_fd(stream.as_raw_fd())?);
+                received_fd = Some(fd_handoff::recv_device_fd(stream.as_raw_fd())?);
                 break;
             }
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
@@ -407,8 +407,8 @@ fn run_handoff_smoke() -> Result<AuditRecord, String> {
     let output = child
         .wait_with_output()
         .map_err(|err| format!("failed to wait for bwrap handoff smoke: {err}"))?;
-    let fd_valid = fd_handoff::fd_is_valid(fd);
-    fd_handoff::close_fd(fd);
+    let fd_valid = fd.is_valid();
+    fd.close();
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir(&socket_dir);
 
@@ -533,19 +533,19 @@ fn run_writeback_smoke() -> Result<AuditRecord, String> {
         .map_err(|err| format!("failed to spawn bwrap write-back smoke: {err}"))?;
 
     let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
-    fd_handoff::set_nonblocking(fd)?;
+    fd.set_nonblocking()?;
     let mut buf = [0_u8; 2048];
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut packets_read = 0_u64;
     let mut replied = false;
     while Instant::now() < deadline {
-        match fd_handoff::read_fd(fd, &mut buf) {
+        match fd.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
                 if let Ok(reply) = synthesize_udp_echo_reply(packet, b"foxprox") {
-                    fd_handoff::write_all_fd(fd, &reply)?;
+                    fd.write_all(&reply)?;
                     replied = true;
                     break;
                 }
@@ -582,7 +582,7 @@ fn run_writeback_smoke() -> Result<AuditRecord, String> {
     let output = child
         .wait_with_output()
         .map_err(|err| format!("failed to wait for bwrap write-back smoke: {err}"))?;
-    fd_handoff::close_fd(fd);
+    fd.close();
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir(&socket_dir);
 
@@ -738,7 +738,7 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
         .map_err(|err| format!("failed to spawn bwrap UDP forward smoke: {err}"))?;
 
     let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
-    fd_handoff::set_nonblocking(fd)?;
+    fd.set_nonblocking()?;
     let destination_ip = "203.0.113.10"
         .parse()
         .map_err(|err| format!("invalid UDP smoke destination IP: {err}"))?;
@@ -756,13 +756,13 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
     let mut packets_read = 0_u64;
     let mut forwarded = false;
     while Instant::now() < deadline {
-        match fd_handoff::read_fd(fd, &mut buf) {
+        match fd.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
                 if let Some(reply) = runtime.handle_ipv4_packet("udp-forward-smoke", packet)? {
-                    fd_handoff::write_all_fd(fd, &reply)?;
+                    fd.write_all(&reply)?;
                     forwarded = true;
                     break;
                 }
@@ -801,7 +801,7 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
     let output = child
         .wait_with_output()
         .map_err(|err| format!("failed to wait for bwrap UDP forward smoke: {err}"))?;
-    fd_handoff::close_fd(fd);
+    fd.close();
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir(&socket_dir);
     let echo_result = echo_thread
@@ -944,7 +944,7 @@ fn run_dns_smoke() -> Result<AuditRecord, String> {
         .map_err(|err| format!("failed to spawn bwrap DNS smoke: {err}"))?;
 
     let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
-    fd_handoff::set_nonblocking(fd)?;
+    fd.set_nonblocking()?;
     let answer_ip = "203.0.113.77"
         .parse()
         .map_err(|err| format!("invalid DNS smoke answer IP: {err}"))?;
@@ -954,13 +954,13 @@ fn run_dns_smoke() -> Result<AuditRecord, String> {
     let mut packets_read = 0_u64;
     let mut answered = false;
     while Instant::now() < deadline {
-        match fd_handoff::read_fd(fd, &mut buf) {
+        match fd.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
                 if let Some(reply) = runtime.handle_ipv4_packet("dns-smoke", packet)? {
-                    fd_handoff::write_all_fd(fd, &reply)?;
+                    fd.write_all(&reply)?;
                     answered = true;
                     break;
                 }
@@ -993,7 +993,7 @@ fn run_dns_smoke() -> Result<AuditRecord, String> {
     let output = child
         .wait_with_output()
         .map_err(|err| format!("failed to wait for bwrap DNS smoke: {err}"))?;
-    fd_handoff::close_fd(fd);
+    fd.close();
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir(&socket_dir);
     let runtime_audit = runtime.audit.last().cloned();
@@ -1153,7 +1153,7 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
         .map_err(|err| format!("failed to spawn bwrap DNS attribution smoke: {err}"))?;
 
     let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
-    fd_handoff::set_nonblocking(fd)?;
+    fd.set_nonblocking()?;
     let answer_ip = "203.0.113.77"
         .parse()
         .map_err(|err| format!("invalid DNS attribution answer IP: {err}"))?;
@@ -1174,7 +1174,7 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
     let mut dns_answered = false;
     let mut forwarded = false;
     while Instant::now() < deadline {
-        match fd_handoff::read_fd(fd, &mut buf) {
+        match fd.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
@@ -1194,7 +1194,7 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
                     if let Some(reply) =
                         dns_runtime.handle_ipv4_packet("dns-attribution-smoke", packet)?
                     {
-                        fd_handoff::write_all_fd(fd, &reply)?;
+                        fd.write_all(&reply)?;
                         runtime.dns_cache = dns_runtime.dns_cache.clone();
                         runtime.now_tick = 2;
                         dns_answered = true;
@@ -1202,7 +1202,7 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
                 } else if let Some(reply) =
                     runtime.handle_ipv4_packet("dns-attribution-smoke", packet)?
                 {
-                    fd_handoff::write_all_fd(fd, &reply)?;
+                    fd.write_all(&reply)?;
                     forwarded = true;
                     break;
                 }
@@ -1239,7 +1239,7 @@ fn run_dns_attribution_smoke() -> Result<AuditRecord, String> {
     let output = child
         .wait_with_output()
         .map_err(|err| format!("failed to wait for bwrap DNS attribution smoke: {err}"))?;
-    fd_handoff::close_fd(fd);
+    fd.close();
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir(&socket_dir);
     let echo_result = echo_thread
@@ -1406,7 +1406,7 @@ fn run_tcp_syn_smoke() -> Result<AuditRecord, String> {
         .map_err(|err| format!("failed to spawn bwrap TCP SYN smoke: {err}"))?;
 
     let fd = accept_handoff_fd(&handoff_listener, &mut child, Duration::from_secs(10))?;
-    fd_handoff::set_nonblocking(fd)?;
+    fd.set_nonblocking()?;
     let destination_ip = "203.0.113.20"
         .parse()
         .map_err(|err| format!("invalid TCP SYN smoke destination IP: {err}"))?;
@@ -1424,7 +1424,7 @@ fn run_tcp_syn_smoke() -> Result<AuditRecord, String> {
     let mut packets_read = 0_u64;
     let mut syn_observed = false;
     while Instant::now() < deadline {
-        match fd_handoff::read_fd(fd, &mut buf) {
+        match fd.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
@@ -1470,7 +1470,7 @@ fn run_tcp_syn_smoke() -> Result<AuditRecord, String> {
     let output = child
         .wait_with_output()
         .map_err(|err| format!("failed to wait for bwrap TCP SYN smoke: {err}"))?;
-    fd_handoff::close_fd(fd);
+    fd.close();
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir(&socket_dir);
     let egress_calls = runtime.egress.calls();
@@ -1624,14 +1624,14 @@ fn run_tcp_synack_smoke() -> Result<AuditRecord, String> {
         .map_err(|err| format!("failed to spawn bwrap TCP SYN-ACK smoke: {err}"))?;
 
     let fd = accept_handoff_fd(&handoff_listener, &mut child, Duration::from_secs(10))?;
-    fd_handoff::set_nonblocking(fd)?;
+    fd.set_nonblocking()?;
     let mut buf = [0_u8; 2048];
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut packets_read = 0_u64;
     let mut emitted_packets = 0_usize;
     let mut syn_ack_written = false;
     while Instant::now() < deadline {
-        match fd_handoff::read_fd(fd, &mut buf) {
+        match fd.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
@@ -1670,7 +1670,7 @@ fn run_tcp_synack_smoke() -> Result<AuditRecord, String> {
                             }
                         }
                     }
-                    fd_handoff::write_all_fd(fd, emitted)?;
+                    fd.write_all(emitted)?;
                 }
                 break;
             }
@@ -1700,7 +1700,7 @@ fn run_tcp_synack_smoke() -> Result<AuditRecord, String> {
     let output = child
         .wait_with_output()
         .map_err(|err| format!("failed to wait for bwrap TCP SYN-ACK smoke: {err}"))?;
-    fd_handoff::close_fd(fd);
+    fd.close();
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir(&socket_dir);
     let success = output.status.success() && syn_ack_written;
@@ -1870,7 +1870,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
         .map_err(|err| format!("failed to spawn bwrap TCP bridge smoke: {err}"))?;
 
     let fd = accept_handoff_fd(&handoff_listener, &mut child, Duration::from_secs(10))?;
-    fd_handoff::set_nonblocking(fd)?;
+    fd.set_nonblocking()?;
     let bridge_destination: std::net::Ipv4Addr = "203.0.113.22"
         .parse()
         .map_err(|err| format!("invalid TCP bridge destination IP: {err}"))?;
@@ -1901,7 +1901,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
     let mut bridged_bytes = 0_usize;
     let mut response_written = false;
     while Instant::now() < deadline {
-        match fd_handoff::read_fd(fd, &mut buf) {
+        match fd.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
@@ -1909,7 +1909,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
                 let step = bridge_runtime.handle_ipv4_packet("tcp-bridge-smoke", packet)?;
                 for emitted in step.emitted_packets {
                     emitted_packets += 1;
-                    fd_handoff::write_all_fd(fd, &emitted)?;
+                    fd.write_all(&emitted)?;
                 }
                 if let Some(data) = step.egress_payload {
                     if !data.is_empty() && !response_written {
@@ -1922,7 +1922,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
                             bridge_runtime.send_egress_response(&outcome.response_payload)?
                         {
                             emitted_packets += 1;
-                            fd_handoff::write_all_fd(fd, &emitted)?;
+                            fd.write_all(&emitted)?;
                         }
                         response_written = true;
                     }
@@ -1938,7 +1938,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
         }
         for emitted in bridge_runtime.poll()? {
             emitted_packets += 1;
-            fd_handoff::write_all_fd(fd, &emitted)?;
+            fd.write_all(&emitted)?;
         }
         if child
             .try_wait()
@@ -1953,7 +1953,7 @@ fn run_tcp_bridge_smoke() -> Result<AuditRecord, String> {
     let output = child
         .wait_with_output()
         .map_err(|err| format!("failed to wait for bwrap TCP bridge smoke: {err}"))?;
-    fd_handoff::close_fd(fd);
+    fd.close();
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir(&socket_dir);
     let echo_result = echo_thread
@@ -2127,7 +2127,7 @@ fn run_tcp_bridge_deny_smoke() -> Result<AuditRecord, String> {
         .map_err(|err| format!("failed to spawn bwrap TCP bridge deny smoke: {err}"))?;
 
     let fd = accept_handoff_fd(&handoff_listener, &mut child, Duration::from_secs(10))?;
-    fd_handoff::set_nonblocking(fd)?;
+    fd.set_nonblocking()?;
     let bridge_destination: std::net::Ipv4Addr = "203.0.113.23"
         .parse()
         .map_err(|err| format!("invalid TCP bridge deny destination IP: {err}"))?;
@@ -2138,14 +2138,14 @@ fn run_tcp_bridge_deny_smoke() -> Result<AuditRecord, String> {
     let mut packets_read = 0_u64;
     let mut rst_written = false;
     while Instant::now() < deadline {
-        match fd_handoff::read_fd(fd, &mut buf) {
+        match fd.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
                 let packet = &buf[..n];
                 let step = bridge_runtime.handle_ipv4_packet("tcp-bridge-deny-smoke", packet)?;
                 for emitted in step.emitted_packets {
-                    fd_handoff::write_all_fd(fd, &emitted)?;
+                    fd.write_all(&emitted)?;
                     rst_written = true;
                 }
                 if rst_written {
@@ -2184,7 +2184,7 @@ fn run_tcp_bridge_deny_smoke() -> Result<AuditRecord, String> {
     let output = child
         .wait_with_output()
         .map_err(|err| format!("failed to wait for bwrap TCP bridge deny smoke: {err}"))?;
-    fd_handoff::close_fd(fd);
+    fd.close();
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir(&socket_dir);
     let success = output.status.success() && rst_written;
@@ -2321,7 +2321,7 @@ fn run_udp_deny_smoke() -> Result<AuditRecord, String> {
         .map_err(|err| format!("failed to spawn bwrap UDP deny smoke: {err}"))?;
 
     let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
-    fd_handoff::set_nonblocking(fd)?;
+    fd.set_nonblocking()?;
     let policy = PolicyEngine::new(PolicyConfig::deny_by_default());
     let mut runtime = TransparentUdpRuntime::new(policy, LocalUdpEgress::new(echo_addr)?);
     let mut buf = [0_u8; 2048];
@@ -2329,7 +2329,7 @@ fn run_udp_deny_smoke() -> Result<AuditRecord, String> {
     let mut packets_read = 0_u64;
     let mut denied = false;
     while Instant::now() < deadline {
-        match fd_handoff::read_fd(fd, &mut buf) {
+        match fd.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 packets_read += 1;
@@ -2372,7 +2372,7 @@ fn run_udp_deny_smoke() -> Result<AuditRecord, String> {
     let output = child
         .wait_with_output()
         .map_err(|err| format!("failed to wait for bwrap UDP deny smoke: {err}"))?;
-    fd_handoff::close_fd(fd);
+    fd.close();
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_dir(&socket_dir);
     let runtime_audit = runtime.audit.last().cloned();
@@ -3087,13 +3087,13 @@ fn accept_handoff_fd(
     listener: &UnixListener,
     child: &mut std::process::Child,
     timeout: Duration,
-) -> Result<i32, String> {
+) -> Result<fd_handoff::DeviceFd, String> {
     use std::os::fd::AsRawFd;
 
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         match listener.accept() {
-            Ok((stream, _addr)) => return fd_handoff::recv_fd(stream.as_raw_fd()),
+            Ok((stream, _addr)) => return fd_handoff::recv_device_fd(stream.as_raw_fd()),
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
             Err(err) => return Err(format!("handoff socket accept failed: {err}")),
         }

@@ -48,6 +48,58 @@ pub mod fd {
         fn close(fd: c_int) -> c_int;
     }
 
+    #[derive(Debug)]
+    pub struct DeviceFd {
+        fd: RawFd,
+    }
+
+    impl DeviceFd {
+        pub fn new(fd: RawFd) -> Result<Self, String> {
+            if fd_is_valid(fd) {
+                Ok(Self { fd })
+            } else {
+                Err(format!("invalid device fd: {fd}"))
+            }
+        }
+
+        pub fn raw_fd(&self) -> RawFd {
+            self.fd
+        }
+
+        pub fn is_valid(&self) -> bool {
+            fd_is_valid(self.fd)
+        }
+
+        pub fn set_nonblocking(&self) -> Result<(), String> {
+            set_nonblocking(self.fd)
+        }
+
+        pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+            read_fd(self.fd, buf)
+        }
+
+        pub fn write_all(&self, buf: &[u8]) -> Result<(), String> {
+            write_all_fd(self.fd, buf)
+        }
+
+        pub fn close(self) {
+            drop(self);
+        }
+    }
+
+    impl Drop for DeviceFd {
+        fn drop(&mut self) {
+            if self.fd >= 0 {
+                close_fd(self.fd);
+                self.fd = -1;
+            }
+        }
+    }
+
+    pub fn recv_device_fd(socket_fd: RawFd) -> Result<DeviceFd, String> {
+        recv_fd(socket_fd).and_then(DeviceFd::new)
+    }
+
     pub fn recv_fd(socket_fd: RawFd) -> Result<RawFd, String> {
         let mut byte = [0_u8];
         let mut iov = Iovec {
@@ -217,6 +269,11 @@ pub mod fd {
         #[test]
         fn invalid_fd_is_not_valid() {
             assert!(!fd_is_valid(-1));
+        }
+
+        #[test]
+        fn device_fd_rejects_invalid_raw_fd() {
+            assert!(DeviceFd::new(-1).is_err());
         }
     }
 }
