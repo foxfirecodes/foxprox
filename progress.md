@@ -614,3 +614,22 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - Commit hash after commit: 6fd580d.
 - Remaining boundary risks: production SOCKS listener read timeouts, CONNECT stream bridging, and policy-to-reply-code mapping remain.
+
+## 2026-06-21 — Boundary objective: SOCKS policy reply mapping
+
+- Boundary under work: frontend-local SOCKS5 reply-code mapping from normalized policy decisions.
+- Allowed dependency direction: `foxprox-frontends` may depend on `foxprox-core` policy decision enums to choose SOCKS wire replies; policy must not import SOCKS reply codes or frontend wire details.
+- Dependency-risk assessment: without a mapping helper, production SOCKS listener code may duplicate or leak SOCKS reply codes into policy/egress paths. Keep wire response selection in the frontend crate and make policy decisions remain protocol-neutral.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`.
+- Observed results: added `socks5_reply_for_policy_decision` in `foxprox-frontends`, mapping normalized allow/deny/require-DNS/fail-closed decisions to frontend-local SOCKS5 reply codes without policy importing SOCKS wire details. All verification passed.
+- Changed files:
+  - `crates/foxprox-frontends/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 72 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-frontends` — frontends depend only on `foxprox-core`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: egress-error-to-reply mapping, production SOCKS listener state machine, read timeouts, and CONNECT stream bridging remain.

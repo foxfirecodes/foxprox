@@ -143,3 +143,8 @@
 
 - SOCKS greeting and CONNECT request size limits can share the normalized `ParserLimits` contract with HTTP while keeping SOCKS wire negotiation in the frontend crate.
 - Oversized SOCKS CONNECT attempts should normalize to `ParserLimitExceeded`; malformed-but-in-limit SOCKS bytes remain `MalformedProxyRequest`.
+
+## 2026-06-21 — SOCKS policy reply mapping
+
+- SOCKS reply-code selection can depend on normalized `PolicyDecision` in the frontend crate, but policy must stay unaware of SOCKS wire values.
+- Denied and broker-DNS-required SOCKS CONNECT attempts should map to `ConnectionNotAllowed`; fail-closed parser/runtime cases should map to `GeneralFailure`.

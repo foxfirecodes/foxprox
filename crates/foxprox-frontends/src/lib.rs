@@ -9,9 +9,9 @@ use std::fmt;
 use std::net::IpAddr;
 
 use foxprox_core::{
-    DestinationHost, FrontendKind, Hostname, HttpMethod, HttpRequest, HttpScheme, HttpsConnect,
-    NormalizedEvent, ParserLimits, SandboxId, SocksConnect, UnsupportedNetworkEvent,
-    UnsupportedReason,
+    DenialAction, DestinationHost, FrontendKind, Hostname, HttpMethod, HttpRequest, HttpScheme,
+    HttpsConnect, NormalizedEvent, ParserLimits, PolicyDecision, SandboxId, SocksConnect,
+    UnsupportedNetworkEvent, UnsupportedReason,
 };
 
 /// Maximum request head bytes accepted by the alpha HTTP proxy parser.
@@ -335,6 +335,21 @@ pub fn build_socks5_connect_reply(code: Socks5ReplyCode) -> [u8; 10] {
     [0x05, code.as_byte(), 0x00, 0x01, 0, 0, 0, 0, 0, 0]
 }
 
+/// Map a normalized policy decision to a SOCKS5 frontend reply code without
+/// exposing SOCKS wire values to the policy engine.
+pub fn socks5_reply_for_policy_decision(decision: &PolicyDecision) -> Socks5ReplyCode {
+    match decision {
+        PolicyDecision::Allow(_) => Socks5ReplyCode::Succeeded,
+        PolicyDecision::Deny(deny) => match deny.action {
+            DenialAction::Drop | DenialAction::Reset | DenialAction::IcmpUnreachable => {
+                Socks5ReplyCode::ConnectionNotAllowed
+            }
+        },
+        PolicyDecision::RequireBrokerDns { .. } => Socks5ReplyCode::ConnectionNotAllowed,
+        PolicyDecision::FailClosed { .. } => Socks5ReplyCode::GeneralFailure,
+    }
+}
+
 /// Parse one SOCKS5 TCP CONNECT request after method negotiation.
 pub fn parse_socks5_connect(sandbox_id: SandboxId, bytes: &[u8]) -> NormalizedEvent {
     parse_socks5_connect_with_limits(sandbox_id, bytes, ParserLimits::default())
@@ -577,6 +592,37 @@ mod tests {
         assert_eq!(
             build_socks5_connect_reply(Socks5ReplyCode::ConnectionNotAllowed),
             [0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn socks5_policy_reply_mapping_stays_frontend_local() {
+        let allow = PolicyDecision::Allow(foxprox_core::AllowDecision {
+            rule_id: None,
+            timeout_override: None,
+            reason: Some("ok".into()),
+        });
+        assert_eq!(
+            socks5_reply_for_policy_decision(&allow),
+            Socks5ReplyCode::Succeeded
+        );
+
+        let deny = PolicyDecision::Deny(foxprox_core::DenyDecision {
+            action: DenialAction::Reset,
+            rule_id: None,
+            reason: "blocked".into(),
+        });
+        assert_eq!(
+            socks5_reply_for_policy_decision(&deny),
+            Socks5ReplyCode::ConnectionNotAllowed
+        );
+
+        let fail_closed = PolicyDecision::FailClosed {
+            reason: "bad request".into(),
+        };
+        assert_eq!(
+            socks5_reply_for_policy_decision(&fail_closed),
+            Socks5ReplyCode::GeneralFailure
         );
     }
 
