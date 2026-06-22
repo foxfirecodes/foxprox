@@ -410,7 +410,9 @@ mod tests {
         use foxprox_core::{PolicyRule, PortMatcher, Protocol, ProtocolMatcher, RuntimeConfig};
         use foxprox_device::PreopenedTunDevice;
         use foxprox_egress::MockEgress;
-        use foxprox_runtime::{process_one_stack_device_packet, StackDevicePacketStep};
+        use foxprox_runtime::{
+            process_one_stack_device_packet, StackDevicePacketStep, StackTcpBridgeTable,
+        };
 
         let syn = tcp_syn_packet();
         let cursor = Cursor::new(syn.clone());
@@ -433,6 +435,7 @@ mod tests {
         let policy = foxprox_policy::PolicyEngine::new(runtime_config);
         let mut egress = MockEgress::default();
         let mut audit = BoundedAuditSink::new(8);
+        let mut tcp_bridges = StackTcpBridgeTable::default();
 
         let outcome = process_one_stack_device_packet(
             &mut device,
@@ -441,6 +444,7 @@ mod tests {
                 policy: &policy,
                 egress: &mut egress,
                 audit: &mut audit,
+                tcp_bridges: &mut tcp_bridges,
                 sequence_start: 1,
                 timestamp_millis: 1000,
             },

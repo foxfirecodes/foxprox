@@ -5,15 +5,16 @@
 
 #![forbid(unsafe_code)]
 
-use std::fmt;
+use std::{collections::HashMap, fmt, net::SocketAddr};
 
 use foxprox_audit::{AuditRecord, AuditSink, FlowClosedAudit};
-use foxprox_core::{FrontendKind, Protocol, SandboxId};
+use foxprox_core::{FrontendKind, NormalizedEvent, Protocol, SandboxId, TcpConnectAttempt};
 use foxprox_device::{DeviceError, DevicePacket, PacketDevice};
-use foxprox_egress::HostEgress;
+use foxprox_egress::{EgressError, EgressOutcome, HostEgress, HostTcpStream};
 use foxprox_net::{
-    handle_ipv4_packet, handle_normalized_event, BrokerError, BrokerEventOutcome, FlowProtocol,
-    InboundIpv4Packet, OutboundIpPacket, PacketBrokerOutcome, StackAdapter, StackEvent,
+    handle_ipv4_packet, handle_normalized_event_with_egress, BrokerError, BrokerEventOutcome,
+    FlowProtocol, InboundIpv4Packet, OutboundIpPacket, PacketBrokerOutcome, StackAdapter,
+    StackEvent, StackTcpData,
 };
 use foxprox_policy::PolicyEngine;
 
@@ -61,12 +62,112 @@ where
     Ok(outcome)
 }
 
+/// Normalized key for a stack TCP flow bridged to a host egress stream.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct StackTcpFlowKey {
+    pub sandbox_id: SandboxId,
+    pub frontend: FrontendKind,
+    pub source: SocketAddr,
+    pub destination: SocketAddr,
+}
+
+impl StackTcpFlowKey {
+    pub fn new(
+        sandbox_id: SandboxId,
+        frontend: FrontendKind,
+        source: SocketAddr,
+        destination: SocketAddr,
+    ) -> Self {
+        Self {
+            sandbox_id,
+            frontend,
+            source,
+            destination,
+        }
+    }
+
+    pub fn from_connect_attempt(event: &TcpConnectAttempt) -> Self {
+        Self::new(
+            event.sandbox_id.clone(),
+            event.frontend,
+            event.source,
+            event.destination,
+        )
+    }
+
+    pub fn from_tcp_data(event: &StackTcpData) -> Self {
+        Self::new(
+            event.sandbox_id.clone(),
+            event.frontend,
+            event.source,
+            event.destination,
+        )
+    }
+}
+
+/// Runtime-owned bridge table from normalized stack flows to egress-owned host
+/// TCP streams. The table deliberately stores only `HostTcpStream` handles; it
+/// never exposes smoltcp sockets or std socket details to policy or audit.
+pub struct StackTcpBridgeTable<T> {
+    streams: HashMap<StackTcpFlowKey, T>,
+}
+
+impl<T> Default for StackTcpBridgeTable<T> {
+    fn default() -> Self {
+        Self {
+            streams: HashMap::new(),
+        }
+    }
+}
+
+impl<T> StackTcpBridgeTable<T> {
+    pub fn len(&self) -> usize {
+        self.streams.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.streams.is_empty()
+    }
+
+    pub fn contains_key(&self, key: &StackTcpFlowKey) -> bool {
+        self.streams.contains_key(key)
+    }
+
+    pub fn insert(&mut self, key: StackTcpFlowKey, stream: T) -> Option<T> {
+        self.streams.insert(key, stream)
+    }
+
+    pub fn remove(&mut self, key: &StackTcpFlowKey) -> Option<T> {
+        self.streams.remove(key)
+    }
+}
+
+impl<T> StackTcpBridgeTable<T>
+where
+    T: HostTcpStream,
+{
+    pub fn write_from_sandbox(
+        &mut self,
+        event: &StackTcpData,
+    ) -> Result<Option<usize>, EgressError> {
+        let key = StackTcpFlowKey::from_tcp_data(event);
+        let Some(stream) = self.streams.get_mut(&key) else {
+            return Ok(None);
+        };
+        stream.write_from_sandbox(&event.bytes).map(Some)
+    }
+}
+
 /// Context for processing one packet through a stack adapter.
-pub struct StackDevicePacketStep<'a, S, E, A> {
+pub struct StackDevicePacketStep<'a, S, E, A>
+where
+    E: HostEgress,
+{
     pub adapter: &'a mut S,
     pub policy: &'a PolicyEngine,
     pub egress: &'a mut E,
     pub audit: &'a mut A,
+    pub tcp_bridges: &'a mut StackTcpBridgeTable<E::TcpStream>,
     pub sequence_start: u64,
     pub timestamp_millis: u64,
 }
@@ -75,6 +176,8 @@ pub struct StackDevicePacketStep<'a, S, E, A> {
 pub struct StackDevicePacketOutcome {
     pub broker_outcomes: Vec<BrokerEventOutcome>,
     pub tcp_data_events: usize,
+    pub tcp_bytes_written_to_egress: usize,
+    pub tcp_data_without_bridge: usize,
     pub flow_closed_events: usize,
     pub outbound_packets_written: usize,
 }
@@ -99,12 +202,14 @@ where
         .map_err(RuntimeError::Stack)?;
     let mut broker_outcomes = Vec::new();
     let mut tcp_data_events = 0;
+    let mut tcp_bytes_written_to_egress = 0;
+    let mut tcp_data_without_bridge = 0;
     let mut flow_closed_events = 0;
 
     for (offset, event) in events.into_iter().enumerate() {
         match event {
             StackEvent::PolicyEvent(event) => {
-                let outcome = handle_normalized_event(
+                let result = handle_normalized_event_with_egress(
                     &event,
                     ctx.policy,
                     ctx.egress,
@@ -113,10 +218,27 @@ where
                     ctx.timestamp_millis,
                 )
                 .map_err(RuntimeError::Broker)?;
-                broker_outcomes.push(outcome);
+                if let (
+                    NormalizedEvent::TcpConnectAttempt(connect),
+                    Some(EgressOutcome::TcpConnected(stream)),
+                ) = (&event, result.egress_outcome)
+                {
+                    ctx.tcp_bridges
+                        .insert(StackTcpFlowKey::from_connect_attempt(connect), stream);
+                }
+                broker_outcomes.push(result.outcome);
             }
-            StackEvent::TcpData(_) => {
+            StackEvent::TcpData(data) => {
                 tcp_data_events += 1;
+                match ctx
+                    .tcp_bridges
+                    .write_from_sandbox(&data)
+                    .map_err(BrokerError::Egress)
+                    .map_err(RuntimeError::Broker)?
+                {
+                    Some(bytes) => tcp_bytes_written_to_egress += bytes,
+                    None => tcp_data_without_bridge += 1,
+                }
             }
             StackEvent::FlowClosed(closed) => {
                 let protocol = match closed.key.protocol {
@@ -152,6 +274,8 @@ where
     Ok(StackDevicePacketOutcome {
         broker_outcomes,
         tcp_data_events,
+        tcp_bytes_written_to_egress,
+        tcp_data_without_bridge,
         flow_closed_events,
         outbound_packets_written,
     })
@@ -193,15 +317,15 @@ impl std::error::Error for RuntimeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
+    use std::{cell::RefCell, io::Cursor, rc::Rc};
 
     use foxprox_audit::BoundedAuditSink;
     use foxprox_core::{
-        NormalizedEvent, PolicyRule, PortMatcher, Protocol, ProtocolMatcher, RuntimeConfig,
-        TcpConnectAttempt,
+        DnsQuery, HttpRequest, HttpsConnect, NormalizedEvent, PolicyRule, PortMatcher, Protocol,
+        ProtocolMatcher, RuntimeConfig, SocksConnect, TcpConnectAttempt, UdpFlowAttempt,
     };
     use foxprox_device::PreopenedTunDevice;
-    use foxprox_egress::MockEgress;
+    use foxprox_egress::{MockEgress, MockHttpResponse, MockUdpHandle};
     use foxprox_net::StackError;
 
     #[test]
@@ -247,6 +371,7 @@ mod tests {
         let policy = PolicyEngine::new(RuntimeConfig::deny_by_default());
         let mut egress = MockEgress::default();
         let mut audit = BoundedAuditSink::new(4);
+        let mut tcp_bridges = StackTcpBridgeTable::default();
 
         let outcome = process_one_stack_device_packet(
             &mut device,
@@ -255,6 +380,7 @@ mod tests {
                 policy: &policy,
                 egress: &mut egress,
                 audit: &mut audit,
+                tcp_bridges: &mut tcp_bridges,
                 sequence_start: 20,
                 timestamp_millis: 3000,
             },
@@ -282,6 +408,7 @@ mod tests {
         let policy = PolicyEngine::new(config);
         let mut egress = MockEgress::default();
         let mut audit = BoundedAuditSink::new(4);
+        let mut tcp_bridges = StackTcpBridgeTable::default();
 
         let outcome = process_one_stack_device_packet(
             &mut device,
@@ -290,6 +417,7 @@ mod tests {
                 policy: &policy,
                 egress: &mut egress,
                 audit: &mut audit,
+                tcp_bridges: &mut tcp_bridges,
                 sequence_start: 10,
                 timestamp_millis: 2000,
             },
@@ -304,6 +432,111 @@ mod tests {
         let bytes = device.into_inner().into_inner();
         assert_eq!(&bytes[..inbound.len()], inbound.as_slice());
         assert_eq!(&bytes[inbound.len()..], &[0x45, 0, 0, 20]);
+    }
+
+    #[test]
+    fn allowed_stack_tcp_connect_stores_bridge_and_writes_payload_to_egress() {
+        let inbound = vec![0x45, 0, 0, 20];
+        let cursor = Cursor::new(inbound);
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let connect = tcp_connect_event();
+        let data = foxprox_net::StackTcpData {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:49152".parse().unwrap(),
+            destination: "203.0.113.10:80".parse().unwrap(),
+            bytes: b"hello".to_vec(),
+        };
+        let mut adapter = ScriptedStackAdapter::new(vec![
+            StackEvent::PolicyEvent(NormalizedEvent::TcpConnectAttempt(connect.clone())),
+            StackEvent::TcpData(data),
+        ]);
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut rule = PolicyRule::allow(foxprox_core::RuleId::new("tcp-80").unwrap());
+        rule.protocol = ProtocolMatcher::Exact(Protocol::Tcp);
+        rule.port = PortMatcher::Exact(80);
+        config.rules.push(rule);
+        let policy = PolicyEngine::new(config);
+        let writes = Rc::new(RefCell::new(Vec::new()));
+        let mut egress = RecordingEgress::new(Rc::clone(&writes));
+        let mut audit = BoundedAuditSink::new(4);
+        let mut tcp_bridges = StackTcpBridgeTable::default();
+
+        let outcome = process_one_stack_device_packet(
+            &mut device,
+            StackDevicePacketStep {
+                adapter: &mut adapter,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                tcp_bridges: &mut tcp_bridges,
+                sequence_start: 30,
+                timestamp_millis: 4000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.broker_outcomes, vec![BrokerEventOutcome::Forwarded]);
+        assert_eq!(outcome.tcp_data_events, 1);
+        assert_eq!(outcome.tcp_bytes_written_to_egress, 5);
+        assert_eq!(outcome.tcp_data_without_bridge, 0);
+        assert_eq!(tcp_bridges.len(), 1);
+        assert!(tcp_bridges.contains_key(&StackTcpFlowKey::from_connect_attempt(&connect)));
+        assert_eq!(egress.tcp_connects, vec![connect]);
+        assert_eq!(writes.borrow().as_slice(), &[b"hello".to_vec()]);
+        assert_eq!(audit.records().len(), 1);
+    }
+
+    #[test]
+    fn denied_stack_tcp_connect_does_not_store_bridge_or_write_payload() {
+        let inbound = vec![0x45, 0, 0, 20];
+        let cursor = Cursor::new(inbound);
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let connect = tcp_connect_event();
+        let data = foxprox_net::StackTcpData {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:49152".parse().unwrap(),
+            destination: "203.0.113.10:80".parse().unwrap(),
+            bytes: b"blocked".to_vec(),
+        };
+        let mut adapter = ScriptedStackAdapter::new(vec![
+            StackEvent::PolicyEvent(NormalizedEvent::TcpConnectAttempt(connect)),
+            StackEvent::TcpData(data),
+        ]);
+        let policy = PolicyEngine::new(RuntimeConfig::deny_by_default());
+        let writes = Rc::new(RefCell::new(Vec::new()));
+        let mut egress = RecordingEgress::new(Rc::clone(&writes));
+        let mut audit = BoundedAuditSink::new(4);
+        let mut tcp_bridges = StackTcpBridgeTable::default();
+
+        let outcome = process_one_stack_device_packet(
+            &mut device,
+            StackDevicePacketStep {
+                adapter: &mut adapter,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                tcp_bridges: &mut tcp_bridges,
+                sequence_start: 40,
+                timestamp_millis: 5000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.broker_outcomes,
+            vec![BrokerEventOutcome::Denied(Some(
+                foxprox_core::DenialAction::Drop
+            ))]
+        );
+        assert_eq!(outcome.tcp_data_events, 1);
+        assert_eq!(outcome.tcp_bytes_written_to_egress, 0);
+        assert_eq!(outcome.tcp_data_without_bridge, 1);
+        assert!(tcp_bridges.is_empty());
+        assert!(egress.tcp_connects.is_empty());
+        assert!(writes.borrow().is_empty());
+        assert_eq!(audit.records().len(), 1);
     }
 
     struct FlowClosedStackAdapter;
@@ -358,6 +591,107 @@ mod tests {
 
         fn poll_outbound_packets(&mut self) -> Result<Vec<OutboundIpPacket>, StackError> {
             Ok(std::mem::take(&mut self.outbound))
+        }
+    }
+
+    struct ScriptedStackAdapter {
+        events: Vec<StackEvent>,
+    }
+
+    impl ScriptedStackAdapter {
+        fn new(events: Vec<StackEvent>) -> Self {
+            Self { events }
+        }
+    }
+
+    impl StackAdapter for ScriptedStackAdapter {
+        fn ingest_ip_packet(&mut self, _packet: &[u8]) -> Result<Vec<StackEvent>, StackError> {
+            Ok(std::mem::take(&mut self.events))
+        }
+
+        fn poll_outbound_packets(&mut self) -> Result<Vec<OutboundIpPacket>, StackError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct RecordingEgress {
+        tcp_connects: Vec<TcpConnectAttempt>,
+        writes: Rc<RefCell<Vec<Vec<u8>>>>,
+    }
+
+    impl RecordingEgress {
+        fn new(writes: Rc<RefCell<Vec<Vec<u8>>>>) -> Self {
+            Self {
+                tcp_connects: Vec::new(),
+                writes,
+            }
+        }
+    }
+
+    impl HostEgress for RecordingEgress {
+        type TcpStream = RecordingTcpStream;
+        type UdpHandle = MockUdpHandle;
+        type HttpResponse = MockHttpResponse;
+
+        fn connect_tcp(
+            &mut self,
+            event: &TcpConnectAttempt,
+        ) -> Result<Self::TcpStream, EgressError> {
+            self.tcp_connects.push(event.clone());
+            Ok(RecordingTcpStream {
+                writes: Rc::clone(&self.writes),
+            })
+        }
+
+        fn open_udp_flow(
+            &mut self,
+            _event: &UdpFlowAttempt,
+        ) -> Result<Self::UdpHandle, EgressError> {
+            Err(EgressError::UnsupportedAllowedEvent)
+        }
+
+        fn proxy_http_request(
+            &mut self,
+            _event: &HttpRequest,
+        ) -> Result<Self::HttpResponse, EgressError> {
+            Err(EgressError::UnsupportedAllowedEvent)
+        }
+
+        fn proxy_connect(&mut self, _event: &HttpsConnect) -> Result<Self::TcpStream, EgressError> {
+            Err(EgressError::UnsupportedAllowedEvent)
+        }
+
+        fn socks_connect(&mut self, _event: &SocksConnect) -> Result<Self::TcpStream, EgressError> {
+            Err(EgressError::UnsupportedAllowedEvent)
+        }
+
+        fn resolve_dns(&mut self, _event: &DnsQuery) -> Result<Vec<SocketAddr>, EgressError> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct RecordingTcpStream {
+        writes: Rc<RefCell<Vec<Vec<u8>>>>,
+    }
+
+    impl HostTcpStream for RecordingTcpStream {
+        fn write_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
+            self.writes.borrow_mut().push(bytes.to_vec());
+            Ok(bytes.len())
+        }
+
+        fn read_to_sandbox(&mut self, _max_bytes: usize) -> Result<Vec<u8>, EgressError> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn tcp_connect_event() -> TcpConnectAttempt {
+        TcpConnectAttempt {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:49152".parse().unwrap(),
+            destination: "203.0.113.10:80".parse().unwrap(),
+            hostname: None,
         }
     }
 

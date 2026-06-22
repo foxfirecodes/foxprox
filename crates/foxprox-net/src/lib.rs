@@ -18,7 +18,7 @@ use foxprox_core::{
     UdpTimeouts,
 };
 use foxprox_dns::{build_address_response, build_refused_response, parse_dns_query_event};
-use foxprox_egress::{dispatch_allowed_event, EgressError, HostEgress};
+use foxprox_egress::{dispatch_allowed_event, DispatchOutcome, EgressError, HostEgress};
 use foxprox_packet::{inspect_ipv4_packet, synthesize_ipv4_denial_response};
 use foxprox_policy::PolicyEngine;
 
@@ -286,8 +286,26 @@ where
     E: HostEgress,
     A: AuditSink,
 {
-    handle_normalized_event_with_decision(event, policy, egress, audit, sequence, timestamp_millis)
+    handle_normalized_event_with_egress(event, policy, egress, audit, sequence, timestamp_millis)
         .map(|evaluated| evaluated.outcome)
+}
+
+/// Process a normalized event and return the egress handle, when one was
+/// created, so runtime bridge code can retain it without re-running policy or
+/// opening sockets outside the shared egress boundary.
+pub fn handle_normalized_event_with_egress<E, A>(
+    event: &NormalizedEvent,
+    policy: &PolicyEngine,
+    egress: &mut E,
+    audit: &mut A,
+    sequence: u64,
+    timestamp_millis: u64,
+) -> Result<BrokerEventResult<E>, BrokerError>
+where
+    E: HostEgress,
+    A: AuditSink,
+{
+    handle_normalized_event_with_decision(event, policy, egress, audit, sequence, timestamp_millis)
 }
 
 fn handle_normalized_event_with_decision<E, A>(
@@ -297,7 +315,7 @@ fn handle_normalized_event_with_decision<E, A>(
     audit: &mut A,
     sequence: u64,
     timestamp_millis: u64,
-) -> Result<EvaluatedEventOutcome, BrokerError>
+) -> Result<BrokerEventResult<E>, BrokerError>
 where
     E: HostEgress,
     A: AuditSink,
@@ -306,23 +324,33 @@ where
     let record = AuditRecord::from_event(sequence, timestamp_millis, event, &decision);
     audit.record(record).map_err(BrokerError::Audit)?;
 
-    let outcome = if decision.is_allowed() {
+    let (outcome, egress_outcome) = if decision.is_allowed() {
         match dispatch_allowed_event(egress, event) {
-            Ok(_) => BrokerEventOutcome::Forwarded,
-            Err(EgressError::UnsupportedAllowedEvent) => BrokerEventOutcome::NoEgressRequired,
+            Ok(egress_outcome) => (BrokerEventOutcome::Forwarded, Some(egress_outcome)),
+            Err(EgressError::UnsupportedAllowedEvent) => {
+                (BrokerEventOutcome::NoEgressRequired, None)
+            }
             Err(error) => return Err(BrokerError::Egress(error)),
         }
     } else {
-        BrokerEventOutcome::Denied(decision_denial_action(&decision))
+        (
+            BrokerEventOutcome::Denied(decision_denial_action(&decision)),
+            None,
+        )
     };
 
-    Ok(EvaluatedEventOutcome { decision, outcome })
+    Ok(BrokerEventResult {
+        decision,
+        outcome,
+        egress_outcome,
+    })
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct EvaluatedEventOutcome {
-    decision: PolicyDecision,
-    outcome: BrokerEventOutcome,
+/// Result of policy/audit/egress handling for one normalized event.
+pub struct BrokerEventResult<E: HostEgress> {
+    pub decision: PolicyDecision,
+    pub outcome: BrokerEventOutcome,
+    pub egress_outcome: Option<DispatchOutcome<E>>,
 }
 
 /// One inbound IPv4 packet plus the normalized session/frontend labels needed

@@ -223,3 +223,8 @@
 
 - Keep host socket byte IO in `foxprox-egress` via a `HostTcpStream` trait so future transparent and explicit proxy bridges share stream handling instead of embedding `std::net::TcpStream` in runtime or frontend code.
 - The first stream contract should be intentionally narrow (`write_from_sandbox`, `read_to_sandbox`) until bridge state and backpressure semantics are designed.
+
+## 2026-06-22 — runtime TCP bridge table
+
+- Retain host TCP streams only in runtime bridge state keyed by normalized sandbox/frontend/source/destination data; do not let smoltcp socket handles or `std::net::TcpStream` details enter policy/audit contracts.
+- Exposing the egress outcome from normalized-event handling avoids re-running policy or opening a second host socket just to keep the stream handle for later payload writes.

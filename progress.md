@@ -955,3 +955,27 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: f495281.
 - Remaining boundary risks: runtime connection-handle storage, backpressure, server-to-sandbox packet injection, and async stream IO remain.
+
+## 2026-06-22 — Boundary objective: runtime TCP bridge table
+
+- Boundary under work: runtime-owned TCP bridge state that connects policy-approved stack TCP flows to shared host egress streams.
+- Allowed dependency direction: runtime may retain opaque `HostTcpStream` handles returned by `foxprox-egress`; policy/audit continue to consume only normalized events; smoltcp socket types and std socket details must not leak across the stack/egress boundaries.
+- Dependency-risk assessment: TCP forwarding is the main alpha proof gap. Without a bridge table, stack payload events are counted but not connected to host egress, inviting ad-hoc socket handling in runtime or stack code. The bridge key should be normalized sandbox/frontend/source/destination data and writes should use only `HostTcpStream`.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/egress/audit/smoltcp.
+- Observed results: added `StackTcpBridgeTable` and normalized `StackTcpFlowKey` in runtime, exposed a net-layer `handle_normalized_event_with_egress` result so runtime can retain the exact host stream opened by shared egress, and wired `StackTcpData` writes through `HostTcpStream`. Added tests proving allowed stack TCP connects store a bridge and write payload bytes, while denied connects store no bridge and drop payload data without egress writes. All verification passed.
+- Changed files:
+  - `crates/foxprox-net/src/lib.rs`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `crates/foxprox-smoltcp/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 95 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime depends on shared egress/net contracts, not smoltcp.
+  - `cargo tree -p foxprox-egress` — egress depends only on `foxprox-core`.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+  - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated in adapter crate.
+- Commit hash after commit: pending.
+- Remaining boundary risks: host-to-sandbox packet injection, partial-write/backpressure semantics, async stream readiness, and bridge cleanup on real close remain.
