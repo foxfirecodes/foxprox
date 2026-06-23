@@ -338,3 +338,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Drain failures must preserve aggregate cursor
 
 - Sink-backed aggregate drains should prove write failures do not advance the drain cursor. A subsequent successful drain must still emit all previously aggregated records, then repeated successful drains should emit zero duplicates.
+
+## 2026-06-23 — Commit aggregate drain cursor only after full success
+
+- A sink drain can succeed for some records and then fail. To preserve retry semantics, stage the aggregate drain cursor locally and commit it only after every pending record is appended successfully; otherwise a retry may skip records after partial sink failure.

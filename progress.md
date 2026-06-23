@@ -3155,3 +3155,27 @@ Extended the sink-backed runtime aggregate drain proof with deterministic sink f
 ### Remaining blind spots
 - This remains a blocking-runtime aggregate drain, not full async fan-in with readiness/timer orchestration.
 - Final async runtime still needs real task registration/cancellation/join ordering and bounded sink-backed fan-in across listener/TUN/smoltcp lifecycle sources.
+
+## 2026-06-23 — Make aggregate drain cursor all-or-nothing on failure
+
+### Commands run
+- `cargo fmt` — applied formatting for aggregate drain cursor fix.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_aggregate_captures_http_read_failures --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 61 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_proxy_runtime_aggregate_captures_http_read_failures ... ok`
+
+### Interpretation
+Round-72 correctness found that the aggregate sink drain cursor advanced after each successfully appended record, so a sink that failed after one successful record would cause a later retry to skip that first aggregate record. The drain now stages `start..end` and commits `drained_aggregate_audit_records = end` only after all appends succeed. The regression now covers both immediate sink failure and partial sink failure after one record, then verifies a later good sink drains the entire aggregate and a repeated good drain emits zero duplicates.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This remains a blocking-runtime aggregate drain, not full async fan-in with readiness/timer orchestration.
+- Final async runtime still needs real task registration/cancellation/join ordering and bounded sink-backed fan-in across listener/TUN/smoltcp lifecycle sources.

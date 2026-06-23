@@ -1780,11 +1780,12 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
         sink: &mut JsonLineAuditSink<W>,
     ) -> Result<usize, AuditSinkError> {
         let start = self.drained_aggregate_audit_records;
-        for record in &self.aggregate_audit_records[start..] {
+        let end = self.aggregate_audit_records.len();
+        for record in &self.aggregate_audit_records[start..end] {
             sink.append(record)?;
-            self.drained_aggregate_audit_records += 1;
         }
-        Ok(self.drained_aggregate_audit_records - start)
+        self.drained_aggregate_audit_records = end;
+        Ok(end - start)
     }
 
     pub fn dns_server(&self) -> &BlockingDnsBrokerServer<U> {
@@ -2330,6 +2331,29 @@ mod tests {
                 ErrorKind::BrokenPipe,
                 "deterministic test write failure",
             ))
+        }
+
+        fn flush(&mut self) -> IoResult<()> {
+            Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct FailingAfterRecordsWriter {
+        completed_records: usize,
+        fail_after_records: usize,
+    }
+
+    impl Write for FailingAfterRecordsWriter {
+        fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
+            if self.completed_records >= self.fail_after_records {
+                return Err(std::io::Error::new(
+                    ErrorKind::BrokenPipe,
+                    "deterministic partial sink failure",
+                ));
+            }
+            self.completed_records += buf.iter().filter(|byte| **byte == b'\n').count();
+            Ok(buf.len())
         }
 
         fn flush(&mut self) -> IoResult<()> {
@@ -5341,6 +5365,15 @@ mod tests {
             .drain_aggregate_audit_to_sink(&mut failing_sink)
             .is_err());
         assert_eq!(failing_sink.records_written(), 0);
+
+        let mut partially_failing_sink = JsonLineAuditSink::new(FailingAfterRecordsWriter {
+            completed_records: 0,
+            fail_after_records: 1,
+        });
+        assert!(runtime
+            .drain_aggregate_audit_to_sink(&mut partially_failing_sink)
+            .is_err());
+        assert_eq!(partially_failing_sink.records_written(), 1);
 
         let mut sink = JsonLineAuditSink::new(Vec::new());
         let drained = runtime.drain_aggregate_audit_to_sink(&mut sink).unwrap();
