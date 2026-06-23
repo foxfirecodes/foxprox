@@ -3395,3 +3395,35 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Audit fan-in is now lifecycle-owned by both blocking runtime variants, but the fan-in loop remains blocking/synthetic. Final async readiness/timer-driven orchestration over live listener/TUN/smoltcp sources remains outstanding.
+
+## 2026-06-23 — Add sink-backed live audit fan-in drain APIs
+
+### Reviewer feedback
+- Round-81 review found no blocker/high issues. The next runtime gap remained replacing synthetic fan-in plumbing with runtime-owned, sink-backed fan-in paths that can become the eventual readiness/timer task body.
+
+### Commands run
+- `cargo fmt` — applied formatting for fan-in drain API changes.
+- `cargo test -p foxprox-egress blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners --all-targets --all-features` — passed.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_aggregate_captures_http_read_failures --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 153 core tests, 4 device tests, 63 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners ... ok`
+- `tests::blocking_proxy_runtime_aggregate_captures_http_read_failures ... ok`
+
+### Fix
+- Added `BlockingRuntimeAuditFanInDrainReport` with `made_progress()` so runtime-owned fan-in drains can drive idle/progress loops without open-coded accepted/drained counters.
+- Added `BlockingRuntimeAuditFanInDrainError` to preserve typed ingest vs sink-drain failures.
+- Added `drain_live_audit_sources_to_sink(...)` for both blocking runtime variants. Each method ingests live runtime ledgers into `RuntimeAuditFanIn`, drains to a `JsonLineAuditSink`, and returns source-ingest plus sink-drain evidence.
+- Added DNS/HTTP runtime sink-backed fan-in assertions for `network_session_start`, `proxy_destination_resolved`, and `http_request_decision`, plus duplicate no-progress behavior.
+- Reused the full blocking proxy runtime sink-backed method inside the bounded fan-in pump-loop regression.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This provides a reusable blocking sink-backed fan-in task body, but it is still not an async readiness/timer-driven runtime. The remaining gap is integrating this with live listener/TUN/smoltcp task scheduling and cancellation/join in the final async runtime.

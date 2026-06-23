@@ -374,3 +374,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Runtime fan-in ownership applies to reduced runtimes too
 
 - If a reduced blocking runtime variant starts listener task expectations, it should also declare and clean up audit fan-in consistently with the fuller runtime. Otherwise lifecycle proofs can pass in the full path while older DNS/HTTP-only runtime evidence omits the fan-in task contract.
+
+## 2026-06-23 — Runtime fan-in needs a sink-backed API, not only test plumbing
+
+- Source-specific fan-in ingestion should be paired with a runtime-owned drain-to-sink method that reports both accepted source records and drained sink records. Tests can then assert duplicate calls make no progress and that the sink contains stable JSONL evidence without manually reimplementing the pump body.

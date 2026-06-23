@@ -12,12 +12,12 @@ use foxprox_core::{
     DenialReason, DnsBrokerHandler, DnsQueryMetadata, DnsUpstream, DnsUpstreamError,
     ExplicitProxyEgress, ExplicitProxyFrontend, Frontend, HttpProxyRequestMetadata,
     JsonLineAuditSink, NetworkEndpoint, PolicyRequest, Protocol, ProxyEgressError, ProxyParseError,
-    RuntimeAuditFanIn, RuntimeAuditFanInError, RuntimeAuditIngestReport, RuntimeChildExit,
-    RuntimeCleanupAction, RuntimeCleanupReport, RuntimeComponent, RuntimeExitStatus,
-    RuntimeLifecycleError, RuntimeLifecycleHarness, RuntimeListenerConfig, RuntimeTaskExpectation,
-    RuntimeTaskHandle, RuntimeTaskJoinReport, RuntimeTaskStatus, RuntimeTaskSupervisor,
-    RuntimeTaskSupervisorError, SharedDnsCache, SocksConnectMetadata, TcpEgress, TcpEgressError,
-    UdpEgress, UdpEgressError,
+    RuntimeAuditDrainError, RuntimeAuditDrainReport, RuntimeAuditFanIn, RuntimeAuditFanInError,
+    RuntimeAuditIngestReport, RuntimeChildExit, RuntimeCleanupAction, RuntimeCleanupReport,
+    RuntimeComponent, RuntimeExitStatus, RuntimeLifecycleError, RuntimeLifecycleHarness,
+    RuntimeListenerConfig, RuntimeTaskExpectation, RuntimeTaskHandle, RuntimeTaskJoinReport,
+    RuntimeTaskStatus, RuntimeTaskSupervisor, RuntimeTaskSupervisorError, SharedDnsCache,
+    SocksConnectMetadata, TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
 };
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -1246,6 +1246,27 @@ pub enum BlockingProxyRuntimeError {
     Lifecycle(RuntimeLifecycleError),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockingRuntimeAuditFanInDrainReport {
+    pub ingest_reports: Vec<RuntimeAuditIngestReport>,
+    pub drain_report: RuntimeAuditDrainReport,
+}
+
+impl BlockingRuntimeAuditFanInDrainReport {
+    pub fn made_progress(&self) -> bool {
+        self.ingest_reports
+            .iter()
+            .any(|report| report.accepted_records > 0)
+            || self.drain_report.drained_records > 0
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockingRuntimeAuditFanInDrainError {
+    Ingest(RuntimeAuditFanInError),
+    Drain(RuntimeAuditDrainError),
+}
+
 #[derive(Debug)]
 pub struct BlockingDnsHttpRuntime<U, E> {
     sandbox_id: String,
@@ -1455,6 +1476,41 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
 
     pub fn audit_records(&self) -> Vec<AuditRecord> {
         self.aggregate_audit_records.clone()
+    }
+
+    pub fn ingest_live_audit_sources_into_fan_in(
+        &self,
+        fan_in: &mut RuntimeAuditFanIn,
+    ) -> Result<Vec<RuntimeAuditIngestReport>, RuntimeAuditFanInError> {
+        let mut reports = Vec::new();
+        reports.push(fan_in.ingest("lifecycle", self.lifecycle.audit().records())?);
+        if let Some(dns_server) = self.dns_server.as_ref() {
+            reports.push(fan_in.ingest("dns", dns_server.handler().broker().audit().records())?);
+        }
+        if let Some(http_proxy_server) = self.http_proxy_server.as_ref() {
+            reports.push(fan_in.ingest(
+                "http_proxy",
+                http_proxy_server.frontend().broker().audit().records(),
+            )?);
+        }
+        Ok(reports)
+    }
+
+    pub fn drain_live_audit_sources_to_sink<W: Write>(
+        &self,
+        fan_in: &mut RuntimeAuditFanIn,
+        sink: &mut JsonLineAuditSink<W>,
+    ) -> Result<BlockingRuntimeAuditFanInDrainReport, BlockingRuntimeAuditFanInDrainError> {
+        let ingest_reports = self
+            .ingest_live_audit_sources_into_fan_in(fan_in)
+            .map_err(BlockingRuntimeAuditFanInDrainError::Ingest)?;
+        let drain_report = fan_in
+            .drain_to_sink(sink)
+            .map_err(BlockingRuntimeAuditFanInDrainError::Drain)?;
+        Ok(BlockingRuntimeAuditFanInDrainReport {
+            ingest_reports,
+            drain_report,
+        })
     }
 
     pub fn dns_server(&self) -> &BlockingDnsBrokerServer<U> {
@@ -1828,6 +1884,23 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
             )?);
         }
         Ok(reports)
+    }
+
+    pub fn drain_live_audit_sources_to_sink<W: Write>(
+        &self,
+        fan_in: &mut RuntimeAuditFanIn,
+        sink: &mut JsonLineAuditSink<W>,
+    ) -> Result<BlockingRuntimeAuditFanInDrainReport, BlockingRuntimeAuditFanInDrainError> {
+        let ingest_reports = self
+            .ingest_live_audit_sources_into_fan_in(fan_in)
+            .map_err(BlockingRuntimeAuditFanInDrainError::Ingest)?;
+        let drain_report = fan_in
+            .drain_to_sink(sink)
+            .map_err(BlockingRuntimeAuditFanInDrainError::Drain)?;
+        Ok(BlockingRuntimeAuditFanInDrainReport {
+            ingest_reports,
+            drain_report,
+        })
     }
 
     pub fn dns_server(&self) -> &BlockingDnsBrokerServer<U> {
@@ -5041,6 +5114,24 @@ mod tests {
             1
         );
 
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 16);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+        let fan_in_report = runtime
+            .drain_live_audit_sources_to_sink(&mut fan_in, &mut sink)
+            .unwrap();
+        assert!(fan_in_report.made_progress());
+        assert_eq!(fan_in_report.ingest_reports.len(), 3);
+        assert!(fan_in_report.drain_report.drained_records >= 6);
+        let duplicate_report = runtime
+            .drain_live_audit_sources_to_sink(&mut fan_in, &mut sink)
+            .unwrap();
+        assert!(!duplicate_report.made_progress());
+        assert_eq!(duplicate_report.drain_report.drained_records, 0);
+        let fan_in_output = String::from_utf8(sink.into_inner()).unwrap();
+        assert!(fan_in_output.contains("network_session_start"));
+        assert!(fan_in_output.contains("proxy_destination_resolved"));
+        assert!(fan_in_output.contains("http_request_decision"));
+
         runtime.exit(RuntimeExitStatus::Clean, 1_100).unwrap();
         let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
         assert_eq!(lifecycle_records.len(), 4);
@@ -5592,13 +5683,10 @@ mod tests {
             1,
             || false,
             || -> Result<bool, ()> {
-                let reports = runtime
-                    .ingest_live_audit_sources_into_fan_in(&mut loop_fan_in)
+                let report = runtime
+                    .drain_live_audit_sources_to_sink(&mut loop_fan_in, &mut loop_sink)
                     .map_err(|_| ())?;
-                let accepted_records: usize =
-                    reports.iter().map(|report| report.accepted_records).sum();
-                let drain = loop_fan_in.drain_to_sink(&mut loop_sink).map_err(|_| ())?;
-                Ok(accepted_records > 0 || drain.drained_records > 0)
+                Ok(report.made_progress())
             },
         );
         assert_eq!(loop_status, RuntimeTaskStatus::TimedOut);
