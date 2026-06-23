@@ -2547,6 +2547,93 @@ mod tests {
     }
 
     #[test]
+    fn blocking_listener_loop_error_recorders_append_structured_broker_errors() {
+        let query = dns_query(0x7171, "Error.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let mut dns_server = BlockingDnsBrokerServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            Duration::from_millis(10),
+            512,
+        )
+        .unwrap();
+        dns_server.record_listener_loop_error("s1", 1_000, &DnsUpstreamError::Unavailable);
+        let dns_records: Vec<_> = dns_server.handler().broker().audit().records().collect();
+        assert_eq!(dns_records.len(), 1);
+        assert_eq!(dns_records[0].kind, AuditKind::BrokerError);
+        assert_eq!(dns_records[0].decision, Some(Decision::FailClosed));
+        assert_eq!(dns_records[0].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(
+            dns_records[0].details["runtime_error"],
+            "listener_loop_error"
+        );
+        assert_eq!(dns_records[0].details["listener_component"], "dns_listener");
+        assert_eq!(dns_records[0].details["listener_task"], "dns_accept_loop");
+        assert_eq!(dns_records[0].details["listener_error"], "unavailable");
+
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut http_server = BlockingHttpProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            Duration::from_millis(10),
+            4096,
+        )
+        .unwrap();
+        http_server.record_listener_loop_error(1_000, &ProxyEgressError::SendFailed);
+        let http_records: Vec<_> = http_server.frontend().broker().audit().records().collect();
+        assert_eq!(http_records.len(), 1);
+        assert_eq!(http_records[0].kind, AuditKind::BrokerError);
+        assert_eq!(http_records[0].decision, Some(Decision::FailClosed));
+        assert_eq!(http_records[0].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(
+            http_records[0].details["listener_component"],
+            "http_proxy_listener"
+        );
+        assert_eq!(
+            http_records[0].details["listener_task"],
+            "http_proxy_accept_loop"
+        );
+        assert_eq!(http_records[0].details["listener_error"], "send_failed");
+
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut socks_server = BlockingSocks5ProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_millis(10),
+            4096,
+        )
+        .unwrap();
+        socks_server.record_listener_loop_error(1_000, &ProxyEgressError::SendFailed);
+        let socks_records: Vec<_> = socks_server.frontend().broker().audit().records().collect();
+        assert_eq!(socks_records.len(), 1);
+        assert_eq!(socks_records[0].kind, AuditKind::BrokerError);
+        assert_eq!(socks_records[0].decision, Some(Decision::FailClosed));
+        assert_eq!(socks_records[0].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(
+            socks_records[0].details["listener_component"],
+            "socks5_listener"
+        );
+        assert_eq!(
+            socks_records[0].details["listener_task"],
+            "socks5_accept_loop"
+        );
+        assert_eq!(socks_records[0].details["listener_error"], "send_failed");
+    }
+
+    #[test]
     fn blocking_listener_loop_tasks_feed_lifecycle_exit() {
         let query = dns_query(0x7070, "Loop.TEST", 1);
         let response = dns_a_response(&query, [127, 0, 0, 1], 30);

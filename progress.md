@@ -2951,3 +2951,29 @@ Round-62/63 review found two high-risk overclaims: idle-budget exhaustion was be
 ### Remaining blind spots
 - Still need adapter-level listener/socket error injection to prove real OS accept/recv failures hit the new `listener_loop_error` audit path deterministically.
 - Final async runtime still needs readiness/timer integration and audit fan-in wiring for real task loops.
+
+## 2026-06-23 — Add structured listener-loop error audit assertions
+
+### Commands run
+- `cargo fmt` — applied formatting for listener-loop audit assertion changes.
+- `cargo test -p foxprox-egress blocking_listener_loop --all-targets --all-features` — passed, 5 listener-loop tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 58 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_listener_loop_error_recorders_append_structured_broker_errors ... ok`
+- `tests::blocking_listener_loop_helper_reports_real_errors_as_failed ... ok`
+- `tests::blocking_listener_loop_tasks_feed_lifecycle_exit ... ok`
+
+### Interpretation
+Round-64 review found no blocker/high issues and identified deterministic listener error-path evidence as the next gap. Added assertions for DNS, HTTP, and SOCKS listener error recorders so task failures retain structured `broker_error` evidence: `runtime_error=listener_loop_error`, listener component, listener task name, and listener error detail. This narrows the prior blind spot from “no structured error-path proof” to “still no OS-level accept/recv fault injection against concrete sockets.”
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Need real adapter-level/OS listener error injection so DNS/HTTP/SOCKS `run_until_cancelled(...)` can be proven to hit these recorders from concrete accept/recv failures without unsafe fd manipulation.
+- Final async runtime still needs readiness/timer integration and audit fan-in wiring for real task loops.

@@ -306,3 +306,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Idle budget exhaustion is not cancellation evidence
 
 - Listener loop helpers must reserve `RuntimeTaskStatus::Cancelled` for an observed cancellation signal. Idle-budget exhaustion without cancellation is a timeout/fail-closed task outcome, while per-client read timeouts should be audited as request failures and should not stop the listener task.
+
+## 2026-06-23 — Listener error audits should be asserted per frontend
+
+- Shared listener-loop status tests are not enough on their own; each listener frontend should have structured audit assertions for `listener_loop_error` records so DNS/HTTP/SOCKS task failures retain component, task, frontend/protocol, and error detail evidence.
