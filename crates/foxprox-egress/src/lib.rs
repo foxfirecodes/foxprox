@@ -4749,6 +4749,290 @@ mod tests {
             .await;
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_local_scheduler_combines_live_io_smoltcp_and_final_drain() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let mut combined_lifecycle =
+                    RuntimeLifecycleHarness::new("local-combined-runtime", 16);
+                let expected_tasks = vec![
+                    RuntimeTaskExpectation::new(RuntimeComponent::DnsListener, "dns_accept_loop"),
+                    RuntimeTaskExpectation::new(
+                        RuntimeComponent::HttpProxyListener,
+                        "http_proxy_accept_loop",
+                    ),
+                    RuntimeTaskExpectation::new(RuntimeComponent::TunDevice, "tun_packet_loop"),
+                    RuntimeTaskExpectation::new(
+                        RuntimeComponent::SmoltcpStack,
+                        "smoltcp_tun_bridge_loop",
+                    ),
+                    RuntimeTaskExpectation::new(RuntimeComponent::AuditFanIn, "audit_fan_in_loop"),
+                ];
+                combined_lifecycle
+                    .start_with_task_expectations(
+                        vec![
+                            RuntimeComponent::DnsListener,
+                            RuntimeComponent::HttpProxyListener,
+                            RuntimeComponent::TunDevice,
+                            RuntimeComponent::SmoltcpStack,
+                            RuntimeComponent::AuditFanIn,
+                        ],
+                        expected_tasks.clone(),
+                        9_700,
+                    )
+                    .unwrap();
+                let lifecycle = std::rc::Rc::new(std::cell::RefCell::new(Some(combined_lifecycle)));
+                let live_dispatch_done = Arc::new(AtomicBool::new(false));
+                let wait_requested = Arc::new(AtomicBool::new(false));
+                let wait_notify = Arc::new(tokio::sync::Notify::new());
+                let wait_report = Arc::new(std::sync::Mutex::new(None));
+                let mut task_set = AsyncLocalRuntimeTaskSet::new();
+                for (component, task_name) in [
+                    (RuntimeComponent::DnsListener, "dns_accept_loop"),
+                    (
+                        RuntimeComponent::HttpProxyListener,
+                        "http_proxy_accept_loop",
+                    ),
+                    (RuntimeComponent::TunDevice, "tun_packet_loop"),
+                    (RuntimeComponent::AuditFanIn, "audit_fan_in_loop"),
+                ] {
+                    task_set
+                        .spawn_cancellable_task(component, task_name, |token| async move {
+                            token.cancelled().await;
+                            RuntimeTaskStatus::Cancelled
+                        })
+                        .unwrap();
+                }
+                let lifecycle_for_task = std::rc::Rc::clone(&lifecycle);
+                let dispatch_done = live_dispatch_done.clone();
+                let wait_observed = wait_requested.clone();
+                let wait_notification = wait_notify.clone();
+                let wait_report_slot = wait_report.clone();
+                task_set
+                    .spawn_cancellable_task(
+                        RuntimeComponent::SmoltcpStack,
+                        "smoltcp_tun_bridge_loop",
+                        move |token| async move {
+                            let udp_socket =
+                                tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                            let udp_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+                            udp_sender
+                                .send_to(b"local-combined-dns", udp_socket.local_addr().unwrap())
+                                .unwrap();
+                            let udp_report = wait_for_async_udp_socket_readiness(
+                                &udp_socket,
+                                RuntimeComponent::DnsListener,
+                                "dns_accept_loop",
+                                Duration::from_secs(1),
+                                &token,
+                            )
+                            .await;
+
+                            let tcp_listener =
+                                tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                            let listener_addr = tcp_listener.local_addr().unwrap();
+                            let client = tokio::spawn(async move {
+                                let stream =
+                                    tokio::net::TcpStream::connect(listener_addr).await.unwrap();
+                                stream.local_addr().unwrap()
+                            });
+                            let tcp_report = accept_async_tcp_listener_when_ready(
+                                &tcp_listener,
+                                RuntimeComponent::HttpProxyListener,
+                                "http_proxy_accept_loop",
+                                Duration::from_secs(1),
+                                &token,
+                            )
+                            .await;
+                            let tcp_client_addr = client.await.unwrap();
+
+                            let (packet_fd, mut sandbox_peer) =
+                                std::os::unix::net::UnixStream::pair().unwrap();
+                            packet_fd.set_nonblocking(true).unwrap();
+                            let async_packet_fd = tokio::io::unix::AsyncFd::new(packet_fd).unwrap();
+                            sandbox_peer.write_all(b"local-combined-tun").unwrap();
+                            let packet_report = wait_for_async_packet_fd_readiness(
+                                &async_packet_fd,
+                                Duration::from_secs(1),
+                                &token,
+                            )
+                            .await;
+
+                            let mut stack =
+                                foxprox_stack::SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+                            stack.listen_tcp(8080, 1024, 1024);
+                            stack.inject_packet(egress_ipv4_tcp_packet(EgressTcpPacketSpec {
+                                source: [10, 0, 2, 15],
+                                destination: [10, 0, 2, 1],
+                                source_port: 50_000,
+                                destination_port: 8080,
+                                sequence: 0x0102_0304,
+                                acknowledgment: 0,
+                                flags: EGRESS_TCP_SYN,
+                                payload: &[],
+                            }));
+                            let syn_ack = stack.poll(9_710);
+                            let due_ms = 9_710 + syn_ack.next_poll_delay_ms.unwrap() as i64;
+                            let smoltcp_ready = stack.runtime_timer_readiness(due_ms);
+                            let audit_ready = RuntimeTaskReadiness::ready(
+                                RuntimeComponent::AuditFanIn,
+                                "audit_fan_in_loop",
+                            );
+                            let io_reports = [udp_report, packet_report];
+                            let readiness = collect_async_runtime_readiness_from_reports(
+                                &io_reports,
+                                std::slice::from_ref(&tcp_report),
+                                &[],
+                                &[smoltcp_ready, audit_ready],
+                            );
+                            let mut accepted_stream = Some(tcp_report.stream.unwrap());
+                            let tcp_peer = tcp_report.accepted_peer;
+                            let dispatch_token = token.clone();
+                            let mut combined_lifecycle = lifecycle_for_task
+                                .borrow_mut()
+                                .take()
+                                .expect("combined lifecycle is available for dispatch");
+                            let step = run_async_runtime_scheduler_step(
+                                &mut combined_lifecycle,
+                                &readiness,
+                                9_720,
+                                &token,
+                                |ready_tasks| async move {
+                                    let mut packet = [0u8; 64];
+                                    let (udp_len, _) =
+                                        udp_socket.try_recv_from(&mut packet).unwrap();
+                                    assert_eq!(&packet[..udp_len], b"local-combined-dns");
+                                    assert_eq!(tcp_peer, Some(tcp_client_addr));
+                                    assert!(accepted_stream.take().is_some());
+                                    let packet_read = read_async_packet_fd_ready_task(
+                                        &async_packet_fd,
+                                        &ready_tasks,
+                                        64,
+                                        Duration::from_secs(1),
+                                        &dispatch_token,
+                                    )
+                                    .await
+                                    .unwrap()
+                                    .unwrap();
+                                    assert_eq!(
+                                        packet_read.packet.as_deref(),
+                                        Some(&b"local-combined-tun"[..])
+                                    );
+                                    let stack_poll =
+                                        stack.poll_ready_task(&ready_tasks, due_ms).unwrap();
+                                    assert_eq!(stack_poll.packets_emitted, 1);
+                                },
+                            )
+                            .await
+                            .unwrap();
+                            assert_eq!(
+                                step.scheduler_action,
+                                RuntimeSchedulerAction::RunReadyTasks
+                            );
+                            assert_eq!(step.dispatched_tasks.len(), 5);
+                            *lifecycle_for_task.borrow_mut() = Some(combined_lifecycle);
+                            dispatch_done.store(true, Ordering::SeqCst);
+
+                            let mut combined_lifecycle = lifecycle_for_task
+                                .borrow_mut()
+                                .take()
+                                .expect("combined lifecycle is available for wait");
+                            let report = run_async_runtime_scheduler_loop_until_cancelled(
+                                &mut combined_lifecycle,
+                                &token,
+                                9_730,
+                                1,
+                                10,
+                                move |_step| {
+                                    wait_observed.store(true, Ordering::SeqCst);
+                                    wait_notification.notify_waiters();
+                                    vec![RuntimeTaskReadiness::new(
+                                        RuntimeComponent::SmoltcpStack,
+                                        "smoltcp_tun_bridge_loop",
+                                    )
+                                    .with_next_ready_delay_ms(Some(60_000))]
+                                },
+                                |_ready_tasks| async {},
+                            )
+                            .await
+                            .unwrap();
+                            *lifecycle_for_task.borrow_mut() = Some(combined_lifecycle);
+                            *wait_report_slot.lock().unwrap() = Some(report.clone());
+                            if report.status == AsyncRuntimeSchedulerLoopStatus::Cancelled {
+                                RuntimeTaskStatus::Cancelled
+                            } else {
+                                RuntimeTaskStatus::TimedOut
+                            }
+                        },
+                    )
+                    .unwrap();
+                if !wait_requested.load(Ordering::SeqCst) {
+                    tokio::time::timeout(Duration::from_secs(1), wait_notify.notified())
+                        .await
+                        .unwrap();
+                }
+                assert!(live_dispatch_done.load(Ordering::SeqCst));
+                assert_eq!(task_set.request_cancellation(), 5);
+                let task_report = task_set.join_all_with_timeout(Duration::from_secs(1)).await;
+                assert_eq!(task_report.outcomes.len(), 5);
+                assert!(task_report
+                    .outcomes
+                    .iter()
+                    .all(|outcome| outcome.status == RuntimeTaskStatus::Cancelled));
+                let wait_report = wait_report.lock().unwrap().clone().unwrap();
+                assert_eq!(
+                    wait_report.status,
+                    AsyncRuntimeSchedulerLoopStatus::Cancelled
+                );
+                assert_eq!(
+                    wait_report.steps[0].wait_status,
+                    AsyncRuntimeSchedulerWaitStatus::Cancelled
+                );
+
+                let mut lifecycle = lifecycle
+                    .borrow_mut()
+                    .take()
+                    .expect("combined lifecycle is available for exit");
+                lifecycle
+                    .exit_with_cleanup_child_and_tasks(
+                        RuntimeExitStatus::Clean,
+                        RuntimeCleanupReport::all_succeeded(vec![
+                            RuntimeCleanupAction::DnsListener,
+                            RuntimeCleanupAction::HttpProxyListener,
+                            RuntimeCleanupAction::TunDevice,
+                            RuntimeCleanupAction::SmoltcpStack,
+                            RuntimeCleanupAction::AuditFanIn,
+                        ]),
+                        None,
+                        Some(task_report),
+                        9_800,
+                    )
+                    .unwrap();
+                let mut fan_in = RuntimeAuditFanIn::new("local-combined-runtime", 16);
+                fan_in
+                    .ingest("lifecycle", lifecycle.audit().records())
+                    .unwrap();
+                let mut sink = JsonLineAuditSink::new(Vec::new());
+                let drain = fan_in.drain_to_sink(&mut sink).unwrap();
+                assert!(drain.drained_records >= 4);
+                let output = String::from_utf8(sink.into_inner()).unwrap();
+                assert!(output.contains("runtime_readiness"));
+                assert!(output.contains("network_session_exit"));
+                assert!(output.contains("dns_listener:dns_accept_loop:cancelled"));
+                assert!(output.contains("http_proxy_listener:http_proxy_accept_loop:cancelled"));
+                assert!(output.contains("tun_device:tun_packet_loop:cancelled"));
+                assert!(output.contains("smoltcp_stack:smoltcp_tun_bridge_loop:cancelled"));
+                assert!(output.contains("audit_fan_in:audit_fan_in_loop:cancelled"));
+                let exit = lifecycle.audit().records().last().unwrap();
+                assert_eq!(exit.kind, AuditKind::NetworkSessionExit);
+                assert_eq!(exit.details["task_join_status"], "complete");
+                assert_eq!(exit.details["cleanup_status"], "complete");
+            })
+            .await;
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn async_runtime_scheduler_step_runs_ready_tasks_and_audits_action() {
         let cancellation =

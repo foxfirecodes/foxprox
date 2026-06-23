@@ -4358,3 +4358,33 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - This ties local non-`Send` smoltcp task ownership to lifecycle exit and fan-in final drain evidence, but it is still a dedicated lifecycle proof. Remaining final runtime gap is one production-owned runtime loop combining live UDP/TCP/packet-fd readiness, local smoltcp dispatch, audit fan-in, cancellation/join, shutdown final drain, and actual `/dev/net/tun` setup/handoff.
+
+## 2026-06-23 — Combine live IO, local smoltcp dispatch, cancellation, and final drain in one local runtime proof
+
+### Review
+- Round-119 correctness and validation found no blockers or high issues.
+- Reviewers identified the next highest runtime gap as one production-owned runtime loop combining live UDP/TCP/packet-fd readiness, local smoltcp dispatch, audit fan-in, cancellation/join, shutdown final drain, and actual `/dev/net/tun` setup/handoff.
+
+### Fix
+- Added `async_local_scheduler_combines_live_io_smoltcp_and_final_drain`.
+- The test uses a single `LocalSet`/`AsyncLocalRuntimeTaskSet` proof with a shared lifecycle to combine:
+  - real UDP socket readiness and dispatch,
+  - real TCP accept ownership,
+  - real packet-fd readiness/read dispatch,
+  - local non-`Send` smoltcp timer readiness/dispatch,
+  - audit-fan-in readiness,
+  - cancellation-aware timer wait and local task joins,
+  - lifecycle exit with all expected runtime task outcomes, and
+  - `RuntimeAuditFanIn` drain to JSON sink.
+- The test asserts runtime readiness evidence, all five cancelled runtime task outcomes, `network_session_exit`, `task_join_status=complete`, and `cleanup_status=complete`.
+- Fixed an intermediate clippy failure by taking ownership of the shared lifecycle out of `RefCell<Option<_>>` before awaited scheduler calls, then restoring it after the await.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_local_scheduler_combines_live_io_smoltcp_and_final_drain --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- This is the strongest local runtime proof so far: live UDP/TCP/packet-fd readiness, local smoltcp dispatch, cancellation/join, lifecycle exit, and fan-in final drain share one lifecycle. Remaining final gap is converting this proof into production runtime wiring and replacing the deterministic packet-fd stand-in with actual `/dev/net/tun` setup/handoff.

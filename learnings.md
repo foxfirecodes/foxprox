@@ -530,3 +530,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Local smoltcp task joins can feed lifecycle fan-in final drain
 
 - To connect non-`Send` smoltcp ownership to final drain without pretending it is the full production runtime, start a dedicated lifecycle harness with expected `smoltcp_stack:smoltcp_tun_bridge_loop`, join an `AsyncLocalRuntimeTaskSet`, exit with smoltcp cleanup, ingest lifecycle records into `RuntimeAuditFanIn`, and drain to JSON sink.
+
+## 2026-06-23 — A LocalSet can combine live IO and non-Send smoltcp with one lifecycle/fan-in drain
+
+- To avoid `RefCell` borrows across awaits when sharing lifecycle state with a local task, store `Option<RuntimeLifecycleHarness>` in the `RefCell`, `take()` ownership before awaited scheduler calls, then put it back after the await. This satisfies clippy while preserving one lifecycle for readiness, join, exit, and fan-in drain evidence.
