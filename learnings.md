@@ -514,3 +514,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Owned scheduler tasks should be cancelled and joined through the same shutdown drain path
 
 - To narrow runtime ownership evidence, run a scheduler loop inside an `AsyncRuntimeTaskSet` cancellable task, let shutdown request cancellation, then assert the loop reports `Cancelled`, task joins are complete, and final audit fan-in drain emits `network_session_exit` with complete join status.
+
+## 2026-06-23 — Shutdown cancellation tests must assert the scheduler was inside a wait step
+
+- A flag set before entering the scheduler loop is not enough to prove cancellation woke an in-flight timer wait. Capture the scheduler loop report and assert it contains a `WaitForTimer` step with `wait_status=Cancelled`, timer evidence, and no dispatched tasks.

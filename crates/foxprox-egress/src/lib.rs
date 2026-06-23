@@ -8002,8 +8002,10 @@ mod tests {
             1_550,
         )
         .unwrap();
-        let scheduler_started = Arc::new(AtomicBool::new(false));
+        let wait_plan_requested = Arc::new(AtomicBool::new(false));
+        let wait_plan_notify = Arc::new(tokio::sync::Notify::new());
         let scheduler_cancelled = Arc::new(AtomicBool::new(false));
+        let scheduler_report = Arc::new(std::sync::Mutex::new(None));
         let mut task_set = AsyncRuntimeTaskSet::new();
         for (component, task_name) in [
             (RuntimeComponent::DnsListener, "dns_accept_loop"),
@@ -8020,8 +8022,10 @@ mod tests {
                 })
                 .unwrap();
         }
-        let started = scheduler_started.clone();
+        let wait_requested = wait_plan_requested.clone();
+        let wait_notify = wait_plan_notify.clone();
         let cancelled = scheduler_cancelled.clone();
+        let report_slot = scheduler_report.clone();
         task_set
             .spawn_cancellable_task(
                 RuntimeComponent::AuditFanIn,
@@ -8038,14 +8042,15 @@ mod tests {
                             1_560,
                         )
                         .unwrap();
-                    started.store(true, Ordering::SeqCst);
                     let report = run_async_runtime_scheduler_loop_until_cancelled(
                         &mut lifecycle,
                         &token,
                         1_560,
                         1,
                         10,
-                        |_step| {
+                        move |_step| {
+                            wait_requested.store(true, Ordering::SeqCst);
+                            wait_notify.notify_waiters();
                             vec![RuntimeTaskReadiness::new(
                                 RuntimeComponent::AuditFanIn,
                                 "audit_fan_in_loop",
@@ -8056,6 +8061,7 @@ mod tests {
                     )
                     .await
                     .unwrap();
+                    *report_slot.lock().unwrap() = Some(report.clone());
                     if report.status == AsyncRuntimeSchedulerLoopStatus::Cancelled {
                         cancelled.store(true, Ordering::SeqCst);
                         RuntimeTaskStatus::Cancelled
@@ -8065,13 +8071,12 @@ mod tests {
                 },
             )
             .unwrap();
-        for _ in 0..4 {
-            if scheduler_started.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::task::yield_now().await;
+        if !wait_plan_requested.load(Ordering::SeqCst) {
+            tokio::time::timeout(Duration::from_secs(1), wait_plan_notify.notified())
+                .await
+                .unwrap();
         }
-        assert!(scheduler_started.load(Ordering::SeqCst));
+        assert!(wait_plan_requested.load(Ordering::SeqCst));
         let mut fan_in = RuntimeAuditFanIn::new("s1", 16);
         let mut sink = JsonLineAuditSink::new(Vec::new());
 
@@ -8088,6 +8093,25 @@ mod tests {
             .unwrap();
 
         assert!(scheduler_cancelled.load(Ordering::SeqCst));
+        let scheduler_report = scheduler_report.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            scheduler_report.status,
+            AsyncRuntimeSchedulerLoopStatus::Cancelled
+        );
+        assert_eq!(scheduler_report.steps.len(), 1);
+        assert_eq!(
+            scheduler_report.steps[0].scheduler_action,
+            RuntimeSchedulerAction::WaitForTimer
+        );
+        assert_eq!(
+            scheduler_report.steps[0].wait_status,
+            AsyncRuntimeSchedulerWaitStatus::Cancelled
+        );
+        assert_eq!(
+            scheduler_report.steps[0].plan.next_ready_delay_ms,
+            Some(60_000)
+        );
+        assert!(scheduler_report.steps[0].dispatched_tasks.is_empty());
         assert_eq!(shutdown.cancelled_tasks, 4);
         assert_eq!(shutdown.task_report.outcomes.len(), 4);
         assert!(shutdown

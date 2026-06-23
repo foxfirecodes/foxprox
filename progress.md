@@ -4274,3 +4274,24 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - This ties owned scheduler-loop cancellation/join to existing shutdown final-drain evidence, but it uses a synthetic long timer wait and does not yet combine real UDP/TCP/packet-fd/smoltcp readiness in one production-owned loop. Actual `/dev/net/tun` setup/handoff remains outside the proof.
+
+## 2026-06-23 — Fix owned scheduler shutdown wait proof
+
+### Review
+- Round-115 correctness found a high issue: `async_owned_scheduler_task_shutdown_cancels_joins_and_drains` set its readiness flag before entering the scheduler loop, so shutdown cancellation could occur at the top-of-loop precheck without proving a cancellable timer wait step was entered.
+- Round-115 validation found no additional blocker/high issues.
+
+### Fix
+- Reworked `async_owned_scheduler_task_shutdown_cancels_joins_and_drains` to signal after the readiness source creates the long timer-wait plan and to capture the owned scheduler loop report after shutdown joins it.
+- Added assertions that the owned scheduler report contains exactly one step with `scheduler_action=wait_for_timer`, `wait_status=cancelled`, `next_ready_delay_ms=60000`, and no dispatched tasks before the task reports `RuntimeTaskStatus::Cancelled`.
+- This removes the overclaim that cancellation necessarily woke an in-flight wait without evidence.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_owned_scheduler_task_shutdown_cancels_joins_and_drains --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 95 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The owned scheduler shutdown proof now verifies a cancelled timer-wait step, but it still uses synthetic readiness. Remaining final runtime gap is actual `/dev/net/tun` setup/handoff plus a production-owned loop combining live UDP/TCP/packet-fd readiness and smoltcp timer dispatch with shutdown final drain.
