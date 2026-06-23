@@ -446,3 +446,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Couple async task joins to final shutdown drain
 
 - Shutdown helpers that own async runtime tasks should request cancellation, await the async join report, and only then perform the existing pre/post-exit fan-in drain. This keeps lifecycle task evidence and final audit drain evidence tied to the same shutdown path.
+
+## 2026-06-23 — Expose fan-in and listener readiness as live scheduler sources
+
+- Fan-in readiness should come from the fan-in ledger's undrained record count, not from a synthetic drain report alone. Listener readiness sources can represent active nonblocking listener polling capability while the final socket-readable integration remains a separate step.

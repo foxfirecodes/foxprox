@@ -3911,3 +3911,30 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Async task cancellation/join is now tied to shutdown final drain for the full blocking proxy runtime. Remaining work is still the true end-to-end Tokio runtime with concrete live readiness adapters for DNS/HTTP/SOCKS sockets, TUN packets, smoltcp timers, fan-in progress, and real task spawning/driving rather than synthetic async task bodies.
+
+## 2026-06-23 — Add concrete listener and fan-in readiness source adapters
+
+### Review
+- Round-98 correctness and validation found no blockers or high issues.
+- Both reviews identified the next highest gap as concrete live Tokio readiness adapters and true end-to-end runtime task driving.
+
+### Fix
+- Added `RuntimeAuditFanIn::undrained_record_count()` and `RuntimeAuditFanIn::runtime_readiness()` so audit fan-in readiness can be derived from real undrained fan-in records.
+- Added `AsyncRuntimeReadinessSource` implementations for live blocking listener references:
+  - `&BlockingDnsBrokerServer` -> `dns_listener:dns_accept_loop`
+  - `&BlockingHttpProxyServer` -> `http_proxy_listener:http_proxy_accept_loop`
+  - `&BlockingSocks5ProxyServer` -> `socks5_listener:socks5_accept_loop`
+  - `&RuntimeAuditFanIn` -> `audit_fan_in:audit_fan_in_loop` based on undrained records
+- Added core coverage proving fan-in readiness becomes ready after ingest and idle again after drain.
+- Added egress coverage proving live `BlockingProxyRuntime` listener references plus a live fan-in instance produce ordered scheduler readiness for DNS/HTTP/SOCKS/fan-in.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-core runtime_audit_fan_in_reports_readiness_from_undrained_records --all-targets --all-features` — passed.
+- `cargo test -p foxprox-egress async_runtime_readiness --all-targets --all-features` — passed 2 readiness tests.
+- `cargo test --all-targets --all-features` — passed, including 159 core tests and 79 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Listener adapters currently model active nonblocking listener pollability, not OS-level readable readiness. Remaining final gap: actual Tokio socket/TUN/smoltcp readiness integration and real task driving, plus end-to-end final drain in a fully async runtime.

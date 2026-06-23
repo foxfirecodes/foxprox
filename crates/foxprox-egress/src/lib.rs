@@ -2677,6 +2677,33 @@ pub fn collect_async_runtime_readiness(
         .collect()
 }
 
+impl<U, S> AsyncRuntimeReadinessSource for &BlockingDnsBrokerServer<U, S> {
+    fn runtime_readiness(&mut self) -> RuntimeTaskReadiness {
+        RuntimeTaskReadiness::ready(RuntimeComponent::DnsListener, "dns_accept_loop")
+    }
+}
+
+impl<E, L> AsyncRuntimeReadinessSource for &BlockingHttpProxyServer<E, L> {
+    fn runtime_readiness(&mut self) -> RuntimeTaskReadiness {
+        RuntimeTaskReadiness::ready(
+            RuntimeComponent::HttpProxyListener,
+            "http_proxy_accept_loop",
+        )
+    }
+}
+
+impl<E, L> AsyncRuntimeReadinessSource for &BlockingSocks5ProxyServer<E, L> {
+    fn runtime_readiness(&mut self) -> RuntimeTaskReadiness {
+        RuntimeTaskReadiness::ready(RuntimeComponent::Socks5Listener, "socks5_accept_loop")
+    }
+}
+
+impl AsyncRuntimeReadinessSource for &RuntimeAuditFanIn {
+    fn runtime_readiness(&mut self) -> RuntimeTaskReadiness {
+        (*self).runtime_readiness()
+    }
+}
+
 pub async fn run_async_runtime_scheduler_loop_with_sources_until_cancelled<Run, Fut>(
     lifecycle: &mut RuntimeLifecycleHarness,
     cancellation: &AsyncRuntimeCancellationToken,
@@ -3730,6 +3757,73 @@ mod tests {
             RuntimeSchedulerAction::RunReadyTasks
         );
         assert_eq!(plan.ready_task_details(), "dns_listener:dns_accept_loop,http_proxy_listener:http_proxy_accept_loop,socks5_listener:socks5_accept_loop,audit_fan_in:audit_fan_in_loop");
+    }
+
+    #[test]
+    fn async_runtime_readiness_sources_cover_live_proxy_runtime_listeners_and_fan_in() {
+        let query = dns_query(0x7c7f, "ReadinessSources.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let runtime = BlockingProxyRuntime::bind(
+            "s1",
+            8,
+            SharedDnsCache::default(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            7_500,
+        )
+        .unwrap();
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 16);
+        runtime
+            .ingest_live_audit_sources_into_fan_in(&mut fan_in)
+            .unwrap();
+        let mut dns_source = runtime.dns_server();
+        let mut http_source = runtime.http_proxy_server();
+        let mut socks_source = runtime.socks5_proxy_server();
+        let mut fan_in_source = &fan_in;
+        let mut sources: Vec<&mut dyn AsyncRuntimeReadinessSource> = vec![
+            &mut dns_source,
+            &mut http_source,
+            &mut socks_source,
+            &mut fan_in_source,
+        ];
+
+        let readiness = collect_async_runtime_readiness(&mut sources);
+
+        assert_eq!(readiness.len(), 4);
+        assert_eq!(
+            readiness,
+            vec![
+                RuntimeTaskReadiness::ready(RuntimeComponent::DnsListener, "dns_accept_loop"),
+                RuntimeTaskReadiness::ready(
+                    RuntimeComponent::HttpProxyListener,
+                    "http_proxy_accept_loop",
+                ),
+                RuntimeTaskReadiness::ready(RuntimeComponent::Socks5Listener, "socks5_accept_loop"),
+                RuntimeTaskReadiness::ready(RuntimeComponent::AuditFanIn, "audit_fan_in_loop"),
+            ]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -719,6 +719,18 @@ impl RuntimeAuditFanIn {
     pub fn last_source_sequence(&self, source: &str) -> u64 {
         *self.last_source_sequences.get(source).unwrap_or(&0)
     }
+
+    pub fn undrained_record_count(&self) -> usize {
+        self.audit
+            .records()
+            .filter(|record| record.sequence > self.last_drained_sequence)
+            .count()
+    }
+
+    pub fn runtime_readiness(&self) -> RuntimeTaskReadiness {
+        RuntimeTaskReadiness::new(RuntimeComponent::AuditFanIn, "audit_fan_in_loop")
+            .with_ready(self.undrained_record_count() > 0)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1353,6 +1365,31 @@ mod tests {
         let duplicate = fan_in.drain_to_sink(&mut sink).unwrap();
         assert_eq!(duplicate.drained_records, 0);
         assert_eq!(sink.records_written(), 2);
+    }
+
+    #[test]
+    fn runtime_audit_fan_in_reports_readiness_from_undrained_records() {
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+        assert_eq!(fan_in.undrained_record_count(), 0);
+        assert_eq!(
+            fan_in.runtime_readiness(),
+            RuntimeTaskReadiness::new(RuntimeComponent::AuditFanIn, "audit_fan_in_loop")
+        );
+        let mut start = AuditRecord::new_at(AuditKind::NetworkSessionStart, "s1", 1_000);
+        start.sequence = 1;
+        fan_in.ingest("lifecycle", &[start]).unwrap();
+        assert_eq!(fan_in.undrained_record_count(), 1);
+        assert_eq!(
+            fan_in.runtime_readiness(),
+            RuntimeTaskReadiness::ready(RuntimeComponent::AuditFanIn, "audit_fan_in_loop")
+        );
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+        fan_in.drain_to_sink(&mut sink).unwrap();
+        assert_eq!(fan_in.undrained_record_count(), 0);
+        assert_eq!(
+            fan_in.runtime_readiness(),
+            RuntimeTaskReadiness::new(RuntimeComponent::AuditFanIn, "audit_fan_in_loop")
+        );
     }
 
     #[derive(Debug)]
