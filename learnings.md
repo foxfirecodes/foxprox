@@ -31,3 +31,9 @@
 
 - When exposing a broker-local service to the sandbox via TUN/smoltcp, keep the host-side backend listener loopback-only and validate both the requested bind address and the bound address reported after `TcpListener::bind`.
 - Starting long-lived proof backend threads should happen only after earlier fallible setup validation/binding has succeeded, so invalid CLI/setup input does not leave stray host listeners.
+
+## 2026-06-23T21:06:34Z — Live bwrap/TUN smoke harness notes
+
+- For live bwrap network setup, `--unshare-user --uid 0 --gid 0 --unshare-net --cap-add CAP_NET_ADMIN` is needed; `--cap-add CAP_NET_ADMIN` without mapping to uid/gid 0 can still leave `ip link set lo up` failing with `Operation not permitted`.
+- In bwrap live tests, provide a writable sandbox resolver file for `foxproxsetup --resolv-conf`, for example with `--bind-data FD /etc/resolv.conf`; read-only host resolver binds fail closed during DNS setup.
+- Keep direct transparent TUN traffic and explicit proxy bridge smoke phases isolated. A fresh broker/setup phase per group avoids listener rearm/timing noise while still exercising the same combined proof runtime.

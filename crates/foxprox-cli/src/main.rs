@@ -465,12 +465,6 @@ where
         socks5_proxy_config.listen_addr,
     )?;
     if let Some(proxy_port) = http_proxy_port {
-        if proxy_port == config.tcp_port {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "HTTP proxy port must differ from transparent TCP port",
-            ));
-        }
         validate_http_proxy_backend_loopback(http_proxy_config.listen_addr)?;
         let backend_addr = start_http_proxy_backend(http_proxy_config)?;
         validate_http_proxy_backend_loopback(backend_addr)?;
@@ -488,12 +482,6 @@ where
         );
     }
     if let Some(proxy_port) = socks5_proxy_port {
-        if proxy_port == config.tcp_port || Some(proxy_port) == http_proxy_port {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "SOCKS5 proxy port must differ from transparent TCP and HTTP proxy ports",
-            ));
-        }
         validate_proxy_backend_loopback(socks5_proxy_config.listen_addr)?;
         let backend_addr = start_socks5_proxy_backend(socks5_proxy_config)?;
         validate_proxy_backend_loopback(backend_addr)?;
@@ -515,8 +503,8 @@ where
     verify_peer_credentials(&stream)?;
     let tun_fd = recv_fd(stream.as_raw_fd())?;
     eprintln!(
-        "foxprox: received TUN fd; starting combined transparent proof tcp_port={} broker_dns={}:{} upstream={}",
-        config.tcp_port, config.broker_ip, config.dns_port, config.upstream_dns
+        "foxprox: received TUN fd; starting combined transparent proof tcp_ports={:?} broker_dns={}:{} upstream={}",
+        combined_transparent_tcp_ports(&config), config.broker_ip, config.dns_port, config.upstream_dns
     );
     run_combined_transparent_proof_with_ready(tun_fd, config, || stream.write_all(b"ready\n"))
 }
@@ -532,7 +520,7 @@ fn validate_transparent_proxy_bridge_inputs(
         if transparent_tcp_ports.contains(&port) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "HTTP proxy port must differ from transparent TCP port",
+                "HTTP proxy port must differ from transparent TCP ports",
             ));
         }
         validate_http_proxy_backend_loopback(http_backend_listen)?;
@@ -766,7 +754,7 @@ fn allow_tcp_forward_rule(port: u16) -> PolicyRule {
 
 fn allow_proxy_bridge_rule(broker_ip: Ipv4Addr, port: u16) -> PolicyRule {
     PolicyRule::new(
-        format!("proof-allow-http-proxy-bridge-{port}"),
+        format!("proof-allow-proxy-bridge-{port}"),
         RuleEffect::Allow,
     )
     .with_protocol(Protocol::Tcp)
@@ -1155,6 +1143,17 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+
+        let error = validate_transparent_proxy_bridge_inputs(
+            &[80, 443],
+            Some(443),
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+            None,
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("transparent TCP ports"));
     }
 
     #[test]

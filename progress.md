@@ -1963,3 +1963,29 @@
   - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`
 - Residual non-blocking follow-ups recorded: run a privileged/live bwrap smoke for combined `proof-transparent`; document writable `/etc/resolv.conf` or `--resolv-conf` expectations; document current QUIC limit as UDP/443 candidate classification plus DNS attribution rather than deeper QUIC TLS parsing; clean stale one-port proof comments.
 - Current conclusion: no remaining alpha implementation blockers are known.
+
+## 2026-06-23T21:06:34Z — non-blocking live smoke/docs cleanup complete
+
+- Current objective: close residual non-blocking alpha follow-ups after final alpha implementation review: scripted live bwrap/TUN smoke, documentation cleanup, QUIC limitation notes, and stale proof comments.
+- Changes implemented:
+  - Added `scripts/live-smoke-bwrap-tun.sh`, an executable live smoke runner that builds the workspace by default, launches host `foxprox proof-transparent`, runs `foxproxsetup` inside bwrap with TUN/CAP_NET_ADMIN, and verifies structured audit evidence.
+  - Added `docs/live-smoke.md` with prerequisites, invocation, coverage, writable `/etc/resolv.conf` setup expectations, and the current QUIC metadata limitation.
+  - Linked the live smoke doc from `README.md`.
+  - Updated `docs/bubblewrap-fork.md` to document `--uid 0 --gid 0` inside the user namespace, writable resolver-file requirements, and explicit proxy env injection flags.
+  - Updated `docs/arch.md` to state that alpha QUIC support is UDP/443 candidate classification, policy/audit, and DNS attribution only; it does not parse QUIC TLS or expose HTTP/3 metadata.
+  - Cleaned stale combined-proof wording in CLI output/rule names so multi-port transparent TCP and generic proxy bridge rules are described accurately.
+- Live smoke verification passed:
+  - `scripts/live-smoke-bwrap-tun.sh --skip-build --out-dir .tmp/live-smoke-script-check`
+  - `scripts/live-smoke-bwrap-tun.sh --skip-build --out-dir .tmp/live-smoke-script-check-2` after the final script portability tweak
+  - Covered direct transparent HTTP, direct transparent HTTPS/TLS, broker DNS, UDP/443 QUIC-candidate audit, HTTP CONNECT proxy bridge, HTTP proxy bridge, SOCKS5 proxy bridge, and setup-injected proxy environment variables.
+- Static/local verification passed:
+  - `bash -n scripts/live-smoke-bwrap-tun.sh`
+  - `cargo test -p foxprox-cli -p foxprox-setup`
+  - `cargo fmt --all -- --check`
+  - `cargo check --workspace`
+  - `cargo test --workspace`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`
+  - `cargo tree -p foxprox-core`
+- Current git status summary: docs/script/CLI/progress/learnings changes staged for a non-blocking follow-up commit; `.tmp/` live smoke logs remain ignored.
+- Next exact action: commit the verified non-blocking follow-ups, then report alpha plus live-smoke completion.
