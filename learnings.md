@@ -262,3 +262,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Cancellable blocking tasks close the timeout-only supervision gap
 
 - Bounded join timeouts make hangs observable, but cooperative cancellation is needed before timeout to prove clean shutdown. A simple cancellation token lets blocking task proofs return `cancelled` and lifecycle exit can remain `allow` with structured task evidence.
+
+## 2026-06-23 — Runtime exit should own task cancellation/join handoff
+
+- Proving cancellable tasks independently is not enough; the runtime exit path should accept the task set, request cancellation, bounded-join it, and feed the resulting report into lifecycle exit so cleanup, listener teardown, and task evidence stay in one observable shutdown path.

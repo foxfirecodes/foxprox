@@ -2636,3 +2636,32 @@ Round-52 validation observed a transient compile blocker in the in-flight cancel
 
 ### Remaining blind spots
 - Cancellation is cooperative and thread-based; final runtime still needs concrete async task handles, per-listener/TUN/smoltcp cancellation tokens, and bounded shutdown ordering wired into the real runtime.
+
+## 2026-06-23 — Wire blocking runtime exit to cancellable task sets
+
+### Commands run
+- `cargo fmt` — applied formatting for runtime/task-set exit wiring.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_exit_with_task_set_cancels_and_joins_tasks --all-targets --all-features` — passed.
+- `cargo test -p foxprox-egress blocking_runtime_task_set --all-targets --all-features` — passed, 6 blocking task-set tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 150 core tests, 3 device tests, 45 egress tests, and 12 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_proxy_runtime_exit_with_task_set_cancels_and_joins_tasks ... ok`
+- `tests::blocking_runtime_task_set_cancellation_is_joined_cleanly ... ok`
+- `tests::blocking_runtime_task_set_timeout_is_fail_closed ... ok`
+
+### Interpretation
+Added `exit_with_task_set(...)` to the blocking DNS/HTTP and full proxy runtimes. Runtime exit now can own the shutdown handoff: request cooperative task cancellation, bounded-join the task set, feed the task report into lifecycle exit, then archive component audit and close listeners. The full proxy regression proves all expected listener tasks are cancelled and joined with structured `network_session_exit` evidence (`task_join_status=complete`, `runtime_tasks=...:cancelled`, zero failed/missing counts) and that listeners are unavailable after exit.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Commit checkpoints
+- Round-53 review validated `bb3fae1` and `3dda4cd`: no blocker/high findings.
+
+### Remaining blind spots
+- This is still a blocking/thread runtime proof. Final runtime still needs real accept-loop task registration, TUN/smoltcp task cancellation, and async shutdown ordering with concrete sockets/devices.
