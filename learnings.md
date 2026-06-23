@@ -274,3 +274,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — TUN and smoltcp loops should share shutdown semantics
 
 - The smoltcp bridge loop needs the same external cancellation contract as the raw TUN loop so final runtime shutdown can cancel either packet path without relying on packet budgets or idle devices.
+
+## 2026-06-23 — Cleanup must run even when exit audit is backpressured
+
+- Runtime shutdown cannot return early on lifecycle audit backpressure before retiring listeners/devices. Archive whatever evidence exists, close listener handles, then return the audit error so fail-closed evidence and cleanup robustness both hold.

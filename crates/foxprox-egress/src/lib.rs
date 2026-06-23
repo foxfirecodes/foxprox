@@ -1102,11 +1102,11 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
             now_ms,
         );
         self.archive_new_lifecycle_records();
-        result?;
         self.archive_new_dns_records();
         self.archive_new_http_records();
         self.dns_server = None;
         self.http_proxy_server = None;
+        result?;
         Ok(())
     }
 
@@ -1431,13 +1431,13 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
             now_ms,
         );
         self.archive_new_lifecycle_records();
-        result?;
         self.archive_new_dns_records();
         self.archive_new_http_records();
         self.archive_new_socks5_records();
         self.dns_server = None;
         self.http_proxy_server = None;
         self.socks5_proxy_server = None;
+        result?;
         Ok(())
     }
 
@@ -4020,6 +4020,123 @@ mod tests {
         assert!(aggregate
             .iter()
             .any(|record| record.kind == AuditKind::SocksConnectDecision));
+    }
+
+    #[test]
+    fn blocking_dns_http_runtime_exit_backpressure_still_closes_listeners() {
+        let query = dns_query(0x6d6d, "Backpressure.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let proxy_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut runtime = BlockingDnsHttpRuntime::bind(
+            "s1",
+            3,
+            SharedDnsCache::default(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            proxy_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            3_200,
+        )
+        .unwrap();
+
+        let error = runtime.exit(RuntimeExitStatus::Clean, 3_300).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RuntimeLifecycleError::AuditBackpressure {
+                attempted_kind: AuditKind::NetworkSessionExit,
+            }
+        ));
+        assert_eq!(
+            runtime.handle_dns_once(3_301).unwrap_err(),
+            DnsUpstreamError::Unavailable
+        );
+        assert_eq!(
+            runtime.handle_http_proxy_once(3_301).unwrap_err(),
+            ProxyEgressError::SendFailed
+        );
+        let aggregate = runtime.audit_records();
+        let backpressure = aggregate
+            .iter()
+            .find(|record| record.kind == AuditKind::AuditBackpressure)
+            .expect("aggregate captures lifecycle exit backpressure");
+        assert_eq!(backpressure.details["attempted_kind"], "networksessionexit");
+    }
+
+    #[test]
+    fn blocking_proxy_runtime_exit_backpressure_still_closes_listeners() {
+        let query = dns_query(0x7e7e, "Backpressure.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut runtime = BlockingProxyRuntime::bind(
+            "s1",
+            4,
+            SharedDnsCache::default(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            3_300,
+        )
+        .unwrap();
+
+        let error = runtime.exit(RuntimeExitStatus::Clean, 3_400).unwrap_err();
+
+        assert!(matches!(
+            error,
+            RuntimeLifecycleError::AuditBackpressure {
+                attempted_kind: AuditKind::NetworkSessionExit,
+            }
+        ));
+        assert_eq!(
+            runtime.handle_dns_once(3_401).unwrap_err(),
+            DnsUpstreamError::Unavailable
+        );
+        assert_eq!(
+            runtime.handle_http_proxy_once(3_401).unwrap_err(),
+            ProxyEgressError::SendFailed
+        );
+        assert_eq!(
+            runtime.handle_socks5_proxy_once(3_401).unwrap_err(),
+            ProxyEgressError::SendFailed
+        );
+        let aggregate = runtime.audit_records();
+        let backpressure = aggregate
+            .iter()
+            .find(|record| record.kind == AuditKind::AuditBackpressure)
+            .expect("aggregate captures lifecycle exit backpressure");
+        assert_eq!(backpressure.details["attempted_kind"], "networksessionexit");
     }
 
     #[test]

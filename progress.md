@@ -2719,3 +2719,33 @@ Added `SmoltcpTunBridge::process_packet_loop_until(...)`, matching the raw TUN h
 
 ### Remaining blind spots
 - The final runtime still needs to connect these cancellation predicates to concrete async/task cancellation tokens and real TUN fd readiness/timers.
+
+## 2026-06-23 — Close blocking listeners even when exit audit is backpressured
+
+### Commands run
+- `cargo fmt` — applied formatting for cleanup/backpressure tests.
+- `cargo test -p foxprox-egress blocking_ --all-targets --all-features` — passed, 46 filtered blocking tests including exit-backpressure cleanup regressions.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 151 core tests, 3 device tests, 47 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_dns_http_runtime_exit_backpressure_still_closes_listeners ... ok`
+- `tests::blocking_proxy_runtime_exit_backpressure_still_closes_listeners ... ok`
+- `tests::blocking_proxy_runtime_exit_with_task_set_cancels_and_joins_tasks ... ok`
+
+### Interpretation
+Addressed round-54 high feedback and the round-56 validation clippy overclaim. Blocking DNS/HTTP and full proxy runtime shutdown now archives lifecycle/component evidence and retires listener handles before returning an exit audit-backpressure error. Regression tests fill the lifecycle ledger so `network_session_exit` is backpressured, assert the returned `AuditBackpressure { attempted_kind: NetworkSessionExit }`, and then prove DNS/HTTP/SOCKS handlers are unavailable after exit. Removed the transient unused imports that made clippy fail after the smoltcp cancellation commit.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Review follow-up
+- Round-54 validation found listener cleanup could be skipped on exit audit backpressure; fixed here.
+- Round-56 validation found clippy failed due transient unused imports; fixed here.
+
+### Remaining blind spots
+- The real blocking accept loops still need nonblocking/cancellation-aware accept semantics before claiming actual listener tasks can stop while blocked in `accept()`.
+- Raw TUN and smoltcp cancellation predicates still need concrete fd readiness/wakeup integration for blocked reads.
