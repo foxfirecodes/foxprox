@@ -2759,6 +2759,29 @@ where
     }))
 }
 
+pub fn collect_async_runtime_readiness_from_reports(
+    io_reports: &[AsyncRuntimeIoReadinessReport],
+    tcp_accept_reports: &[AsyncRuntimeTcpAcceptReport],
+    packet_read_reports: &[AsyncRuntimePacketFdReadReport],
+    additional_readiness: &[RuntimeTaskReadiness],
+) -> Vec<RuntimeTaskReadiness> {
+    io_reports
+        .iter()
+        .map(|report| report.readiness.clone())
+        .chain(
+            tcp_accept_reports
+                .iter()
+                .map(|report| report.readiness.clone()),
+        )
+        .chain(
+            packet_read_reports
+                .iter()
+                .map(|report| report.readiness.clone()),
+        )
+        .chain(additional_readiness.iter().cloned())
+        .collect()
+}
+
 pub async fn run_async_runtime_scheduler_step<F, Fut>(
     lifecycle: &mut RuntimeLifecycleHarness,
     task_readiness: &[RuntimeTaskReadiness],
@@ -3889,6 +3912,165 @@ mod tests {
         assert_eq!(drained.bytes_read, 0);
         assert!(drained.packet.is_none());
         assert!(!drained.readiness.ready);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_scheduler_step_integrates_live_io_reports_and_dispatch() {
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+
+        let udp_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let udp_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp_sender
+            .send_to(b"dns-ready", udp_socket.local_addr().unwrap())
+            .unwrap();
+        let udp_report = wait_for_async_udp_socket_readiness(
+            &udp_socket,
+            RuntimeComponent::DnsListener,
+            "dns_accept_loop",
+            Duration::from_secs(1),
+            &cancellation,
+        )
+        .await;
+
+        let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener_addr = tcp_listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let stream = tokio::net::TcpStream::connect(listener_addr).await.unwrap();
+            stream.local_addr().unwrap()
+        });
+        let tcp_report = accept_async_tcp_listener_when_ready(
+            &tcp_listener,
+            RuntimeComponent::HttpProxyListener,
+            "http_proxy_accept_loop",
+            Duration::from_secs(1),
+            &cancellation,
+        )
+        .await;
+        let tcp_client_addr = client.await.unwrap();
+
+        let (packet_fd, mut sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        packet_fd.set_nonblocking(true).unwrap();
+        let async_packet_fd = tokio::io::unix::AsyncFd::new(packet_fd).unwrap();
+        sandbox_peer.write_all(b"tun-dispatch").unwrap();
+        let packet_readiness_report = wait_for_async_packet_fd_readiness(
+            &async_packet_fd,
+            Duration::from_secs(1),
+            &cancellation,
+        )
+        .await;
+        let additional_readiness = vec![RuntimeTaskReadiness::ready(
+            RuntimeComponent::AuditFanIn,
+            "audit_fan_in_loop",
+        )];
+        let readiness = collect_async_runtime_readiness_from_reports(
+            std::slice::from_ref(&udp_report),
+            std::slice::from_ref(&tcp_report),
+            &[],
+            &additional_readiness,
+        )
+        .into_iter()
+        .chain([packet_readiness_report.readiness.clone()])
+        .collect::<Vec<_>>();
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-live-io-step", 8);
+        lifecycle
+            .start_with_task_expectations(
+                vec![
+                    RuntimeComponent::DnsListener,
+                    RuntimeComponent::HttpProxyListener,
+                    RuntimeComponent::TunDevice,
+                    RuntimeComponent::AuditFanIn,
+                ],
+                vec![
+                    RuntimeTaskExpectation::new(RuntimeComponent::DnsListener, "dns_accept_loop"),
+                    RuntimeTaskExpectation::new(
+                        RuntimeComponent::HttpProxyListener,
+                        "http_proxy_accept_loop",
+                    ),
+                    RuntimeTaskExpectation::new(RuntimeComponent::TunDevice, "tun_packet_loop"),
+                    RuntimeTaskExpectation::new(RuntimeComponent::AuditFanIn, "audit_fan_in_loop"),
+                ],
+                8_900,
+            )
+            .unwrap();
+        let tcp_report = std::rc::Rc::new(std::cell::RefCell::new(Some(tcp_report)));
+        let udp_consumed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let tcp_owned = std::rc::Rc::new(std::cell::Cell::new(false));
+        let packet_consumed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let fan_in_dispatched = std::rc::Rc::new(std::cell::Cell::new(false));
+        let tcp_report_for_dispatch = std::rc::Rc::clone(&tcp_report);
+        let udp_consumed_for_dispatch = std::rc::Rc::clone(&udp_consumed);
+        let tcp_owned_for_dispatch = std::rc::Rc::clone(&tcp_owned);
+        let packet_consumed_for_dispatch = std::rc::Rc::clone(&packet_consumed);
+        let fan_in_dispatched_for_dispatch = std::rc::Rc::clone(&fan_in_dispatched);
+        let dispatch_cancellation = cancellation.clone();
+
+        let step = run_async_runtime_scheduler_step(
+            &mut lifecycle,
+            &readiness,
+            8_910,
+            &cancellation,
+            |ready_tasks| async move {
+                assert!(ready_tasks.iter().any(|task| {
+                    task.component == RuntimeComponent::DnsListener
+                        && task.task_name == "dns_accept_loop"
+                }));
+                assert!(ready_tasks.iter().any(|task| {
+                    task.component == RuntimeComponent::HttpProxyListener
+                        && task.task_name == "http_proxy_accept_loop"
+                }));
+                assert!(ready_tasks.iter().any(|task| {
+                    task.component == RuntimeComponent::TunDevice
+                        && task.task_name == "tun_packet_loop"
+                }));
+                assert!(ready_tasks.iter().any(|task| {
+                    task.component == RuntimeComponent::AuditFanIn
+                        && task.task_name == "audit_fan_in_loop"
+                }));
+
+                let mut packet = [0u8; 64];
+                let (udp_len, _) = udp_socket.try_recv_from(&mut packet).unwrap();
+                assert_eq!(&packet[..udp_len], b"dns-ready");
+                udp_consumed_for_dispatch.set(true);
+
+                let accepted = tcp_report_for_dispatch.borrow_mut().take().unwrap();
+                assert_eq!(accepted.accepted_peer, Some(tcp_client_addr));
+                assert!(accepted.stream.is_some());
+                tcp_owned_for_dispatch.set(true);
+
+                let packet_report = read_async_packet_fd_ready_task(
+                    &async_packet_fd,
+                    &ready_tasks,
+                    64,
+                    Duration::from_secs(1),
+                    &dispatch_cancellation,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(packet_report.packet.as_deref(), Some(&b"tun-dispatch"[..]));
+                packet_consumed_for_dispatch.set(true);
+
+                fan_in_dispatched_for_dispatch.set(true);
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(step.scheduler_action, RuntimeSchedulerAction::RunReadyTasks);
+        assert_eq!(step.dispatched_tasks.len(), 4);
+        assert!(udp_consumed.get());
+        assert!(tcp_owned.get());
+        assert!(packet_consumed.get());
+        assert!(fan_in_dispatched.get());
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::RuntimeReadiness);
+        assert_eq!(records[1].details["scheduler_action"], "run_ready_tasks");
+        assert_eq!(
+            records[1].details["ready_runtime_tasks"],
+            "dns_listener:dns_accept_loop,http_proxy_listener:http_proxy_accept_loop,audit_fan_in:audit_fan_in_loop,tun_device:tun_packet_loop"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -494,3 +494,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — AsyncFd ready-task dispatch must clear readiness after packet reads
 
 - A packet-fd readiness proof is stronger when the ready-task helper actually reads through `AsyncFdReadyGuard::try_io(...)`, returns the packet for dispatch, and proves a follow-up wait times out after the fd is drained. This avoids evidence that only observes readiness without proving readiness can be cleared.
+
+## 2026-06-23 — Live Tokio readiness reports can share one scheduler plan before final runtime wiring
+
+- A bounded scheduler-step proof can collect UDP socket readiness, TCP accept ownership, packet-fd readiness, and audit-fan-in readiness into one `RuntimeReadinessPlan`, then dispatch all ready tasks in one cancellation-aware scheduler step. Keep this scoped as a focused integration proof until real `/dev/net/tun`, smoltcp timer wakes, and shutdown final-drain are all wired together.

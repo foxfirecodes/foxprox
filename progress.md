@@ -4165,3 +4165,29 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - This proves AsyncFd packet-fd ready-task read dispatch and readiness clearing with a deterministic fd pair. It is still not real `/dev/net/tun` setup/handoff. Remaining final runtime gap is actual TUN device fd setup/handoff, live smoltcp timer wake wiring, and integrating UDP/TCP/packet-fd readiness plus dispatch into one end-to-end async runtime loop with cancellation/join, audit fan-in, and shutdown final drain.
+
+## 2026-06-23 — Integrate live Tokio IO readiness reports in one scheduler step
+
+### Review
+- Round-110 correctness and validation found no blockers or high issues.
+- Reviewers identified the next gap as integrating UDP/TCP/packet-fd readiness, smoltcp timer wakeups, cancellation/join, audit fan-in, and shutdown final drain into one end-to-end async runtime loop.
+
+### Fix
+- Added `collect_async_runtime_readiness_from_reports(...)` to fan in structured IO readiness/accept/read reports and additional runtime readiness into scheduler-ready task evidence.
+- Added `async_runtime_scheduler_step_integrates_live_io_reports_and_dispatch`, proving one Tokio scheduler step can combine:
+  - real UDP socket readiness for `dns_listener:dns_accept_loop`,
+  - real TCP accept ownership for `http_proxy_listener:http_proxy_accept_loop`,
+  - packet-fd readiness/read dispatch for `tun_device:tun_packet_loop`, and
+  - `audit_fan_in:audit_fan_in_loop` readiness,
+  then execute a cancellation-aware ready-task dispatch closure that consumes/owns each live input.
+- The test asserts the unified `RuntimeReadinessPlan` records `scheduler_action=run_ready_tasks` and all expected ready task evidence.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_scheduler_step_integrates_live_io_reports_and_dispatch --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 91 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- This is a bounded integration proof for live UDP/TCP/packet-fd readiness reports and dispatch in one scheduler step. It is not yet real `/dev/net/tun` setup/handoff, live smoltcp timer wake dispatch in the same loop, full task lifecycle ownership across repeated runtime iterations, or shutdown final-drain integration.
