@@ -1275,8 +1275,22 @@ pub struct BlockingRuntimeAuditFanInShutdownDrainReport {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BlockingRuntimeAuditFanInShutdownDrainError {
-    Drain(BlockingRuntimeAuditFanInDrainError),
-    Exit(RuntimeLifecycleError),
+    PreExitDrain {
+        error: BlockingRuntimeAuditFanInDrainError,
+        exit: Result<(), RuntimeLifecycleError>,
+        post_exit:
+            Result<BlockingRuntimeAuditFanInDrainReport, BlockingRuntimeAuditFanInDrainError>,
+    },
+    Exit {
+        before_exit: BlockingRuntimeAuditFanInDrainReport,
+        error: RuntimeLifecycleError,
+        post_exit:
+            Result<BlockingRuntimeAuditFanInDrainReport, BlockingRuntimeAuditFanInDrainError>,
+    },
+    PostExitDrain {
+        before_exit: BlockingRuntimeAuditFanInDrainReport,
+        error: BlockingRuntimeAuditFanInDrainError,
+    },
 }
 
 #[derive(Debug)]
@@ -1536,18 +1550,37 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
         BlockingRuntimeAuditFanInShutdownDrainReport,
         BlockingRuntimeAuditFanInShutdownDrainError,
     > {
-        let before_exit = self
-            .drain_live_audit_sources_to_sink(fan_in, sink)
-            .map_err(BlockingRuntimeAuditFanInShutdownDrainError::Drain)?;
+        let before_exit_result = self.drain_live_audit_sources_to_sink(fan_in, sink);
         let exit_result = self.exit_with_task_report(status, task_report, now_ms);
-        let after_exit = self
-            .drain_live_audit_sources_to_sink(fan_in, sink)
-            .map_err(BlockingRuntimeAuditFanInShutdownDrainError::Drain)?;
-        exit_result.map_err(BlockingRuntimeAuditFanInShutdownDrainError::Exit)?;
-        Ok(BlockingRuntimeAuditFanInShutdownDrainReport {
-            before_exit,
-            after_exit,
-        })
+        let after_exit_result = self.drain_live_audit_sources_to_sink(fan_in, sink);
+        match (before_exit_result, exit_result, after_exit_result) {
+            (Ok(before_exit), Ok(()), Ok(after_exit)) => {
+                Ok(BlockingRuntimeAuditFanInShutdownDrainReport {
+                    before_exit,
+                    after_exit,
+                })
+            }
+            (Err(error), exit, post_exit) => {
+                Err(BlockingRuntimeAuditFanInShutdownDrainError::PreExitDrain {
+                    error,
+                    exit,
+                    post_exit,
+                })
+            }
+            (Ok(before_exit), Err(error), post_exit) => {
+                Err(BlockingRuntimeAuditFanInShutdownDrainError::Exit {
+                    before_exit,
+                    error,
+                    post_exit,
+                })
+            }
+            (Ok(before_exit), Ok(()), Err(error)) => {
+                Err(BlockingRuntimeAuditFanInShutdownDrainError::PostExitDrain {
+                    before_exit,
+                    error,
+                })
+            }
+        }
     }
 
     pub fn dns_server(&self) -> &BlockingDnsBrokerServer<U> {
@@ -1951,18 +1984,37 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
         BlockingRuntimeAuditFanInShutdownDrainReport,
         BlockingRuntimeAuditFanInShutdownDrainError,
     > {
-        let before_exit = self
-            .drain_live_audit_sources_to_sink(fan_in, sink)
-            .map_err(BlockingRuntimeAuditFanInShutdownDrainError::Drain)?;
+        let before_exit_result = self.drain_live_audit_sources_to_sink(fan_in, sink);
         let exit_result = self.exit_with_task_report(status, task_report, now_ms);
-        let after_exit = self
-            .drain_live_audit_sources_to_sink(fan_in, sink)
-            .map_err(BlockingRuntimeAuditFanInShutdownDrainError::Drain)?;
-        exit_result.map_err(BlockingRuntimeAuditFanInShutdownDrainError::Exit)?;
-        Ok(BlockingRuntimeAuditFanInShutdownDrainReport {
-            before_exit,
-            after_exit,
-        })
+        let after_exit_result = self.drain_live_audit_sources_to_sink(fan_in, sink);
+        match (before_exit_result, exit_result, after_exit_result) {
+            (Ok(before_exit), Ok(()), Ok(after_exit)) => {
+                Ok(BlockingRuntimeAuditFanInShutdownDrainReport {
+                    before_exit,
+                    after_exit,
+                })
+            }
+            (Err(error), exit, post_exit) => {
+                Err(BlockingRuntimeAuditFanInShutdownDrainError::PreExitDrain {
+                    error,
+                    exit,
+                    post_exit,
+                })
+            }
+            (Ok(before_exit), Err(error), post_exit) => {
+                Err(BlockingRuntimeAuditFanInShutdownDrainError::Exit {
+                    before_exit,
+                    error,
+                    post_exit,
+                })
+            }
+            (Ok(before_exit), Ok(()), Err(error)) => {
+                Err(BlockingRuntimeAuditFanInShutdownDrainError::PostExitDrain {
+                    before_exit,
+                    error,
+                })
+            }
+        }
     }
 
     pub fn dns_server(&self) -> &BlockingDnsBrokerServer<U> {
@@ -5241,6 +5293,178 @@ mod tests {
         assert!(aggregate
             .iter()
             .any(|record| record.kind == AuditKind::HttpRequestDecision));
+    }
+
+    #[test]
+    fn blocking_dns_http_runtime_shutdown_drain_failure_still_exits_and_closes() {
+        let query = dns_query(0x6c6c, "Shutdown.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let proxy_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut runtime = BlockingDnsHttpRuntime::bind(
+            "s1",
+            8,
+            SharedDnsCache::default(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            proxy_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            1_200,
+        )
+        .unwrap();
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 16);
+        let mut failing_sink = JsonLineAuditSink::new(FailingWriter);
+
+        let error = runtime
+            .exit_and_drain_live_audit_sources_to_sink(
+                RuntimeExitStatus::Clean,
+                None,
+                &mut fan_in,
+                &mut failing_sink,
+                1_300,
+            )
+            .unwrap_err();
+
+        match error {
+            BlockingRuntimeAuditFanInShutdownDrainError::PreExitDrain {
+                error,
+                exit,
+                post_exit,
+            } => {
+                assert!(matches!(
+                    error,
+                    BlockingRuntimeAuditFanInDrainError::Drain(
+                        RuntimeAuditDrainError::SinkWriteFailed { .. }
+                    )
+                ));
+                assert!(exit.is_ok());
+                assert!(matches!(
+                    post_exit,
+                    Err(BlockingRuntimeAuditFanInDrainError::Drain(
+                        RuntimeAuditDrainError::SinkWriteFailed { .. }
+                    ))
+                ));
+            }
+            other => panic!("unexpected shutdown drain error: {other:?}"),
+        }
+        assert_eq!(failing_sink.records_written(), 0);
+        let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
+        let exit = lifecycle_records.last().unwrap();
+        assert_eq!(exit.kind, AuditKind::NetworkSessionExit);
+        assert_eq!(
+            exit.details["cleanup_actions"],
+            "dns_listener,http_proxy_listener,audit_fan_in"
+        );
+        assert_eq!(
+            runtime.handle_dns_once(1_301).unwrap_err(),
+            DnsUpstreamError::Unavailable
+        );
+        assert_eq!(
+            runtime.handle_http_proxy_once(1_301).unwrap_err(),
+            ProxyEgressError::SendFailed
+        );
+    }
+
+    #[test]
+    fn blocking_proxy_runtime_shutdown_drain_emits_exit_and_closes_all_listeners() {
+        let query = dns_query(0x7c7d, "ShutdownFull.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut runtime = BlockingProxyRuntime::bind(
+            "s1",
+            8,
+            SharedDnsCache::default(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            1_400,
+        )
+        .unwrap();
+        let task_report = RuntimeTaskJoinReport::new(vec![
+            RuntimeTaskOutcome::new(
+                RuntimeComponent::DnsListener,
+                "dns_accept_loop",
+                RuntimeTaskStatus::Cancelled,
+            ),
+            RuntimeTaskOutcome::new(
+                RuntimeComponent::HttpProxyListener,
+                "http_proxy_accept_loop",
+                RuntimeTaskStatus::Cancelled,
+            ),
+            RuntimeTaskOutcome::new(
+                RuntimeComponent::Socks5Listener,
+                "socks5_accept_loop",
+                RuntimeTaskStatus::Cancelled,
+            ),
+            RuntimeTaskOutcome::new(
+                RuntimeComponent::AuditFanIn,
+                "audit_fan_in_loop",
+                RuntimeTaskStatus::Cancelled,
+            ),
+        ]);
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 16);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+
+        let shutdown_drain = runtime
+            .exit_and_drain_live_audit_sources_to_sink(
+                RuntimeExitStatus::Clean,
+                Some(task_report),
+                &mut fan_in,
+                &mut sink,
+                1_500,
+            )
+            .unwrap();
+
+        assert!(shutdown_drain.before_exit.made_progress());
+        assert!(shutdown_drain.after_exit.made_progress());
+        assert_eq!(shutdown_drain.after_exit.drain_report.drained_records, 1);
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+        assert!(output.contains("network_session_start"));
+        assert!(output.contains("socks5_listener"));
+        assert!(output.contains("network_session_exit"));
+        assert_eq!(
+            runtime.handle_dns_once(1_501).unwrap_err(),
+            DnsUpstreamError::Unavailable
+        );
+        assert_eq!(
+            runtime.handle_http_proxy_once(1_501).unwrap_err(),
+            ProxyEgressError::SendFailed
+        );
+        assert_eq!(
+            runtime.handle_socks5_proxy_once(1_501).unwrap_err(),
+            ProxyEgressError::SendFailed
+        );
     }
 
     #[test]

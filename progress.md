@@ -3460,3 +3460,36 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Shutdown final-drain is still implemented in the blocking runtime harness. Final async readiness/timer-driven scheduling over live listener/TUN/smoltcp tasks remains outstanding.
+
+## 2026-06-23 — Keep shutdown cleanup after pre-exit fan-in drain failure
+
+### Reviewer feedback
+- Round-83 correctness/validation found a high issue: `exit_and_drain_live_audit_sources_to_sink(...)` returned early when the pre-exit fan-in drain failed, so lifecycle exit/cleanup might not run and listeners could remain owned/open.
+
+### Commands run
+- `cargo fmt` — applied formatting for phase-specific shutdown drain errors and regressions.
+- `cargo test -p foxprox-egress shutdown_drain --all-targets --all-features` — passed two shutdown drain tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 153 core tests, 4 device tests, 65 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_dns_http_runtime_shutdown_drain_failure_still_exits_and_closes ... ok`
+- `tests::blocking_proxy_runtime_shutdown_drain_emits_exit_and_closes_all_listeners ... ok`
+
+### Fix
+- Reworked `BlockingRuntimeAuditFanInShutdownDrainError` into phase-specific variants:
+  - `PreExitDrain { error, exit, post_exit }`
+  - `Exit { before_exit, error, post_exit }`
+  - `PostExitDrain { before_exit, error }`
+- Both blocking runtime shutdown-drain methods now always attempt lifecycle exit and post-exit drain after the pre-exit drain attempt.
+- Added a DNS/HTTP regression where the audit sink fails during pre-exit drain. The method returns `PreExitDrain`, reports that lifecycle exit was still attempted successfully, attempts post-exit drain, records `network_session_exit`, and closes DNS/HTTP listeners.
+- Added a full DNS/HTTP/SOCKS proxy runtime shutdown-drain regression proving direct full-runtime shutdown drain emits `network_session_exit`, includes SOCKS listener evidence, and closes all three listeners.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Shutdown fan-in cleanup is now fail-closed in the blocking runtime harness, but final async readiness/timer-driven orchestration over live listener/TUN/smoltcp sources remains outstanding.

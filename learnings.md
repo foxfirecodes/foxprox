@@ -382,3 +382,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Final fan-in drain needs pre-exit and post-exit phases
 
 - A shutdown drain must collect live listener ledgers before runtime exit drops listener ownership, then drain again after lifecycle exit to capture `network_session_exit`. A single post-exit live-source drain only sees lifecycle records after listeners have been closed.
+
+## 2026-06-23 — Shutdown must not be gated by audit sink success
+
+- Final-drain helpers must attempt lifecycle exit and resource cleanup even when the pre-exit audit fan-in drain fails. Return phase-specific evidence for pre-exit drain, exit, and post-exit drain failures instead of using `?` before cleanup.
