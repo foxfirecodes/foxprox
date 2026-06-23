@@ -3332,3 +3332,37 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Final async runtime still needs readiness/timer orchestration and real audit fan-in ownership across live listener/TUN/smoltcp tasks.
+
+## 2026-06-23 — Add audit fan-in ownership to blocking proxy runtime lifecycle
+
+### Reviewer feedback
+- Round-79 reviewers found no blocker/high issues in the fan-in cursor fix. The remaining concrete gap was real runtime ownership: `BlockingProxyRuntime::exit_with_task_report(...)` still only auto-derived DNS/HTTP/SOCKS cleanup, while audit fan-in coverage lived in standalone lifecycle tests.
+
+### Commands run
+- `cargo fmt` — applied formatting for blocking proxy runtime lifecycle updates.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 63 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 153 core tests, 4 device tests, 63 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_proxy_runtime_exit_with_task_set_cancels_and_joins_tasks ... ok`
+- `tests::blocking_proxy_runtime_exit_fails_closed_for_partial_task_report ... ok`
+- `tests::blocking_proxy_runtime_shares_delivered_dns_cache_with_socks_listener ... ok`
+
+### Fix
+- `BlockingProxyRuntime::bind(...)` now declares `RuntimeComponent::AuditFanIn` and the `audit_fan_in_loop` task expectation alongside DNS, HTTP, and SOCKS listener tasks.
+- `BlockingProxyRuntime::exit_with_task_report(...)` now includes `RuntimeCleanupAction::AuditFanIn` in runtime cleanup evidence.
+- Updated blocking proxy runtime lifecycle regressions so:
+  - startup component evidence includes `audit_fan_in`,
+  - cleanup action evidence includes `audit_fan_in`,
+  - partial task reports fail closed when `audit_fan_in_loop` is missing,
+  - task-set exit cancels and joins four tasks and records `audit_fan_in:audit_fan_in_loop:cancelled`.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This adds blocking runtime lifecycle ownership/expectation for the fan-in task, but the fan-in loop remains synthetic in tests. Final async readiness/timer-driven orchestration over live listener/TUN/smoltcp sources remains outstanding.

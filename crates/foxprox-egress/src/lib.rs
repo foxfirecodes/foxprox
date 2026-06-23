@@ -1587,6 +1587,7 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
                     RuntimeComponent::DnsListener,
                     RuntimeComponent::HttpProxyListener,
                     RuntimeComponent::Socks5Listener,
+                    RuntimeComponent::AuditFanIn,
                 ],
                 vec![
                     RuntimeTaskExpectation::new(RuntimeComponent::DnsListener, "dns_accept_loop"),
@@ -1598,6 +1599,7 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
                         RuntimeComponent::Socks5Listener,
                         "socks5_accept_loop",
                     ),
+                    RuntimeTaskExpectation::new(RuntimeComponent::AuditFanIn, "audit_fan_in_loop"),
                 ],
                 now_ms,
             )
@@ -1757,6 +1759,7 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
         if self.socks5_proxy_server.is_some() {
             cleanup_actions.push(RuntimeCleanupAction::Socks5Listener);
         }
+        cleanup_actions.push(RuntimeCleanupAction::AuditFanIn);
         let result = self.lifecycle.exit_with_cleanup_child_and_tasks(
             status,
             RuntimeCleanupReport::all_succeeded(cleanup_actions),
@@ -5181,7 +5184,7 @@ mod tests {
         assert_eq!(lifecycle_records[0].kind, AuditKind::NetworkSessionStart);
         assert_eq!(
             lifecycle_records[0].details["runtime_components"],
-            "dns_listener,http_proxy_listener,socks5_listener"
+            "dns_listener,http_proxy_listener,socks5_listener,audit_fan_in"
         );
         assert_eq!(
             lifecycle_records[1].kind,
@@ -5236,7 +5239,7 @@ mod tests {
         assert_eq!(lifecycle_records[4].details["cleanup_status"], "complete");
         assert_eq!(
             lifecycle_records[4].details["cleanup_actions"],
-            "dns_listener,http_proxy_listener,socks5_listener"
+            "dns_listener,http_proxy_listener,socks5_listener,audit_fan_in"
         );
         assert_eq!(
             runtime.handle_dns_once(2_101).unwrap_err(),
@@ -5685,9 +5688,9 @@ mod tests {
         assert_eq!(exit.details["task_join_status"], "incomplete");
         assert_eq!(
             exit.details["missing_runtime_tasks"],
-            "http_proxy_listener:http_proxy_accept_loop,socks5_listener:socks5_accept_loop"
+            "http_proxy_listener:http_proxy_accept_loop,socks5_listener:socks5_accept_loop,audit_fan_in:audit_fan_in_loop"
         );
-        assert_eq!(exit.details["missing_runtime_task_count"], "2");
+        assert_eq!(exit.details["missing_runtime_task_count"], "3");
     }
 
     #[test]
@@ -5733,6 +5736,7 @@ mod tests {
                 "http_proxy_accept_loop",
             ),
             (RuntimeComponent::Socks5Listener, "socks5_accept_loop"),
+            (RuntimeComponent::AuditFanIn, "audit_fan_in_loop"),
         ] {
             task_set
                 .spawn_cancellable_task(component, task_name, |token| {
@@ -5753,7 +5757,7 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(cancelled, 3);
+        assert_eq!(cancelled, 4);
         let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
         let exit = lifecycle_records.last().unwrap();
         assert_eq!(exit.kind, AuditKind::NetworkSessionExit);
@@ -5763,7 +5767,7 @@ mod tests {
         assert_eq!(exit.details["missing_runtime_task_count"], "0");
         assert_eq!(
             exit.details["runtime_tasks"],
-            "dns_listener:dns_accept_loop:cancelled,http_proxy_listener:http_proxy_accept_loop:cancelled,socks5_listener:socks5_accept_loop:cancelled"
+            "dns_listener:dns_accept_loop:cancelled,http_proxy_listener:http_proxy_accept_loop:cancelled,socks5_listener:socks5_accept_loop:cancelled,audit_fan_in:audit_fan_in_loop:cancelled"
         );
         assert_eq!(
             runtime.handle_dns_once(4_001).unwrap_err(),

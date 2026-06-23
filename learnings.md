@@ -366,3 +366,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Runtime fan-in sink cursor must be all-or-nothing
 
 - `RuntimeAuditFanIn::drain_to_sink_with_failure_sink` must stage `last_drained_sequence` locally and commit it only after every pending record appends successfully. Advancing the cursor per record can skip already-written-but-uncommitted records on retry if the sink fails mid-batch.
+
+## 2026-06-23 — Runtime-owned fan-in must be in the runtime contract
+
+- When a runtime owns audit fan-in, include `AuditFanIn` in lifecycle components, task expectations, cleanup actions, and joined task reports. Standalone fan-in tests are not enough to catch missing runtime-exit ownership.
