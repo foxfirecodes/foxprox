@@ -1908,6 +1908,31 @@ mod tests {
             records[0].details["attempted_transition"],
             "record_readiness"
         );
+
+        let mut exited_runtime = RuntimeLifecycleHarness::new("s2", 4);
+        exited_runtime
+            .start(vec![RuntimeComponent::AuditFanIn], 2_000)
+            .unwrap();
+        exited_runtime
+            .exit(RuntimeExitStatus::Clean, 2_100)
+            .unwrap();
+
+        let error = exited_runtime
+            .record_readiness_plan(&plan, 2_110)
+            .unwrap_err();
+
+        assert_eq!(error, RuntimeLifecycleError::AlreadyExited);
+        let records: Vec<_> = exited_runtime.audit().records().collect();
+        assert_eq!(records[2].kind, AuditKind::BrokerError);
+        assert_eq!(records[2].decision, Some(Decision::FailClosed));
+        assert_eq!(records[2].details["runtime_error"], "already_exited");
+        assert_eq!(records[2].details["lifecycle_state"], "exited");
+        assert_eq!(
+            records[2].details["attempted_transition"],
+            "record_readiness"
+        );
+        assert_eq!(records[2].details["runtime_status"], "clean");
+        assert_eq!(records[2].duration_ms, Some(100));
     }
 
     #[test]

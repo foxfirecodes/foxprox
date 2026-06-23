@@ -3625,3 +3625,30 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Readiness/timer plans are now structured and auditable, but the final async scheduler still needs to consume real listener readiness, TUN packet readiness, smoltcp timers, fan-in progress, cancellation/join, and shutdown final-drain evidence.
+
+## 2026-06-23 — Cover exited-state readiness audit rejection
+
+### Reviewer feedback
+- Round-88 review found no blocker/high issues. One minor evidence nit noted that readiness invalid-transition coverage asserted the `NotStarted` branch but not the `AlreadyExited` branch.
+
+### Commands run
+- `cargo fmt` — applied formatting for expanded readiness invalid-transition coverage.
+- `cargo test -p foxprox-core runtime_lifecycle_rejects_readiness_plan_outside_running_state --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 158 core tests, 4 device tests, 65 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_lifecycle_rejects_readiness_plan_outside_running_state ... ok`
+
+### Fix
+- Expanded readiness invalid-transition coverage to assert the exited lifecycle branch.
+- The test now verifies a post-exit readiness plan attempt returns `RuntimeLifecycleError::AlreadyExited`, emits fail-closed `BrokerError`, preserves `attempted_transition=record_readiness`, includes `runtime_error=already_exited`, keeps `lifecycle_state=exited`, carries `runtime_status=clean`, and records the prior runtime duration.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Readiness planning and invalid-transition evidence are now stronger, but the final async scheduler still needs to consume live listener/TUN/smoltcp/fan-in readiness and own cancellation/join/final-drain behavior.

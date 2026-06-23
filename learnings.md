@@ -402,3 +402,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Readiness plans need audit records before scheduler wiring
 
 - Runtime readiness/timer decisions should be auditable before the final scheduler exists. Recording readiness plans in lifecycle audit makes ready tasks, timer waits, idle states, and invalid lifecycle transitions inspectable as structured evidence.
+
+## 2026-06-23 — Readiness audit invalid transitions need both lifecycle edges
+
+- When adding lifecycle-scoped audit evidence, test both not-started and already-exited rejection paths. The exited case should preserve prior duration/runtime status details while still recording the attempted transition as fail-closed evidence.
