@@ -3553,3 +3553,42 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - smoltcp timer readiness is now observable, but there is still no final async scheduler that consumes this timer evidence alongside listener readiness, TUN packet readiness, and sink-backed audit fan-in.
+
+## 2026-06-23 — Add runtime readiness plan evidence
+
+### Reviewer feedback
+- Round-86 review found no blocker/high issues. The remaining gap is the final scheduler that consumes smoltcp timer evidence alongside listener readiness, TUN readiness, sink-backed fan-in, cancellation/join, and final drains.
+
+### Commands run
+- `cargo fmt` — applied formatting for readiness plan types and smoltcp conversion.
+- `cargo test -p foxprox-core runtime_readiness_plan --all-targets --all-features` — passed three readiness-plan tests.
+- `cargo test -p foxprox-stack smoltcp_tcp_listener_accepts_handshake_and_receives_bytes --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 156 core tests, 4 device tests, 65 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_readiness_plan_runs_ready_tasks_before_waiting ... ok`
+- `runtime::tests::runtime_readiness_plan_uses_shortest_timer_when_no_task_ready ... ok`
+- `runtime::tests::runtime_readiness_plan_reports_idle_without_ready_or_timer ... ok`
+- `tests::smoltcp_tcp_listener_accepts_handshake_and_receives_bytes ... ok`
+
+### Fix
+- Added `RuntimeTaskReadiness` and `RuntimeReadinessPlan` to core runtime evidence.
+- Readiness plans now expose:
+  - immediate ready tasks,
+  - shortest next timer delay when no task is ready,
+  - idle state when neither readiness nor timers are present.
+- Exported the new runtime readiness types from `foxprox-core`.
+- Added `StackPollEvidence::runtime_timer_readiness()` so smoltcp `next_poll_delay_ms` becomes scheduler-ready evidence: zero delay is immediately ready, positive delay becomes a timer wait, and `None` remains idle.
+- Extended the TCP handshake test to prove smoltcp timer evidence feeds a `RuntimeReadinessPlan` with `timer_wait` status and the expected delay.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-stack/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This models readiness/timer decisions and connects smoltcp poll evidence to the model, but it is still not the final async scheduler. Listener readiness, TUN packet readiness, fan-in progress, cancellation/join, and shutdown final-drain must still be wired into a concrete runtime loop.

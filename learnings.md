@@ -394,3 +394,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — smoltcp timer readiness should be explicit evidence
 
 - `smoltcp` exposes the next required poll via `Interface::poll_delay(...)`. Preserve that value in stack poll evidence so the eventual runtime scheduler can distinguish immediate re-polls, finite timer waits, and no active timer.
+
+## 2026-06-23 — Scheduler planning needs task readiness and timer inputs
+
+- Keep readiness planning independent of a concrete async runtime: model ready tasks, next timer delay, and idle state as typed evidence first. smoltcp poll evidence can then be converted into this scheduler input without claiming the final scheduler exists.

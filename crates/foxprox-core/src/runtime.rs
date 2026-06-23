@@ -158,6 +158,85 @@ impl RuntimeTaskExpectation {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeTaskReadiness {
+    pub component: RuntimeComponent,
+    pub task_name: String,
+    pub ready: bool,
+    pub next_ready_delay_ms: Option<u64>,
+}
+
+impl RuntimeTaskReadiness {
+    pub fn new(component: RuntimeComponent, task_name: impl Into<String>) -> Self {
+        Self {
+            component,
+            task_name: task_name.into(),
+            ready: false,
+            next_ready_delay_ms: None,
+        }
+    }
+
+    pub fn ready(component: RuntimeComponent, task_name: impl Into<String>) -> Self {
+        Self::new(component, task_name).with_ready(true)
+    }
+
+    pub fn with_ready(mut self, ready: bool) -> Self {
+        self.ready = ready;
+        self
+    }
+
+    pub fn with_next_ready_delay_ms(mut self, next_ready_delay_ms: Option<u64>) -> Self {
+        self.next_ready_delay_ms = next_ready_delay_ms;
+        self
+    }
+
+    fn as_expectation(&self) -> RuntimeTaskExpectation {
+        RuntimeTaskExpectation::new(self.component, self.task_name.clone())
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeReadinessPlan {
+    pub ready_tasks: Vec<RuntimeTaskExpectation>,
+    pub next_ready_delay_ms: Option<u64>,
+}
+
+impl RuntimeReadinessPlan {
+    pub fn from_tasks(tasks: &[RuntimeTaskReadiness]) -> Self {
+        let ready_tasks: Vec<_> = tasks
+            .iter()
+            .filter(|task| task.ready)
+            .map(RuntimeTaskReadiness::as_expectation)
+            .collect();
+        let next_ready_delay_ms = if ready_tasks.is_empty() {
+            tasks
+                .iter()
+                .filter_map(|task| task.next_ready_delay_ms)
+                .min()
+        } else {
+            None
+        };
+        Self {
+            ready_tasks,
+            next_ready_delay_ms,
+        }
+    }
+
+    pub fn status_detail(&self) -> &'static str {
+        if !self.ready_tasks.is_empty() {
+            "ready"
+        } else if self.next_ready_delay_ms.is_some() {
+            "timer_wait"
+        } else {
+            "idle"
+        }
+    }
+
+    pub fn ready_task_details(&self) -> String {
+        task_expectation_list(&self.ready_tasks)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeTaskOutcome {
     pub component: RuntimeComponent,
     pub task_name: String,
@@ -1699,6 +1778,45 @@ mod tests {
             "http_proxy_listener"
         );
         assert_eq!(records[1].details["missing_runtime_task_count"], "1");
+    }
+
+    #[test]
+    fn runtime_readiness_plan_runs_ready_tasks_before_waiting() {
+        let plan = RuntimeReadinessPlan::from_tasks(&[
+            RuntimeTaskReadiness::ready(RuntimeComponent::DnsListener, "dns_accept_loop"),
+            RuntimeTaskReadiness::new(RuntimeComponent::SmoltcpStack, "smoltcp_tun_bridge_loop")
+                .with_next_ready_delay_ms(Some(250)),
+        ]);
+
+        assert_eq!(plan.status_detail(), "ready");
+        assert_eq!(plan.next_ready_delay_ms, None);
+        assert_eq!(plan.ready_task_details(), "dns_listener:dns_accept_loop");
+    }
+
+    #[test]
+    fn runtime_readiness_plan_uses_shortest_timer_when_no_task_ready() {
+        let plan = RuntimeReadinessPlan::from_tasks(&[
+            RuntimeTaskReadiness::new(RuntimeComponent::SmoltcpStack, "smoltcp_tun_bridge_loop")
+                .with_next_ready_delay_ms(Some(250)),
+            RuntimeTaskReadiness::new(RuntimeComponent::AuditFanIn, "audit_fan_in_loop")
+                .with_next_ready_delay_ms(Some(50)),
+        ]);
+
+        assert_eq!(plan.status_detail(), "timer_wait");
+        assert_eq!(plan.ready_task_details(), "");
+        assert_eq!(plan.next_ready_delay_ms, Some(50));
+    }
+
+    #[test]
+    fn runtime_readiness_plan_reports_idle_without_ready_or_timer() {
+        let plan = RuntimeReadinessPlan::from_tasks(&[
+            RuntimeTaskReadiness::new(RuntimeComponent::TunDevice, "tun_packet_loop"),
+            RuntimeTaskReadiness::new(RuntimeComponent::AuditFanIn, "audit_fan_in_loop"),
+        ]);
+
+        assert_eq!(plan.status_detail(), "idle");
+        assert_eq!(plan.ready_task_details(), "");
+        assert_eq!(plan.next_ready_delay_ms, None);
     }
 
     #[test]

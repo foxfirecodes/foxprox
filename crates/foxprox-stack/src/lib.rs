@@ -10,7 +10,8 @@
 use foxprox_core::{
     AuditKind, AuditRecord, BrokerCore, ByteCounts, Decision, DenialReason, DeviceIoError,
     Frontend, NetworkEndpoint, PacketDevice, ParsedIpPacket, PolicyDecision, PolicyRequest,
-    RuntimeComponent, RuntimeTaskOutcome, RuntimeTaskStatus, TcpEgress, TcpEgressError,
+    RuntimeComponent, RuntimeTaskOutcome, RuntimeTaskReadiness, RuntimeTaskStatus, TcpEgress,
+    TcpEgressError,
 };
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -28,6 +29,14 @@ pub struct StackPollEvidence {
     pub packets_emitted: usize,
     pub outbound_bytes: usize,
     pub next_poll_delay_ms: Option<u64>,
+}
+
+impl StackPollEvidence {
+    pub fn runtime_timer_readiness(&self) -> RuntimeTaskReadiness {
+        RuntimeTaskReadiness::new(RuntimeComponent::SmoltcpStack, "smoltcp_tun_bridge_loop")
+            .with_ready(self.next_poll_delay_ms == Some(0))
+            .with_next_ready_delay_ms(self.next_poll_delay_ms.filter(|delay| *delay > 0))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -816,7 +825,9 @@ fn poll_result_name(result: PollResult) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use foxprox_core::{checksum, InMemoryPacketDevice, PolicyConfig, PolicyEngine};
+    use foxprox_core::{
+        checksum, InMemoryPacketDevice, PolicyConfig, PolicyEngine, RuntimeReadinessPlan,
+    };
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -1051,6 +1062,13 @@ mod tests {
         let syn_ack_evidence = stack.poll(3_000);
         assert_eq!(syn_ack_evidence.packets_emitted, 1);
         assert!(syn_ack_evidence.next_poll_delay_ms.is_some());
+        let readiness = syn_ack_evidence.runtime_timer_readiness();
+        let plan = RuntimeReadinessPlan::from_tasks(&[readiness]);
+        assert_eq!(plan.status_detail(), "timer_wait");
+        assert_eq!(
+            plan.next_ready_delay_ms,
+            syn_ack_evidence.next_poll_delay_ms
+        );
         let syn_ack_packets = stack.outbound_packets();
         let syn_ack = &syn_ack_packets[0];
         let syn_ack_tcp = &syn_ack[20..];
