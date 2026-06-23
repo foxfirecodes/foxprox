@@ -12,6 +12,7 @@ pub enum RuntimeComponent {
     DnsListener,
     HttpProxyListener,
     Socks5Listener,
+    AuditFanIn,
     ChildProcess,
 }
 
@@ -23,6 +24,7 @@ impl RuntimeComponent {
             Self::DnsListener => "dns_listener",
             Self::HttpProxyListener => "http_proxy_listener",
             Self::Socks5Listener => "socks5_listener",
+            Self::AuditFanIn => "audit_fan_in",
             Self::ChildProcess => "child_process",
         }
     }
@@ -58,6 +60,7 @@ pub enum RuntimeCleanupAction {
     DnsListener,
     HttpProxyListener,
     Socks5Listener,
+    AuditFanIn,
     SetupControlFd,
     ChildProcess,
 }
@@ -70,6 +73,7 @@ impl RuntimeCleanupAction {
             Self::DnsListener => "dns_listener",
             Self::HttpProxyListener => "http_proxy_listener",
             Self::Socks5Listener => "socks5_listener",
+            Self::AuditFanIn => "audit_fan_in",
             Self::SetupControlFd => "setup_control_fd",
             Self::ChildProcess => "child_process",
         }
@@ -1001,6 +1005,7 @@ fn frontend_for_component(component: RuntimeComponent) -> Frontend {
         RuntimeComponent::TunDevice => Frontend::Tun,
         RuntimeComponent::SmoltcpStack
         | RuntimeComponent::DnsListener
+        | RuntimeComponent::AuditFanIn
         | RuntimeComponent::ChildProcess => Frontend::Core,
     }
 }
@@ -1012,6 +1017,7 @@ fn protocol_for_component(component: RuntimeComponent) -> Protocol {
         RuntimeComponent::Socks5Listener => Protocol::Socks,
         RuntimeComponent::TunDevice
         | RuntimeComponent::SmoltcpStack
+        | RuntimeComponent::AuditFanIn
         | RuntimeComponent::ChildProcess => Protocol::Unsupported,
     }
 }

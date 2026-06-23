@@ -471,6 +471,17 @@ fn proxy_egress_error_detail(error: &ProxyEgressError) -> &'static str {
     }
 }
 
+#[cfg(test)]
+fn run_blocking_audit_fan_in_until_cancelled<E>(
+    max_idle_steps: usize,
+    should_cancel: impl FnMut() -> bool,
+    mut pump_once: impl FnMut() -> Result<bool, E>,
+) -> RuntimeTaskStatus {
+    run_blocking_listener_loop_until_cancelled(max_idle_steps, should_cancel, || {
+        pump_once().map(|made_progress| made_progress.then_some(()))
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HttpProxyListenerStepResult {
     pub client: SocketAddr,
@@ -2766,6 +2777,94 @@ mod tests {
 
         assert_eq!(status, RuntimeTaskStatus::Cancelled);
         assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn blocking_audit_fan_in_loop_pumps_and_drains_until_cancelled() {
+        let mut start_record = AuditRecord::new_at(AuditKind::NetworkSessionStart, "s1", 1_000);
+        start_record.sequence = 1;
+        let source_records = vec![start_record];
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+        let mut first_pump = true;
+
+        let timeout_status = run_blocking_audit_fan_in_until_cancelled(
+            1,
+            || false,
+            || -> Result<bool, ()> {
+                if first_pump {
+                    first_pump = false;
+                    fan_in
+                        .ingest("lifecycle", &source_records)
+                        .map_err(|_| ())?;
+                }
+                let drained = fan_in.drain_to_sink(&mut sink).map_err(|_| ())?;
+                Ok(drained.drained_records > 0)
+            },
+        );
+
+        assert_eq!(timeout_status, RuntimeTaskStatus::TimedOut);
+        let json_lines = String::from_utf8(sink.into_inner()).unwrap();
+        assert!(json_lines.contains("network_session_start"));
+
+        let mut task_set = BlockingRuntimeTaskSet::new();
+        task_set
+            .spawn_cancellable_task(RuntimeComponent::AuditFanIn, "audit_fan_in_loop", |token| {
+                let mut start_record =
+                    AuditRecord::new_at(AuditKind::NetworkSessionStart, "s1", 2_000);
+                start_record.sequence = 1;
+                let source_records = vec![start_record];
+                let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+                let mut sink = JsonLineAuditSink::new(Vec::new());
+                let mut first_pump = true;
+                run_blocking_audit_fan_in_until_cancelled(
+                    1_000_000,
+                    || token.is_cancelled(),
+                    || -> Result<bool, ()> {
+                        if first_pump {
+                            first_pump = false;
+                            fan_in
+                                .ingest("lifecycle", &source_records)
+                                .map_err(|_| ())?;
+                        }
+                        let drained = fan_in.drain_to_sink(&mut sink).map_err(|_| ())?;
+                        if drained.drained_records == 0 {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Ok(drained.drained_records > 0)
+                    },
+                )
+            })
+            .unwrap();
+        let expectations = task_set.expectations();
+        assert_eq!(task_set.request_cancellation(), 1);
+        let report = task_set.join_all_with_timeout(Duration::from_secs(1));
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].status, RuntimeTaskStatus::Cancelled);
+
+        let mut lifecycle = RuntimeLifecycleHarness::new("s1", 4);
+        lifecycle
+            .start_with_task_expectations(vec![RuntimeComponent::AuditFanIn], expectations, 2_000)
+            .unwrap();
+        lifecycle
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::AuditFanIn]),
+                None,
+                Some(report),
+                2_100,
+            )
+            .unwrap();
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        let exit = records.last().unwrap();
+        assert_eq!(exit.kind, AuditKind::NetworkSessionExit);
+        assert_eq!(exit.decision, Some(Decision::Allow));
+        assert_eq!(exit.details["task_join_status"], "complete");
+        assert_eq!(exit.details["failed_runtime_task_count"], "0");
+        assert_eq!(
+            exit.details["runtime_tasks"],
+            "audit_fan_in:audit_fan_in_loop:cancelled"
+        );
     }
 
     #[test]

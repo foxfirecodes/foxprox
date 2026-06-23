@@ -3203,3 +3203,28 @@ Added `BlockingProxyRuntime::ingest_live_audit_sources_into_fan_in(...)`, which 
 ### Remaining blind spots
 - This bridges live blocking-runtime ledgers into core fan-in, but it is still invoked synchronously from tests rather than by an async fan-in task.
 - Final async runtime still needs readiness/timer orchestration plus real task registration/cancellation/join ordering across listener/TUN/smoltcp sources.
+
+## 2026-06-23 — Register audit fan-in as a runtime task
+
+### Commands run
+- `cargo fmt` — applied formatting for audit fan-in task coverage.
+- `cargo test -p foxprox-egress blocking_audit_fan_in_loop_pumps_and_drains_until_cancelled --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 62 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_audit_fan_in_loop_pumps_and_drains_until_cancelled ... ok`
+
+### Interpretation
+Added an `audit_fan_in` runtime component/cleanup action and a bounded blocking fan-in pump loop. The new regression proves the pump drains fan-in records to a JSON sink, reports idle exhaustion as `timed_out`, can run under `BlockingRuntimeTaskSet` as `audit_fan_in_loop`, observes cancellation, and is recorded in lifecycle exit evidence as `audit_fan_in:audit_fan_in_loop:cancelled` with a clean task join report. This advances real task registration/cancellation/join coverage for fan-in while remaining a blocking harness rather than a production async scheduler.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The fan-in task proof uses a blocking harness and synthetic source records; it is not yet the final async readiness/timer-driven fan-in task over live listener/TUN/smoltcp sources.
+- Final async runtime still needs readiness/timer orchestration across all concrete runtime tasks.

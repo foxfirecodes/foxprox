@@ -346,3 +346,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Fan-in must ingest live source ledgers by source
 
 - Runtime aggregate records can contain duplicate per-ledger sequence numbers, so core fan-in should ingest live lifecycle/DNS/HTTP/SOCKS ledgers as separate named sources rather than treating a flattened aggregate vector as one source. This preserves source cursors and avoids sequence collisions.
+
+## 2026-06-23 — Audit fan-in needs task lifecycle evidence
+
+- A fan-in bridge should be paired with task-supervisor evidence: register an `audit_fan_in` runtime component/task, pump/drain fan-in work until cancellation, and prove lifecycle exit records the fan-in task outcome alongside listener tasks.
