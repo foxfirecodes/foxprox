@@ -4253,3 +4253,24 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - This proves timer waiting and due dispatch in the bounded Tokio scheduler loop. Remaining final runtime gap is actual `/dev/net/tun` setup/handoff, live UDP/TCP/packet-fd readiness and smoltcp timer dispatch across the same production runtime ownership loop, cancellation/join, audit fan-in, and shutdown final drain.
+
+## 2026-06-23 — Tie owned async scheduler task cancellation to shutdown final drain
+
+### Review
+- Round-114 correctness and validation found no blockers or high issues.
+- Reviewers identified the next highest runtime gap as production end-to-end ownership: actual `/dev/net/tun` setup/handoff, live UDP/TCP/packet-fd readiness plus smoltcp timer dispatch in the same loop, cancellation/join, audit fan-in, and shutdown final drain.
+
+### Fix
+- Added `async_owned_scheduler_task_shutdown_cancels_joins_and_drains`.
+- The test runs a Tokio scheduler loop inside an `AsyncRuntimeTaskSet` cancellable `audit_fan_in_loop` task, lets the loop enter a long timer wait, then shuts down through `BlockingProxyRuntime::exit_with_async_task_set_and_drain_live_audit_sources_to_sink(...)`.
+- The test proves shutdown cancellation wakes the owned scheduler loop, the task reports `RuntimeTaskStatus::Cancelled`, all async tasks join with complete status, the runtime emits `network_session_exit`, and fan-in final drain captures the cancelled `audit_fan_in_loop` task evidence.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_owned_scheduler_task_shutdown_cancels_joins_and_drains --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 95 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- This ties owned scheduler-loop cancellation/join to existing shutdown final-drain evidence, but it uses a synthetic long timer wait and does not yet combine real UDP/TCP/packet-fd/smoltcp readiness in one production-owned loop. Actual `/dev/net/tun` setup/handoff remains outside the proof.

@@ -510,3 +510,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Timer-wait scheduler proofs should cover both wait and due dispatch steps
 
 - For smoltcp timers, a stronger async-loop proof starts one scheduler step before the deadline, records `wait_for_timer` with `next_ready_delay_ms`, waits for `TimerElapsed`, then polls again at the due timestamp and dispatches the stack task.
+
+## 2026-06-23 — Owned scheduler tasks should be cancelled and joined through the same shutdown drain path
+
+- To narrow runtime ownership evidence, run a scheduler loop inside an `AsyncRuntimeTaskSet` cancellable task, let shutdown request cancellation, then assert the loop reports `Cancelled`, task joins are complete, and final audit fan-in drain emits `network_session_exit` with complete join status.

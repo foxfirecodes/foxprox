@@ -7968,6 +7968,144 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn async_owned_scheduler_task_shutdown_cancels_joins_and_drains() {
+        let query = dns_query(0x7d7e, "OwnedSchedulerShutdown.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut runtime = BlockingProxyRuntime::bind(
+            "s1",
+            8,
+            SharedDnsCache::default(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            1_550,
+        )
+        .unwrap();
+        let scheduler_started = Arc::new(AtomicBool::new(false));
+        let scheduler_cancelled = Arc::new(AtomicBool::new(false));
+        let mut task_set = AsyncRuntimeTaskSet::new();
+        for (component, task_name) in [
+            (RuntimeComponent::DnsListener, "dns_accept_loop"),
+            (
+                RuntimeComponent::HttpProxyListener,
+                "http_proxy_accept_loop",
+            ),
+            (RuntimeComponent::Socks5Listener, "socks5_accept_loop"),
+        ] {
+            task_set
+                .spawn_cancellable_task(component, task_name, |token| async move {
+                    token.cancelled().await;
+                    RuntimeTaskStatus::Cancelled
+                })
+                .unwrap();
+        }
+        let started = scheduler_started.clone();
+        let cancelled = scheduler_cancelled.clone();
+        task_set
+            .spawn_cancellable_task(
+                RuntimeComponent::AuditFanIn,
+                "audit_fan_in_loop",
+                move |token| async move {
+                    let mut lifecycle = RuntimeLifecycleHarness::new("owned-scheduler-task", 8);
+                    lifecycle
+                        .start_with_task_expectations(
+                            vec![RuntimeComponent::AuditFanIn],
+                            vec![RuntimeTaskExpectation::new(
+                                RuntimeComponent::AuditFanIn,
+                                "audit_fan_in_loop",
+                            )],
+                            1_560,
+                        )
+                        .unwrap();
+                    started.store(true, Ordering::SeqCst);
+                    let report = run_async_runtime_scheduler_loop_until_cancelled(
+                        &mut lifecycle,
+                        &token,
+                        1_560,
+                        1,
+                        10,
+                        |_step| {
+                            vec![RuntimeTaskReadiness::new(
+                                RuntimeComponent::AuditFanIn,
+                                "audit_fan_in_loop",
+                            )
+                            .with_next_ready_delay_ms(Some(60_000))]
+                        },
+                        |_ready_tasks| async {},
+                    )
+                    .await
+                    .unwrap();
+                    if report.status == AsyncRuntimeSchedulerLoopStatus::Cancelled {
+                        cancelled.store(true, Ordering::SeqCst);
+                        RuntimeTaskStatus::Cancelled
+                    } else {
+                        RuntimeTaskStatus::TimedOut
+                    }
+                },
+            )
+            .unwrap();
+        for _ in 0..4 {
+            if scheduler_started.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(scheduler_started.load(Ordering::SeqCst));
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 16);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+
+        let shutdown = runtime
+            .exit_with_async_task_set_and_drain_live_audit_sources_to_sink(
+                RuntimeExitStatus::Clean,
+                task_set,
+                Duration::from_secs(1),
+                &mut fan_in,
+                &mut sink,
+                1_650,
+            )
+            .await
+            .unwrap();
+
+        assert!(scheduler_cancelled.load(Ordering::SeqCst));
+        assert_eq!(shutdown.cancelled_tasks, 4);
+        assert_eq!(shutdown.task_report.outcomes.len(), 4);
+        assert!(shutdown
+            .task_report
+            .outcomes
+            .iter()
+            .all(|outcome| outcome.status == RuntimeTaskStatus::Cancelled));
+        assert!(shutdown.shutdown_drain.before_exit.made_progress());
+        assert!(shutdown.shutdown_drain.after_exit.made_progress());
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+        assert!(output.contains("network_session_exit"));
+        assert!(output.contains("audit_fan_in:audit_fan_in_loop:cancelled"));
+        let exit = runtime.lifecycle().audit().records().last().unwrap();
+        assert_eq!(exit.kind, AuditKind::NetworkSessionExit);
+        assert_eq!(exit.details["task_join_status"], "complete");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn blocking_proxy_runtime_async_task_shutdown_drains_final_audit() {
         let query = dns_query(0x7c7e, "AsyncShutdownFull.TEST", 1);
         let response = dns_a_response(&query, [127, 0, 0, 1], 30);
