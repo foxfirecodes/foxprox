@@ -5300,6 +5300,10 @@ mod tests {
         assert_eq!(lifecycle_records[3].kind, AuditKind::RuntimeReadiness);
         assert_eq!(lifecycle_records[3].details["readiness_status"], "ready");
         assert_eq!(
+            lifecycle_records[3].details["scheduler_action"],
+            "run_ready_tasks"
+        );
+        assert_eq!(
             lifecycle_records[3].details["ready_runtime_tasks"],
             "audit_fan_in:audit_fan_in_loop"
         );

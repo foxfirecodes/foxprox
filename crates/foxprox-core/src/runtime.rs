@@ -194,6 +194,24 @@ impl RuntimeTaskReadiness {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeSchedulerAction {
+    RunReadyTasks,
+    WaitForTimer,
+    Idle,
+}
+
+impl RuntimeSchedulerAction {
+    pub fn as_detail(self) -> &'static str {
+        match self {
+            Self::RunReadyTasks => "run_ready_tasks",
+            Self::WaitForTimer => "wait_for_timer",
+            Self::Idle => "idle",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeReadinessPlan {
     pub ready_tasks: Vec<RuntimeTaskExpectation>,
@@ -221,13 +239,21 @@ impl RuntimeReadinessPlan {
         }
     }
 
-    pub fn status_detail(&self) -> &'static str {
+    pub fn scheduler_action(&self) -> RuntimeSchedulerAction {
         if !self.ready_tasks.is_empty() {
-            "ready"
+            RuntimeSchedulerAction::RunReadyTasks
         } else if self.next_ready_delay_ms.is_some() {
-            "timer_wait"
+            RuntimeSchedulerAction::WaitForTimer
         } else {
-            "idle"
+            RuntimeSchedulerAction::Idle
+        }
+    }
+
+    pub fn status_detail(&self) -> &'static str {
+        match self.scheduler_action() {
+            RuntimeSchedulerAction::RunReadyTasks => "ready",
+            RuntimeSchedulerAction::WaitForTimer => "timer_wait",
+            RuntimeSchedulerAction::Idle => "idle",
         }
     }
 
@@ -880,6 +906,7 @@ impl RuntimeLifecycleHarness {
         .with_frontend(Frontend::Core)
         .with_decision(Decision::Allow, None)
         .with_detail("readiness_status", plan.status_detail())
+        .with_detail("scheduler_action", plan.scheduler_action().as_detail())
         .with_detail("ready_runtime_tasks", plan.ready_task_details())
         .with_detail(
             "ready_runtime_task_count",
@@ -1830,6 +1857,10 @@ mod tests {
         ]);
 
         assert_eq!(plan.status_detail(), "ready");
+        assert_eq!(
+            plan.scheduler_action(),
+            RuntimeSchedulerAction::RunReadyTasks
+        );
         assert_eq!(plan.next_ready_delay_ms, None);
         assert_eq!(plan.ready_task_details(), "dns_listener:dns_accept_loop");
     }
@@ -1844,6 +1875,10 @@ mod tests {
         ]);
 
         assert_eq!(plan.status_detail(), "timer_wait");
+        assert_eq!(
+            plan.scheduler_action(),
+            RuntimeSchedulerAction::WaitForTimer
+        );
         assert_eq!(plan.ready_task_details(), "");
         assert_eq!(plan.next_ready_delay_ms, Some(50));
     }
@@ -1856,6 +1891,7 @@ mod tests {
         ]);
 
         assert_eq!(plan.status_detail(), "idle");
+        assert_eq!(plan.scheduler_action(), RuntimeSchedulerAction::Idle);
         assert_eq!(plan.ready_task_details(), "");
         assert_eq!(plan.next_ready_delay_ms, None);
     }
@@ -1885,6 +1921,7 @@ mod tests {
         assert_eq!(records[1].frontend, Some(Frontend::Core));
         assert_eq!(records[1].decision, Some(Decision::Allow));
         assert_eq!(records[1].details["readiness_status"], "timer_wait");
+        assert_eq!(records[1].details["scheduler_action"], "wait_for_timer");
         assert_eq!(records[1].details["ready_runtime_tasks"], "");
         assert_eq!(records[1].details["ready_runtime_task_count"], "0");
         assert_eq!(records[1].details["next_ready_delay_ms"], "42");

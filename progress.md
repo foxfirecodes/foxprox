@@ -3682,3 +3682,41 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Audit fan-in progress is now converted into readiness evidence, but listener readiness, TUN readiness, smoltcp timers, fan-in progress, cancellation/join, and shutdown final-drain still need to be consumed by a concrete async scheduler loop.
+
+## 2026-06-23 — Add scheduler action evidence to readiness plans
+
+### Commands run
+- `cargo fmt` — applied formatting for scheduler action fields.
+- `cargo test -p foxprox-core runtime_readiness_plan --all-targets --all-features` — passed three readiness-plan tests.
+- `cargo test -p foxprox-core runtime_lifecycle_records_readiness_plan --all-targets --all-features` — passed.
+- `cargo test -p foxprox-egress blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 158 core tests, 4 device tests, 65 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_readiness_plan_runs_ready_tasks_before_waiting ... ok`
+- `runtime::tests::runtime_readiness_plan_uses_shortest_timer_when_no_task_ready ... ok`
+- `runtime::tests::runtime_readiness_plan_reports_idle_without_ready_or_timer ... ok`
+- `runtime::tests::runtime_lifecycle_records_readiness_plan ... ok`
+- `tests::blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners ... ok`
+
+### Fix
+- Added `RuntimeSchedulerAction` with stable details:
+  - `run_ready_tasks`,
+  - `wait_for_timer`,
+  - `idle`.
+- `RuntimeReadinessPlan::scheduler_action()` now exposes the scheduler action separately from `readiness_status`.
+- `RuntimeLifecycleHarness::record_readiness_plan(...)` now records `scheduler_action` in `runtime_readiness` audit evidence.
+- Updated core readiness-plan tests to assert the action for ready, timer-wait, and idle plans.
+- Updated DNS/HTTP runtime readiness regression to assert `scheduler_action=run_ready_tasks` for fan-in readiness evidence.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Scheduler actions are now typed and audited, but a concrete async scheduler loop still needs to consume real listener/TUN/smoltcp/fan-in readiness, run tasks, handle cancellation/join, and perform shutdown final drains.

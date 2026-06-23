@@ -410,3 +410,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Fan-in progress can be scheduler readiness evidence
 
 - A sink-backed fan-in drain that accepts or drains records should be convertible into `audit_fan_in_loop` readiness evidence. Recording that plan before shutdown proves the future scheduler can see audit fan-in progress as a runnable task, not only as JSONL sink output.
+
+## 2026-06-23 — Readiness audit should name scheduler action explicitly
+
+- `readiness_status` is useful for humans, but scheduler-facing evidence should also carry a stable `scheduler_action` such as `run_ready_tasks`, `wait_for_timer`, or `idle`. This avoids future ambiguity between descriptive state and the action a runtime loop should take.
