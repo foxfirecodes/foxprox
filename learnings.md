@@ -270,3 +270,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Packet loops need external cancellation predicates, not just budgets
 
 - Budget-based loop cancellation proves bounded harness execution, but runtime shutdown needs an external cancellation signal. Packet-loop helpers should accept cancellation predicates and return the same structured `cancelled` task outcome before consuming further device input.
+
+## 2026-06-23 — TUN and smoltcp loops should share shutdown semantics
+
+- The smoltcp bridge loop needs the same external cancellation contract as the raw TUN loop so final runtime shutdown can cancel either packet path without relying on packet budgets or idle devices.

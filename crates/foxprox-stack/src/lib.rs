@@ -480,8 +480,24 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         now_ms: i64,
         max_packets: usize,
     ) -> SmoltcpBridgeLoopReport {
+        self.process_packet_loop_until(now_ms, max_packets, || false)
+    }
+
+    pub fn process_packet_loop_until(
+        &mut self,
+        now_ms: i64,
+        max_packets: usize,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> SmoltcpBridgeLoopReport {
         let mut processed_packets = 0usize;
         while processed_packets < max_packets {
+            if should_cancel() {
+                return SmoltcpBridgeLoopReport {
+                    processed_packets,
+                    error: None,
+                    task_outcome: smoltcp_task_outcome(RuntimeTaskStatus::Cancelled),
+                };
+            }
             match self.process_next_packet(now_ms) {
                 Ok(Some(_)) => processed_packets += 1,
                 Ok(None) => {
@@ -949,6 +965,38 @@ mod tests {
         );
         assert_eq!(report.task_outcome.task_name, "smoltcp_tun_bridge_loop");
         assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Completed);
+    }
+
+    #[test]
+    fn smoltcp_tun_bridge_loop_reports_external_cancellation() {
+        let packet = ipv4_icmp_echo_request();
+        let device = InMemoryPacketDevice::with_inbound([packet.clone(), packet]);
+        let config = PolicyConfig {
+            allow_ping: true,
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 16);
+        let stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+        let mut checks = 0usize;
+
+        let report = bridge.process_packet_loop_until(2_795, 8, || {
+            checks += 1;
+            checks > 1
+        });
+
+        assert_eq!(report.processed_packets, 1);
+        assert_eq!(report.error, None);
+        assert_eq!(
+            report.task_outcome.component,
+            RuntimeComponent::SmoltcpStack
+        );
+        assert_eq!(report.task_outcome.task_name, "smoltcp_tun_bridge_loop");
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Cancelled);
+        let records: Vec<_> = bridge.broker().audit().records().collect();
+        assert_eq!(records[0].kind, AuditKind::PacketObserved);
+        assert_eq!(records[0].details["stack"], "smoltcp");
     }
 
     #[test]

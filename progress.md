@@ -2692,3 +2692,30 @@ Added `TunPacketHarness::process_packet_loop_until(...)`, which checks an extern
 
 ### Remaining blind spots
 - The smoltcp bridge loop still only has budget/idle/read-write outcomes and should accept the same external cancellation style before final runtime shutdown wiring claims TUN/smoltcp cancellation complete.
+
+## 2026-06-23 — Add external cancellation proof for smoltcp bridge loops
+
+### Commands run
+- `cargo fmt` — applied formatting for smoltcp bridge cancellation changes.
+- `cargo test -p foxprox-stack smoltcp_tun_bridge_loop_reports_external_cancellation --all-targets --all-features` — passed.
+- `cargo test -p foxprox-stack smoltcp_tun_bridge_loop_reports --all-targets --all-features` — passed, 4 smoltcp loop tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 151 core tests, 3 device tests, 45 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::smoltcp_tun_bridge_loop_reports_external_cancellation ... ok`
+- `tests::smoltcp_tun_bridge_loop_reports_budget_cancellation ... ok`
+- `tests::smoltcp_tun_bridge_loop_reports_idle_completion ... ok`
+- `tests::smoltcp_tun_bridge_loop_reports_write_failure ... ok`
+
+### Interpretation
+Added `SmoltcpTunBridge::process_packet_loop_until(...)`, matching the raw TUN harness cancellation contract. The bridge checks an external cancellation predicate before each packet read and returns structured `smoltcp_stack:smoltcp_tun_bridge_loop:cancelled` task evidence while preserving audit records for packets already processed.
+
+### Changed files
+- `crates/foxprox-stack/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The final runtime still needs to connect these cancellation predicates to concrete async/task cancellation tokens and real TUN fd readiness/timers.
