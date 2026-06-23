@@ -286,3 +286,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — DNS listeners also need idle cancellation semantics
 
 - HTTP/SOCKS accept loops were made cancellation-aware, but DNS listener loops can still wait on UDP receive unless the socket is nonblocking/time-bounded. Treating no-packet-ready as an idle step lets DNS listener tasks observe cancellation without traffic.
+
+## 2026-06-23 — DNS idle is not an upstream failure
+
+- Once DNS listener sockets are nonblocking, `WouldBlock`/timeout must be modeled as an idle no-packet-ready step, not `DnsUpstreamError::Unavailable`. Cancellation loops may ignore idle, but real receive errors must remain distinct so task failure evidence is meaningful.

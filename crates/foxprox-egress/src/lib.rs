@@ -270,13 +270,21 @@ impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
         &mut self,
         sandbox_id: impl Into<String>,
         now_ms: u64,
-    ) -> Result<DnsBrokerStepResult, DnsUpstreamError> {
+    ) -> Result<Option<DnsBrokerStepResult>, DnsUpstreamError> {
         let sandbox_id = sandbox_id.into();
         let mut query = vec![0u8; self.max_query_bytes.max(1)];
-        let (query_len, client) = self
-            .socket
-            .recv_from(&mut query)
-            .map_err(|_| DnsUpstreamError::Unavailable)?;
+        let (query_len, client) = match self.socket.recv_from(&mut query) {
+            Ok(received) => received,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(_) => return Err(DnsUpstreamError::Unavailable),
+        };
         query.truncate(query_len);
         let result = self
             .handler
@@ -301,7 +309,7 @@ impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
                         response_len,
                         now_ms,
                     );
-                    return Ok(DnsBrokerStepResult {
+                    return Ok(Some(DnsBrokerStepResult {
                         client,
                         query_len,
                         response_len,
@@ -309,11 +317,11 @@ impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
                         send_status: "send_failed".to_string(),
                         decision: Decision::FailClosed,
                         reason: Some(DenialReason::ResourceLimit),
-                    });
+                    }));
                 }
             }
         }
-        Ok(DnsBrokerStepResult {
+        Ok(Some(DnsBrokerStepResult {
             client,
             query_len,
             response_len,
@@ -321,7 +329,7 @@ impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
             send_status,
             decision: result.decision.decision,
             reason: result.decision.reason,
-        })
+        }))
     }
 
     pub fn handler(&self) -> &DnsBrokerHandler<U> {
@@ -1040,7 +1048,7 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
     pub fn handle_dns_once(
         &mut self,
         now_ms: u64,
-    ) -> Result<DnsBrokerStepResult, DnsUpstreamError> {
+    ) -> Result<Option<DnsBrokerStepResult>, DnsUpstreamError> {
         let result = self
             .dns_server
             .as_mut()
@@ -1353,7 +1361,7 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
     pub fn handle_dns_once(
         &mut self,
         now_ms: u64,
-    ) -> Result<DnsBrokerStepResult, DnsUpstreamError> {
+    ) -> Result<Option<DnsBrokerStepResult>, DnsUpstreamError> {
         let result = self
             .dns_server
             .as_mut()
@@ -3487,6 +3495,30 @@ mod tests {
     }
 
     #[test]
+    fn blocking_dns_broker_server_reports_idle_without_failure() {
+        let query = dns_query(0x4545, "Idle.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 8);
+        let handler = DnsBrokerHandler::new(
+            broker,
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let mut server = BlockingDnsBrokerServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            handler,
+            Duration::from_secs(1),
+            512,
+        )
+        .unwrap();
+
+        let step = server.handle_one("s1", 1_000).unwrap();
+
+        assert_eq!(step, None);
+        assert!(server.handler().broker().audit().records().next().is_none());
+    }
+
+    #[test]
     fn blocking_dns_broker_server_handles_one_allowed_query() {
         let resolver = UdpSocket::bind("127.0.0.1:0").unwrap();
         resolver
@@ -3530,7 +3562,7 @@ mod tests {
             .send_to(&query, server.local_addr().unwrap())
             .unwrap();
 
-        let step = server.handle_one("s1", 1_000).unwrap();
+        let step = server.handle_one("s1", 1_000).unwrap().unwrap();
         assert_eq!(step.query_len, query.len());
         assert_eq!(step.response_len, response.len());
         assert!(step.sent_response);
@@ -3571,7 +3603,7 @@ mod tests {
             .send_to(&query, server.local_addr().unwrap())
             .unwrap();
 
-        let step = server.handle_one("s1", 1_000).unwrap();
+        let step = server.handle_one("s1", 1_000).unwrap().unwrap();
         assert_eq!(step.decision, Decision::DenyDrop);
         assert!(step.sent_response);
         assert_eq!(step.send_status, "sent");
@@ -3615,7 +3647,7 @@ mod tests {
             .send_to(&query, server.local_addr().unwrap())
             .unwrap();
 
-        let step = server.handle_one("s1", 1_000).unwrap();
+        let step = server.handle_one("s1", 1_000).unwrap().unwrap();
         assert!(!step.sent_response);
         assert_eq!(step.send_status, "send_failed");
         assert_eq!(step.decision, Decision::FailClosed);
@@ -3666,7 +3698,7 @@ mod tests {
             .send_to(&query, server.local_addr().unwrap())
             .unwrap();
 
-        let step = server.handle_one("s1", 1_000).unwrap();
+        let step = server.handle_one("s1", 1_000).unwrap().unwrap();
         assert_eq!(step.send_status, "send_failed");
         assert!(shared_cache
             .resolve_hostname("broker.test", 1_100)
@@ -3736,7 +3768,7 @@ mod tests {
         client
             .send_to(&query, server.local_addr().unwrap())
             .unwrap();
-        let delivered = server.handle_one("s1", 1_000).unwrap();
+        let delivered = server.handle_one("s1", 1_000).unwrap().unwrap();
         assert_eq!(delivered.send_status, "sent");
         let mut buf = [0u8; 512];
         let _ = client.recv_from(&mut buf).unwrap();
@@ -3744,7 +3776,7 @@ mod tests {
         client
             .send_to(&query, server.local_addr().unwrap())
             .unwrap();
-        let failed = server.handle_one("s1", 1_000).unwrap();
+        let failed = server.handle_one("s1", 1_000).unwrap().unwrap();
         assert_eq!(failed.send_status, "send_failed");
         assert!(server
             .handler()
@@ -3838,7 +3870,7 @@ mod tests {
         dns_client
             .send_to(&query, runtime.dns_addr().unwrap())
             .unwrap();
-        let dns_step = runtime.handle_dns_once(1_010).unwrap();
+        let dns_step = runtime.handle_dns_once(1_010).unwrap().unwrap();
         assert_eq!(dns_step.decision, Decision::Allow);
         assert_eq!(dns_step.send_status, "sent");
         let mut dns_reply = [0u8; 512];
@@ -4019,7 +4051,7 @@ mod tests {
         dns_client
             .send_to(&query, runtime.dns_addr().unwrap())
             .unwrap();
-        let dns_step = runtime.handle_dns_once(2_010).unwrap();
+        let dns_step = runtime.handle_dns_once(2_010).unwrap().unwrap();
         assert_eq!(dns_step.decision, Decision::Allow);
         assert_eq!(dns_step.send_status, "sent");
         let mut dns_reply = [0u8; 512];
@@ -4561,7 +4593,7 @@ mod tests {
         dns_client
             .send_to(&query, runtime.dns_addr().unwrap())
             .unwrap();
-        let dns_step = runtime.handle_dns_once(3_020).unwrap();
+        let dns_step = runtime.handle_dns_once(3_020).unwrap().unwrap();
         assert_eq!(dns_step.decision, Decision::Allow);
         let mut dns_reply = [0u8; 512];
         let (dns_reply_len, _) = dns_client.recv_from(&mut dns_reply).unwrap();

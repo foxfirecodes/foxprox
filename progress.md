@@ -2809,3 +2809,32 @@ Extended listener idle-cancellation proof to DNS. `BlockingDnsBrokerServer::bind
 
 ### Remaining blind spots
 - These are still blocking/thread proofs with polling sleeps. Final async runtime should use readiness/timer primitives and feed actual listener/TUN/smoltcp task reports into lifecycle exit and audit fan-in.
+
+## 2026-06-23 — Distinguish DNS idle receive from listener failure
+
+### Commands run
+- `cargo fmt` — applied formatting for DNS idle-step changes.
+- `cargo test -p foxprox-egress blocking_dns_broker_server_reports_idle_without_failure --all-targets --all-features` — passed.
+- `cargo test -p foxprox-egress blocking_dns_listener_task_cancels_without_packets --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 50 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_dns_broker_server_reports_idle_without_failure ... ok`
+- `tests::blocking_dns_listener_task_cancels_without_packets ... ok`
+- `tests::blocking_proxy_listener_tasks_cancel_without_clients ... ok`
+
+### Interpretation
+Addressed round-59 high feedback. `BlockingDnsBrokerServer::handle_one(...)` now returns `Ok(None)` for nonblocking idle receive (`WouldBlock`/`TimedOut`) instead of conflating no-packet-ready with `DnsUpstreamError::Unavailable`. Handled packets return `Ok(Some(DnsBrokerStepResult))`, while actual socket errors still fail. The idle regression asserts no audit is emitted for idle, and the DNS listener cancellation test continues to prove idle loops can observe cancellation and join as `cancelled`.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Review follow-up
+- Round-59 correctness flagged that DNS idle receive was represented as unavailable and masked by ignoring errors in the cancellation loop. This commit makes idle a first-class `None` result and preserves real errors separately.
+
+### Remaining blind spots
+- Final runtime still needs async/readiness integration and structured task failure evidence for real DNS socket errors inside registered listener tasks.
