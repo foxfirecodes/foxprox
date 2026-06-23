@@ -398,3 +398,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Scheduler planning needs task readiness and timer inputs
 
 - Keep readiness planning independent of a concrete async runtime: model ready tasks, next timer delay, and idle state as typed evidence first. smoltcp poll evidence can then be converted into this scheduler input without claiming the final scheduler exists.
+
+## 2026-06-23 — Readiness plans need audit records before scheduler wiring
+
+- Runtime readiness/timer decisions should be auditable before the final scheduler exists. Recording readiness plans in lifecycle audit makes ready tasks, timer waits, idle states, and invalid lifecycle transitions inspectable as structured evidence.

@@ -3592,3 +3592,36 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - This models readiness/timer decisions and connects smoltcp poll evidence to the model, but it is still not the final async scheduler. Listener readiness, TUN packet readiness, fan-in progress, cancellation/join, and shutdown final-drain must still be wired into a concrete runtime loop.
+
+## 2026-06-23 — Record runtime readiness plans in lifecycle audit
+
+### Commands run
+- `cargo fmt` — applied formatting for runtime readiness audit records.
+- `cargo test -p foxprox-core runtime_lifecycle_records_readiness_plan --all-targets --all-features` — passed.
+- `cargo test -p foxprox-core runtime_lifecycle_rejects_readiness_plan_outside_running_state --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 158 core tests, 4 device tests, 65 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_lifecycle_records_readiness_plan ... ok`
+- `runtime::tests::runtime_lifecycle_rejects_readiness_plan_outside_running_state ... ok`
+
+### Fix
+- Added `AuditKind::RuntimeReadiness`.
+- Added `RuntimeLifecycleHarness::record_readiness_plan(...)` to emit structured scheduler-planning evidence while the runtime is running.
+- Runtime readiness audit details include:
+  - `readiness_status` (`ready`, `timer_wait`, or `idle`),
+  - `ready_runtime_tasks`,
+  - `ready_runtime_task_count`,
+  - optional `next_ready_delay_ms`.
+- Added rejection coverage proving readiness records outside the running lifecycle fail closed as `BrokerError` with `attempted_transition=record_readiness`.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/types.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Readiness/timer plans are now structured and auditable, but the final async scheduler still needs to consume real listener readiness, TUN packet readiness, smoltcp timers, fan-in progress, cancellation/join, and shutdown final-drain evidence.

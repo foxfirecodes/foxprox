@@ -96,6 +96,7 @@ pub enum AuditKind {
     BrokerStarted,
     TunConfigured,
     ProxyListenerConfigured,
+    RuntimeReadiness,
     ProxyDestinationResolved,
     PacketObserved,
     PacketMalformedDenied,

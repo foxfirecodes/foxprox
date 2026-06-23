@@ -850,6 +850,47 @@ impl RuntimeLifecycleHarness {
         self.append_required(audit)
     }
 
+    pub fn record_readiness_plan(
+        &mut self,
+        plan: &RuntimeReadinessPlan,
+        now_ms: u64,
+    ) -> Result<(), RuntimeLifecycleError> {
+        match self.state {
+            RuntimeLifecycleState::Running { .. } => {}
+            RuntimeLifecycleState::NotStarted => {
+                return self.reject_invalid_transition(
+                    RuntimeLifecycleError::NotStarted,
+                    "record_readiness",
+                    now_ms,
+                );
+            }
+            RuntimeLifecycleState::Exited { .. } => {
+                return self.reject_invalid_transition(
+                    RuntimeLifecycleError::AlreadyExited,
+                    "record_readiness",
+                    now_ms,
+                );
+            }
+        }
+        let mut audit = AuditRecord::new_at(
+            AuditKind::RuntimeReadiness,
+            self.sandbox_id.clone(),
+            now_ms as u128,
+        )
+        .with_frontend(Frontend::Core)
+        .with_decision(Decision::Allow, None)
+        .with_detail("readiness_status", plan.status_detail())
+        .with_detail("ready_runtime_tasks", plan.ready_task_details())
+        .with_detail(
+            "ready_runtime_task_count",
+            plan.ready_tasks.len().to_string(),
+        );
+        if let Some(next_ready_delay_ms) = plan.next_ready_delay_ms {
+            audit = audit.with_detail("next_ready_delay_ms", next_ready_delay_ms.to_string());
+        }
+        self.append_required(audit)
+    }
+
     pub fn record_child_supervision_error(
         &mut self,
         error: impl Into<String>,
@@ -1817,6 +1858,56 @@ mod tests {
         assert_eq!(plan.status_detail(), "idle");
         assert_eq!(plan.ready_task_details(), "");
         assert_eq!(plan.next_ready_delay_ms, None);
+    }
+
+    #[test]
+    fn runtime_lifecycle_records_readiness_plan() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        runtime
+            .start(
+                vec![
+                    RuntimeComponent::DnsListener,
+                    RuntimeComponent::SmoltcpStack,
+                ],
+                1_000,
+            )
+            .unwrap();
+        let plan = RuntimeReadinessPlan::from_tasks(&[
+            RuntimeTaskReadiness::new(RuntimeComponent::DnsListener, "dns_accept_loop"),
+            RuntimeTaskReadiness::new(RuntimeComponent::SmoltcpStack, "smoltcp_tun_bridge_loop")
+                .with_next_ready_delay_ms(Some(42)),
+        ]);
+
+        runtime.record_readiness_plan(&plan, 1_010).unwrap();
+
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::RuntimeReadiness);
+        assert_eq!(records[1].frontend, Some(Frontend::Core));
+        assert_eq!(records[1].decision, Some(Decision::Allow));
+        assert_eq!(records[1].details["readiness_status"], "timer_wait");
+        assert_eq!(records[1].details["ready_runtime_tasks"], "");
+        assert_eq!(records[1].details["ready_runtime_task_count"], "0");
+        assert_eq!(records[1].details["next_ready_delay_ms"], "42");
+    }
+
+    #[test]
+    fn runtime_lifecycle_rejects_readiness_plan_outside_running_state() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        let plan = RuntimeReadinessPlan::from_tasks(&[RuntimeTaskReadiness::ready(
+            RuntimeComponent::AuditFanIn,
+            "audit_fan_in_loop",
+        )]);
+
+        let error = runtime.record_readiness_plan(&plan, 1_000).unwrap_err();
+
+        assert_eq!(error, RuntimeLifecycleError::NotStarted);
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records[0].kind, AuditKind::BrokerError);
+        assert_eq!(records[0].decision, Some(Decision::FailClosed));
+        assert_eq!(
+            records[0].details["attempted_transition"],
+            "record_readiness"
+        );
     }
 
     #[test]
