@@ -4063,6 +4063,164 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_scheduler_dispatch_drives_ready_http_and_socks_listeners_once() {
+        let query = dns_query(0x8124, "DispatchProxy.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let mut http_config = PolicyConfig::default();
+        http_config.rules.push(
+            PolicyRule::allow("allow-dispatch-http")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Http)
+                .origin("http", "example.com", 80),
+        );
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(http_config), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut socks_config = PolicyConfig::default();
+        socks_config.rules.push(
+            PolicyRule::allow("allow-dispatch-socks")
+                .frontend(Frontend::Socks5Proxy)
+                .protocol(Protocol::Socks)
+                .hostname("example.com")
+                .destination_port(443),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(socks_config), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut runtime = BlockingProxyRuntime::bind(
+            "s1",
+            8,
+            SharedDnsCache::default(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            8_200,
+        )
+        .unwrap();
+        let mut http_client = TcpStream::connect(runtime.http_proxy_addr().unwrap()).unwrap();
+        http_client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        http_client
+            .write_all(b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n")
+            .unwrap();
+        let mut socks_client = TcpStream::connect(runtime.socks5_proxy_addr().unwrap()).unwrap();
+        socks_client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        socks_client.write_all(&[0x05, 0x01, 0x00]).unwrap();
+        socks_client
+            .write_all(&[
+                0x05, 0x01, 0x00, 0x03, 11, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'c',
+                b'o', b'm', 0x01, 0xbb,
+            ])
+            .unwrap();
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-scheduler", 8);
+        lifecycle
+            .start_with_task_expectations(
+                vec![
+                    RuntimeComponent::HttpProxyListener,
+                    RuntimeComponent::Socks5Listener,
+                ],
+                vec![
+                    RuntimeTaskExpectation::new(
+                        RuntimeComponent::HttpProxyListener,
+                        "http_proxy_accept_loop",
+                    ),
+                    RuntimeTaskExpectation::new(
+                        RuntimeComponent::Socks5Listener,
+                        "socks5_accept_loop",
+                    ),
+                ],
+                8_200,
+            )
+            .unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let mut dispatch_report = None;
+
+        let scheduler_report = run_async_runtime_scheduler_step(
+            &mut lifecycle,
+            &[
+                RuntimeTaskReadiness::ready(
+                    RuntimeComponent::HttpProxyListener,
+                    "http_proxy_accept_loop",
+                ),
+                RuntimeTaskReadiness::ready(RuntimeComponent::Socks5Listener, "socks5_accept_loop"),
+            ],
+            8_210,
+            &cancellation,
+            |ready_tasks| {
+                let runtime = &mut runtime;
+                let dispatch_report = &mut dispatch_report;
+                async move {
+                    *dispatch_report = Some(
+                        runtime
+                            .dispatch_ready_proxy_listener_tasks(&ready_tasks, 8_220)
+                            .unwrap(),
+                    );
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            scheduler_report.scheduler_action,
+            RuntimeSchedulerAction::RunReadyTasks
+        );
+        let dispatch_report = dispatch_report.unwrap();
+        assert_eq!(dispatch_report.dispatched_tasks.len(), 2);
+        let http_step = dispatch_report.http_proxy_step.unwrap();
+        assert_eq!(http_step.decision, Decision::Allow);
+        assert!(http_step.forwarded);
+        assert_eq!(http_step.status_code, 200);
+        let socks_step = dispatch_report.socks5_proxy_step.unwrap();
+        assert_eq!(socks_step.decision, Decision::Allow);
+        assert!(socks_step.forwarded);
+        assert_eq!(socks_step.reply_code, 0x00);
+        let mut http_response = String::new();
+        http_client.read_to_string(&mut http_response).unwrap();
+        assert!(http_response.starts_with("HTTP/1.1 200 OK"));
+        let mut socks_response = Vec::new();
+        socks_client.read_to_end(&mut socks_response).unwrap();
+        assert_eq!(&socks_response[..2], &[0x05, 0x00]);
+        assert_eq!(
+            &socks_response[2..12],
+            &[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]
+        );
+        assert!(runtime
+            .audit_records()
+            .iter()
+            .any(|record| record.kind == AuditKind::HttpRequestDecision));
+        assert!(runtime
+            .audit_records()
+            .iter()
+            .any(|record| record.kind == AuditKind::SocksConnectDecision));
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].details["scheduler_action"], "run_ready_tasks");
+        assert_eq!(
+            records[1].details["ready_runtime_tasks"],
+            "http_proxy_listener:http_proxy_accept_loop,socks5_listener:socks5_accept_loop"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn async_runtime_scheduler_loop_collects_sources_each_step() {
         let cancellation_state = Arc::new(AsyncRuntimeCancellationState::new());
         let cancellation = AsyncRuntimeCancellationToken::new(cancellation_state.clone());

@@ -458,3 +458,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Scheduler-dispatched listener tasks can drive one real listener step
 
 - Before replacing blocking listeners with Tokio sockets, an audited scheduler ready-task dispatch can still drive a real nonblocking listener one-step and verify policy/audit side effects. This narrows task-driving evidence while keeping OS-level readiness as the remaining gap.
+
+## 2026-06-23 — Test all listener dispatch branches before claiming scheduler task driving coverage
+
+- When a ready-task dispatcher maps multiple listener expectations, each branch should have a scheduler-level runtime test. DNS-only coverage left HTTP/SOCKS as an implementation-only gap; adding HTTP/SOCKS dispatch tests verifies the shared scheduler dispatch path archives proxy decision evidence too.

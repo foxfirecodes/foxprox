@@ -3983,3 +3983,23 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Scheduler-dispatched listener task driving is now proven for a real DNS listener one-step. HTTP/SOCKS dispatch paths exist but need comparable runtime tests. Final runtime gap remains actual Tokio socket/TUN readable readiness, smoltcp timer integration, and end-to-end async task driving rather than blocking one-step dispatch.
+
+## 2026-06-23 — Add HTTP/SOCKS scheduler-dispatch listener coverage
+
+### Review
+- Round-101 correctness and validation found no blockers or high issues.
+- Reviewers noted the HTTP/SOCKS dispatch branches existed but lacked comparable scheduler-dispatch runtime tests.
+
+### Fix
+- Added `async_runtime_scheduler_dispatch_drives_ready_http_and_socks_listeners_once`, proving a single audited `run_ready_tasks` scheduler action can drive both real HTTP and SOCKS listener one-step handlers.
+- The test sends a real HTTP proxy request and SOCKS5 connect request to live bound listeners, dispatches `http_proxy_accept_loop` and `socks5_accept_loop` through the scheduler ready-task path, verifies allow/forwarded outcomes and client responses, and asserts archived `HttpRequestDecision` plus `SocksConnectDecision` evidence.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_scheduler_dispatch_drives_ready_http_and_socks_listeners_once --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 159 core tests and 82 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Scheduler-dispatched listener task driving now covers DNS, HTTP, and SOCKS one-step handlers. Final runtime gap remains actual Tokio OS-level socket/TUN readable readiness, smoltcp timer integration, and end-to-end async task driving/final drain rather than blocking one-step dispatch.
