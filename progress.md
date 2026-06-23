@@ -2838,3 +2838,33 @@ Addressed round-59 high feedback. `BlockingDnsBrokerServer::handle_one(...)` now
 
 ### Remaining blind spots
 - Final runtime still needs async/readiness integration and structured task failure evidence for real DNS socket errors inside registered listener tasks.
+
+## 2026-06-23 — Distinguish idle listener accepts from failures
+
+### Commands run
+- `cargo fmt` — applied formatting for idle listener result changes.
+- `cargo test -p foxprox-egress reports_idle_without_failure --all-targets --all-features` — passed, 3 idle listener tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 52 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_dns_broker_server_reports_idle_without_failure ... ok`
+- `tests::blocking_http_proxy_server_reports_idle_without_failure ... ok`
+- `tests::blocking_socks5_proxy_server_reports_idle_without_failure ... ok`
+- `tests::blocking_dns_listener_task_cancels_without_packets ... ok`
+- `tests::blocking_proxy_listener_tasks_cancel_without_clients ... ok`
+
+### Interpretation
+Extended the idle-vs-failure distinction to all blocking listener frontends. DNS/HTTP/SOCKS `handle_one(...)` now returns `Ok(None)` for no packet/client ready (`WouldBlock`/timeout) and `Ok(Some(step))` for handled requests, reserving `Err(...)` for actual listener/socket failures. Idle regressions assert no spurious audit records are emitted for no-ready events, while cancellation task tests prove idle listener loops can still join cleanly as `cancelled`.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Review follow-up
+- Round-59 correctness flagged DNS `WouldBlock` being conflated with `Unavailable`; fixed and generalized to HTTP/SOCKS accepts so cancellation loops do not need to ignore expected idle as if it were a failure.
+
+### Remaining blind spots
+- Final runtime still needs actual task-loop wrappers that convert repeated idle, real listener failures, cancellation, and timeouts into registered task outcomes and fan-in audit evidence.

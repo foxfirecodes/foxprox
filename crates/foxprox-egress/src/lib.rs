@@ -415,11 +415,19 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
     pub fn handle_one(
         &mut self,
         now_ms: u64,
-    ) -> Result<HttpProxyListenerStepResult, ProxyEgressError> {
-        let (mut stream, client) = self
-            .listener
-            .accept()
-            .map_err(|_| ProxyEgressError::SendFailed)?;
+    ) -> Result<Option<HttpProxyListenerStepResult>, ProxyEgressError> {
+        let (mut stream, client) = match self.listener.accept() {
+            Ok(accepted) => accepted,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(_) => return Err(ProxyEgressError::SendFailed),
+        };
         stream
             .set_read_timeout(Some(self.io_timeout))
             .map_err(|_| ProxyEgressError::SendFailed)?;
@@ -428,6 +436,7 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
             .map_err(|_| ProxyEgressError::SendFailed)?;
         let request = read_http_proxy_request(&mut stream, self.max_request_bytes)?;
         self.handle_http_proxy_request(client, &request, &mut stream, now_ms)
+            .map(Some)
     }
 
     pub fn frontend(&self) -> &ExplicitProxyFrontend<E> {
@@ -601,11 +610,19 @@ impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
     pub fn handle_one(
         &mut self,
         now_ms: u64,
-    ) -> Result<Socks5ListenerStepResult, ProxyEgressError> {
-        let (mut stream, client) = self
-            .listener
-            .accept()
-            .map_err(|_| ProxyEgressError::SendFailed)?;
+    ) -> Result<Option<Socks5ListenerStepResult>, ProxyEgressError> {
+        let (mut stream, client) = match self.listener.accept() {
+            Ok(accepted) => accepted,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(_) => return Err(ProxyEgressError::SendFailed),
+        };
         stream
             .set_read_timeout(Some(self.io_timeout))
             .map_err(|_| ProxyEgressError::SendFailed)?;
@@ -615,7 +632,7 @@ impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
         let greeting = match read_socks5_greeting(&mut stream, self.max_request_bytes) {
             Ok(greeting) => greeting,
             Err(_) => {
-                return Ok(self.handle_socks5_malformed(
+                return Ok(Some(self.handle_socks5_malformed(
                     Socks5MalformedStep {
                         client,
                         greeting_len: 0,
@@ -625,11 +642,11 @@ impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
                         error: ProxyParseError::Truncated,
                     },
                     &mut stream,
-                ));
+                )));
             }
         };
         if !socks5_greeting_supports_no_auth(&greeting) {
-            return Ok(self.handle_socks5_malformed(
+            return Ok(Some(self.handle_socks5_malformed(
                 Socks5MalformedStep {
                     client,
                     greeting_len: greeting.len(),
@@ -639,7 +656,7 @@ impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
                     error: ProxyParseError::UnsupportedSocksAuthentication,
                 },
                 &mut stream,
-            ));
+            )));
         }
         if let Some(step) = self.handle_socks5_method_selection_response(
             client,
@@ -647,12 +664,12 @@ impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
             &mut stream,
             now_ms,
         ) {
-            return Ok(step);
+            return Ok(Some(step));
         }
         let request = match read_socks5_connect_request(&mut stream, self.max_request_bytes) {
             Ok(request) => request,
             Err(_) => {
-                return Ok(self.handle_socks5_malformed(
+                return Ok(Some(self.handle_socks5_malformed(
                     Socks5MalformedStep {
                         client,
                         greeting_len: greeting.len(),
@@ -662,10 +679,11 @@ impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
                         error: ProxyParseError::Truncated,
                     },
                     &mut stream,
-                ));
+                )));
             }
         };
         self.handle_socks5_connect_request(client, greeting.len(), &request, &mut stream, now_ms)
+            .map(Some)
     }
 
     pub fn frontend(&self) -> &ExplicitProxyFrontend<E> {
@@ -1061,7 +1079,7 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
     pub fn handle_http_proxy_once(
         &mut self,
         now_ms: u64,
-    ) -> Result<HttpProxyListenerStepResult, ProxyEgressError> {
+    ) -> Result<Option<HttpProxyListenerStepResult>, ProxyEgressError> {
         let result = self
             .http_proxy_server
             .as_mut()
@@ -1374,7 +1392,7 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
     pub fn handle_http_proxy_once(
         &mut self,
         now_ms: u64,
-    ) -> Result<HttpProxyListenerStepResult, ProxyEgressError> {
+    ) -> Result<Option<HttpProxyListenerStepResult>, ProxyEgressError> {
         let result = self
             .http_proxy_server
             .as_mut()
@@ -1387,7 +1405,7 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
     pub fn handle_socks5_proxy_once(
         &mut self,
         now_ms: u64,
-    ) -> Result<Socks5ListenerStepResult, ProxyEgressError> {
+    ) -> Result<Option<Socks5ListenerStepResult>, ProxyEgressError> {
         let result = self
             .socks5_proxy_server
             .as_mut()
@@ -2664,7 +2682,7 @@ mod tests {
         );
         client.write_all(request.as_bytes()).unwrap();
 
-        let step = proxy_server.handle_one(4_000).unwrap();
+        let step = proxy_server.handle_one(4_000).unwrap().unwrap();
         assert_eq!(step.decision, Decision::Allow);
         assert!(step.forwarded);
         assert_eq!(step.send_status, "sent");
@@ -2813,7 +2831,7 @@ mod tests {
             ])
             .unwrap();
 
-        let step = proxy_server.handle_one(4_000).unwrap();
+        let step = proxy_server.handle_one(4_000).unwrap().unwrap();
         assert_eq!(step.decision, Decision::Allow);
         assert!(step.forwarded);
         assert_eq!(step.reply_code, 0x00);
@@ -2826,6 +2844,31 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, AuditKind::SocksConnectDecision);
         assert_eq!(records[0].decision, Some(Decision::Allow));
+    }
+
+    #[test]
+    fn blocking_http_proxy_server_reports_idle_without_failure() {
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 8);
+        let frontend =
+            ExplicitProxyFrontend::new("s1", broker, InMemoryExplicitProxyEgress::default());
+        let mut server = BlockingHttpProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            frontend,
+            Duration::from_secs(1),
+            4096,
+        )
+        .unwrap();
+
+        let step = server.handle_one(1_000).unwrap();
+
+        assert_eq!(step, None);
+        assert!(server
+            .frontend()
+            .broker()
+            .audit()
+            .records()
+            .next()
+            .is_none());
     }
 
     #[test]
@@ -2855,7 +2898,7 @@ mod tests {
             .write_all(b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n")
             .unwrap();
 
-        let step = server.handle_one(1_000).unwrap();
+        let step = server.handle_one(1_000).unwrap().unwrap();
         assert_eq!(step.decision, Decision::Allow);
         assert!(step.forwarded);
         assert_eq!(step.status_code, 200);
@@ -2889,7 +2932,7 @@ mod tests {
             .write_all(b"CONNECT example.com:443 HTTP/1.1\r\n\r\n")
             .unwrap();
 
-        let step = server.handle_one(1_000).unwrap();
+        let step = server.handle_one(1_000).unwrap().unwrap();
         assert_eq!(step.decision, Decision::DenyDrop);
         assert!(!step.forwarded);
         assert_eq!(step.status_code, 403);
@@ -3103,7 +3146,7 @@ mod tests {
         );
         client.write_all(request.as_bytes()).unwrap();
 
-        let step = proxy_server.handle_one(4_100).unwrap();
+        let step = proxy_server.handle_one(4_100).unwrap().unwrap();
         assert_eq!(step.decision, Decision::Allow);
         assert!(step.forwarded);
         assert_eq!(step.send_status, "sent");
@@ -3176,6 +3219,31 @@ mod tests {
     }
 
     #[test]
+    fn blocking_socks5_proxy_server_reports_idle_without_failure() {
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 8);
+        let frontend =
+            ExplicitProxyFrontend::new("s1", broker, InMemoryExplicitProxyEgress::default());
+        let mut server = BlockingSocks5ProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            frontend,
+            Duration::from_secs(1),
+            4096,
+        )
+        .unwrap();
+
+        let step = server.handle_one(1_000).unwrap();
+
+        assert_eq!(step, None);
+        assert!(server
+            .frontend()
+            .broker()
+            .audit()
+            .records()
+            .next()
+            .is_none());
+    }
+
+    #[test]
     fn blocking_socks5_proxy_server_handles_allowed_connect() {
         let mut config = PolicyConfig::default();
         config.rules.push(
@@ -3210,7 +3278,7 @@ mod tests {
             ])
             .unwrap();
 
-        let step = server.handle_one(3_000).unwrap();
+        let step = server.handle_one(3_000).unwrap().unwrap();
         assert_eq!(step.decision, Decision::Allow);
         assert!(step.forwarded);
         assert_eq!(step.reply_code, 0x00);
@@ -3254,7 +3322,7 @@ mod tests {
             .write_all(&[0x05, 0x01, 0x00, 0x01, 203, 0, 113, 42, 0x00, 0x50])
             .unwrap();
 
-        let step = server.handle_one(3_000).unwrap();
+        let step = server.handle_one(3_000).unwrap().unwrap();
         assert_eq!(step.decision, Decision::DenyDrop);
         assert!(!step.forwarded);
         assert_eq!(step.reply_code, 0x02);
@@ -3294,7 +3362,7 @@ mod tests {
             .unwrap();
         client.write_all(&[0x05, 0x01, 0x02]).unwrap();
 
-        let step = server.handle_one(3_000).unwrap();
+        let step = server.handle_one(3_000).unwrap().unwrap();
         assert_eq!(step.decision, Decision::FailClosed);
         assert_eq!(step.reason, Some(DenialReason::ProxyMalformed));
         assert!(!step.forwarded);
@@ -3335,7 +3403,7 @@ mod tests {
         client.write_all(&[0x05, 0x01]).unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
 
-        let step = server.handle_one(3_000).unwrap();
+        let step = server.handle_one(3_000).unwrap().unwrap();
         assert_eq!(step.decision, Decision::FailClosed);
         assert_eq!(step.reason, Some(DenialReason::ProxyMalformed));
         assert!(!step.forwarded);
@@ -3378,7 +3446,7 @@ mod tests {
             .write_all(&[0x05, 0x01, 0x7f, 0x01, 203, 0, 113, 42, 0x00, 0x50])
             .unwrap();
 
-        let step = server.handle_one(3_000).unwrap();
+        let step = server.handle_one(3_000).unwrap().unwrap();
         assert_eq!(step.decision, Decision::FailClosed);
         assert_eq!(step.reason, Some(DenialReason::ProxyMalformed));
         assert!(!step.forwarded);
@@ -3887,7 +3955,7 @@ mod tests {
         http_client
             .write_all(b"GET http://broker.test/ HTTP/1.1\r\nHost: broker.test\r\n\r\n")
             .unwrap();
-        let http_step = runtime.handle_http_proxy_once(1_020).unwrap();
+        let http_step = runtime.handle_http_proxy_once(1_020).unwrap().unwrap();
         assert_eq!(http_step.decision, Decision::Allow);
         assert!(http_step.forwarded);
         assert_eq!(http_step.send_status, "sent");
@@ -4073,7 +4141,7 @@ mod tests {
                 b's', b't', 0x01, 0xbb, // domain broker.test:443
             ])
             .unwrap();
-        let socks_step = runtime.handle_socks5_proxy_once(2_020).unwrap();
+        let socks_step = runtime.handle_socks5_proxy_once(2_020).unwrap().unwrap();
         assert_eq!(socks_step.decision, Decision::Allow);
         assert!(socks_step.forwarded);
         assert_eq!(socks_step.reply_code, 0x00);
@@ -4579,7 +4647,7 @@ mod tests {
         http_client
             .write_all(b"GET http://127.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
             .unwrap();
-        let http_step = runtime.handle_http_proxy_once(3_010).unwrap();
+        let http_step = runtime.handle_http_proxy_once(3_010).unwrap().unwrap();
         assert_eq!(http_step.decision, Decision::Allow);
         assert!(http_step.forwarded);
         let mut http_response = String::new();
@@ -4674,7 +4742,7 @@ mod tests {
             http_client
                 .write_all(b"GET http://127.0.0.1/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
                 .unwrap();
-            let _ = runtime.handle_http_proxy_once(now_ms).unwrap();
+            let _ = runtime.handle_http_proxy_once(now_ms).unwrap().unwrap();
             let mut http_response = String::new();
             http_client.read_to_string(&mut http_response).unwrap();
             assert!(http_response.starts_with("HTTP/1.1"));

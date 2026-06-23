@@ -290,3 +290,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — DNS idle is not an upstream failure
 
 - Once DNS listener sockets are nonblocking, `WouldBlock`/timeout must be modeled as an idle no-packet-ready step, not `DnsUpstreamError::Unavailable`. Cancellation loops may ignore idle, but real receive errors must remain distinct so task failure evidence is meaningful.
+
+## 2026-06-23 — Proxy listener idle is not send failure
+
+- After HTTP/SOCKS listeners become nonblocking, idle accepts must return a distinct no-client-ready result. Mapping `WouldBlock` to `SendFailed` makes cancellation tests pass only by ignoring errors and hides real listener failures.
