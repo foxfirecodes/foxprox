@@ -438,3 +438,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Scheduler ready dispatch must be cancellable
 
 - A scheduler loop is not truly cancellation-aware if only timer/idle waits race cancellation. Ready-task dispatch futures can also block, so `run_ready_tasks` must be selected against cancellation and dropped when cancellation wins before the loop reports cancellation.
+
+## 2026-06-23 — Use source traits to bridge injected scheduler tests toward live readiness
+
+- A small readiness-source trait is a useful intermediate step between precomputed readiness vectors and the final runtime: the scheduler can poll heterogeneous listener/TUN/stack/fan-in readiness producers each iteration while tests remain deterministic and bounded.

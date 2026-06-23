@@ -2607,6 +2607,74 @@ where
     })
 }
 
+pub trait AsyncRuntimeReadinessSource {
+    fn runtime_readiness(&mut self) -> RuntimeTaskReadiness;
+}
+
+impl<F> AsyncRuntimeReadinessSource for F
+where
+    F: FnMut() -> RuntimeTaskReadiness,
+{
+    fn runtime_readiness(&mut self) -> RuntimeTaskReadiness {
+        self()
+    }
+}
+
+pub fn collect_async_runtime_readiness(
+    sources: &mut [&mut dyn AsyncRuntimeReadinessSource],
+) -> Vec<RuntimeTaskReadiness> {
+    sources
+        .iter_mut()
+        .map(|source| source.runtime_readiness())
+        .collect()
+}
+
+pub async fn run_async_runtime_scheduler_loop_with_sources_until_cancelled<Run, Fut>(
+    lifecycle: &mut RuntimeLifecycleHarness,
+    cancellation: &AsyncRuntimeCancellationToken,
+    start_ms: u64,
+    step_ms: u64,
+    max_steps: usize,
+    readiness_sources: &mut [&mut dyn AsyncRuntimeReadinessSource],
+    mut run_ready_tasks: Run,
+) -> Result<AsyncRuntimeSchedulerLoopReport, RuntimeLifecycleError>
+where
+    Run: FnMut(Vec<RuntimeTaskExpectation>) -> Fut,
+    Fut: Future<Output = ()>,
+{
+    let mut steps = Vec::new();
+    for step_index in 0..max_steps {
+        if cancellation.is_cancelled() {
+            return Ok(AsyncRuntimeSchedulerLoopReport {
+                status: AsyncRuntimeSchedulerLoopStatus::Cancelled,
+                steps,
+            });
+        }
+        let now_ms = start_ms.saturating_add((step_index as u64).saturating_mul(step_ms));
+        let readiness = collect_async_runtime_readiness(readiness_sources);
+        let step = run_async_runtime_scheduler_step(
+            lifecycle,
+            &readiness,
+            now_ms,
+            cancellation,
+            &mut run_ready_tasks,
+        )
+        .await?;
+        let was_cancelled = step.wait_status == AsyncRuntimeSchedulerWaitStatus::Cancelled;
+        steps.push(step);
+        if was_cancelled {
+            return Ok(AsyncRuntimeSchedulerLoopReport {
+                status: AsyncRuntimeSchedulerLoopStatus::Cancelled,
+                steps,
+            });
+        }
+    }
+    Ok(AsyncRuntimeSchedulerLoopReport {
+        status: AsyncRuntimeSchedulerLoopStatus::StepLimitReached,
+        steps,
+    })
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChildSupervisorError {
     SpawnFailed,
@@ -3567,6 +3635,150 @@ mod tests {
         let records: Vec<_> = lifecycle.audit().records().collect();
         assert_eq!(records[1].details["scheduler_action"], "idle");
         assert_eq!(records[2].details["scheduler_action"], "idle");
+    }
+
+    #[test]
+    fn async_runtime_readiness_collection_preserves_live_source_order() {
+        let mut dns_source =
+            || RuntimeTaskReadiness::ready(RuntimeComponent::DnsListener, "dns_accept_loop");
+        let mut http_source = || {
+            RuntimeTaskReadiness::ready(
+                RuntimeComponent::HttpProxyListener,
+                "http_proxy_accept_loop",
+            )
+        };
+        let mut socks_source =
+            || RuntimeTaskReadiness::ready(RuntimeComponent::Socks5Listener, "socks5_accept_loop");
+        let mut tun_source =
+            || RuntimeTaskReadiness::new(RuntimeComponent::TunDevice, "tun_packet_loop");
+        let mut stack_source = || {
+            RuntimeTaskReadiness::new(RuntimeComponent::SmoltcpStack, "smoltcp_tun_bridge_loop")
+                .with_next_ready_delay_ms(Some(25))
+        };
+        let mut fan_in_source =
+            || RuntimeTaskReadiness::ready(RuntimeComponent::AuditFanIn, "audit_fan_in_loop");
+        let mut sources: Vec<&mut dyn AsyncRuntimeReadinessSource> = vec![
+            &mut dns_source,
+            &mut http_source,
+            &mut socks_source,
+            &mut tun_source,
+            &mut stack_source,
+            &mut fan_in_source,
+        ];
+
+        let readiness = collect_async_runtime_readiness(&mut sources);
+
+        assert_eq!(readiness.len(), 6);
+        assert_eq!(readiness[0].component, RuntimeComponent::DnsListener);
+        assert_eq!(readiness[1].component, RuntimeComponent::HttpProxyListener);
+        assert_eq!(readiness[2].component, RuntimeComponent::Socks5Listener);
+        assert_eq!(readiness[3].component, RuntimeComponent::TunDevice);
+        assert_eq!(readiness[4].component, RuntimeComponent::SmoltcpStack);
+        assert_eq!(readiness[4].next_ready_delay_ms, Some(25));
+        assert_eq!(readiness[5].component, RuntimeComponent::AuditFanIn);
+        let plan = RuntimeReadinessPlan::from_tasks(&readiness);
+        assert_eq!(
+            plan.scheduler_action(),
+            RuntimeSchedulerAction::RunReadyTasks
+        );
+        assert_eq!(plan.ready_task_details(), "dns_listener:dns_accept_loop,http_proxy_listener:http_proxy_accept_loop,socks5_listener:socks5_accept_loop,audit_fan_in:audit_fan_in_loop");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_scheduler_loop_collects_sources_each_step() {
+        let cancellation_state = Arc::new(AsyncRuntimeCancellationState::new());
+        let cancellation = AsyncRuntimeCancellationToken::new(cancellation_state.clone());
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-scheduler", 8);
+        lifecycle
+            .start_with_task_expectations(
+                vec![
+                    RuntimeComponent::DnsListener,
+                    RuntimeComponent::SmoltcpStack,
+                    RuntimeComponent::AuditFanIn,
+                ],
+                vec![
+                    RuntimeTaskExpectation::new(RuntimeComponent::DnsListener, "dns_accept_loop"),
+                    RuntimeTaskExpectation::new(
+                        RuntimeComponent::SmoltcpStack,
+                        "smoltcp_tun_bridge_loop",
+                    ),
+                    RuntimeTaskExpectation::new(RuntimeComponent::AuditFanIn, "audit_fan_in_loop"),
+                ],
+                7_000,
+            )
+            .unwrap();
+        let dns_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let stack_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let fan_in_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dns_calls_by_source = dns_calls.clone();
+        let stack_calls_by_source = stack_calls.clone();
+        let fan_in_calls_by_source = fan_in_calls.clone();
+        let mut dns_source = move || {
+            if dns_calls_by_source.fetch_add(1, Ordering::SeqCst) == 0 {
+                RuntimeTaskReadiness::ready(RuntimeComponent::DnsListener, "dns_accept_loop")
+            } else {
+                RuntimeTaskReadiness::new(RuntimeComponent::DnsListener, "dns_accept_loop")
+            }
+        };
+        let mut stack_source = move || {
+            stack_calls_by_source.fetch_add(1, Ordering::SeqCst);
+            RuntimeTaskReadiness::new(RuntimeComponent::SmoltcpStack, "smoltcp_tun_bridge_loop")
+                .with_next_ready_delay_ms(Some(60_000))
+        };
+        let mut fan_in_source = move || {
+            fan_in_calls_by_source.fetch_add(1, Ordering::SeqCst);
+            RuntimeTaskReadiness::new(RuntimeComponent::AuditFanIn, "audit_fan_in_loop")
+        };
+        let mut sources: Vec<&mut dyn AsyncRuntimeReadinessSource> =
+            vec![&mut dns_source, &mut stack_source, &mut fan_in_source];
+        let dispatched = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dispatched_by_runner = dispatched.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            cancellation_state.cancelled.store(true, Ordering::SeqCst);
+            cancellation_state.notify.notify_waiters();
+        });
+
+        let report = run_async_runtime_scheduler_loop_with_sources_until_cancelled(
+            &mut lifecycle,
+            &cancellation,
+            7_010,
+            10,
+            4,
+            &mut sources,
+            move |ready_tasks| {
+                let dispatched_by_runner = dispatched_by_runner.clone();
+                async move {
+                    dispatched_by_runner.lock().unwrap().extend(ready_tasks);
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.status, AsyncRuntimeSchedulerLoopStatus::Cancelled);
+        assert_eq!(report.steps.len(), 2);
+        assert_eq!(dns_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(stack_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(fan_in_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            report.steps[0].scheduler_action,
+            RuntimeSchedulerAction::RunReadyTasks
+        );
+        assert_eq!(
+            report.steps[1].scheduler_action,
+            RuntimeSchedulerAction::WaitForTimer
+        );
+        assert_eq!(
+            *dispatched.lock().unwrap(),
+            vec![RuntimeTaskExpectation::new(
+                RuntimeComponent::DnsListener,
+                "dns_accept_loop"
+            )]
+        );
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].details["scheduler_action"], "run_ready_tasks");
+        assert_eq!(records[2].details["scheduler_action"], "wait_for_timer");
     }
 
     #[tokio::test(flavor = "current_thread")]

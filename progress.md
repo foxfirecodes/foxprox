@@ -3866,3 +3866,27 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Scheduler loop cancellation now covers ready dispatch, timer waits, and idle waits. Remaining runtime gap is live-source integration and shutdown final-drain: DNS/HTTP/SOCKS listener readiness, TUN packet readiness, smoltcp timer evidence, fan-in progress, task spawning/joining, and final audit drain in an end-to-end Tokio runtime loop.
+
+## 2026-06-23 — Add readiness-source collection for scheduler loop
+
+### Review
+- Round-96 correctness and validation found no blockers or high issues.
+- Both reviews identified the same next gap: live-source Tokio scheduler integration plus shutdown final-drain over DNS/HTTP/SOCKS readiness, TUN packet readiness, smoltcp timers, audit fan-in progress, task join/cancellation, and final sink drain.
+
+### Fix
+- Added `AsyncRuntimeReadinessSource` and `collect_async_runtime_readiness(...)` so the scheduler can collect readiness from heterogeneous live-source adapters while preserving source order.
+- Added `run_async_runtime_scheduler_loop_with_sources_until_cancelled(...)`, which collects readiness from sources each iteration before recording/executing the audited scheduler step.
+- Added collection coverage for DNS, HTTP, SOCKS, TUN, smoltcp timer, and audit fan-in readiness sources.
+- Added loop coverage proving sources are polled on each iteration, a first ready DNS source dispatches, later smoltcp timer readiness waits, cancellation stops the loop, and readiness audit records the ordered scheduler actions.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- Initial `cargo test -p foxprox-egress async_runtime --all-targets --all-features` failed because the expected ready-task detail ordering in the new source-order test was wrong; fixed the assertion to match `RuntimeReadinessPlan`'s source-preserving ready task order.
+- `cargo fmt` — reapplied formatting.
+- `cargo test -p foxprox-egress async_runtime --all-targets --all-features` — passed 12 async runtime tests.
+- `cargo test --all-targets --all-features` — passed, including 77 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The scheduler loop now polls readiness-source adapters instead of only accepting a precomputed vector or step-index closure, but the sources in tests are still deterministic adapters. Remaining work is concrete adapters for real DNS/HTTP/SOCKS listeners, TUN packet readiness, smoltcp timer polling, fan-in drain progress, task joins, and shutdown final drain in an end-to-end Tokio runtime.
