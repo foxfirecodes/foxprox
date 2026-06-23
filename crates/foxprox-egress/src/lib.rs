@@ -337,21 +337,13 @@ impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
         sandbox_id: impl Into<String>,
         now_ms: u64,
         max_idle_steps: usize,
-        mut should_cancel: impl FnMut() -> bool,
+        should_cancel: impl FnMut() -> bool,
     ) -> RuntimeTaskStatus {
         let sandbox_id = sandbox_id.into();
-        let mut idle_steps = 0usize;
-        while idle_steps < max_idle_steps {
-            if should_cancel() {
-                return RuntimeTaskStatus::Cancelled;
-            }
-            match self.handle_one(sandbox_id.clone(), now_ms) {
-                Ok(Some(_)) => idle_steps = 0,
-                Ok(None) => idle_steps += 1,
-                Err(_) => return RuntimeTaskStatus::Failed,
-            }
-        }
-        RuntimeTaskStatus::Cancelled
+        run_blocking_listener_loop_until_cancelled(max_idle_steps, should_cancel, || {
+            self.handle_one(sandbox_id.clone(), now_ms)
+                .map(|step| step.map(|_| ()))
+        })
     }
 
     pub fn handler(&self) -> &DnsBrokerHandler<U> {
@@ -386,6 +378,25 @@ impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
         .with_detail("error", "dns_client_send_failed");
         let _ = self.handler.broker_mut().append_audit_for(&request, audit);
     }
+}
+
+fn run_blocking_listener_loop_until_cancelled<E>(
+    max_idle_steps: usize,
+    mut should_cancel: impl FnMut() -> bool,
+    mut handle_step: impl FnMut() -> Result<Option<()>, E>,
+) -> RuntimeTaskStatus {
+    let mut idle_steps = 0usize;
+    while idle_steps < max_idle_steps {
+        if should_cancel() {
+            return RuntimeTaskStatus::Cancelled;
+        }
+        match handle_step() {
+            Ok(Some(())) => idle_steps = 0,
+            Ok(None) => idle_steps += 1,
+            Err(_) => return RuntimeTaskStatus::Failed,
+        }
+    }
+    RuntimeTaskStatus::Cancelled
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -465,20 +476,11 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
         &mut self,
         now_ms: u64,
         max_idle_steps: usize,
-        mut should_cancel: impl FnMut() -> bool,
+        should_cancel: impl FnMut() -> bool,
     ) -> RuntimeTaskStatus {
-        let mut idle_steps = 0usize;
-        while idle_steps < max_idle_steps {
-            if should_cancel() {
-                return RuntimeTaskStatus::Cancelled;
-            }
-            match self.handle_one(now_ms) {
-                Ok(Some(_)) => idle_steps = 0,
-                Ok(None) => idle_steps += 1,
-                Err(_) => return RuntimeTaskStatus::Failed,
-            }
-        }
-        RuntimeTaskStatus::Cancelled
+        run_blocking_listener_loop_until_cancelled(max_idle_steps, should_cancel, || {
+            self.handle_one(now_ms).map(|step| step.map(|_| ()))
+        })
     }
 
     pub fn frontend(&self) -> &ExplicitProxyFrontend<E> {
@@ -732,20 +734,11 @@ impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
         &mut self,
         now_ms: u64,
         max_idle_steps: usize,
-        mut should_cancel: impl FnMut() -> bool,
+        should_cancel: impl FnMut() -> bool,
     ) -> RuntimeTaskStatus {
-        let mut idle_steps = 0usize;
-        while idle_steps < max_idle_steps {
-            if should_cancel() {
-                return RuntimeTaskStatus::Cancelled;
-            }
-            match self.handle_one(now_ms) {
-                Ok(Some(_)) => idle_steps = 0,
-                Ok(None) => idle_steps += 1,
-                Err(_) => return RuntimeTaskStatus::Failed,
-            }
-        }
-        RuntimeTaskStatus::Cancelled
+        run_blocking_listener_loop_until_cancelled(max_idle_steps, should_cancel, || {
+            self.handle_one(now_ms).map(|step| step.map(|_| ()))
+        })
     }
 
     pub fn frontend(&self) -> &ExplicitProxyFrontend<E> {
@@ -2387,6 +2380,42 @@ mod tests {
                 RuntimeTaskStatus::Cancelled,
             )
         );
+    }
+
+    #[test]
+    fn blocking_listener_loop_helper_reports_real_errors_as_failed() {
+        let mut calls = 0usize;
+
+        let status = run_blocking_listener_loop_until_cancelled(
+            8,
+            || false,
+            || -> Result<Option<()>, ()> {
+                calls += 1;
+                Err(())
+            },
+        );
+
+        assert_eq!(status, RuntimeTaskStatus::Failed);
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn blocking_listener_loop_helper_resets_idle_budget_after_work() {
+        let mut steps: VecDeque<Result<Option<()>, ()>> =
+            VecDeque::from([Ok(None), Ok(Some(())), Ok(None), Ok(None)]);
+        let mut calls = 0usize;
+
+        let status = run_blocking_listener_loop_until_cancelled(
+            2,
+            || false,
+            || {
+                calls += 1;
+                steps.pop_front().unwrap_or(Ok(None))
+            },
+        );
+
+        assert_eq!(status, RuntimeTaskStatus::Cancelled);
+        assert_eq!(calls, 4);
     }
 
     #[test]

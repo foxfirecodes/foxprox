@@ -298,3 +298,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Listener loop wrappers turn idle/error/cancel into task outcomes
 
 - Once listener `handle_one` methods distinguish idle from failure, runtime task loops should use that distinction directly: idle continues, cancellation returns `cancelled`, and real listener errors return `failed` so lifecycle exit can emit structured task evidence.
+
+## 2026-06-23 — Listener task loops need reusable status mapping
+
+- Per-listener cancellation loops should share one idle/handled/error mapping so DNS, HTTP, and SOCKS cannot drift: handled work resets idle budget, idle advances it, cancellation returns `cancelled`, and real listener errors return `failed` for lifecycle task evidence.

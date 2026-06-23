@@ -2898,3 +2898,29 @@ Added `run_until_cancelled(...)` loop wrappers for DNS, HTTP, and SOCKS blocking
 ### Remaining blind spots
 - Need deterministic listener error injection or adapter traits to prove `run_until_cancelled(...) -> Failed` for actual socket failures without relying on OS-specific invalid handles.
 - Final async runtime still needs readiness/timer integration, task registration, cancellation/join ordering, and fan-in audit drain for concrete runtime tasks.
+
+## 2026-06-23 — Add reusable listener loop status mapping
+
+### Commands run
+- `cargo fmt` — applied formatting for listener-loop helper changes.
+- `cargo test -p foxprox-egress blocking_listener_loop --all-targets --all-features` — passed, 3 listener-loop tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 55 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_listener_loop_helper_reports_real_errors_as_failed ... ok`
+- `tests::blocking_listener_loop_helper_resets_idle_budget_after_work ... ok`
+- `tests::blocking_listener_loop_tasks_feed_lifecycle_exit ... ok`
+
+### Interpretation
+Refactored DNS/HTTP/SOCKS `run_until_cancelled(...)` wrappers through a shared `run_blocking_listener_loop_until_cancelled(...)` helper. The helper has deterministic tests proving real step errors map to `RuntimeTaskStatus::Failed`, handled work resets the idle budget, and idle exhaustion/cancellation is bounded as `cancelled`. Existing listener-loop lifecycle proof continues to show actual listener tasks feeding `cancelled` outcomes into structured `network_session_exit` task evidence.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Need concrete adapter-level tests for actual OS listener/socket errors once the listener abstraction can inject them without unsafe fd manipulation.
+- Final async runtime still needs readiness/timer integration and audit fan-in wiring for real task loops.
