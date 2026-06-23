@@ -2868,6 +2868,60 @@ mod tests {
     }
 
     #[test]
+    fn blocking_audit_fan_in_loop_failure_is_lifecycle_fail_closed() {
+        let status = run_blocking_audit_fan_in_until_cancelled(
+            8,
+            || false,
+            || -> Result<bool, ()> { Err(()) },
+        );
+        assert_eq!(status, RuntimeTaskStatus::Failed);
+
+        let mut task_set = BlockingRuntimeTaskSet::new();
+        task_set
+            .spawn_cancellable_task(
+                RuntimeComponent::AuditFanIn,
+                "audit_fan_in_loop",
+                |_token| {
+                    run_blocking_audit_fan_in_until_cancelled(
+                        8,
+                        || false,
+                        || -> Result<bool, ()> { Err(()) },
+                    )
+                },
+            )
+            .unwrap();
+        let expectations = task_set.expectations();
+        let report = task_set.join_all_with_timeout(Duration::from_secs(1));
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].status, RuntimeTaskStatus::Failed);
+
+        let mut lifecycle = RuntimeLifecycleHarness::new("s1", 4);
+        lifecycle
+            .start_with_task_expectations(vec![RuntimeComponent::AuditFanIn], expectations, 3_000)
+            .unwrap();
+        lifecycle
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::AuditFanIn]),
+                None,
+                Some(report),
+                3_100,
+            )
+            .unwrap();
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        let exit = records.last().unwrap();
+        assert_eq!(exit.kind, AuditKind::NetworkSessionExit);
+        assert_eq!(exit.decision, Some(Decision::FailClosed));
+        assert_eq!(exit.reason, Some(DenialReason::RuntimeState));
+        assert_eq!(exit.details["task_join_status"], "failed");
+        assert_eq!(exit.details["failed_runtime_task_count"], "1");
+        assert_eq!(
+            exit.details["runtime_tasks"],
+            "audit_fan_in:audit_fan_in_loop:failed"
+        );
+    }
+
+    #[test]
     fn blocking_listener_loop_error_recorders_append_structured_broker_errors() {
         let query = dns_query(0x7171, "Error.TEST", 1);
         let response = dns_a_response(&query, [127, 0, 0, 1], 30);

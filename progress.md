@@ -3228,3 +3228,28 @@ Added an `audit_fan_in` runtime component/cleanup action and a bounded blocking 
 ### Remaining blind spots
 - The fan-in task proof uses a blocking harness and synthetic source records; it is not yet the final async readiness/timer-driven fan-in task over live listener/TUN/smoltcp sources.
 - Final async runtime still needs readiness/timer orchestration across all concrete runtime tasks.
+
+## 2026-06-23 — Fail closed on audit fan-in task errors
+
+### Commands run
+- `cargo fmt` — applied formatting for audit fan-in failure coverage.
+- `cargo test -p foxprox-egress blocking_audit_fan_in_loop --all-targets --all-features` — passed, 2 audit fan-in loop tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 63 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_audit_fan_in_loop_pumps_and_drains_until_cancelled ... ok`
+- `tests::blocking_audit_fan_in_loop_failure_is_lifecycle_fail_closed ... ok`
+
+### Interpretation
+Round-75 review found no blocker/high issues and kept final async fan-in as the remaining gap. Added failure-path coverage for the blocking audit fan-in runtime task: pump errors map to `RuntimeTaskStatus::Failed`, a task-set join records that failed outcome, and lifecycle exit fails closed with `audit_fan_in:audit_fan_in_loop:failed` and `failed_runtime_task_count=1`. This complements the prior clean cancellation evidence for the same fan-in task.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The fan-in task proof is still a blocking harness with synthetic source records; it is not yet final async readiness/timer-driven fan-in over live listener/TUN/smoltcp sources.
+- Final async runtime still needs readiness/timer orchestration across all concrete runtime tasks.

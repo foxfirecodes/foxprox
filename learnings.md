@@ -350,3 +350,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Audit fan-in needs task lifecycle evidence
 
 - A fan-in bridge should be paired with task-supervisor evidence: register an `audit_fan_in` runtime component/task, pump/drain fan-in work until cancellation, and prove lifecycle exit records the fan-in task outcome alongside listener tasks.
+
+## 2026-06-23 — Fan-in task failures must fail closed in lifecycle
+
+- In addition to clean cancellation, audit fan-in runtime tasks need failure-path lifecycle coverage. Pump/drain errors should return `RuntimeTaskStatus::Failed`, and `network_session_exit` should fail closed with the `audit_fan_in:audit_fan_in_loop:failed` task outcome.
