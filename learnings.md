@@ -418,3 +418,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Start async runtime work with task ownership before full scheduler
 
 - After choosing Tokio for the final runtime path, introduce async task registration/cancellation/join evidence before wiring every live socket/TUN source. This gives lifecycle-visible async task outcomes and timeout behavior while keeping the remaining scheduler integration explicit.
+
+## 2026-06-23 — Await aborted Tokio tasks before emitting join evidence
+
+- For async runtime join evidence, calling `JoinHandle::abort()` is not enough. Await the aborted handle before recording a timeout outcome so lifecycle evidence does not claim a task was joined while cleanup/drop is still pending.

@@ -2442,6 +2442,7 @@ impl AsyncRuntimeTaskSet {
                 Ok(Err(_)) => RuntimeTaskStatus::JoinFailed,
                 Err(_) => {
                     join.abort();
+                    let _ = join.await;
                     RuntimeTaskStatus::TimedOut
                 }
             };
@@ -2743,6 +2744,15 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct DropFlag(Arc<AtomicBool>);
+
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
     #[test]
     fn blocking_runtime_task_set_feeds_clean_lifecycle_exit() {
         let mut task_set = BlockingRuntimeTaskSet::new();
@@ -3040,6 +3050,35 @@ mod tests {
         assert_eq!(
             records[1].details["runtime_tasks"],
             "smoltcp_stack:smoltcp_tun_bridge_loop:timed_out"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_task_set_timeout_awaits_aborted_task_before_report() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let dropped_by_task = dropped.clone();
+        let mut task_set = AsyncRuntimeTaskSet::new();
+        task_set
+            .spawn_task(
+                RuntimeComponent::SmoltcpStack,
+                "smoltcp_tun_bridge_loop",
+                async move {
+                    let _drop_flag = DropFlag(dropped_by_task);
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    RuntimeTaskStatus::Completed
+                },
+            )
+            .unwrap();
+
+        let report = task_set
+            .join_all_with_timeout(Duration::from_millis(1))
+            .await;
+
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].status, RuntimeTaskStatus::TimedOut);
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "timed-out async task must be dropped before lifecycle join evidence is returned"
         );
     }
 

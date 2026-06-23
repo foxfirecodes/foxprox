@@ -3758,3 +3758,23 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Tokio task ownership/cancellation/join evidence is now present, but the final async scheduler still needs to consume real listener/TUN/smoltcp/fan-in readiness, run ready tasks or wait timers, and perform shutdown final-drain over live runtime sources.
+
+## 2026-06-23 — Round-92 high fixed: await aborted async task joins
+
+### Review
+- Round-92 correctness found no blockers, but identified one high issue: `AsyncRuntimeTaskSet::join_all_with_timeout(...)` requested abort on timed-out Tokio tasks without awaiting the aborted `JoinHandle`, so lifecycle evidence could say `timed_out` before task cleanup/drop was confirmed.
+- Round-92 validation found no blockers and confirmed Tokio introduction/progress scope were aligned.
+
+### Fix
+- After a Tokio join timeout, `AsyncRuntimeTaskSet::join_all_with_timeout(...)` now calls `join.abort()` and awaits the handle before recording `RuntimeTaskStatus::TimedOut`.
+- Added `async_runtime_task_set_timeout_awaits_aborted_task_before_report`, using a drop flag to prove the timed-out task is dropped before the join report is returned.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_task_set --all-targets --all-features` — passed 3 async task-set tests.
+- `cargo test --all-targets --all-features` — passed, including 68 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Async task timeout evidence now confirms abort completion before report emission, but cancellation is still polling-only. The next highest gap remains an awaitable/select-able cancellation mechanism and the concrete Tokio scheduler consuming live readiness/timers/fan-in sources with shutdown final drain.
