@@ -5336,6 +5336,12 @@ mod tests {
                 && record.reason == Some(DenialReason::ProxyMalformed)
         }));
 
+        let mut failing_sink = JsonLineAuditSink::new(FailingWriter);
+        assert!(runtime
+            .drain_aggregate_audit_to_sink(&mut failing_sink)
+            .is_err());
+        assert_eq!(failing_sink.records_written(), 0);
+
         let mut sink = JsonLineAuditSink::new(Vec::new());
         let drained = runtime.drain_aggregate_audit_to_sink(&mut sink).unwrap();
         assert_eq!(drained, aggregate.len());

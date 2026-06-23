@@ -334,3 +334,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Sink drains need no-duplicate cursor proof
 
 - In-memory runtime aggregates should expose a sink drain with its own cursor and tests proving first drain writes all currently aggregated records and the next drain writes none. This is a stepping stone toward full async fan-in without overclaiming readiness integration.
+
+## 2026-06-23 — Drain failures must preserve aggregate cursor
+
+- Sink-backed aggregate drains should prove write failures do not advance the drain cursor. A subsequent successful drain must still emit all previously aggregated records, then repeated successful drains should emit zero duplicates.
