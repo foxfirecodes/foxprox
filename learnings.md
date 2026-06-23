@@ -358,3 +358,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Live source fan-in should run through the same pump loop
 
 - After proving source-specific fan-in ingestion directly, also drive live runtime ledgers through the fan-in pump loop. This verifies progress/idle handling, duplicate source cursor behavior, and sink output under the same loop semantics used by the audit fan-in runtime task.
+
+## 2026-06-23 — Listener and fan-in task outcomes should join together
+
+- Runtime lifecycle coverage should include listener loops and audit fan-in in the same task report. This catches ordering/coverage bugs where listeners cancel cleanly but the fan-in task is omitted from expected runtime components or cleanup evidence.

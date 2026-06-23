@@ -3172,8 +3172,20 @@ mod tests {
                 },
             )
             .unwrap();
+        task_set
+            .spawn_cancellable_task(RuntimeComponent::AuditFanIn, "audit_fan_in_loop", |token| {
+                run_blocking_audit_fan_in_until_cancelled(
+                    1_000_000,
+                    || token.is_cancelled(),
+                    || -> Result<bool, ()> {
+                        std::thread::sleep(Duration::from_millis(1));
+                        Ok(false)
+                    },
+                )
+            })
+            .unwrap();
         let expectations = task_set.expectations();
-        assert_eq!(task_set.request_cancellation(), 3);
+        assert_eq!(task_set.request_cancellation(), 4);
 
         let report = task_set.join_all_with_timeout(Duration::from_secs(1));
         let mut lifecycle = RuntimeLifecycleHarness::new("task-sandbox", 8);
@@ -3183,6 +3195,7 @@ mod tests {
                     RuntimeComponent::DnsListener,
                     RuntimeComponent::HttpProxyListener,
                     RuntimeComponent::Socks5Listener,
+                    RuntimeComponent::AuditFanIn,
                 ],
                 expectations,
                 1_000,
@@ -3195,6 +3208,7 @@ mod tests {
                     RuntimeCleanupAction::DnsListener,
                     RuntimeCleanupAction::HttpProxyListener,
                     RuntimeCleanupAction::Socks5Listener,
+                    RuntimeCleanupAction::AuditFanIn,
                 ]),
                 None,
                 Some(report),
@@ -3210,7 +3224,7 @@ mod tests {
         assert_eq!(exit.details["failed_runtime_task_count"], "0");
         assert_eq!(
             exit.details["runtime_tasks"],
-            "dns_listener:dns_accept_loop:cancelled,http_proxy_listener:http_proxy_accept_loop:cancelled,socks5_listener:socks5_accept_loop:cancelled"
+            "dns_listener:dns_accept_loop:cancelled,http_proxy_listener:http_proxy_accept_loop:cancelled,socks5_listener:socks5_accept_loop:cancelled,audit_fan_in:audit_fan_in_loop:cancelled"
         );
     }
 

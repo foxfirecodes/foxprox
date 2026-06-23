@@ -3277,3 +3277,27 @@ Extended the live blocking-runtime fan-in proof so `BlockingProxyRuntime` source
 ### Remaining blind spots
 - This still runs synchronously in the blocking harness; it is not yet the final async readiness/timer-driven fan-in task over live listener/TUN/smoltcp sources.
 - Final async runtime still needs readiness/timer orchestration across all concrete runtime tasks.
+
+## 2026-06-23 — Join listener and audit fan-in task outcomes together
+
+### Commands run
+- `cargo fmt` — applied formatting for combined listener/fan-in task coverage.
+- `cargo test -p foxprox-egress blocking_listener_loop_tasks_feed_lifecycle_exit --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 63 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_listener_loop_tasks_feed_lifecycle_exit ... ok`
+
+### Interpretation
+Round-77 review found no blocker/high issues and left final async readiness orchestration as the next gap. Extended the existing listener-loop lifecycle regression so DNS, HTTP, SOCKS, and `audit_fan_in_loop` tasks are registered, cancelled, joined, and reported together. The `network_session_exit` evidence now includes `audit_fan_in:audit_fan_in_loop:cancelled` alongside the three listener task outcomes and includes audit fan-in cleanup coverage.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The fan-in task in this combined lifecycle proof remains a blocking synthetic loop, not final async readiness/timer-driven fan-in over live listener/TUN/smoltcp sources.
+- Final async runtime still needs readiness/timer orchestration across all concrete runtime tasks.
