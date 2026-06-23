@@ -461,6 +461,7 @@ pub enum RuntimeAuditDrainError {
     SinkWriteFailed {
         attempted_sequence: u64,
         failure_record: Box<AuditRecord>,
+        failure_sink_error_record: Option<Box<AuditRecord>>,
     },
 }
 
@@ -563,12 +564,30 @@ impl RuntimeAuditFanIn {
                             "last_drained_sequence",
                             self.last_drained_sequence.to_string(),
                         );
+                let mut failure_sink_error_record = None;
                 if let Some(failure_sink) = failure_sink.as_deref_mut() {
-                    let _ = failure_sink.append(&failure_record);
+                    if failure_sink.append(&failure_record).is_err() {
+                        failure_sink_error_record = Some(Box::new(
+                            AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
+                                .with_frontend(Frontend::Core)
+                                .with_decision(
+                                    Decision::FailClosed,
+                                    Some(DenialReason::AuditBackpressure),
+                                )
+                                .with_detail("runtime_error", "audit_emergency_sink_write_failed")
+                                .with_detail("primary_runtime_error", "audit_sink_write_failed")
+                                .with_detail("attempted_sequence", record.sequence.to_string())
+                                .with_detail(
+                                    "last_drained_sequence",
+                                    self.last_drained_sequence.to_string(),
+                                ),
+                        ));
+                    }
                 }
                 return Err(RuntimeAuditDrainError::SinkWriteFailed {
                     attempted_sequence: record.sequence,
                     failure_record: Box::new(failure_record),
+                    failure_sink_error_record,
                 });
             }
             self.last_drained_sequence = record.sequence;
@@ -1205,8 +1224,10 @@ mod tests {
         let RuntimeAuditDrainError::SinkWriteFailed {
             attempted_sequence,
             failure_record,
+            failure_sink_error_record,
         } = error;
         assert_eq!(attempted_sequence, 1);
+        assert!(failure_sink_error_record.is_none());
         assert_eq!(failure_record.kind, AuditKind::BrokerError);
         assert_eq!(failure_record.decision, Some(Decision::FailClosed));
         assert_eq!(failure_record.reason, Some(DenialReason::AuditBackpressure));
@@ -1236,8 +1257,10 @@ mod tests {
         let RuntimeAuditDrainError::SinkWriteFailed {
             attempted_sequence,
             failure_record,
+            failure_sink_error_record,
         } = error;
         assert_eq!(attempted_sequence, 1);
+        assert!(failure_sink_error_record.is_none());
         assert_eq!(
             failure_record.details["runtime_error"],
             "audit_sink_write_failed"
@@ -1257,6 +1280,46 @@ mod tests {
     }
 
     #[test]
+    fn runtime_audit_fan_in_emergency_sink_failure_is_observable() {
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 1);
+        let mut start = AuditRecord::new_at(AuditKind::NetworkSessionStart, "s1", 1_000);
+        start.sequence = 1;
+        fan_in.ingest("lifecycle", &[start]).unwrap();
+
+        let mut primary = JsonLineAuditSink::new(FailingAuditWriter);
+        let mut emergency = JsonLineAuditSink::new(FailingAuditWriter);
+        let error = fan_in
+            .drain_to_sink_with_failure_sink(&mut primary, Some(&mut emergency))
+            .unwrap_err();
+
+        let RuntimeAuditDrainError::SinkWriteFailed {
+            attempted_sequence,
+            failure_record,
+            failure_sink_error_record,
+        } = error;
+        assert_eq!(attempted_sequence, 1);
+        assert_eq!(
+            failure_record.details["runtime_error"],
+            "audit_sink_write_failed"
+        );
+        let failure_sink_error_record = failure_sink_error_record.unwrap();
+        assert_eq!(failure_sink_error_record.kind, AuditKind::BrokerError);
+        assert_eq!(
+            failure_sink_error_record.details["runtime_error"],
+            "audit_emergency_sink_write_failed"
+        );
+        assert_eq!(
+            failure_sink_error_record.details["primary_runtime_error"],
+            "audit_sink_write_failed"
+        );
+        assert_eq!(failure_sink_error_record.details["attempted_sequence"], "1");
+        let records: Vec<_> = fan_in.audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::NetworkSessionStart);
+        assert_eq!(fan_in.last_drained_sequence, 0);
+    }
+
+    #[test]
     fn runtime_audit_fan_in_sink_failure_preserves_full_undrained_ledger() {
         let mut fan_in = RuntimeAuditFanIn::new("s1", 1);
         let mut start = AuditRecord::new_at(AuditKind::NetworkSessionStart, "s1", 1_000);
@@ -1269,9 +1332,11 @@ mod tests {
         let RuntimeAuditDrainError::SinkWriteFailed {
             attempted_sequence,
             failure_record,
+            failure_sink_error_record,
         } = error;
         assert_eq!(attempted_sequence, 1);
         assert_eq!(failure_record.details["attempted_sequence"], "1");
+        assert!(failure_sink_error_record.is_none());
         let records: Vec<_> = fan_in.audit().records().collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, AuditKind::NetworkSessionStart);

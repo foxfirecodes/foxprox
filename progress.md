@@ -2547,3 +2547,32 @@ Added `RuntimeAuditFanIn::drain_to_sink_with_failure_sink(...)`, allowing a call
 
 ### Remaining blind spots
 - The emergency sink is still caller-provided and synchronous. Final runtime should define a concrete fallback destination and bounded behavior when both primary and emergency sinks fail.
+
+## 2026-06-23 — Make fallback audit and blocking task spawn failures observable
+
+### Commands run
+- `cargo fmt` — applied formatting for fan-in and blocking task-set changes.
+- `cargo test -p foxprox-core runtime::tests::runtime_audit_fan_in --all-targets --all-features` — passed, 8 fan-in tests.
+- `cargo test -p foxprox-egress blocking_runtime_task_set --all-targets --all-features` — passed, 4 blocking task-set tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 150 core tests, 3 device tests, 42 egress tests, and 12 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_audit_fan_in_emergency_sink_failure_is_observable ... ok`
+- `runtime::tests::runtime_audit_fan_in_writes_sink_failure_to_emergency_sink ... ok`
+- `tests::blocking_runtime_task_set_spawn_failure_is_join_failed ... ok`
+- `tests::blocking_runtime_task_set_panic_is_join_failed ... ok`
+
+### Interpretation
+Addressed round-49/round-50 high review notes. `RuntimeAuditDrainError::SinkWriteFailed` now includes an optional structured `failure_sink_error_record` (`runtime_error=audit_emergency_sink_write_failed`) when the emergency audit sink also fails, while preserving the undrained primary ledger and drain cursor. `BlockingRuntimeTaskSet::spawn_task(...)` now routes through `std::thread::Builder::spawn`, converts OS thread creation failure into a registered `join_failed` task outcome, and returns `BlockingRuntimeTaskSetError::SpawnFailed`; feeding that report into lifecycle exit produces fail-closed task join evidence instead of a panic or missing task.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The emergency sink destination is still caller-provided; final runtime should choose the concrete fallback sink and bounded retry policy.
+- The blocking task-set proof is still synchronous/thread-based. Final runtime still needs async task handles, cancellation ordering, and real listener/TUN/smoltcp task registration.

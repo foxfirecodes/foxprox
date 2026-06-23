@@ -1520,6 +1520,21 @@ pub struct BlockingRuntimeTaskSet {
     tasks: Vec<(RuntimeTaskHandle, JoinHandle<RuntimeTaskStatus>)>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockingRuntimeTaskSetError {
+    Supervisor(RuntimeTaskSupervisorError),
+    SpawnFailed {
+        component: RuntimeComponent,
+        task_name: String,
+    },
+}
+
+impl From<RuntimeTaskSupervisorError> for BlockingRuntimeTaskSetError {
+    fn from(error: RuntimeTaskSupervisorError) -> Self {
+        Self::Supervisor(error)
+    }
+}
+
 impl BlockingRuntimeTaskSet {
     pub fn new() -> Self {
         Self {
@@ -1533,13 +1548,45 @@ impl BlockingRuntimeTaskSet {
         component: RuntimeComponent,
         task_name: impl Into<String>,
         task: F,
-    ) -> Result<RuntimeTaskHandle, RuntimeTaskSupervisorError>
+    ) -> Result<RuntimeTaskHandle, BlockingRuntimeTaskSetError>
     where
         F: FnOnce() -> RuntimeTaskStatus + Send + 'static,
     {
-        let handle = self.supervisor.register_task(component, task_name)?;
-        self.tasks.push((handle, std::thread::spawn(task)));
-        Ok(handle)
+        self.spawn_task_with_spawner(component, task_name, task, |task_name, task| {
+            std::thread::Builder::new().name(task_name).spawn(task)
+        })
+    }
+
+    fn spawn_task_with_spawner<F, S>(
+        &mut self,
+        component: RuntimeComponent,
+        task_name: impl Into<String>,
+        task: F,
+        spawner: S,
+    ) -> Result<RuntimeTaskHandle, BlockingRuntimeTaskSetError>
+    where
+        F: FnOnce() -> RuntimeTaskStatus + Send + 'static,
+        S: FnOnce(String, F) -> std::io::Result<JoinHandle<RuntimeTaskStatus>>,
+    {
+        let task_name = task_name.into();
+        let handle = self
+            .supervisor
+            .register_task(component, task_name.clone())?;
+        match spawner(task_name.clone(), task) {
+            Ok(task) => {
+                self.tasks.push((handle, task));
+                Ok(handle)
+            }
+            Err(_) => {
+                self.supervisor
+                    .record_outcome(handle, RuntimeTaskStatus::JoinFailed)
+                    .expect("spawn-failed task was just registered");
+                Err(BlockingRuntimeTaskSetError::SpawnFailed {
+                    component,
+                    task_name,
+                })
+            }
+        }
     }
 
     pub fn expectations(&self) -> Vec<RuntimeTaskExpectation> {
@@ -1893,13 +1940,68 @@ mod tests {
             task_set.spawn_task(RuntimeComponent::DnsListener, "dns_accept_loop", || {
                 RuntimeTaskStatus::Completed
             }),
-            Err(RuntimeTaskSupervisorError::DuplicateTaskName {
-                component: RuntimeComponent::DnsListener,
-                task_name: "dns_accept_loop".to_string(),
-            })
+            Err(BlockingRuntimeTaskSetError::Supervisor(
+                RuntimeTaskSupervisorError::DuplicateTaskName {
+                    component: RuntimeComponent::DnsListener,
+                    task_name: "dns_accept_loop".to_string(),
+                },
+            ))
         );
         let report = task_set.join_all();
         assert_eq!(report.outcomes.len(), 1);
+    }
+
+    #[test]
+    fn blocking_runtime_task_set_spawn_failure_is_join_failed() {
+        let mut task_set = BlockingRuntimeTaskSet::new();
+        let error = task_set
+            .spawn_task_with_spawner(
+                RuntimeComponent::DnsListener,
+                "dns_accept_loop",
+                || RuntimeTaskStatus::Completed,
+                |_task_name, _task| {
+                    Err(std::io::Error::new(
+                        ErrorKind::WouldBlock,
+                        "deterministic thread spawn failure",
+                    ))
+                },
+            )
+            .unwrap_err();
+        assert_eq!(
+            error,
+            BlockingRuntimeTaskSetError::SpawnFailed {
+                component: RuntimeComponent::DnsListener,
+                task_name: "dns_accept_loop".to_string(),
+            }
+        );
+
+        let expectations = task_set.expectations();
+        let mut lifecycle = RuntimeLifecycleHarness::new("task-sandbox", 4);
+        lifecycle
+            .start_with_task_expectations(vec![RuntimeComponent::DnsListener], expectations, 1_000)
+            .unwrap();
+        let report = task_set.join_all();
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].status, RuntimeTaskStatus::JoinFailed);
+        lifecycle
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::DnsListener]),
+                None,
+                Some(report),
+                1_100,
+            )
+            .unwrap();
+
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["task_join_status"], "failed");
+        assert_eq!(
+            records[1].details["runtime_tasks"],
+            "dns_listener:dns_accept_loop:join_failed"
+        );
     }
 
     #[test]
