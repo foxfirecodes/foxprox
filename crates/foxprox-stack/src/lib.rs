@@ -573,6 +573,96 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         should_process.then(|| self.process_packet_loop(now_ms, max_packets))
     }
 
+    pub fn poll_stack_ready_task(
+        &mut self,
+        ready_tasks: &[RuntimeTaskExpectation],
+        now_ms: i64,
+    ) -> Result<Option<SmoltcpTunBridgeResult>, DeviceIoError> {
+        let should_poll = ready_tasks.iter().any(|task| {
+            task.component == RuntimeComponent::SmoltcpStack
+                && task.task_name == "smoltcp_tun_bridge_loop"
+        });
+        if !should_poll {
+            return Ok(None);
+        }
+        let before = self.stack.outbound_len();
+        let stack_evidence = self.stack.poll(now_ms);
+        let mut written = 0usize;
+        for packet in self.stack.outbound_packets_since(before) {
+            let parsed = match ParsedIpPacket::parse(&packet) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    let request = PolicyRequest::unsupported(
+                        self.sandbox_id.clone(),
+                        Frontend::Tun,
+                        error.denial_reason(),
+                    );
+                    let audit = error
+                        .audit_record(self.sandbox_id.clone())
+                        .with_timestamp_ms(now_ms as u128);
+                    let decision = match self.broker.append_audit_for(&request, audit) {
+                        Ok(_) => PolicyDecision {
+                            decision: Decision::FailClosed,
+                            reason: Some(error.denial_reason()),
+                            rule_id: None,
+                            audit_kind: AuditKind::PacketMalformedDenied,
+                        },
+                        Err(decision) => decision,
+                    };
+                    return Ok(Some(bridge_result(
+                        false,
+                        stack_evidence,
+                        written,
+                        decision,
+                    )));
+                }
+            };
+            let request = request_for_packet(&self.sandbox_id, &parsed);
+            let outbound_audit = packet_audit(
+                &self.sandbox_id,
+                &parsed,
+                now_ms,
+                packet.len(),
+                "to_sandbox",
+            )
+            .with_detail("stack", "smoltcp")
+            .with_detail("write_phase", "attempt");
+            if let Err(decision) = self.broker.append_audit_for(&request, outbound_audit) {
+                return Ok(Some(bridge_result(
+                    false,
+                    stack_evidence,
+                    written,
+                    decision,
+                )));
+            }
+            if let Err(error) = self.device.write_packet(&packet) {
+                let error_audit = AuditRecord::new_at(
+                    AuditKind::BrokerError,
+                    self.sandbox_id.clone(),
+                    now_ms as u128,
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(parsed.protocol)
+                .with_source(parsed.source_endpoint())
+                .with_destination(parsed.destination_endpoint())
+                .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+                .with_detail("stack", "smoltcp")
+                .with_detail("direction", "to_sandbox")
+                .with_detail("device_io_error", "write_failed");
+                let _ = self.broker.append_audit_for(&request, error_audit);
+                return Err(error);
+            }
+            written += 1;
+        }
+        Ok(Some(SmoltcpTunBridgeResult {
+            inbound_observed: false,
+            stack: stack_evidence,
+            packets_written: written,
+            decision: Decision::Allow,
+            reason: None,
+        }))
+    }
+
     fn record_device_read_failure(&mut self, now_ms: i64) {
         let request = PolicyRequest::unsupported(
             self.sandbox_id.clone(),
@@ -1164,6 +1254,65 @@ mod tests {
                 )],
                 due_ms,
             )
+            .is_none());
+    }
+
+    #[test]
+    fn smoltcp_bridge_timer_dispatch_writes_retransmitted_stack_output() {
+        let device = InMemoryPacketDevice::default();
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16);
+        let stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+        bridge.stack.listen_tcp(8080, 1024, 1024);
+        let client_seq = 0x0102_0304;
+        bridge.stack.inject_packet(ipv4_tcp_packet(TcpPacketSpec {
+            source: [10, 0, 2, 15],
+            destination: [10, 0, 2, 1],
+            source_port: 50_000,
+            destination_port: 8080,
+            sequence: client_seq,
+            acknowledgment: 0,
+            flags: TCP_SYN,
+            payload: &[],
+        }));
+        let syn_ack = bridge.stack.poll(3_000);
+        assert_eq!(syn_ack.packets_emitted, 1);
+        let due_ms = 3_000 + syn_ack.next_poll_delay_ms.unwrap() as i64;
+        let ready = bridge.stack.runtime_timer_readiness(due_ms);
+        assert_eq!(
+            ready,
+            RuntimeTaskReadiness::ready(RuntimeComponent::SmoltcpStack, "smoltcp_tun_bridge_loop")
+        );
+        let ready_tasks = vec![RuntimeTaskExpectation::new(
+            RuntimeComponent::SmoltcpStack,
+            "smoltcp_tun_bridge_loop",
+        )];
+
+        let result = bridge
+            .poll_stack_ready_task(&ready_tasks, due_ms)
+            .unwrap()
+            .unwrap();
+
+        assert!(!result.inbound_observed);
+        assert_eq!(result.decision, Decision::Allow);
+        assert_eq!(result.stack.packets_emitted, 1);
+        assert_eq!(result.packets_written, 1);
+        assert_eq!(bridge.device().outbound().len(), 1);
+        let records: Vec<_> = bridge.broker().audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::PacketObserved);
+        assert_eq!(records[0].details["direction"], "to_sandbox");
+        assert_eq!(records[0].details["stack"], "smoltcp");
+        assert_eq!(records[0].details["write_phase"], "attempt");
+        assert!(bridge
+            .poll_stack_ready_task(
+                &[RuntimeTaskExpectation::new(
+                    RuntimeComponent::AuditFanIn,
+                    "audit_fan_in_loop"
+                )],
+                due_ms,
+            )
+            .unwrap()
             .is_none());
     }
 

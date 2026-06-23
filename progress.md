@@ -4058,3 +4058,23 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Smoltcp timer readiness can now drive a stack poll without packet input in the deterministic stack adapter. Remaining final gap is still true Tokio fd/socket/TUN readiness and an end-to-end async runtime loop that wires live timers, live listener/TUN readiness, cancellation/join, audit fan-in, and shutdown final drain together.
+
+## 2026-06-23 — Add bridge-level smoltcp timer dispatch write-back evidence
+
+### Review
+- Round-105 correctness and validation found no blockers or high issues.
+- Reviewers identified the next highest gap as timer-ready stack polling integrated with bridge-level auditing/writing of timer-generated outbound packets.
+
+### Fix
+- Added `SmoltcpTunBridge::poll_stack_ready_task(...)`, mapping `smoltcp_stack:smoltcp_tun_bridge_loop` ready tasks to a direct smoltcp stack poll that audits and writes any newly emitted outbound packets to the TUN-side packet device.
+- Added `smoltcp_bridge_timer_dispatch_writes_retransmitted_stack_output`, proving a timer-ready smoltcp retransmission can be dispatched without a TUN packet read, emits one stack packet, writes it to the packet device, and records structured `to_sandbox`/`stack=smoltcp`/`write_phase=attempt` audit evidence.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-stack smoltcp_bridge_timer_dispatch_writes_retransmitted_stack_output --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 82 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Smoltcp timer-ready bridge dispatch now audits and writes timer-generated outbound packets in the deterministic adapter. Remaining final runtime gap is actual Tokio fd/socket/TUN readiness and the full end-to-end async runtime loop wiring live timers, live listener/TUN readiness, cancellation/join, audit fan-in, and shutdown final drain.

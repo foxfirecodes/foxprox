@@ -474,3 +474,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Smoltcp timer readiness can be dispatched without a TUN packet read
 
 - Smoltcp timers need a scheduler path that polls the stack when a timer matures even if no new TUN packet is read. Expose timer readiness from `Interface::poll_delay(...)` and a matching ready-task poll helper so timer wakeups are not hidden behind packet input.
+
+## 2026-06-23 — Timer-only smoltcp polls must write audited outbound packets
+
+- A smoltcp timer wake can emit retransmitted packets even when no new TUN packet was read. Bridge-level timer dispatch must therefore audit and write newly emitted stack packets, not just poll the in-memory stack.
