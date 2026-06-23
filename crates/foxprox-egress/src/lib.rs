@@ -4256,6 +4256,108 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_scheduler_loop_waits_then_dispatches_smoltcp_timer_wake() {
+        let mut stack = foxprox_stack::SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        stack.listen_tcp(8080, 1024, 1024);
+        stack.inject_packet(egress_ipv4_tcp_packet(EgressTcpPacketSpec {
+            source: [10, 0, 2, 15],
+            destination: [10, 0, 2, 1],
+            source_port: 50_000,
+            destination_port: 8080,
+            sequence: 0x0102_0304,
+            acknowledgment: 0,
+            flags: EGRESS_TCP_SYN,
+            payload: &[],
+        }));
+        let syn_ack = stack.poll(9_100);
+        assert_eq!(syn_ack.packets_emitted, 1);
+        let due_ms = 9_100 + syn_ack.next_poll_delay_ms.unwrap() as i64;
+        let before_due_ms = due_ms - 1;
+        let stack = std::rc::Rc::new(std::cell::RefCell::new(stack));
+        let dispatched_packets = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-smoltcp-wait-loop", 8);
+        lifecycle
+            .start_with_task_expectations(
+                vec![RuntimeComponent::SmoltcpStack],
+                vec![RuntimeTaskExpectation::new(
+                    RuntimeComponent::SmoltcpStack,
+                    "smoltcp_tun_bridge_loop",
+                )],
+                before_due_ms as u64,
+            )
+            .unwrap();
+        let readiness_stack = std::rc::Rc::clone(&stack);
+        let dispatch_stack = std::rc::Rc::clone(&stack);
+        let dispatch_observed = std::rc::Rc::clone(&dispatched_packets);
+
+        let report = run_async_runtime_scheduler_loop_until_cancelled(
+            &mut lifecycle,
+            &cancellation,
+            before_due_ms as u64,
+            1,
+            2,
+            move |step| {
+                let now_ms = if step == 0 { before_due_ms } else { due_ms };
+                vec![readiness_stack.borrow_mut().runtime_timer_readiness(now_ms)]
+            },
+            move |ready_tasks| {
+                let dispatch_stack = std::rc::Rc::clone(&dispatch_stack);
+                let dispatch_observed = std::rc::Rc::clone(&dispatch_observed);
+                async move {
+                    let evidence = dispatch_stack
+                        .borrow_mut()
+                        .poll_ready_task(&ready_tasks, due_ms)
+                        .unwrap();
+                    dispatch_observed.set(evidence.packets_emitted);
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            report.status,
+            AsyncRuntimeSchedulerLoopStatus::StepLimitReached
+        );
+        assert_eq!(report.steps.len(), 2);
+        assert_eq!(
+            report.steps[0].scheduler_action,
+            RuntimeSchedulerAction::WaitForTimer
+        );
+        assert_eq!(
+            report.steps[0].wait_status,
+            AsyncRuntimeSchedulerWaitStatus::TimerElapsed
+        );
+        assert!(report.steps[0].dispatched_tasks.is_empty());
+        assert_eq!(
+            report.steps[1].scheduler_action,
+            RuntimeSchedulerAction::RunReadyTasks
+        );
+        assert_eq!(
+            report.steps[1].dispatched_tasks,
+            vec![RuntimeTaskExpectation::new(
+                RuntimeComponent::SmoltcpStack,
+                "smoltcp_tun_bridge_loop",
+            )]
+        );
+        assert_eq!(dispatched_packets.get(), 1);
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::RuntimeReadiness);
+        assert_eq!(records[1].details["scheduler_action"], "wait_for_timer");
+        assert_eq!(records[1].details["readiness_status"], "timer_wait");
+        assert_eq!(records[1].details["ready_runtime_tasks"], "");
+        assert_eq!(records[1].details["next_ready_delay_ms"], "1");
+        assert_eq!(records[2].kind, AuditKind::RuntimeReadiness);
+        assert_eq!(records[2].details["scheduler_action"], "run_ready_tasks");
+        assert_eq!(
+            records[2].details["ready_runtime_tasks"],
+            "smoltcp_stack:smoltcp_tun_bridge_loop"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn async_runtime_scheduler_step_runs_ready_tasks_and_audits_action() {
         let cancellation =
             AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));

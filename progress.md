@@ -4232,3 +4232,24 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - This brings real smoltcp timer wake dispatch into the Tokio scheduler loop as test evidence, but it starts the loop at the due timestamp and does not yet prove the full production runtime waits until that deadline, owns repeated task lifecycles, or performs shutdown final drain. Actual `/dev/net/tun` setup/handoff also remains outside the proof.
+
+## 2026-06-23 — Prove Tokio scheduler timer wait before smoltcp dispatch
+
+### Review
+- Round-113 correctness and validation found no blockers or high issues.
+- Reviewers identified the next highest runtime gap as proving the scheduler waits from a `timer_wait` plan until the smoltcp deadline, then dispatches, plus real `/dev/net/tun` setup/handoff and shutdown final-drain ownership.
+
+### Fix
+- Added `async_runtime_scheduler_loop_waits_then_dispatches_smoltcp_timer_wake`.
+- The test starts the Tokio scheduler loop one millisecond before a real smoltcp retransmission deadline, records `scheduler_action=wait_for_timer`, observes `TimerElapsed`, then collects readiness again at the due timestamp and dispatches `smoltcp_stack:smoltcp_tun_bridge_loop` through `SmoltcpIpStack::poll_ready_task(...)`.
+- The test asserts the lifecycle audit includes both `timer_wait`/`next_ready_delay_ms=1` evidence and the subsequent `run_ready_tasks` evidence for the smoltcp stack task.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_scheduler_loop_waits_then_dispatches_smoltcp_timer_wake --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 94 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- This proves timer waiting and due dispatch in the bounded Tokio scheduler loop. Remaining final runtime gap is actual `/dev/net/tun` setup/handoff, live UDP/TCP/packet-fd readiness and smoltcp timer dispatch across the same production runtime ownership loop, cancellation/join, audit fan-in, and shutdown final drain.

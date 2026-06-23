@@ -506,3 +506,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Smoltcp timer wakes can be exercised inside the Tokio scheduler loop with a dev-only stack dependency
 
 - A focused egress test can depend on `foxprox-stack` as a dev-dependency to prove the Tokio scheduler loop dispatches a real `SmoltcpIpStack::runtime_timer_readiness(...)` wake via `poll_ready_task(...)`. Keep this as test evidence; production crate layering still avoids pulling smoltcp into core.
+
+## 2026-06-23 — Timer-wait scheduler proofs should cover both wait and due dispatch steps
+
+- For smoltcp timers, a stronger async-loop proof starts one scheduler step before the deadline, records `wait_for_timer` with `next_ready_delay_ms`, waits for `TimerElapsed`, then polls again at the due timestamp and dispatches the stack task.
