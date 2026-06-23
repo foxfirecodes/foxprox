@@ -258,3 +258,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Blocking task joins need bounded timeout evidence
 
 - A task registry can still hang shutdown if joining waits forever. Blocking task supervision needs a bounded join path that records a structured `timed_out` task outcome so lifecycle exit can fail closed with inspectable evidence.
+
+## 2026-06-23 — Cancellable blocking tasks close the timeout-only supervision gap
+
+- Bounded join timeouts make hangs observable, but cooperative cancellation is needed before timeout to prove clean shutdown. A simple cancellation token lets blocking task proofs return `cancelled` and lifecycle exit can remain `allow` with structured task evidence.

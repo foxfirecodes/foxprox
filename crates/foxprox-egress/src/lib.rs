@@ -23,7 +23,9 @@ use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -1526,6 +1528,22 @@ struct BlockingRuntimeTask {
     handle: RuntimeTaskHandle,
     join: JoinHandle<RuntimeTaskStatus>,
     status_rx: Receiver<RuntimeTaskStatus>,
+    cancellation: Option<Arc<AtomicBool>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BlockingRuntimeCancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl BlockingRuntimeCancellationToken {
+    fn new(cancelled: Arc<AtomicBool>) -> Self {
+        Self { cancelled }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1560,13 +1578,45 @@ impl BlockingRuntimeTaskSet {
     where
         F: FnOnce() -> RuntimeTaskStatus + Send + 'static,
     {
-        self.spawn_task_with_spawner(component, task_name, task, |task_name, task, status_tx| {
-            std::thread::Builder::new().name(task_name).spawn(move || {
-                let status = task();
-                let _ = status_tx.send(status);
-                status
-            })
-        })
+        self.spawn_task_with_spawner(
+            component,
+            task_name,
+            task,
+            None,
+            |task_name, task, status_tx| {
+                std::thread::Builder::new().name(task_name).spawn(move || {
+                    let status = task();
+                    let _ = status_tx.send(status);
+                    status
+                })
+            },
+        )
+    }
+
+    pub fn spawn_cancellable_task<F>(
+        &mut self,
+        component: RuntimeComponent,
+        task_name: impl Into<String>,
+        task: F,
+    ) -> Result<RuntimeTaskHandle, BlockingRuntimeTaskSetError>
+    where
+        F: FnOnce(BlockingRuntimeCancellationToken) -> RuntimeTaskStatus + Send + 'static,
+    {
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let token = BlockingRuntimeCancellationToken::new(cancellation.clone());
+        self.spawn_task_with_spawner(
+            component,
+            task_name,
+            move || task(token),
+            Some(cancellation),
+            |task_name, task, status_tx| {
+                std::thread::Builder::new().name(task_name).spawn(move || {
+                    let status = task();
+                    let _ = status_tx.send(status);
+                    status
+                })
+            },
+        )
     }
 
     fn spawn_task_with_spawner<F, S>(
@@ -1574,6 +1624,7 @@ impl BlockingRuntimeTaskSet {
         component: RuntimeComponent,
         task_name: impl Into<String>,
         task: F,
+        cancellation: Option<Arc<AtomicBool>>,
         spawner: S,
     ) -> Result<RuntimeTaskHandle, BlockingRuntimeTaskSetError>
     where
@@ -1595,6 +1646,7 @@ impl BlockingRuntimeTaskSet {
                     handle,
                     join,
                     status_rx,
+                    cancellation,
                 });
                 Ok(handle)
             }
@@ -1612,6 +1664,19 @@ impl BlockingRuntimeTaskSet {
 
     pub fn expectations(&self) -> Vec<RuntimeTaskExpectation> {
         self.supervisor.expectations()
+    }
+
+    pub fn request_cancellation(&mut self) -> usize {
+        let mut cancelled = 0usize;
+        for cancellation in self
+            .tasks
+            .iter()
+            .filter_map(|task| task.cancellation.as_ref())
+        {
+            cancellation.store(true, Ordering::SeqCst);
+            cancelled += 1;
+        }
+        cancelled
     }
 
     pub fn join_all(mut self) -> RuntimeTaskJoinReport {
@@ -2000,6 +2065,7 @@ mod tests {
                 RuntimeComponent::DnsListener,
                 "dns_accept_loop",
                 || RuntimeTaskStatus::Completed,
+                None,
                 |_task_name, _task, _status_tx| {
                     Err(std::io::Error::new(
                         ErrorKind::WouldBlock,
@@ -2083,6 +2149,48 @@ mod tests {
             "dns_listener:dns_accept_loop:timed_out"
         );
         assert_eq!(records[1].details["failed_runtime_task_count"], "1");
+    }
+
+    #[test]
+    fn blocking_runtime_task_set_cancellation_is_joined_cleanly() {
+        let mut task_set = BlockingRuntimeTaskSet::new();
+        task_set
+            .spawn_cancellable_task(RuntimeComponent::DnsListener, "dns_accept_loop", |token| {
+                while !token.is_cancelled() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                RuntimeTaskStatus::Cancelled
+            })
+            .unwrap();
+        let expectations = task_set.expectations();
+        assert_eq!(task_set.request_cancellation(), 1);
+
+        let mut lifecycle = RuntimeLifecycleHarness::new("task-sandbox", 4);
+        lifecycle
+            .start_with_task_expectations(vec![RuntimeComponent::DnsListener], expectations, 1_000)
+            .unwrap();
+        let report = task_set.join_all_with_timeout(Duration::from_secs(1));
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].status, RuntimeTaskStatus::Cancelled);
+        lifecycle
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::DnsListener]),
+                None,
+                Some(report),
+                1_100,
+            )
+            .unwrap();
+
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::Allow));
+        assert_eq!(records[1].details["task_join_status"], "complete");
+        assert_eq!(
+            records[1].details["runtime_tasks"],
+            "dns_listener:dns_accept_loop:cancelled"
+        );
+        assert_eq!(records[1].details["failed_runtime_task_count"], "0");
     }
 
     #[test]

@@ -2608,3 +2608,31 @@ Added `RuntimeTaskStatus::TimedOut` as a failed task outcome and extended `Block
 ### Remaining blind spots
 - The timeout path detaches still-running blocking threads after recording `timed_out`; final async runtime should actively signal cancellation and then join with a bounded deadline.
 - Listener/TUN/smoltcp tasks still need concrete registration and cancellation wiring in the final runtime.
+
+## 2026-06-23 — Add cooperative cancellation proof for blocking runtime tasks
+
+### Commands run
+- `cargo fmt` — applied formatting for cancellable task-set changes.
+- `cargo test -p foxprox-egress blocking_runtime_task_set --all-targets --all-features` — passed, 6 blocking task-set tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 150 core tests, 3 device tests, 44 egress tests, and 12 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_runtime_task_set_cancellation_is_joined_cleanly ... ok`
+- `tests::blocking_runtime_task_set_timeout_is_fail_closed ... ok`
+- `tests::blocking_runtime_task_set_spawn_failure_is_join_failed ... ok`
+
+### Interpretation
+Extended the blocking task-set proof with cooperative cancellation. `BlockingRuntimeTaskSet::spawn_cancellable_task(...)` gives tasks a `BlockingRuntimeCancellationToken`, `request_cancellation()` signals all cancellable tasks, and `join_all_with_timeout(...)` records either clean `cancelled` outcomes or fail-closed `timed_out` outcomes. The clean cancellation regression proves lifecycle exit records `runtime_tasks=dns_listener:dns_accept_loop:cancelled`, `task_join_status=complete`, and `failed_runtime_task_count=0`.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Review follow-up
+Round-52 validation observed a transient compile blocker in the in-flight cancellation worktree (`BlockingRuntimeTask` missing `cancellation`). The final implementation sets the field, and the full validation suite above passed.
+
+### Remaining blind spots
+- Cancellation is cooperative and thread-based; final runtime still needs concrete async task handles, per-listener/TUN/smoltcp cancellation tokens, and bounded shutdown ordering wired into the real runtime.
