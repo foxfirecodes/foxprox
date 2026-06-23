@@ -4003,3 +4003,20 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Scheduler-dispatched listener task driving now covers DNS, HTTP, and SOCKS one-step handlers. Final runtime gap remains actual Tokio OS-level socket/TUN readable readiness, smoltcp timer integration, and end-to-end async task driving/final drain rather than blocking one-step dispatch.
+
+## 2026-06-23 — Add TUN packet readiness and ready-task dispatch evidence
+
+### Fix
+- Added `InMemoryPacketDevice::inbound_len()` and `InMemoryPacketDevice::runtime_readiness()` so TUN readiness can be derived from queued inbound packets in deterministic harnesses.
+- Added `TunPacketHarness::process_ready_task(...)`, mapping `tun_device:tun_packet_loop` runtime task expectations to packet-loop processing.
+- Added `tun_readiness_tracks_in_memory_inbound_packets_and_ready_dispatch`, proving queued TUN packets produce ready evidence, ready-task dispatch processes the packet and appends packet audit evidence, and readiness returns idle after the queue drains.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-core tun_readiness_tracks_in_memory_inbound_packets_and_ready_dispatch --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests and 82 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- TUN scheduler evidence is still in-memory packet-queue readiness and blocking harness dispatch. Final gap remains real Tokio TUN fd readiness, smoltcp timer/readiness integration, and end-to-end async task driving/final drain.

@@ -462,3 +462,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Test all listener dispatch branches before claiming scheduler task driving coverage
 
 - When a ready-task dispatcher maps multiple listener expectations, each branch should have a scheduler-level runtime test. DNS-only coverage left HTTP/SOCKS as an implementation-only gap; adding HTTP/SOCKS dispatch tests verifies the shared scheduler dispatch path archives proxy decision evidence too.
+
+## 2026-06-23 — Model TUN packet readiness before OS-level TUN readiness
+
+- In-memory TUN devices can expose packet-queue readiness and ready-task dispatch without claiming the production TUN fd readiness integration is complete. This gives deterministic evidence for scheduler-driven TUN packet processing while preserving the final Tokio fd-readiness gap.

@@ -2,7 +2,10 @@ use crate::audit::AuditRecord;
 use crate::broker::BrokerCore;
 use crate::packet::{synthesize_icmpv4_echo_reply, IpParseError, ParsedIpPacket};
 use crate::policy::{PolicyDecision, PolicyRequest};
-use crate::runtime::{RuntimeComponent, RuntimeTaskOutcome, RuntimeTaskStatus};
+use crate::runtime::{
+    RuntimeComponent, RuntimeTaskExpectation, RuntimeTaskOutcome, RuntimeTaskReadiness,
+    RuntimeTaskStatus,
+};
 use crate::types::{AuditKind, Decision, DenialReason, Frontend, Protocol};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -110,6 +113,18 @@ impl<D: PacketDevice> TunPacketHarness<D> {
             error: None,
             task_outcome: tun_task_outcome(RuntimeTaskStatus::TimedOut),
         }
+    }
+
+    pub fn process_ready_task(
+        &mut self,
+        ready_tasks: &[RuntimeTaskExpectation],
+        now_ms: u64,
+        max_packets: usize,
+    ) -> Option<TunPacketLoopReport> {
+        let should_process = ready_tasks.iter().any(|task| {
+            task.component == RuntimeComponent::TunDevice && task.task_name == "tun_packet_loop"
+        });
+        should_process.then(|| self.process_packet_loop(now_ms, max_packets))
     }
 
     pub fn process_packet(
@@ -308,6 +323,15 @@ impl InMemoryPacketDevice {
         self.inbound.push_back(packet);
     }
 
+    pub fn inbound_len(&self) -> usize {
+        self.inbound.len()
+    }
+
+    pub fn runtime_readiness(&self) -> RuntimeTaskReadiness {
+        RuntimeTaskReadiness::new(RuntimeComponent::TunDevice, "tun_packet_loop")
+            .with_ready(!self.inbound.is_empty())
+    }
+
     pub fn outbound(&self) -> &[Vec<u8>] {
         &self.outbound
     }
@@ -471,6 +495,50 @@ mod tests {
         assert_eq!(report.task_outcome.component, RuntimeComponent::TunDevice);
         assert_eq!(report.task_outcome.task_name, "tun_packet_loop");
         assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Completed);
+    }
+
+    #[test]
+    fn tun_readiness_tracks_in_memory_inbound_packets_and_ready_dispatch() {
+        let packet = ipv4_packet(17, 0, &[0x12, 0x34, 0x30, 0x39, 0, 8, 0, 0]);
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let device = InMemoryPacketDevice::with_inbound([packet]);
+        assert_eq!(device.inbound_len(), 1);
+        assert_eq!(
+            device.runtime_readiness(),
+            RuntimeTaskReadiness::ready(RuntimeComponent::TunDevice, "tun_packet_loop")
+        );
+        let mut harness = TunPacketHarness::new("s1", broker, device);
+        let ready_tasks = vec![RuntimeTaskExpectation::new(
+            RuntimeComponent::TunDevice,
+            "tun_packet_loop",
+        )];
+
+        let report = harness.process_ready_task(&ready_tasks, 2_000, 8).unwrap();
+
+        assert_eq!(report.processed_packets, 1);
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Completed);
+        assert_eq!(harness.device().inbound_len(), 0);
+        assert_eq!(
+            harness.device().runtime_readiness(),
+            RuntimeTaskReadiness::new(RuntimeComponent::TunDevice, "tun_packet_loop")
+        );
+        let records: Vec<_> = harness.broker().audit().records().collect();
+        assert_eq!(records[0].kind, AuditKind::PacketObserved);
+        assert_eq!(records[1].kind, AuditKind::UdpPacketDecision);
+        assert!(harness
+            .process_ready_task(
+                &[RuntimeTaskExpectation::new(
+                    RuntimeComponent::AuditFanIn,
+                    "audit_fan_in_loop"
+                )],
+                2_010,
+                1,
+            )
+            .is_none());
     }
 
     #[test]
