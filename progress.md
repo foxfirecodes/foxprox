@@ -4316,3 +4316,24 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - This covers production-owned live UDP/TCP/packet-fd dispatch plus shutdown final drain. It does not include real smoltcp dispatch in the owned task because `SmoltcpIpStack` is not `Send` under the current `tokio::spawn`-based task set; smoltcp timer dispatch remains covered by bounded scheduler-loop tests. Actual `/dev/net/tun` setup/handoff remains outside the proof.
+
+## 2026-06-23 — Add local async task ownership for non-Send smoltcp dispatch
+
+### Review
+- Round-117 correctness and validation found no blockers or high issues.
+- Reviewers identified the next gap as real `/dev/net/tun` setup/handoff plus production integration of live UDP/TCP/packet-fd readiness, smoltcp timer/dispatch ownership despite non-Send constraints, cancellation/join, audit fan-in, and shutdown final drain in one runtime loop.
+
+### Fix
+- Added `AsyncLocalRuntimeTaskSet`, a `tokio::task::spawn_local`-backed task set for non-`Send` futures with the same cancellation and timeout join evidence shape as `AsyncRuntimeTaskSet`.
+- Added `async_local_task_set_owns_non_send_smoltcp_timer_dispatch`, proving a local owned task can move non-`Send` `SmoltcpIpStack` state, dispatch real smoltcp timer readiness through the Tokio scheduler loop, then enter a cancellation-aware timer wait and join as `RuntimeTaskStatus::Cancelled`.
+- This narrows the smoltcp ownership gap without weakening the existing Send-bound task set used for ordinary runtime tasks.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_local_task_set_owns_non_send_smoltcp_timer_dispatch --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 97 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Non-`Send` smoltcp state now has local task ownership evidence, but it is not yet wired into a production runtime loop with live UDP/TCP/packet-fd readiness, audit fan-in, and shutdown final drain. Actual `/dev/net/tun` setup/handoff remains outside the proof.

@@ -522,3 +522,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Owned live-IO scheduler tasks can dispatch Send-ready inputs but not non-Send smoltcp state
 
 - `AsyncRuntimeTaskSet` uses `tokio::spawn`, so owned scheduler task futures must be `Send`. `SmoltcpIpStack` currently carries non-`Send` state, so keep real smoltcp dispatch in bounded local scheduler tests unless the runtime adds a local task set or another ownership boundary. Live UDP/TCP/packet-fd inputs can still be dispatched from an owned scheduler task and tied to shutdown final drain.
+
+## 2026-06-23 — Local Tokio task sets can own non-Send smoltcp scheduler state
+
+- `tokio::task::spawn_local` under a `LocalSet` provides an ownership path for non-`Send` smoltcp state. A local runtime task set can dispatch real smoltcp timer readiness and still use the same cancellation/join evidence pattern, while the Send task set remains appropriate for ordinary spawned runtime tasks.

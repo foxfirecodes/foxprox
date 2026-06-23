@@ -2482,6 +2482,82 @@ impl From<RuntimeTaskSupervisorError> for AsyncRuntimeTaskSetError {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct AsyncLocalRuntimeTaskSet {
+    supervisor: RuntimeTaskSupervisor,
+    tasks: Vec<AsyncRuntimeTask>,
+}
+
+impl AsyncLocalRuntimeTaskSet {
+    pub fn new() -> Self {
+        Self {
+            supervisor: RuntimeTaskSupervisor::new(),
+            tasks: Vec::new(),
+        }
+    }
+
+    pub fn spawn_cancellable_task<F, Fut>(
+        &mut self,
+        component: RuntimeComponent,
+        task_name: impl Into<String>,
+        task: F,
+    ) -> Result<RuntimeTaskHandle, AsyncRuntimeTaskSetError>
+    where
+        F: FnOnce(AsyncRuntimeCancellationToken) -> Fut + 'static,
+        Fut: Future<Output = RuntimeTaskStatus> + 'static,
+    {
+        let cancellation = Arc::new(AsyncRuntimeCancellationState::new());
+        let token = AsyncRuntimeCancellationToken::new(cancellation.clone());
+        let task_name = task_name.into();
+        let handle = self.supervisor.register_task(component, task_name)?;
+        let join = tokio::task::spawn_local(task(token));
+        self.tasks.push(AsyncRuntimeTask {
+            handle,
+            join,
+            cancellation: Some(cancellation),
+        });
+        Ok(handle)
+    }
+
+    pub fn expectations(&self) -> Vec<RuntimeTaskExpectation> {
+        self.supervisor.expectations()
+    }
+
+    pub fn request_cancellation(&mut self) -> usize {
+        let mut cancelled = 0usize;
+        for cancellation in self
+            .tasks
+            .iter()
+            .filter_map(|task| task.cancellation.as_ref())
+        {
+            if !cancellation.cancelled.swap(true, Ordering::SeqCst) {
+                cancellation.notify.notify_waiters();
+            }
+            cancelled += 1;
+        }
+        cancelled
+    }
+
+    pub async fn join_all_with_timeout(mut self, timeout: Duration) -> RuntimeTaskJoinReport {
+        for task in self.tasks {
+            let mut join = task.join;
+            let status = match tokio::time::timeout(timeout, &mut join).await {
+                Ok(Ok(status)) => status,
+                Ok(Err(_)) => RuntimeTaskStatus::JoinFailed,
+                Err(_) => {
+                    join.abort();
+                    let _ = join.await;
+                    RuntimeTaskStatus::TimedOut
+                }
+            };
+            self.supervisor
+                .record_outcome(task.handle, status)
+                .expect("joined task was registered once");
+        }
+        self.supervisor.join_report()
+    }
+}
+
 impl AsyncRuntimeTaskSet {
     pub fn new() -> Self {
         Self {
@@ -4355,6 +4431,155 @@ mod tests {
             records[2].details["ready_runtime_tasks"],
             "smoltcp_stack:smoltcp_tun_bridge_loop"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_local_task_set_owns_non_send_smoltcp_timer_dispatch() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let dispatched = Arc::new(AtomicBool::new(false));
+                let wait_requested = Arc::new(AtomicBool::new(false));
+                let wait_notify = Arc::new(tokio::sync::Notify::new());
+                let wait_report = Arc::new(std::sync::Mutex::new(None));
+                let mut task_set = AsyncLocalRuntimeTaskSet::new();
+                let dispatch_observed = dispatched.clone();
+                let wait_observed = wait_requested.clone();
+                let wait_notification = wait_notify.clone();
+                let wait_report_slot = wait_report.clone();
+                task_set
+                    .spawn_cancellable_task(
+                        RuntimeComponent::SmoltcpStack,
+                        "smoltcp_tun_bridge_loop",
+                        move |token| async move {
+                            let mut stack =
+                                foxprox_stack::SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+                            stack.listen_tcp(8080, 1024, 1024);
+                            stack.inject_packet(egress_ipv4_tcp_packet(EgressTcpPacketSpec {
+                                source: [10, 0, 2, 15],
+                                destination: [10, 0, 2, 1],
+                                source_port: 50_000,
+                                destination_port: 8080,
+                                sequence: 0x0102_0304,
+                                acknowledgment: 0,
+                                flags: EGRESS_TCP_SYN,
+                                payload: &[],
+                            }));
+                            let syn_ack = stack.poll(9_200);
+                            assert_eq!(syn_ack.packets_emitted, 1);
+                            let due_ms = 9_200 + syn_ack.next_poll_delay_ms.unwrap() as i64;
+                            let stack = std::rc::Rc::new(std::cell::RefCell::new(stack));
+                            let readiness_stack = std::rc::Rc::clone(&stack);
+                            let dispatch_stack = std::rc::Rc::clone(&stack);
+                            let mut lifecycle =
+                                RuntimeLifecycleHarness::new("local-smoltcp-task", 8);
+                            lifecycle
+                                .start_with_task_expectations(
+                                    vec![RuntimeComponent::SmoltcpStack],
+                                    vec![RuntimeTaskExpectation::new(
+                                        RuntimeComponent::SmoltcpStack,
+                                        "smoltcp_tun_bridge_loop",
+                                    )],
+                                    due_ms as u64,
+                                )
+                                .unwrap();
+                            let dispatch_report = run_async_runtime_scheduler_loop_until_cancelled(
+                                &mut lifecycle,
+                                &token,
+                                due_ms as u64,
+                                1,
+                                1,
+                                move |_step| {
+                                    vec![readiness_stack
+                                        .borrow_mut()
+                                        .runtime_timer_readiness(due_ms)]
+                                },
+                                move |ready_tasks| {
+                                    let dispatch_stack = std::rc::Rc::clone(&dispatch_stack);
+                                    let dispatch_observed = dispatch_observed.clone();
+                                    async move {
+                                        let evidence = dispatch_stack
+                                            .borrow_mut()
+                                            .poll_ready_task(&ready_tasks, due_ms)
+                                            .unwrap();
+                                        assert_eq!(evidence.packets_emitted, 1);
+                                        dispatch_observed.store(true, Ordering::SeqCst);
+                                    }
+                                },
+                            )
+                            .await
+                            .unwrap();
+                            assert_eq!(
+                                dispatch_report.status,
+                                AsyncRuntimeSchedulerLoopStatus::StepLimitReached
+                            );
+                            let wait_report = run_async_runtime_scheduler_loop_until_cancelled(
+                                &mut lifecycle,
+                                &token,
+                                due_ms as u64 + 1,
+                                1,
+                                10,
+                                move |_step| {
+                                    wait_observed.store(true, Ordering::SeqCst);
+                                    wait_notification.notify_waiters();
+                                    vec![RuntimeTaskReadiness::new(
+                                        RuntimeComponent::SmoltcpStack,
+                                        "smoltcp_tun_bridge_loop",
+                                    )
+                                    .with_next_ready_delay_ms(Some(60_000))]
+                                },
+                                |_ready_tasks| async {},
+                            )
+                            .await
+                            .unwrap();
+                            *wait_report_slot.lock().unwrap() = Some(wait_report.clone());
+                            if wait_report.status == AsyncRuntimeSchedulerLoopStatus::Cancelled {
+                                RuntimeTaskStatus::Cancelled
+                            } else {
+                                RuntimeTaskStatus::TimedOut
+                            }
+                        },
+                    )
+                    .unwrap();
+                assert_eq!(
+                    task_set.expectations(),
+                    vec![RuntimeTaskExpectation::new(
+                        RuntimeComponent::SmoltcpStack,
+                        "smoltcp_tun_bridge_loop",
+                    )]
+                );
+                if !wait_requested.load(Ordering::SeqCst) {
+                    tokio::time::timeout(Duration::from_secs(1), wait_notify.notified())
+                        .await
+                        .unwrap();
+                }
+                assert!(dispatched.load(Ordering::SeqCst));
+                assert_eq!(task_set.request_cancellation(), 1);
+                let join_report = task_set.join_all_with_timeout(Duration::from_secs(1)).await;
+                assert_eq!(join_report.outcomes.len(), 1);
+                assert_eq!(
+                    join_report.outcomes[0].component,
+                    RuntimeComponent::SmoltcpStack
+                );
+                assert_eq!(join_report.outcomes[0].task_name, "smoltcp_tun_bridge_loop");
+                assert_eq!(join_report.outcomes[0].status, RuntimeTaskStatus::Cancelled);
+                let wait_report = wait_report.lock().unwrap().clone().unwrap();
+                assert_eq!(
+                    wait_report.status,
+                    AsyncRuntimeSchedulerLoopStatus::Cancelled
+                );
+                assert_eq!(wait_report.steps.len(), 1);
+                assert_eq!(
+                    wait_report.steps[0].scheduler_action,
+                    RuntimeSchedulerAction::WaitForTimer
+                );
+                assert_eq!(
+                    wait_report.steps[0].wait_status,
+                    AsyncRuntimeSchedulerWaitStatus::Cancelled
+                );
+                assert_eq!(wait_report.steps[0].plan.next_ready_delay_ms, Some(60_000));
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "current_thread")]
