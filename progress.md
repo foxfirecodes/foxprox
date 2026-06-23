@@ -2493,3 +2493,32 @@ Added `BlockingRuntimeTaskSet`, a concrete `std::thread`-backed proof that regis
 
 ### Remaining blind spots
 - This is a blocking thread proof, not async runtime scheduling. Final runtime still needs actual listener/TUN/smoltcp/child tasks registered through the supervisor and drained through one shared audit fan-in path.
+
+## 2026-06-22 — Preserve undrained audit records and reject duplicate direct expectations
+
+### Commands run
+- `cargo fmt` — applied formatting for lifecycle expectation and fan-in drain fixes.
+- `cargo test -p foxprox-core runtime::tests::runtime_audit_fan_in --all-targets --all-features` — passed, 6 fan-in tests.
+- `cargo test -p foxprox-core runtime::tests::runtime_lifecycle_duplicate_task_expectations_are_rejected --all-targets --all-features` — passed.
+- `cargo test -p foxprox-core runtime::tests::runtime_task_supervisor --all-targets --all-features` — passed, 2 task supervisor tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 148 core tests, 3 device tests, 41 egress tests, and 12 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_lifecycle_duplicate_task_expectations_are_rejected ... ok`
+- `runtime::tests::runtime_audit_fan_in_sink_failure_preserves_full_undrained_ledger ... ok`
+- `runtime::tests::runtime_audit_fan_in_sink_failure_is_observable ... ok`
+- `runtime::tests::runtime_task_supervisor_rejects_unknown_duplicate_names_and_duplicate_outcomes ... ok`
+
+### Interpretation
+Addressed round-48 highs. `RuntimeLifecycleHarness::start_with_task_expectations(...)` now rejects duplicate direct `(component, task_name)` expectations with structured fail-closed `broker_error` evidence, closing the bypass around supervisor duplicate-name checks. `RuntimeAuditFanIn::drain_to_sink(...)` no longer lossy-appends sink-failure evidence into the same bounded ledger; it returns a structured `failure_record` in `RuntimeAuditDrainError::SinkWriteFailed`, preserving full undrained ledger contents for retry while still surfacing fail-closed sink failure evidence to the caller.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-core/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Audit sink failure evidence is returned to the caller, not yet routed to a separate durable emergency sink. Final runtime should define where that failure record is persisted when the primary audit sink is unavailable.

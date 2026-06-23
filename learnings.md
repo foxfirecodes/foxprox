@@ -240,3 +240,8 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-22 — Blocking thread tasks can prove supervisor integration
 
 - A concrete blocking task-set proof can bridge the gap between abstract task reports and real handles: register task names, spawn threads, translate join success/panic into runtime task statuses, and feed the resulting report into lifecycle exit.
+
+## 2026-06-22 — Direct lifecycle expectations and fan-in sink failures need fail-closed preservation
+
+- Duplicate task-name protection must exist both at supervisor registration and direct lifecycle start with explicit expectations; direct callers can bypass supervisor checks otherwise.
+- Audit sink write failure evidence should not be lossy-appended into the same full ledger that still contains undrained records. Return the failure record separately so retry/durable-drain evidence is not evicted before it reaches the sink.

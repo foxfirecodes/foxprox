@@ -432,6 +432,7 @@ pub enum RuntimeLifecycleError {
     NotStarted,
     AlreadyRunning,
     AlreadyExited,
+    DuplicateTaskExpectation,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -457,7 +458,10 @@ pub struct RuntimeAuditDrainReport {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeAuditDrainError {
-    SinkWriteFailed { attempted_sequence: u64 },
+    SinkWriteFailed {
+        attempted_sequence: u64,
+        failure_record: Box<AuditRecord>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -541,7 +545,7 @@ impl RuntimeAuditFanIn {
         let mut drained_records = 0usize;
         for record in records {
             if sink.append(&record).is_err() {
-                self.audit.append_lossy(
+                let failure_record =
                     AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
                         .with_frontend(Frontend::Core)
                         .with_decision(Decision::FailClosed, Some(DenialReason::AuditBackpressure))
@@ -550,10 +554,10 @@ impl RuntimeAuditFanIn {
                         .with_detail(
                             "last_drained_sequence",
                             self.last_drained_sequence.to_string(),
-                        ),
-                );
+                        );
                 return Err(RuntimeAuditDrainError::SinkWriteFailed {
                     attempted_sequence: record.sequence,
+                    failure_record: Box::new(failure_record),
                 });
             }
             self.last_drained_sequence = record.sequence;
@@ -647,6 +651,23 @@ impl RuntimeLifecycleHarness {
                     now_ms,
                 );
             }
+        }
+        if let Some(duplicate) = duplicate_task_expectation(&expected_tasks) {
+            let audit = AuditRecord::new_at(
+                AuditKind::BrokerError,
+                self.sandbox_id.clone(),
+                now_ms as u128,
+            )
+            .with_frontend(Frontend::Core)
+            .with_decision(Decision::FailClosed, Some(DenialReason::RuntimeState))
+            .with_detail("runtime_error", "duplicate_task_expectation")
+            .with_detail("attempted_transition", "start")
+            .with_detail("lifecycle_state", self.state.as_detail())
+            .with_detail("duplicate_runtime_task", duplicate.as_detail())
+            .with_detail("runtime_components", component_list(&components))
+            .with_detail("component_count", components.len().to_string());
+            self.append_required(audit)?;
+            return Err(RuntimeLifecycleError::DuplicateTaskExpectation);
         }
         let audit = AuditRecord::new_at(
             AuditKind::NetworkSessionStart,
@@ -969,7 +990,21 @@ fn runtime_error_detail(error: RuntimeLifecycleError) -> &'static str {
         RuntimeLifecycleError::NotStarted => "not_started",
         RuntimeLifecycleError::AlreadyRunning => "already_running",
         RuntimeLifecycleError::AlreadyExited => "already_exited",
+        RuntimeLifecycleError::DuplicateTaskExpectation => "duplicate_task_expectation",
     }
+}
+
+fn duplicate_task_expectation(
+    expectations: &[RuntimeTaskExpectation],
+) -> Option<RuntimeTaskExpectation> {
+    for (index, expectation) in expectations.iter().enumerate() {
+        if expectations.iter().skip(index + 1).any(|other| {
+            other.component == expectation.component && other.task_name == expectation.task_name
+        }) {
+            return Some(expectation.clone());
+        }
+    }
+    None
 }
 
 fn cleanup_action_list(actions: &[RuntimeCleanupAction]) -> String {
@@ -1156,22 +1191,44 @@ mod tests {
         let mut sink = JsonLineAuditSink::new(FailingAuditWriter);
         let error = fan_in.drain_to_sink(&mut sink).unwrap_err();
 
+        let RuntimeAuditDrainError::SinkWriteFailed {
+            attempted_sequence,
+            failure_record,
+        } = error;
+        assert_eq!(attempted_sequence, 1);
+        assert_eq!(failure_record.kind, AuditKind::BrokerError);
+        assert_eq!(failure_record.decision, Some(Decision::FailClosed));
+        assert_eq!(failure_record.reason, Some(DenialReason::AuditBackpressure));
         assert_eq!(
-            error,
-            RuntimeAuditDrainError::SinkWriteFailed {
-                attempted_sequence: 1,
-            }
-        );
-        let records: Vec<_> = fan_in.audit().records().collect();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[1].kind, AuditKind::BrokerError);
-        assert_eq!(records[1].decision, Some(Decision::FailClosed));
-        assert_eq!(records[1].reason, Some(DenialReason::AuditBackpressure));
-        assert_eq!(
-            records[1].details["runtime_error"],
+            failure_record.details["runtime_error"],
             "audit_sink_write_failed"
         );
-        assert_eq!(records[1].details["attempted_sequence"], "1");
+        assert_eq!(failure_record.details["attempted_sequence"], "1");
+        let records: Vec<_> = fan_in.audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::NetworkSessionStart);
+    }
+
+    #[test]
+    fn runtime_audit_fan_in_sink_failure_preserves_full_undrained_ledger() {
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 1);
+        let mut start = AuditRecord::new_at(AuditKind::NetworkSessionStart, "s1", 1_000);
+        start.sequence = 1;
+        fan_in.ingest("lifecycle", &[start]).unwrap();
+
+        let mut sink = JsonLineAuditSink::new(FailingAuditWriter);
+        let error = fan_in.drain_to_sink(&mut sink).unwrap_err();
+
+        let RuntimeAuditDrainError::SinkWriteFailed {
+            attempted_sequence,
+            failure_record,
+        } = error;
+        assert_eq!(attempted_sequence, 1);
+        assert_eq!(failure_record.details["attempted_sequence"], "1");
+        let records: Vec<_> = fan_in.audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::NetworkSessionStart);
+        assert_eq!(fan_in.last_drained_sequence, 0);
     }
 
     #[test]
@@ -1537,6 +1594,37 @@ mod tests {
         assert_eq!(
             supervisor.record_outcome(RuntimeTaskHandle { id: 999 }, RuntimeTaskStatus::Failed),
             Err(RuntimeTaskSupervisorError::UnknownTask { task_id: 999 })
+        );
+    }
+
+    #[test]
+    fn runtime_lifecycle_duplicate_task_expectations_are_rejected() {
+        let mut runtime = RuntimeLifecycleHarness::new("s1", 4);
+        let error = runtime
+            .start_with_task_expectations(
+                vec![RuntimeComponent::DnsListener],
+                vec![
+                    RuntimeTaskExpectation::new(RuntimeComponent::DnsListener, "dns_accept_loop"),
+                    RuntimeTaskExpectation::new(RuntimeComponent::DnsListener, "dns_accept_loop"),
+                ],
+                1_000,
+            )
+            .unwrap_err();
+
+        assert_eq!(error, RuntimeLifecycleError::DuplicateTaskExpectation);
+        let records: Vec<_> = runtime.audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::BrokerError);
+        assert_eq!(records[0].decision, Some(Decision::FailClosed));
+        assert_eq!(records[0].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(
+            records[0].details["runtime_error"],
+            "duplicate_task_expectation"
+        );
+        assert_eq!(records[0].details["attempted_transition"], "start");
+        assert_eq!(
+            records[0].details["duplicate_runtime_task"],
+            "dns_listener:dns_accept_loop"
         );
     }
 
