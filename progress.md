@@ -3493,3 +3493,34 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Shutdown fan-in cleanup is now fail-closed in the blocking runtime harness, but final async readiness/timer-driven orchestration over live listener/TUN/smoltcp sources remains outstanding.
+
+## 2026-06-23 — Align TUN and smoltcp loop budget outcomes with timeout semantics
+
+### Reviewer feedback
+- Round-84 review found no blocker/high issues. The remaining runtime gap is final async readiness/timer orchestration over live listener/TUN/smoltcp sources. As a narrower step toward consistent runtime lifecycle evidence, TUN and smoltcp packet-loop budget exhaustion still overclaimed `cancelled` despite no observed cancellation.
+
+### Commands run
+- `cargo fmt` — applied formatting for TUN/smoltcp task outcome updates.
+- `cargo test -p foxprox-core tun_packet_loop_reports_budget_timeout --all-targets --all-features` — passed.
+- `cargo test -p foxprox-stack smoltcp_tun_bridge_loop_reports_budget_timeout --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 153 core tests, 4 device tests, 65 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tun::tests::tun_packet_loop_reports_budget_timeout ... ok`
+- `tests::smoltcp_tun_bridge_loop_reports_budget_timeout ... ok`
+
+### Fix
+- `TunPacketHarness::process_packet_loop_until(...)` now reports `RuntimeTaskStatus::TimedOut` when `max_packets` is exhausted without observing cancellation.
+- `SmoltcpTunBridge::process_packet_loop_until(...)` now reports `RuntimeTaskStatus::TimedOut` when `max_packets` is exhausted without observing cancellation.
+- Renamed and updated the budget tests so explicit cancellation remains `Cancelled`, idle completion remains `Completed`, failures remain `Failed`, and budget exhaustion is now `TimedOut`.
+
+### Changed files
+- `crates/foxprox-core/src/tun.rs`
+- `crates/foxprox-stack/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- TUN and smoltcp loop outcomes now distinguish timeout from cancellation, but there is still no final async readiness/timer-driven scheduler wiring live listener/TUN/smoltcp/fan-in tasks together.

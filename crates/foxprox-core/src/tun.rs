@@ -108,7 +108,7 @@ impl<D: PacketDevice> TunPacketHarness<D> {
         TunPacketLoopReport {
             processed_packets,
             error: None,
-            task_outcome: tun_task_outcome(RuntimeTaskStatus::Cancelled),
+            task_outcome: tun_task_outcome(RuntimeTaskStatus::TimedOut),
         }
     }
 
@@ -522,7 +522,7 @@ mod tests {
     }
 
     #[test]
-    fn tun_packet_loop_reports_budget_cancellation() {
+    fn tun_packet_loop_reports_budget_timeout() {
         let packet = ipv4_packet(17, 0, &[0x12, 0x34, 0x30, 0x39, 0, 8, 0, 0]);
         let config = PolicyConfig {
             default_decision: Decision::Allow,
@@ -538,7 +538,7 @@ mod tests {
         assert_eq!(report.error, None);
         assert_eq!(report.task_outcome.component, RuntimeComponent::TunDevice);
         assert_eq!(report.task_outcome.task_name, "tun_packet_loop");
-        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Cancelled);
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::TimedOut);
     }
 
     #[test]

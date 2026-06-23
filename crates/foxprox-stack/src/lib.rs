@@ -519,7 +519,7 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         SmoltcpBridgeLoopReport {
             processed_packets,
             error: None,
-            task_outcome: smoltcp_task_outcome(RuntimeTaskStatus::Cancelled),
+            task_outcome: smoltcp_task_outcome(RuntimeTaskStatus::TimedOut),
         }
     }
 
@@ -1000,7 +1000,7 @@ mod tests {
     }
 
     #[test]
-    fn smoltcp_tun_bridge_loop_reports_budget_cancellation() {
+    fn smoltcp_tun_bridge_loop_reports_budget_timeout() {
         let packet = ipv4_icmp_echo_request();
         let device = InMemoryPacketDevice::with_inbound([packet.clone(), packet]);
         let config = PolicyConfig {
@@ -1021,7 +1021,7 @@ mod tests {
             RuntimeComponent::SmoltcpStack
         );
         assert_eq!(report.task_outcome.task_name, "smoltcp_tun_bridge_loop");
-        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Cancelled);
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::TimedOut);
     }
 
     #[test]

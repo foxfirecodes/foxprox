@@ -386,3 +386,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Shutdown must not be gated by audit sink success
 
 - Final-drain helpers must attempt lifecycle exit and resource cleanup even when the pre-exit audit fan-in drain fails. Return phase-specific evidence for pre-exit drain, exit, and post-exit drain failures instead of using `?` before cleanup.
+
+## 2026-06-23 — TUN and smoltcp budgets are timeouts, not cancellation
+
+- Packet-loop budget exhaustion should report `RuntimeTaskStatus::TimedOut`; reserve `Cancelled` for observed cancellation tokens. This keeps TUN/smoltcp task lifecycle semantics aligned with listener and fan-in loops.
