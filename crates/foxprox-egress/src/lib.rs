@@ -5230,6 +5230,99 @@ mod tests {
     }
 
     #[test]
+    fn blocking_proxy_runtime_aggregate_captures_http_read_failures() {
+        let query = dns_query(0x7e7e, "Partial.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let mut http_config = PolicyConfig::default();
+        http_config.rules.push(
+            PolicyRule::allow("allow-partial")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Http)
+                .origin("http", "partial.test", 80),
+        );
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(http_config), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut runtime = BlockingProxyRuntime::bind(
+            "s1",
+            8,
+            SharedDnsCache::default(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_millis(5),
+            512,
+            4096,
+            4_100,
+        )
+        .unwrap();
+        let mut client = TcpStream::connect(runtime.http_proxy_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client
+            .write_all(b"GET http://partial.test/ HTTP/1.1\r\nHost: partial.test\r\n")
+            .unwrap();
+
+        let step = runtime.handle_http_proxy_once(4_110).unwrap().unwrap();
+        assert_eq!(step.decision, Decision::FailClosed);
+        assert_eq!(step.reason, Some(DenialReason::ProxyMalformed));
+        assert!(!step.forwarded);
+        assert!(runtime
+            .http_proxy_server()
+            .frontend()
+            .egress()
+            .forwarded_http()
+            .is_empty());
+
+        let aggregate = runtime.audit_records();
+        assert!(aggregate
+            .iter()
+            .any(|record| record.kind == AuditKind::NetworkSessionStart));
+        let read_error = aggregate
+            .iter()
+            .find(|record| {
+                record.kind == AuditKind::BrokerError
+                    && record
+                        .details
+                        .get("error")
+                        .is_some_and(|error| error == "http_proxy_client_read_incomplete")
+            })
+            .expect("partial HTTP read error is archived");
+        assert_eq!(read_error.frontend, Some(Frontend::HttpProxy));
+        assert_eq!(read_error.protocol, Some(Protocol::Http));
+        assert_eq!(read_error.decision, Some(Decision::FailClosed));
+        assert_eq!(read_error.reason, Some(DenialReason::ProxyMalformed));
+        assert_eq!(read_error.details["read_status"], "partial_error");
+        assert_eq!(
+            read_error.details["observed_request_len"],
+            b"GET http://partial.test/ HTTP/1.1\r\nHost: partial.test\r\n"
+                .len()
+                .to_string()
+        );
+        assert!(aggregate.iter().any(|record| {
+            record.kind == AuditKind::UnsupportedDenied
+                && record.decision == Some(Decision::FailClosed)
+                && record.reason == Some(DenialReason::ProxyMalformed)
+        }));
+    }
+
+    #[test]
     fn blocking_proxy_runtime_exit_fails_closed_for_partial_task_report() {
         let query = dns_query(0x7b7b, "Partial.TEST", 1);
         let response = dns_a_response(&query, [127, 0, 0, 1], 30);

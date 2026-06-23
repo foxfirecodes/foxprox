@@ -3082,3 +3082,28 @@ Round-68 review found no blocker/high issues and kept adapter-level listener fau
 ### Remaining blind spots
 - The injected adapter failures prove the wrapper path without unsafe fd manipulation; they still are not kernel/OS-originated socket faults from live descriptors.
 - Final async runtime still needs readiness/timer integration and audit fan-in wiring for real task loops.
+
+## 2026-06-23 — Archive HTTP read-failure evidence into runtime aggregate
+
+### Commands run
+- `cargo fmt` — applied formatting for aggregate audit coverage.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_aggregate_captures_http_read_failures --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 61 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_proxy_runtime_aggregate_captures_http_read_failures ... ok`
+- `tests::blocking_http_proxy_server_partial_request_timeout_is_not_forwarded ... ok`
+
+### Interpretation
+Round-69 review found no blocker/high issues and kept final runtime fan-in wiring as the next gap. Added runtime-level aggregate proof that `BlockingProxyRuntime::handle_http_proxy_once(...)` archives incomplete HTTP read evidence immediately: the aggregate includes lifecycle start records, the structured `http_proxy_client_read_incomplete` broker error with read status and observed byte count, and the final fail-closed malformed decision. This demonstrates real runtime aggregation for a listener-produced failure path rather than only frontend-local broker evidence.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Runtime aggregate is still an in-memory archived ledger, not a full async fan-in task draining to a sink with readiness/timer integration.
+- Final async runtime still needs readiness/timer integration, real task registration/cancellation/join ordering, and sink-backed audit fan-in wiring.

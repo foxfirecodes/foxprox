@@ -326,3 +326,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Listener socket adapters make fault paths testable
 
 - Wrap concrete listener sockets behind small traits when OS-level accept/recv faults are otherwise hard to trigger safely. Test fakes can then drive DNS recv and HTTP/SOCKS accept failures through the real `run_until_cancelled(...)` wrappers and assert both task failure status and structured `listener_loop_error` audit records.
+
+## 2026-06-23 — Runtime aggregate must archive read-failure evidence promptly
+
+- When listener handlers emit per-client failure audits, runtime-level aggregate tests should prove those records are archived immediately after `handle_*_once(...)`, not only visible through the individual frontend broker ledger.
