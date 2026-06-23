@@ -322,3 +322,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Partial HTTP read evidence needs source and status
 
 - Fail-closed HTTP proxy read handling should not collapse every incomplete read into an empty parse error. Add explicit read-failure audit evidence with client/source, observed byte count, and status (`empty_error`, `partial_error`, EOF, or limit) before passing malformed bytes to the parser.
+
+## 2026-06-23 — Listener socket adapters make fault paths testable
+
+- Wrap concrete listener sockets behind small traits when OS-level accept/recv faults are otherwise hard to trigger safely. Test fakes can then drive DNS recv and HTTP/SOCKS accept failures through the real `run_until_cancelled(...)` wrappers and assert both task failure status and structured `listener_loop_error` audit records.

@@ -3055,3 +3055,30 @@ Round-67 validation found fail-closed behavior was correct but audit evidence st
 ### Remaining blind spots
 - Need real adapter-level/OS listener error injection so DNS/HTTP/SOCKS `run_until_cancelled(...)` can be proven to hit listener-loop error recorders from concrete accept/recv failures without unsafe fd manipulation.
 - Final async runtime still needs readiness/timer integration and audit fan-in wiring for real task loops.
+
+## 2026-06-23 — Prove listener socket error paths through run loops
+
+### Commands run
+- `cargo fmt` — applied formatting for listener socket adapter changes.
+- `cargo test -p foxprox-egress blocking_listener_loop_socket_errors_are_audited_and_failed --all-targets --all-features` — passed.
+- `cargo test -p foxprox-egress blocking_listener_loop --all-targets --all-features` — passed, 6 listener-loop tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 60 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_listener_loop_socket_errors_are_audited_and_failed ... ok`
+- `tests::blocking_listener_loop_error_recorders_append_structured_broker_errors ... ok`
+- `tests::blocking_listener_loop_tasks_feed_lifecycle_exit ... ok`
+
+### Interpretation
+Round-68 review found no blocker/high issues and kept adapter-level listener fault injection as the next runtime gap. The DNS, HTTP, and SOCKS listener structs now accept socket/listener adapter types with concrete `UdpSocket`/`TcpListener` defaults. Test adapters inject DNS recv and HTTP/SOCKS accept failures through the actual `run_until_cancelled(...)` wrappers, proving the wrappers return `RuntimeTaskStatus::Failed` and append structured `listener_loop_error` broker evidence instead of only testing the recorders directly.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The injected adapter failures prove the wrapper path without unsafe fd manipulation; they still are not kernel/OS-originated socket faults from live descriptors.
+- Final async runtime still needs readiness/timer integration and audit fan-in wiring for real task loops.

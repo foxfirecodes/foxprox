@@ -229,14 +229,34 @@ pub struct DnsBrokerStepResult {
     pub reason: Option<DenialReason>,
 }
 
+pub trait BlockingDnsListenerSocket {
+    fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)>;
+    fn send_to(&self, buf: &[u8], target: SocketAddr) -> std::io::Result<usize>;
+    fn local_addr(&self) -> std::io::Result<SocketAddr>;
+}
+
+impl BlockingDnsListenerSocket for UdpSocket {
+    fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        UdpSocket::recv_from(self, buf)
+    }
+
+    fn send_to(&self, buf: &[u8], target: SocketAddr) -> std::io::Result<usize> {
+        UdpSocket::send_to(self, buf, target)
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        UdpSocket::local_addr(self)
+    }
+}
+
 #[derive(Debug)]
-pub struct BlockingDnsBrokerServer<U> {
-    socket: UdpSocket,
+pub struct BlockingDnsBrokerServer<U, S = UdpSocket> {
+    socket: S,
     handler: DnsBrokerHandler<U>,
     max_query_bytes: usize,
 }
 
-impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
+impl<U: DnsUpstream> BlockingDnsBrokerServer<U, UdpSocket> {
     pub fn bind(
         bind_addr: SocketAddr,
         handler: DnsBrokerHandler<U>,
@@ -259,7 +279,9 @@ impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
             max_query_bytes,
         })
     }
+}
 
+impl<U: DnsUpstream, S: BlockingDnsListenerSocket> BlockingDnsBrokerServer<U, S> {
     pub fn local_addr(&self) -> Result<SocketAddr, DnsUpstreamError> {
         self.socket
             .local_addr()
@@ -460,17 +482,30 @@ pub struct HttpProxyListenerStepResult {
     pub forwarded: bool,
 }
 
+pub trait BlockingTcpListenerSocket {
+    fn accept(&self) -> std::io::Result<(TcpStream, SocketAddr)>;
+    fn local_addr(&self) -> std::io::Result<SocketAddr>;
+}
+
+impl BlockingTcpListenerSocket for TcpListener {
+    fn accept(&self) -> std::io::Result<(TcpStream, SocketAddr)> {
+        TcpListener::accept(self)
+    }
+
+    fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        TcpListener::local_addr(self)
+    }
+}
+
 #[derive(Debug)]
-pub struct BlockingHttpProxyServer<E> {
-    listener: TcpListener,
+pub struct BlockingHttpProxyServer<E, L = TcpListener> {
+    listener: L,
     frontend: ExplicitProxyFrontend<E>,
     io_timeout: Duration,
     max_request_bytes: usize,
 }
 
-impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
-    const LISTENER_TASK_NAME: &'static str = "http_proxy_accept_loop";
-
+impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E, TcpListener> {
     pub fn bind(
         bind_addr: SocketAddr,
         frontend: ExplicitProxyFrontend<E>,
@@ -488,6 +523,10 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
             max_request_bytes,
         })
     }
+}
+
+impl<E: ExplicitProxyEgress, L: BlockingTcpListenerSocket> BlockingHttpProxyServer<E, L> {
+    const LISTENER_TASK_NAME: &'static str = "http_proxy_accept_loop";
 
     pub fn local_addr(&self) -> Result<SocketAddr, ProxyEgressError> {
         self.listener
@@ -784,16 +823,14 @@ struct Socks5MalformedStep<'a> {
 }
 
 #[derive(Debug)]
-pub struct BlockingSocks5ProxyServer<E> {
-    listener: TcpListener,
+pub struct BlockingSocks5ProxyServer<E, L = TcpListener> {
+    listener: L,
     frontend: ExplicitProxyFrontend<E>,
     io_timeout: Duration,
     max_request_bytes: usize,
 }
 
-impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
-    const LISTENER_TASK_NAME: &'static str = "socks5_accept_loop";
-
+impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E, TcpListener> {
     pub fn bind(
         bind_addr: SocketAddr,
         frontend: ExplicitProxyFrontend<E>,
@@ -811,6 +848,10 @@ impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
             max_request_bytes,
         })
     }
+}
+
+impl<E: ExplicitProxyEgress, L: BlockingTcpListenerSocket> BlockingSocks5ProxyServer<E, L> {
+    const LISTENER_TASK_NAME: &'static str = "socks5_accept_loop";
 
     pub fn local_addr(&self) -> Result<SocketAddr, ProxyEgressError> {
         self.listener
@@ -2218,6 +2259,36 @@ mod tests {
     #[derive(Clone, Debug, Default)]
     struct FailingProxyEgress;
 
+    #[derive(Clone, Debug, Default)]
+    struct FailingDnsListenerSocket;
+
+    impl BlockingDnsListenerSocket for FailingDnsListenerSocket {
+        fn recv_from(&self, _buf: &mut [u8]) -> IoResult<(usize, SocketAddr)> {
+            Err(std::io::Error::other("forced dns listener recv failure"))
+        }
+
+        fn send_to(&self, _buf: &[u8], _target: SocketAddr) -> IoResult<usize> {
+            panic!("send_to should not be called after forced recv failure")
+        }
+
+        fn local_addr(&self) -> IoResult<SocketAddr> {
+            Ok("127.0.0.1:0".parse().unwrap())
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct FailingTcpListenerSocket;
+
+    impl BlockingTcpListenerSocket for FailingTcpListenerSocket {
+        fn accept(&self) -> IoResult<(TcpStream, SocketAddr)> {
+            Err(std::io::Error::other("forced tcp listener accept failure"))
+        }
+
+        fn local_addr(&self) -> IoResult<SocketAddr> {
+            Ok("127.0.0.1:0".parse().unwrap())
+        }
+    }
+
     impl ExplicitProxyEgress for FailingProxyEgress {
         fn forward_http(
             &mut self,
@@ -2730,6 +2801,88 @@ mod tests {
         assert_eq!(
             socks_records[0].details["listener_task"],
             "socks5_accept_loop"
+        );
+        assert_eq!(socks_records[0].details["listener_error"], "send_failed");
+    }
+
+    #[test]
+    fn blocking_listener_loop_socket_errors_are_audited_and_failed() {
+        let query = dns_query(0x7272, "SocketError.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let mut dns_server = BlockingDnsBrokerServer {
+            socket: FailingDnsListenerSocket,
+            handler: dns_handler,
+            max_query_bytes: 512,
+        };
+
+        let dns_status = dns_server.run_until_cancelled("s1", 1_000, 8, || false);
+        assert_eq!(dns_status, RuntimeTaskStatus::Failed);
+        let dns_records: Vec<_> = dns_server.handler().broker().audit().records().collect();
+        assert_eq!(dns_records.len(), 1);
+        assert_eq!(dns_records[0].kind, AuditKind::BrokerError);
+        assert_eq!(
+            dns_records[0].details["runtime_error"],
+            "listener_loop_error"
+        );
+        assert_eq!(dns_records[0].details["listener_component"], "dns_listener");
+        assert_eq!(dns_records[0].details["listener_error"], "unavailable");
+
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut http_server = BlockingHttpProxyServer {
+            listener: FailingTcpListenerSocket,
+            frontend: http_frontend,
+            io_timeout: Duration::from_millis(10),
+            max_request_bytes: 4096,
+        };
+
+        let http_status = http_server.run_until_cancelled(1_000, 8, || false);
+        assert_eq!(http_status, RuntimeTaskStatus::Failed);
+        let http_records: Vec<_> = http_server.frontend().broker().audit().records().collect();
+        assert_eq!(http_records.len(), 1);
+        assert_eq!(http_records[0].kind, AuditKind::BrokerError);
+        assert_eq!(
+            http_records[0].details["runtime_error"],
+            "listener_loop_error"
+        );
+        assert_eq!(
+            http_records[0].details["listener_component"],
+            "http_proxy_listener"
+        );
+        assert_eq!(http_records[0].details["listener_error"], "send_failed");
+
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut socks_server = BlockingSocks5ProxyServer {
+            listener: FailingTcpListenerSocket,
+            frontend: socks_frontend,
+            io_timeout: Duration::from_millis(10),
+            max_request_bytes: 4096,
+        };
+
+        let socks_status = socks_server.run_until_cancelled(1_000, 8, || false);
+        assert_eq!(socks_status, RuntimeTaskStatus::Failed);
+        let socks_records: Vec<_> = socks_server.frontend().broker().audit().records().collect();
+        assert_eq!(socks_records.len(), 1);
+        assert_eq!(socks_records[0].kind, AuditKind::BrokerError);
+        assert_eq!(
+            socks_records[0].details["runtime_error"],
+            "listener_loop_error"
+        );
+        assert_eq!(
+            socks_records[0].details["listener_component"],
+            "socks5_listener"
         );
         assert_eq!(socks_records[0].details["listener_error"], "send_failed");
     }
