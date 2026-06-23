@@ -266,3 +266,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Runtime exit should own task cancellation/join handoff
 
 - Proving cancellable tasks independently is not enough; the runtime exit path should accept the task set, request cancellation, bounded-join it, and feed the resulting report into lifecycle exit so cleanup, listener teardown, and task evidence stay in one observable shutdown path.
+
+## 2026-06-23 — Packet loops need external cancellation predicates, not just budgets
+
+- Budget-based loop cancellation proves bounded harness execution, but runtime shutdown needs an external cancellation signal. Packet-loop helpers should accept cancellation predicates and return the same structured `cancelled` task outcome before consuming further device input.

@@ -65,8 +65,24 @@ impl<D: PacketDevice> TunPacketHarness<D> {
     }
 
     pub fn process_packet_loop(&mut self, now_ms: u64, max_packets: usize) -> TunPacketLoopReport {
+        self.process_packet_loop_until(now_ms, max_packets, || false)
+    }
+
+    pub fn process_packet_loop_until(
+        &mut self,
+        now_ms: u64,
+        max_packets: usize,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> TunPacketLoopReport {
         let mut processed_packets = 0usize;
         while processed_packets < max_packets {
+            if should_cancel() {
+                return TunPacketLoopReport {
+                    processed_packets,
+                    error: None,
+                    task_outcome: tun_task_outcome(RuntimeTaskStatus::Cancelled),
+                };
+            }
             match self.process_next_packet(now_ms) {
                 Ok(Some(_)) => processed_packets += 1,
                 Ok(None) => {
@@ -451,6 +467,34 @@ mod tests {
         assert_eq!(report.task_outcome.component, RuntimeComponent::TunDevice);
         assert_eq!(report.task_outcome.task_name, "tun_packet_loop");
         assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Completed);
+    }
+
+    #[test]
+    fn tun_packet_loop_reports_external_cancellation() {
+        let packet = ipv4_packet(17, 0, &[0x12, 0x34, 0x30, 0x39, 0, 8, 0, 0]);
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let device = InMemoryPacketDevice::with_inbound([packet.clone(), packet]);
+        let mut harness = TunPacketHarness::new("s1", broker, device);
+        let mut checks = 0usize;
+
+        let report = harness.process_packet_loop_until(1_000, 8, || {
+            checks += 1;
+            checks > 1
+        });
+
+        assert_eq!(report.processed_packets, 1);
+        assert_eq!(report.error, None);
+        assert_eq!(report.task_outcome.component, RuntimeComponent::TunDevice);
+        assert_eq!(report.task_outcome.task_name, "tun_packet_loop");
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Cancelled);
+        let records: Vec<_> = harness.broker().audit().records().collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::PacketObserved);
+        assert_eq!(records[1].kind, AuditKind::UdpPacketDecision);
     }
 
     #[test]

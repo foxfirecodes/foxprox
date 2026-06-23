@@ -2665,3 +2665,30 @@ Added `exit_with_task_set(...)` to the blocking DNS/HTTP and full proxy runtimes
 
 ### Remaining blind spots
 - This is still a blocking/thread runtime proof. Final runtime still needs real accept-loop task registration, TUN/smoltcp task cancellation, and async shutdown ordering with concrete sockets/devices.
+
+## 2026-06-23 — Add external cancellation proof for TUN packet loops
+
+### Commands run
+- `cargo fmt` — applied formatting for TUN loop cancellation changes.
+- `cargo test -p foxprox-core tun::tests::tun_packet_loop_reports_external_cancellation --all-targets --all-features` — passed.
+- `cargo test -p foxprox-core tun::tests::tun_packet_loop_reports --all-targets --all-features` — passed, 5 TUN loop tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 151 core tests, 3 device tests, 45 egress tests, and 12 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tun::tests::tun_packet_loop_reports_external_cancellation ... ok`
+- `tun::tests::tun_packet_loop_reports_budget_cancellation ... ok`
+- `tun::tests::tun_packet_loop_reports_read_failure_task_outcome ... ok`
+- `tun::tests::tun_packet_loop_reports_write_failure_task_outcome ... ok`
+
+### Interpretation
+Added `TunPacketHarness::process_packet_loop_until(...)`, which checks an external cancellation predicate before each TUN read and reports the existing structured `tun_device:tun_packet_loop:cancelled` task outcome without consuming more packets. The regression proves cancellation after one packet leaves observable packet/decision audit for the processed packet and exits with a cancelled task outcome rather than relying only on a packet budget.
+
+### Changed files
+- `crates/foxprox-core/src/tun.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The smoltcp bridge loop still only has budget/idle/read-write outcomes and should accept the same external cancellation style before final runtime shutdown wiring claims TUN/smoltcp cancellation complete.
