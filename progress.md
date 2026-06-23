@@ -3029,3 +3029,29 @@ Round-66 validation found that a parseable HTTP request line followed by a read 
 ### Remaining blind spots
 - Need real adapter-level/OS listener error injection so DNS/HTTP/SOCKS `run_until_cancelled(...)` can be proven to hit listener-loop error recorders from concrete accept/recv failures without unsafe fd manipulation.
 - Final async runtime still needs readiness/timer integration and audit fan-in wiring for real task loops.
+
+## 2026-06-23 — Add precise partial HTTP read audit evidence
+
+### Commands run
+- `cargo fmt` — applied formatting for HTTP read evidence changes.
+- `cargo test -p foxprox-egress blocking_http_proxy_server_read_timeout_is_audited_request_failure --all-targets --all-features` — passed.
+- `cargo test -p foxprox-egress blocking_http_proxy_server_partial_request_timeout_is_not_forwarded --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 59 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_http_proxy_server_read_timeout_is_audited_request_failure ... ok`
+- `tests::blocking_http_proxy_server_partial_request_timeout_is_not_forwarded ... ok`
+
+### Interpretation
+Round-67 validation found fail-closed behavior was correct but audit evidence still collapsed empty and partial HTTP reads into an empty malformed parse error. The HTTP proxy read path now records a structured `broker_error` before the malformed decision with typed HTTP proxy frontend/protocol, client source endpoint, `read_status`, observed byte count, and `error=http_proxy_client_read_incomplete`. The empty-timeout and partial-timeout regressions assert both the precise read evidence and the final fail-closed malformed decision.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Need real adapter-level/OS listener error injection so DNS/HTTP/SOCKS `run_until_cancelled(...)` can be proven to hit listener-loop error recorders from concrete accept/recv failures without unsafe fd manipulation.
+- Final async runtime still needs readiness/timer integration and audit fan-in wiring for real task loops.

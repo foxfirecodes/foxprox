@@ -517,8 +517,11 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
         stream
             .set_write_timeout(Some(self.io_timeout))
             .map_err(|_| ProxyEgressError::SendFailed)?;
-        let request = read_http_proxy_request(&mut stream, self.max_request_bytes)?;
-        self.handle_http_proxy_request(client, &request, &mut stream, now_ms)
+        let read = read_http_proxy_request(&mut stream, self.max_request_bytes)?;
+        if !read.status.is_complete() {
+            self.record_client_read_failure(client, read.observed_len, read.status, now_ms);
+        }
+        self.handle_http_proxy_request(client, &read.request, &mut stream, now_ms)
             .map(Some)
     }
 
@@ -561,6 +564,34 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
             )
             .with_detail("listener_task", Self::LISTENER_TASK_NAME)
             .with_detail("listener_error", proxy_egress_error_detail(error));
+        let _ = self.frontend.broker_mut().append_audit_for(&request, audit);
+    }
+
+    fn record_client_read_failure(
+        &mut self,
+        client: SocketAddr,
+        observed_len: usize,
+        status: HttpProxyReadStatus,
+        now_ms: u64,
+    ) {
+        let sandbox_id = self.frontend.sandbox_id().to_string();
+        let request = PolicyRequest::unsupported(
+            sandbox_id.clone(),
+            Frontend::HttpProxy,
+            DenialReason::ProxyMalformed,
+        );
+        let audit = AuditRecord::new_at(AuditKind::BrokerError, sandbox_id, now_ms as u128)
+            .with_frontend(Frontend::HttpProxy)
+            .with_protocol(Protocol::Http)
+            .with_source(NetworkEndpoint {
+                ip: Some(client.ip()),
+                port: Some(client.port()),
+            })
+            .with_decision(Decision::FailClosed, Some(DenialReason::ProxyMalformed))
+            .with_detail("client", client.to_string())
+            .with_detail("read_status", status.as_detail())
+            .with_detail("observed_request_len", observed_len.to_string())
+            .with_detail("error", "http_proxy_client_read_incomplete");
         let _ = self.frontend.broker_mut().append_audit_for(&request, audit);
     }
 
@@ -628,34 +659,84 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HttpProxyReadStatus {
+    Complete,
+    EmptyClosed,
+    EmptyError,
+    PartialClosed,
+    PartialError,
+    HeaderLimit,
+}
+
+impl HttpProxyReadStatus {
+    fn is_complete(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+
+    fn as_detail(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::EmptyClosed => "empty_closed",
+            Self::EmptyError => "empty_error",
+            Self::PartialClosed => "partial_closed",
+            Self::PartialError => "partial_error",
+            Self::HeaderLimit => "header_limit",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct HttpProxyReadResult {
+    request: Vec<u8>,
+    observed_len: usize,
+    status: HttpProxyReadStatus,
+}
+
 fn read_http_proxy_request(
     stream: &mut TcpStream,
     max_request_bytes: usize,
-) -> Result<Vec<u8>, ProxyEgressError> {
+) -> Result<HttpProxyReadResult, ProxyEgressError> {
     let mut request = Vec::new();
     let mut chunk = [0u8; 256];
-    let mut complete_headers = false;
+    let mut status = HttpProxyReadStatus::HeaderLimit;
     while request.len() < max_request_bytes.max(1) {
         let remaining = max_request_bytes.max(1).saturating_sub(request.len());
         let read_len = remaining.min(chunk.len());
         let len = match stream.read(&mut chunk[..read_len]) {
             Ok(len) => len,
-            Err(_) => break,
+            Err(_) => {
+                status = if request.is_empty() {
+                    HttpProxyReadStatus::EmptyError
+                } else {
+                    HttpProxyReadStatus::PartialError
+                };
+                break;
+            }
         };
         if len == 0 {
+            status = if request.is_empty() {
+                HttpProxyReadStatus::EmptyClosed
+            } else {
+                HttpProxyReadStatus::PartialClosed
+            };
             break;
         }
         request.extend_from_slice(&chunk[..len]);
         if request.windows(4).any(|window| window == b"\r\n\r\n") {
-            complete_headers = true;
-            break;
+            return Ok(HttpProxyReadResult {
+                observed_len: request.len(),
+                request,
+                status: HttpProxyReadStatus::Complete,
+            });
         }
     }
-    if complete_headers {
-        Ok(request)
-    } else {
-        Ok(Vec::new())
-    }
+    let observed_len = request.len();
+    Ok(HttpProxyReadResult {
+        request: Vec::new(),
+        observed_len,
+        status,
+    })
 }
 
 fn http_proxy_response_for(
@@ -3394,6 +3475,7 @@ mod tests {
         )
         .unwrap();
         let mut client = TcpStream::connect(server.local_addr().unwrap()).unwrap();
+        let client_addr = client.local_addr().unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
@@ -3409,10 +3491,29 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
 
         let records: Vec<_> = server.frontend().broker().audit().records().collect();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].kind, AuditKind::UnsupportedDenied);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::BrokerError);
+        assert_eq!(records[0].frontend, Some(Frontend::HttpProxy));
+        assert_eq!(records[0].protocol, Some(Protocol::Http));
         assert_eq!(records[0].decision, Some(Decision::FailClosed));
         assert_eq!(records[0].reason, Some(DenialReason::ProxyMalformed));
+        assert_eq!(
+            records[0].source.as_ref().unwrap().ip,
+            Some(client_addr.ip())
+        );
+        assert_eq!(
+            records[0].source.as_ref().unwrap().port,
+            Some(client_addr.port())
+        );
+        assert_eq!(records[0].details["read_status"], "empty_error");
+        assert_eq!(records[0].details["observed_request_len"], "0");
+        assert_eq!(
+            records[0].details["error"],
+            "http_proxy_client_read_incomplete"
+        );
+        assert_eq!(records[1].kind, AuditKind::UnsupportedDenied);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::ProxyMalformed));
     }
 
     #[test]
@@ -3435,6 +3536,7 @@ mod tests {
         )
         .unwrap();
         let mut client = TcpStream::connect(server.local_addr().unwrap()).unwrap();
+        let client_addr = client.local_addr().unwrap();
         client
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
@@ -3452,10 +3554,34 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
 
         let records: Vec<_> = server.frontend().broker().audit().records().collect();
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].kind, AuditKind::UnsupportedDenied);
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].kind, AuditKind::BrokerError);
+        assert_eq!(records[0].frontend, Some(Frontend::HttpProxy));
+        assert_eq!(records[0].protocol, Some(Protocol::Http));
         assert_eq!(records[0].decision, Some(Decision::FailClosed));
         assert_eq!(records[0].reason, Some(DenialReason::ProxyMalformed));
+        assert_eq!(
+            records[0].source.as_ref().unwrap().ip,
+            Some(client_addr.ip())
+        );
+        assert_eq!(
+            records[0].source.as_ref().unwrap().port,
+            Some(client_addr.port())
+        );
+        assert_eq!(records[0].details["read_status"], "partial_error");
+        assert_eq!(
+            records[0].details["observed_request_len"],
+            b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n"
+                .len()
+                .to_string()
+        );
+        assert_eq!(
+            records[0].details["error"],
+            "http_proxy_client_read_incomplete"
+        );
+        assert_eq!(records[1].kind, AuditKind::UnsupportedDenied);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::ProxyMalformed));
         assert!(server.frontend().egress().forwarded_http().is_empty());
     }
 

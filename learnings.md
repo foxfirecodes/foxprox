@@ -318,3 +318,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — HTTP proxy reads must require complete headers
 
 - Treat HTTP proxy client reads that time out or close before `\r\n\r\n` as malformed per-request failures. Returning partial parseable request lines can accidentally allow/forward slow-client requests after a read timeout.
+
+## 2026-06-23 — Partial HTTP read evidence needs source and status
+
+- Fail-closed HTTP proxy read handling should not collapse every incomplete read into an empty parse error. Add explicit read-failure audit evidence with client/source, observed byte count, and status (`empty_error`, `partial_error`, EOF, or limit) before passing malformed bytes to the parser.
