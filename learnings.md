@@ -282,3 +282,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Cancellation-aware loops require nonblocking IO contracts
 
 - Checking a cancellation token before each loop iteration is only meaningful if the underlying IO operation is nonblocking or time-bounded. Listener accept loops and TUN reads should treat WouldBlock/no-ready as idle, allowing shutdown tokens to be observed without waiting for traffic.
+
+## 2026-06-23 — DNS listeners also need idle cancellation semantics
+
+- HTTP/SOCKS accept loops were made cancellation-aware, but DNS listener loops can still wait on UDP receive unless the socket is nonblocking/time-bounded. Treating no-packet-ready as an idle step lets DNS listener tasks observe cancellation without traffic.

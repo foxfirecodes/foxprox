@@ -2783,3 +2783,29 @@ Addressed round-55 high feedback. The `PacketDevice` contract now explicitly req
 ### Remaining blind spots
 - Concrete Linux TUN fd creation still needs to set/verify nonblocking mode when the real fd-backed adapter lands.
 - Final async runtime still needs fd readiness/timer integration rather than polling sleeps in blocking proof tasks.
+
+## 2026-06-23 — Extend idle cancellation proof to DNS listener tasks
+
+### Commands run
+- `cargo fmt` — applied formatting for DNS listener idle-cancellation changes.
+- `cargo test -p foxprox-egress blocking_dns_listener_task_cancels_without_packets --all-targets --all-features` — passed.
+- `cargo test -p foxprox-egress blocking_proxy_listener_tasks_cancel_without_clients --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 49 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_dns_listener_task_cancels_without_packets ... ok`
+- `tests::blocking_proxy_listener_tasks_cancel_without_clients ... ok`
+- `tests::blocking_proxy_runtime_exit_with_task_set_cancels_and_joins_tasks ... ok`
+
+### Interpretation
+Extended listener idle-cancellation proof to DNS. `BlockingDnsBrokerServer::bind(...)` now configures its UDP socket as nonblocking, allowing no-packet-ready iterations to return promptly. The DNS listener task regression moves an actual `BlockingDnsBrokerServer` into a cancellable task, runs it with no packets, requests cancellation, and proves the task joins with `dns_listener:dns_accept_loop:cancelled`. Together with the HTTP/SOCKS no-client test, all blocking listener kinds now have idle cancellation coverage.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- These are still blocking/thread proofs with polling sleeps. Final async runtime should use readiness/timer primitives and feed actual listener/TUN/smoltcp task reports into lifecycle exit and audit fan-in.

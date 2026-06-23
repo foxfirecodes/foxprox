@@ -250,6 +250,9 @@ impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
         socket
             .set_write_timeout(Some(timeout))
             .map_err(|_| DnsUpstreamError::Unavailable)?;
+        socket
+            .set_nonblocking(true)
+            .map_err(|_| DnsUpstreamError::Unavailable)?;
         Ok(Self {
             socket,
             handler,
@@ -2175,6 +2178,51 @@ mod tests {
             "dns_listener:dns_accept_loop:timed_out"
         );
         assert_eq!(records[1].details["failed_runtime_task_count"], "1");
+    }
+
+    #[test]
+    fn blocking_dns_listener_task_cancels_without_packets() {
+        let query = dns_query(0x6f6f, "Idle.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let mut dns_server = BlockingDnsBrokerServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            Duration::from_millis(10),
+            512,
+        )
+        .unwrap();
+        let mut task_set = BlockingRuntimeTaskSet::new();
+        task_set
+            .spawn_cancellable_task(
+                RuntimeComponent::DnsListener,
+                "dns_accept_loop",
+                move |token| {
+                    while !token.is_cancelled() {
+                        let _ = dns_server.handle_one("s1", 1_000);
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    RuntimeTaskStatus::Cancelled
+                },
+            )
+            .unwrap();
+
+        assert_eq!(task_set.request_cancellation(), 1);
+        let report = task_set.join_all_with_timeout(Duration::from_secs(1));
+
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(
+            report.outcomes[0],
+            RuntimeTaskOutcome::new(
+                RuntimeComponent::DnsListener,
+                "dns_accept_loop",
+                RuntimeTaskStatus::Cancelled,
+            )
+        );
     }
 
     #[test]
