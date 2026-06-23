@@ -490,3 +490,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — AsyncFd packet-fd readiness can model the TUN scheduler boundary without consuming data
 
 - `tokio::io::unix::AsyncFd` can wait on a nonblocking packet-like fd and feed `tun_device:tun_packet_loop` readiness while leaving bytes available for later dispatch. Until `/dev/net/tun` creation/handoff is wired, keep this scoped as packet-fd readiness, not proof of real TUN device setup.
+
+## 2026-06-23 — AsyncFd ready-task dispatch must clear readiness after packet reads
+
+- A packet-fd readiness proof is stronger when the ready-task helper actually reads through `AsyncFdReadyGuard::try_io(...)`, returns the packet for dispatch, and proves a follow-up wait times out after the fd is drained. This avoids evidence that only observes readiness without proving readiness can be cleared.

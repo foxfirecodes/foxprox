@@ -4144,3 +4144,24 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - This is Tokio `AsyncFd` packet-fd readiness evidence for the TUN scheduler boundary using a deterministic fd pair, not a real `/dev/net/tun` creation/handoff proof. Remaining final runtime gap is actual TUN device fd setup/handoff, live smoltcp timer wake wiring, and integrating UDP/TCP/packet-fd readiness into one end-to-end async runtime loop with ready-task dispatch, cancellation/join, audit fan-in, and shutdown final drain.
+
+## 2026-06-23 — Add AsyncFd packet ready-task read dispatch evidence
+
+### Review
+- Round-109 correctness and validation found no blockers or high issues.
+- Reviewers identified the next gap as actual `/dev/net/tun` setup/handoff and a coupled AsyncFd read-dispatch loop that drains/clears readiness correctly.
+
+### Fix
+- Added `AsyncRuntimePacketFdReadReport` and Unix-only `read_async_packet_fd_ready_task(...)`.
+- The helper ignores unrelated ready tasks, waits on `tokio::io::unix::AsyncFd`, reads packet bytes through `AsyncFdReadyGuard::try_io(...)` for `tun_device:tun_packet_loop`, and returns the bytes plus structured readiness status.
+- Added regression coverage proving unrelated tasks do not consume bytes, a matching TUN ready task reads the packet and feeds `RuntimeReadinessPlan` with `scheduler_action=run_ready_tasks`, and a follow-up wait times out after the fd is drained/cleared.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_packet_fd_ready_task_reads_and_clears_readiness --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 90 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- This proves AsyncFd packet-fd ready-task read dispatch and readiness clearing with a deterministic fd pair. It is still not real `/dev/net/tun` setup/handoff. Remaining final runtime gap is actual TUN device fd setup/handoff, live smoltcp timer wake wiring, and integrating UDP/TCP/packet-fd readiness plus dispatch into one end-to-end async runtime loop with cancellation/join, audit fan-in, and shutdown final drain.

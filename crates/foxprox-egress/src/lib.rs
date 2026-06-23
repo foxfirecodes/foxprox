@@ -2698,6 +2698,67 @@ where
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AsyncRuntimePacketFdReadReport {
+    pub status: AsyncRuntimeIoReadinessStatus,
+    pub readiness: RuntimeTaskReadiness,
+    pub bytes_read: usize,
+    pub packet: Option<Vec<u8>>,
+}
+
+#[cfg(unix)]
+pub async fn read_async_packet_fd_ready_task<F>(
+    fd: &tokio::io::unix::AsyncFd<F>,
+    ready_tasks: &[RuntimeTaskExpectation],
+    max_packet_bytes: usize,
+    max_wait: Duration,
+    cancellation: &AsyncRuntimeCancellationToken,
+) -> std::io::Result<Option<AsyncRuntimePacketFdReadReport>>
+where
+    F: std::os::fd::AsRawFd,
+    for<'a> &'a F: Read,
+{
+    let should_read = ready_tasks.iter().any(|task| {
+        task.component == RuntimeComponent::TunDevice && task.task_name == "tun_packet_loop"
+    });
+    if !should_read {
+        return Ok(None);
+    }
+
+    let mut packet = vec![0u8; max_packet_bytes.max(1)];
+    let mut bytes_read = 0usize;
+    let status = tokio::select! {
+        result = fd.readable() => {
+            let mut guard = result?;
+            match guard.try_io(|inner| {
+                let mut reader = inner.get_ref();
+                reader.read(&mut packet)
+            }) {
+                Ok(Ok(len)) => {
+                    bytes_read = len;
+                    if len == 0 {
+                        AsyncRuntimeIoReadinessStatus::TimedOut
+                    } else {
+                        AsyncRuntimeIoReadinessStatus::Ready
+                    }
+                }
+                Ok(Err(error)) => return Err(error),
+                Err(_would_block) => AsyncRuntimeIoReadinessStatus::TimedOut,
+            }
+        }
+        () = tokio::time::sleep(max_wait) => AsyncRuntimeIoReadinessStatus::TimedOut,
+        () = cancellation.cancelled() => AsyncRuntimeIoReadinessStatus::Cancelled,
+    };
+    packet.truncate(bytes_read);
+    Ok(Some(AsyncRuntimePacketFdReadReport {
+        readiness: RuntimeTaskReadiness::new(RuntimeComponent::TunDevice, "tun_packet_loop")
+            .with_ready(status == AsyncRuntimeIoReadinessStatus::Ready),
+        status,
+        bytes_read,
+        packet: (bytes_read > 0).then_some(packet),
+    }))
+}
+
 pub async fn run_async_runtime_scheduler_step<F, Fut>(
     lifecycle: &mut RuntimeLifecycleHarness,
     task_readiness: &[RuntimeTaskReadiness],
@@ -3746,6 +3807,88 @@ mod tests {
             report.readiness,
             RuntimeTaskReadiness::new(RuntimeComponent::TunDevice, "tun_packet_loop")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_packet_fd_ready_task_reads_and_clears_readiness() {
+        let (tun_fd, mut sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        tun_fd.set_nonblocking(true).unwrap();
+        let async_fd = tokio::io::unix::AsyncFd::new(tun_fd).unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        sandbox_peer.write_all(b"packet-for-dispatch").unwrap();
+        let unrelated = vec![RuntimeTaskExpectation::new(
+            RuntimeComponent::AuditFanIn,
+            "audit_fan_in_loop",
+        )];
+        assert!(read_async_packet_fd_ready_task(
+            &async_fd,
+            &unrelated,
+            64,
+            Duration::from_secs(1),
+            &cancellation,
+        )
+        .await
+        .unwrap()
+        .is_none());
+        let ready_tasks = vec![RuntimeTaskExpectation::new(
+            RuntimeComponent::TunDevice,
+            "tun_packet_loop",
+        )];
+
+        let report = read_async_packet_fd_ready_task(
+            &async_fd,
+            &ready_tasks,
+            64,
+            Duration::from_secs(1),
+            &cancellation,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(report.status, AsyncRuntimeIoReadinessStatus::Ready);
+        assert_eq!(report.bytes_read, b"packet-for-dispatch".len());
+        assert_eq!(report.packet.as_deref(), Some(&b"packet-for-dispatch"[..]));
+        assert_eq!(
+            report.readiness,
+            RuntimeTaskReadiness::ready(RuntimeComponent::TunDevice, "tun_packet_loop")
+        );
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-packet-fd-dispatch", 4);
+        lifecycle
+            .start_with_task_expectations(
+                vec![RuntimeComponent::TunDevice],
+                vec![RuntimeTaskExpectation::new(
+                    RuntimeComponent::TunDevice,
+                    "tun_packet_loop",
+                )],
+                8_800,
+            )
+            .unwrap();
+        let plan = RuntimeReadinessPlan::from_tasks(&[report.readiness]);
+        lifecycle.record_readiness_plan(&plan, 8_810).unwrap();
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::RuntimeReadiness);
+        assert_eq!(records[1].details["scheduler_action"], "run_ready_tasks");
+        assert_eq!(
+            records[1].details["ready_runtime_tasks"],
+            "tun_device:tun_packet_loop"
+        );
+        let drained = read_async_packet_fd_ready_task(
+            &async_fd,
+            &ready_tasks,
+            64,
+            Duration::from_millis(1),
+            &cancellation,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(drained.status, AsyncRuntimeIoReadinessStatus::TimedOut);
+        assert_eq!(drained.bytes_read, 0);
+        assert!(drained.packet.is_none());
+        assert!(!drained.readiness.ready);
     }
 
     #[tokio::test(flavor = "current_thread")]
