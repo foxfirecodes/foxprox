@@ -330,3 +330,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Runtime aggregate must archive read-failure evidence promptly
 
 - When listener handlers emit per-client failure audits, runtime-level aggregate tests should prove those records are archived immediately after `handle_*_once(...)`, not only visible through the individual frontend broker ledger.
+
+## 2026-06-23 — Sink drains need no-duplicate cursor proof
+
+- In-memory runtime aggregates should expose a sink drain with its own cursor and tests proving first drain writes all currently aggregated records and the next drain writes none. This is a stepping stone toward full async fan-in without overclaiming readiness integration.

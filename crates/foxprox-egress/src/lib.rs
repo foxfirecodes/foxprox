@@ -8,14 +8,15 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    malformed_proxy_request, AuditKind, AuditRecord, BrokerRuntimeConfig, Decision, DenialReason,
-    DnsBrokerHandler, DnsQueryMetadata, DnsUpstream, DnsUpstreamError, ExplicitProxyEgress,
-    ExplicitProxyFrontend, Frontend, HttpProxyRequestMetadata, NetworkEndpoint, PolicyRequest,
-    Protocol, ProxyEgressError, ProxyParseError, RuntimeChildExit, RuntimeCleanupAction,
-    RuntimeCleanupReport, RuntimeComponent, RuntimeExitStatus, RuntimeLifecycleError,
-    RuntimeLifecycleHarness, RuntimeListenerConfig, RuntimeTaskExpectation, RuntimeTaskHandle,
-    RuntimeTaskJoinReport, RuntimeTaskStatus, RuntimeTaskSupervisor, RuntimeTaskSupervisorError,
-    SharedDnsCache, SocksConnectMetadata, TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
+    malformed_proxy_request, AuditKind, AuditRecord, AuditSinkError, BrokerRuntimeConfig, Decision,
+    DenialReason, DnsBrokerHandler, DnsQueryMetadata, DnsUpstream, DnsUpstreamError,
+    ExplicitProxyEgress, ExplicitProxyFrontend, Frontend, HttpProxyRequestMetadata,
+    JsonLineAuditSink, NetworkEndpoint, PolicyRequest, Protocol, ProxyEgressError, ProxyParseError,
+    RuntimeChildExit, RuntimeCleanupAction, RuntimeCleanupReport, RuntimeComponent,
+    RuntimeExitStatus, RuntimeLifecycleError, RuntimeLifecycleHarness, RuntimeListenerConfig,
+    RuntimeTaskExpectation, RuntimeTaskHandle, RuntimeTaskJoinReport, RuntimeTaskStatus,
+    RuntimeTaskSupervisor, RuntimeTaskSupervisorError, SharedDnsCache, SocksConnectMetadata,
+    TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
 };
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -1515,6 +1516,7 @@ pub struct BlockingProxyRuntime<U, H, S> {
     http_proxy_server: Option<BlockingHttpProxyServer<H>>,
     socks5_proxy_server: Option<BlockingSocks5ProxyServer<S>>,
     aggregate_audit_records: Vec<AuditRecord>,
+    drained_aggregate_audit_records: usize,
     last_lifecycle_sequence: u64,
     last_dns_sequence: u64,
     last_http_proxy_sequence: u64,
@@ -1638,6 +1640,7 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
             http_proxy_server: Some(http_proxy_server),
             socks5_proxy_server: Some(socks5_proxy_server),
             aggregate_audit_records,
+            drained_aggregate_audit_records: 0,
             last_lifecycle_sequence,
             last_dns_sequence: 0,
             last_http_proxy_sequence: 0,
@@ -1770,6 +1773,18 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
 
     pub fn audit_records(&self) -> Vec<AuditRecord> {
         self.aggregate_audit_records.clone()
+    }
+
+    pub fn drain_aggregate_audit_to_sink<W: Write>(
+        &mut self,
+        sink: &mut JsonLineAuditSink<W>,
+    ) -> Result<usize, AuditSinkError> {
+        let start = self.drained_aggregate_audit_records;
+        for record in &self.aggregate_audit_records[start..] {
+            sink.append(record)?;
+            self.drained_aggregate_audit_records += 1;
+        }
+        Ok(self.drained_aggregate_audit_records - start)
     }
 
     pub fn dns_server(&self) -> &BlockingDnsBrokerServer<U> {
@@ -5320,6 +5335,17 @@ mod tests {
                 && record.decision == Some(Decision::FailClosed)
                 && record.reason == Some(DenialReason::ProxyMalformed)
         }));
+
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+        let drained = runtime.drain_aggregate_audit_to_sink(&mut sink).unwrap();
+        assert_eq!(drained, aggregate.len());
+        assert_eq!(sink.records_written(), aggregate.len() as u64);
+        assert_eq!(runtime.drain_aggregate_audit_to_sink(&mut sink).unwrap(), 0);
+        let json_lines = String::from_utf8(sink.into_inner()).unwrap();
+        assert!(json_lines.contains("network_session_start"));
+        assert!(json_lines.contains("http_proxy_client_read_incomplete"));
+        assert!(json_lines.contains("unsupported_denied"));
+        assert!(json_lines.contains("proxy_malformed"));
     }
 
     #[test]

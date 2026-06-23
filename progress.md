@@ -3107,3 +3107,27 @@ Round-69 review found no blocker/high issues and kept final runtime fan-in wirin
 ### Remaining blind spots
 - Runtime aggregate is still an in-memory archived ledger, not a full async fan-in task draining to a sink with readiness/timer integration.
 - Final async runtime still needs readiness/timer integration, real task registration/cancellation/join ordering, and sink-backed audit fan-in wiring.
+
+## 2026-06-23 — Drain runtime aggregate audit records to sink
+
+### Commands run
+- `cargo fmt` — applied formatting for aggregate sink drain changes.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_aggregate_captures_http_read_failures --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 61 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_proxy_runtime_aggregate_captures_http_read_failures ... ok`
+
+### Interpretation
+Added a sink-backed drain for `BlockingProxyRuntime` aggregate audit records. The drain writes currently aggregated lifecycle/listener records to `JsonLineAuditSink`, advances a runtime-owned cursor after successful writes, and a second drain writes zero records. The HTTP partial-read aggregate regression now proves the sink output includes session start, precise `http_proxy_client_read_incomplete` evidence, and the final malformed denial without duplicating on a repeated drain.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This is still a blocking-runtime aggregate drain; it is not a full async fan-in task with readiness/timer orchestration.
+- Final async runtime still needs real task registration/cancellation/join ordering and bounded sink-backed fan-in across listener/TUN/smoltcp lifecycle sources.
