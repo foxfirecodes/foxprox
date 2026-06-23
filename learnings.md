@@ -482,3 +482,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Tokio UDP readiness can feed the same readiness ledger without consuming packets
 
 - `tokio::net::UdpSocket::readable()` provides real OS-level socket readiness that can be converted into `RuntimeTaskReadiness` and audited via `RuntimeReadinessPlan` while leaving the packet available for the later ready-task dispatch path.
+
+## 2026-06-23 — Tokio TCP listener accept narrows readiness by owning the accepted stream
+
+- For TCP listeners, a concrete Tokio runtime proof can couple readiness to `TcpListener::accept()`: the accepted stream and peer address become dispatch-owned evidence, while timeout/cancellation must produce non-ready readiness and no stream.

@@ -4101,3 +4101,25 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - This narrows real Tokio OS socket readiness for UDP/DNS-style sockets only. Remaining final runtime gap is Tokio TCP listener readiness/accept integration, real TUN fd readiness, live smoltcp timer wake wiring, full ready-task dispatch in one end-to-end async runtime loop, cancellation/join, audit fan-in, and shutdown final drain.
+
+## 2026-06-23 — Add Tokio TCP listener accept readiness evidence
+
+### Review
+- Round-107 correctness and validation found no blockers or high issues.
+- Reviewers identified Tokio TCP listener readiness/accept integration as one of the next highest runtime gaps.
+
+### Fix
+- Added `AsyncRuntimeTcpAcceptReport` and `accept_async_tcp_listener_when_ready(...)`.
+- Mapped a real `tokio::net::TcpListener::accept()` loopback connection into `RuntimeTaskReadiness` for HTTP/SOCKS-style listener tasks, preserving the accepted stream and peer address for dispatch ownership.
+- Added cancellation and timeout outcomes that leave readiness non-ready and return no accepted stream.
+- Added regression coverage proving real OS TCP accept evidence feeds `RuntimeReadinessPlan` with `scheduler_action=run_ready_tasks` and the expected `http_proxy_listener:http_proxy_accept_loop` ready-task evidence.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_tcp_listener_accept --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 87 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Tokio UDP socket readiness and TCP listener accept readiness now have focused OS-level evidence. Remaining final runtime gap is real TUN fd readiness, live smoltcp timer wake wiring, integrating these readiness/accept paths into one end-to-end async runtime loop with ready-task dispatch, cancellation/join, audit fan-in, and shutdown final drain.

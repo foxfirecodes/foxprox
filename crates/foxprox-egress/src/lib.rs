@@ -2628,6 +2628,49 @@ pub async fn wait_for_async_udp_socket_readiness(
     }
 }
 
+#[derive(Debug)]
+pub struct AsyncRuntimeTcpAcceptReport {
+    pub status: AsyncRuntimeIoReadinessStatus,
+    pub readiness: RuntimeTaskReadiness,
+    pub accepted_peer: Option<SocketAddr>,
+    pub stream: Option<tokio::net::TcpStream>,
+}
+
+pub async fn accept_async_tcp_listener_when_ready(
+    listener: &tokio::net::TcpListener,
+    component: RuntimeComponent,
+    task_name: impl Into<String>,
+    max_wait: Duration,
+    cancellation: &AsyncRuntimeCancellationToken,
+) -> AsyncRuntimeTcpAcceptReport {
+    let task_name = task_name.into();
+    let mut accepted = None;
+    let status = tokio::select! {
+        result = listener.accept() => {
+            match result {
+                Ok((stream, peer)) => {
+                    accepted = Some((stream, peer));
+                    AsyncRuntimeIoReadinessStatus::Ready
+                }
+                Err(_) => AsyncRuntimeIoReadinessStatus::Failed,
+            }
+        }
+        () = tokio::time::sleep(max_wait) => AsyncRuntimeIoReadinessStatus::TimedOut,
+        () = cancellation.cancelled() => AsyncRuntimeIoReadinessStatus::Cancelled,
+    };
+    let (stream, accepted_peer) = match accepted {
+        Some((stream, peer)) => (Some(stream), Some(peer)),
+        None => (None, None),
+    };
+    AsyncRuntimeTcpAcceptReport {
+        readiness: RuntimeTaskReadiness::new(component, task_name)
+            .with_ready(status == AsyncRuntimeIoReadinessStatus::Ready),
+        status,
+        accepted_peer,
+        stream,
+    }
+}
+
 pub async fn run_async_runtime_scheduler_step<F, Fut>(
     lifecycle: &mut RuntimeLifecycleHarness,
     task_readiness: &[RuntimeTaskReadiness],
@@ -3496,6 +3539,115 @@ mod tests {
         assert_eq!(
             report.readiness,
             RuntimeTaskReadiness::new(RuntimeComponent::DnsListener, "dns_accept_loop")
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_tcp_listener_accepts_real_os_connection_and_audits_plan() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let client = tokio::spawn(async move {
+            let stream = tokio::net::TcpStream::connect(listener_addr).await.unwrap();
+            stream.local_addr().unwrap()
+        });
+
+        let report = accept_async_tcp_listener_when_ready(
+            &listener,
+            RuntimeComponent::HttpProxyListener,
+            "http_proxy_accept_loop",
+            Duration::from_secs(1),
+            &cancellation,
+        )
+        .await;
+        let client_addr = client.await.unwrap();
+
+        assert_eq!(report.status, AsyncRuntimeIoReadinessStatus::Ready);
+        assert_eq!(report.accepted_peer, Some(client_addr));
+        assert!(report.stream.is_some());
+        assert_eq!(
+            report.readiness,
+            RuntimeTaskReadiness::ready(
+                RuntimeComponent::HttpProxyListener,
+                "http_proxy_accept_loop"
+            )
+        );
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-tcp-accept", 4);
+        lifecycle
+            .start_with_task_expectations(
+                vec![RuntimeComponent::HttpProxyListener],
+                vec![RuntimeTaskExpectation::new(
+                    RuntimeComponent::HttpProxyListener,
+                    "http_proxy_accept_loop",
+                )],
+                8_600,
+            )
+            .unwrap();
+        let plan = RuntimeReadinessPlan::from_tasks(&[report.readiness]);
+        lifecycle.record_readiness_plan(&plan, 8_610).unwrap();
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::RuntimeReadiness);
+        assert_eq!(records[1].details["scheduler_action"], "run_ready_tasks");
+        assert_eq!(
+            records[1].details["ready_runtime_tasks"],
+            "http_proxy_listener:http_proxy_accept_loop"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_tcp_listener_accept_can_be_cancelled_before_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cancellation_state = Arc::new(AsyncRuntimeCancellationState::new());
+        let cancellation = AsyncRuntimeCancellationToken::new(cancellation_state.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            cancellation_state.cancelled.store(true, Ordering::SeqCst);
+            cancellation_state.notify.notify_waiters();
+        });
+
+        let report = accept_async_tcp_listener_when_ready(
+            &listener,
+            RuntimeComponent::HttpProxyListener,
+            "http_proxy_accept_loop",
+            Duration::from_secs(60),
+            &cancellation,
+        )
+        .await;
+
+        assert_eq!(report.status, AsyncRuntimeIoReadinessStatus::Cancelled);
+        assert!(report.accepted_peer.is_none());
+        assert!(report.stream.is_none());
+        assert_eq!(
+            report.readiness,
+            RuntimeTaskReadiness::new(
+                RuntimeComponent::HttpProxyListener,
+                "http_proxy_accept_loop"
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_tcp_listener_accept_timeout_is_not_ready() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+
+        let report = accept_async_tcp_listener_when_ready(
+            &listener,
+            RuntimeComponent::Socks5Listener,
+            "socks5_accept_loop",
+            Duration::from_millis(1),
+            &cancellation,
+        )
+        .await;
+
+        assert_eq!(report.status, AsyncRuntimeIoReadinessStatus::TimedOut);
+        assert!(report.accepted_peer.is_none());
+        assert!(report.stream.is_none());
+        assert_eq!(
+            report.readiness,
+            RuntimeTaskReadiness::new(RuntimeComponent::Socks5Listener, "socks5_accept_loop")
         );
     }
 
