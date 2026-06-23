@@ -1267,6 +1267,18 @@ pub enum BlockingRuntimeAuditFanInDrainError {
     Drain(RuntimeAuditDrainError),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockingRuntimeAuditFanInShutdownDrainReport {
+    pub before_exit: BlockingRuntimeAuditFanInDrainReport,
+    pub after_exit: BlockingRuntimeAuditFanInDrainReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BlockingRuntimeAuditFanInShutdownDrainError {
+    Drain(BlockingRuntimeAuditFanInDrainError),
+    Exit(RuntimeLifecycleError),
+}
+
 #[derive(Debug)]
 pub struct BlockingDnsHttpRuntime<U, E> {
     sandbox_id: String,
@@ -1510,6 +1522,31 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
         Ok(BlockingRuntimeAuditFanInDrainReport {
             ingest_reports,
             drain_report,
+        })
+    }
+
+    pub fn exit_and_drain_live_audit_sources_to_sink<W: Write>(
+        &mut self,
+        status: RuntimeExitStatus,
+        task_report: Option<RuntimeTaskJoinReport>,
+        fan_in: &mut RuntimeAuditFanIn,
+        sink: &mut JsonLineAuditSink<W>,
+        now_ms: u64,
+    ) -> Result<
+        BlockingRuntimeAuditFanInShutdownDrainReport,
+        BlockingRuntimeAuditFanInShutdownDrainError,
+    > {
+        let before_exit = self
+            .drain_live_audit_sources_to_sink(fan_in, sink)
+            .map_err(BlockingRuntimeAuditFanInShutdownDrainError::Drain)?;
+        let exit_result = self.exit_with_task_report(status, task_report, now_ms);
+        let after_exit = self
+            .drain_live_audit_sources_to_sink(fan_in, sink)
+            .map_err(BlockingRuntimeAuditFanInShutdownDrainError::Drain)?;
+        exit_result.map_err(BlockingRuntimeAuditFanInShutdownDrainError::Exit)?;
+        Ok(BlockingRuntimeAuditFanInShutdownDrainReport {
+            before_exit,
+            after_exit,
         })
     }
 
@@ -1900,6 +1937,31 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
         Ok(BlockingRuntimeAuditFanInDrainReport {
             ingest_reports,
             drain_report,
+        })
+    }
+
+    pub fn exit_and_drain_live_audit_sources_to_sink<W: Write>(
+        &mut self,
+        status: RuntimeExitStatus,
+        task_report: Option<RuntimeTaskJoinReport>,
+        fan_in: &mut RuntimeAuditFanIn,
+        sink: &mut JsonLineAuditSink<W>,
+        now_ms: u64,
+    ) -> Result<
+        BlockingRuntimeAuditFanInShutdownDrainReport,
+        BlockingRuntimeAuditFanInShutdownDrainError,
+    > {
+        let before_exit = self
+            .drain_live_audit_sources_to_sink(fan_in, sink)
+            .map_err(BlockingRuntimeAuditFanInShutdownDrainError::Drain)?;
+        let exit_result = self.exit_with_task_report(status, task_report, now_ms);
+        let after_exit = self
+            .drain_live_audit_sources_to_sink(fan_in, sink)
+            .map_err(BlockingRuntimeAuditFanInShutdownDrainError::Drain)?;
+        exit_result.map_err(BlockingRuntimeAuditFanInShutdownDrainError::Exit)?;
+        Ok(BlockingRuntimeAuditFanInShutdownDrainReport {
+            before_exit,
+            after_exit,
         })
     }
 
@@ -5127,12 +5189,23 @@ mod tests {
             .unwrap();
         assert!(!duplicate_report.made_progress());
         assert_eq!(duplicate_report.drain_report.drained_records, 0);
+        let shutdown_drain = runtime
+            .exit_and_drain_live_audit_sources_to_sink(
+                RuntimeExitStatus::Clean,
+                None,
+                &mut fan_in,
+                &mut sink,
+                1_100,
+            )
+            .unwrap();
+        assert!(!shutdown_drain.before_exit.made_progress());
+        assert!(shutdown_drain.after_exit.made_progress());
+        assert_eq!(shutdown_drain.after_exit.drain_report.drained_records, 1);
         let fan_in_output = String::from_utf8(sink.into_inner()).unwrap();
         assert!(fan_in_output.contains("network_session_start"));
         assert!(fan_in_output.contains("proxy_destination_resolved"));
         assert!(fan_in_output.contains("http_request_decision"));
-
-        runtime.exit(RuntimeExitStatus::Clean, 1_100).unwrap();
+        assert!(fan_in_output.contains("network_session_exit"));
         let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
         assert_eq!(lifecycle_records.len(), 4);
         assert_eq!(lifecycle_records[3].kind, AuditKind::NetworkSessionExit);

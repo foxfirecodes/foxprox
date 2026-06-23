@@ -378,3 +378,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Runtime fan-in needs a sink-backed API, not only test plumbing
 
 - Source-specific fan-in ingestion should be paired with a runtime-owned drain-to-sink method that reports both accepted source records and drained sink records. Tests can then assert duplicate calls make no progress and that the sink contains stable JSONL evidence without manually reimplementing the pump body.
+
+## 2026-06-23 — Final fan-in drain needs pre-exit and post-exit phases
+
+- A shutdown drain must collect live listener ledgers before runtime exit drops listener ownership, then drain again after lifecycle exit to capture `network_session_exit`. A single post-exit live-source drain only sees lifecycle records after listeners have been closed.

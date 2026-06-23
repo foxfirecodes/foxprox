@@ -3427,3 +3427,36 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - This provides a reusable blocking sink-backed fan-in task body, but it is still not an async readiness/timer-driven runtime. The remaining gap is integrating this with live listener/TUN/smoltcp task scheduling and cancellation/join in the final async runtime.
+
+## 2026-06-23 — Add shutdown final-drain API for live audit fan-in
+
+### Reviewer feedback
+- Round-82 review found no blocker/high issues. Reviewers identified shutdown/final-drain integration as part of the next runtime gap for the sink-backed fan-in body.
+
+### Commands run
+- `cargo fmt` — applied formatting for shutdown drain API and regression updates.
+- `cargo test -p foxprox-egress blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 153 core tests, 4 device tests, 63 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners ... ok`
+
+### Fix
+- Added `BlockingRuntimeAuditFanInShutdownDrainReport` with separate `before_exit` and `after_exit` drain reports.
+- Added `BlockingRuntimeAuditFanInShutdownDrainError` to keep typed drain and lifecycle exit failures distinct.
+- Added `exit_and_drain_live_audit_sources_to_sink(...)` for both blocking runtime variants. The method drains live sources before exit, performs lifecycle exit/cleanup, then drains again so `network_session_exit` reaches the sink after listener ownership has been closed.
+- Updated DNS/HTTP runtime regression to prove:
+  - duplicate pre-shutdown drain makes no progress,
+  - shutdown `before_exit` makes no progress after the duplicate drain,
+  - shutdown `after_exit` drains the lifecycle exit record,
+  - JSONL sink output contains `network_session_start`, `proxy_destination_resolved`, `http_request_decision`, and `network_session_exit`.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Shutdown final-drain is still implemented in the blocking runtime harness. Final async readiness/timer-driven scheduling over live listener/TUN/smoltcp tasks remains outstanding.
