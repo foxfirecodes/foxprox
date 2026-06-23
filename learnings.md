@@ -450,3 +450,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Expose fan-in and listener readiness as live scheduler sources
 
 - Fan-in readiness should come from the fan-in ledger's undrained record count, not from a synthetic drain report alone. Listener readiness sources can represent active nonblocking listener polling capability while the final socket-readable integration remains a separate step.
+
+## 2026-06-23 — Scheduler-dispatched fan-in drains close a live progress loop
+
+- Once fan-in readiness is based on undrained records, the scheduler's ready-task dispatcher should actually drain fan-in and then observe readiness returning to idle. This gives a concrete readiness-action-feedback loop without claiming final socket/TUN readiness is complete.

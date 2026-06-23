@@ -2704,6 +2704,21 @@ impl AsyncRuntimeReadinessSource for &RuntimeAuditFanIn {
     }
 }
 
+pub fn run_async_runtime_audit_fan_in_ready_task<W: Write>(
+    ready_tasks: &[RuntimeTaskExpectation],
+    fan_in: &mut RuntimeAuditFanIn,
+    sink: &mut JsonLineAuditSink<W>,
+) -> Result<Option<RuntimeAuditDrainReport>, RuntimeAuditDrainError> {
+    let should_drain = ready_tasks.iter().any(|task| {
+        task.component == RuntimeComponent::AuditFanIn && task.task_name == "audit_fan_in_loop"
+    });
+    if should_drain {
+        fan_in.drain_to_sink(sink).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
 pub async fn run_async_runtime_scheduler_loop_with_sources_until_cancelled<Run, Fut>(
     lifecycle: &mut RuntimeLifecycleHarness,
     cancellation: &AsyncRuntimeCancellationToken,
@@ -3823,6 +3838,71 @@ mod tests {
                 RuntimeTaskReadiness::ready(RuntimeComponent::Socks5Listener, "socks5_accept_loop"),
                 RuntimeTaskReadiness::ready(RuntimeComponent::AuditFanIn, "audit_fan_in_loop"),
             ]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_scheduler_dispatch_drains_ready_fan_in() {
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+        let mut start = AuditRecord::new_at(AuditKind::NetworkSessionStart, "s1", 8_000);
+        start.sequence = 1;
+        fan_in.ingest("lifecycle", &[start]).unwrap();
+        assert!(fan_in.runtime_readiness().ready);
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-scheduler", 8);
+        lifecycle
+            .start_with_task_expectations(
+                vec![RuntimeComponent::AuditFanIn],
+                vec![RuntimeTaskExpectation::new(
+                    RuntimeComponent::AuditFanIn,
+                    "audit_fan_in_loop",
+                )],
+                8_000,
+            )
+            .unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let readiness = fan_in.runtime_readiness();
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+        let mut observed_drain = None;
+
+        let report = run_async_runtime_scheduler_step(
+            &mut lifecycle,
+            &[readiness],
+            8_010,
+            &cancellation,
+            |ready_tasks| {
+                let fan_in = &mut fan_in;
+                let sink = &mut sink;
+                let observed_drain = &mut observed_drain;
+                async move {
+                    *observed_drain =
+                        run_async_runtime_audit_fan_in_ready_task(&ready_tasks, fan_in, sink)
+                            .unwrap();
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            report.scheduler_action,
+            RuntimeSchedulerAction::RunReadyTasks
+        );
+        assert_eq!(
+            report.dispatched_tasks,
+            vec![RuntimeTaskExpectation::new(
+                RuntimeComponent::AuditFanIn,
+                "audit_fan_in_loop"
+            )]
+        );
+        assert_eq!(observed_drain.unwrap().drained_records, 1);
+        assert_eq!(sink.records_written(), 1);
+        assert!(!fan_in.runtime_readiness().ready);
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].details["scheduler_action"], "run_ready_tasks");
+        assert_eq!(
+            records[1].details["ready_runtime_tasks"],
+            "audit_fan_in:audit_fan_in_loop"
         );
     }
 

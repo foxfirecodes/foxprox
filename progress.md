@@ -3938,3 +3938,24 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Listener adapters currently model active nonblocking listener pollability, not OS-level readable readiness. Remaining final gap: actual Tokio socket/TUN/smoltcp readiness integration and real task driving, plus end-to-end final drain in a fully async runtime.
+
+## 2026-06-23 — Wire scheduler-dispatched audit fan-in drain action
+
+### Fix
+- Added `run_async_runtime_audit_fan_in_ready_task(...)`, which checks dispatched ready tasks for `audit_fan_in:audit_fan_in_loop` and drains `RuntimeAuditFanIn` to a `JsonLineAuditSink` when present.
+- Added `async_runtime_scheduler_dispatch_drains_ready_fan_in`, proving:
+  - fan-in readiness is ready when the fan-in ledger has undrained records,
+  - the audited scheduler step dispatches `audit_fan_in_loop`,
+  - the dispatch drains one fan-in record to the sink,
+  - fan-in readiness returns idle after the drain,
+  - readiness audit records `scheduler_action=run_ready_tasks` and the fan-in ready task.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_scheduler_dispatch_drains_ready_fan_in --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 159 core tests and 80 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Fan-in readiness/progress now has a concrete scheduler-dispatched drain action. Remaining final runtime gap is actual Tokio socket/TUN readiness and smoltcp timer integration with real listener/TUN task driving, not just blocking-reference pollability or deterministic harness dispatch.
