@@ -294,3 +294,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Proxy listener idle is not send failure
 
 - After HTTP/SOCKS listeners become nonblocking, idle accepts must return a distinct no-client-ready result. Mapping `WouldBlock` to `SendFailed` makes cancellation tests pass only by ignoring errors and hides real listener failures.
+
+## 2026-06-23 — Listener loop wrappers turn idle/error/cancel into task outcomes
+
+- Once listener `handle_one` methods distinguish idle from failure, runtime task loops should use that distinction directly: idle continues, cancellation returns `cancelled`, and real listener errors return `failed` so lifecycle exit can emit structured task evidence.

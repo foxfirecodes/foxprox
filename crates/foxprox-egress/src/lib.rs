@@ -332,6 +332,28 @@ impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
         }))
     }
 
+    pub fn run_until_cancelled(
+        &mut self,
+        sandbox_id: impl Into<String>,
+        now_ms: u64,
+        max_idle_steps: usize,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> RuntimeTaskStatus {
+        let sandbox_id = sandbox_id.into();
+        let mut idle_steps = 0usize;
+        while idle_steps < max_idle_steps {
+            if should_cancel() {
+                return RuntimeTaskStatus::Cancelled;
+            }
+            match self.handle_one(sandbox_id.clone(), now_ms) {
+                Ok(Some(_)) => idle_steps = 0,
+                Ok(None) => idle_steps += 1,
+                Err(_) => return RuntimeTaskStatus::Failed,
+            }
+        }
+        RuntimeTaskStatus::Cancelled
+    }
+
     pub fn handler(&self) -> &DnsBrokerHandler<U> {
         &self.handler
     }
@@ -437,6 +459,26 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
         let request = read_http_proxy_request(&mut stream, self.max_request_bytes)?;
         self.handle_http_proxy_request(client, &request, &mut stream, now_ms)
             .map(Some)
+    }
+
+    pub fn run_until_cancelled(
+        &mut self,
+        now_ms: u64,
+        max_idle_steps: usize,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> RuntimeTaskStatus {
+        let mut idle_steps = 0usize;
+        while idle_steps < max_idle_steps {
+            if should_cancel() {
+                return RuntimeTaskStatus::Cancelled;
+            }
+            match self.handle_one(now_ms) {
+                Ok(Some(_)) => idle_steps = 0,
+                Ok(None) => idle_steps += 1,
+                Err(_) => return RuntimeTaskStatus::Failed,
+            }
+        }
+        RuntimeTaskStatus::Cancelled
     }
 
     pub fn frontend(&self) -> &ExplicitProxyFrontend<E> {
@@ -684,6 +726,26 @@ impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
         };
         self.handle_socks5_connect_request(client, greeting.len(), &request, &mut stream, now_ms)
             .map(Some)
+    }
+
+    pub fn run_until_cancelled(
+        &mut self,
+        now_ms: u64,
+        max_idle_steps: usize,
+        mut should_cancel: impl FnMut() -> bool,
+    ) -> RuntimeTaskStatus {
+        let mut idle_steps = 0usize;
+        while idle_steps < max_idle_steps {
+            if should_cancel() {
+                return RuntimeTaskStatus::Cancelled;
+            }
+            match self.handle_one(now_ms) {
+                Ok(Some(_)) => idle_steps = 0,
+                Ok(None) => idle_steps += 1,
+                Err(_) => return RuntimeTaskStatus::Failed,
+            }
+        }
+        RuntimeTaskStatus::Cancelled
     }
 
     pub fn frontend(&self) -> &ExplicitProxyFrontend<E> {
@@ -2324,6 +2386,112 @@ mod tests {
                 "socks5_accept_loop",
                 RuntimeTaskStatus::Cancelled,
             )
+        );
+    }
+
+    #[test]
+    fn blocking_listener_loop_tasks_feed_lifecycle_exit() {
+        let query = dns_query(0x7070, "Loop.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let mut dns_server = BlockingDnsBrokerServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            Duration::from_millis(10),
+            512,
+        )
+        .unwrap();
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut http_server = BlockingHttpProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            Duration::from_millis(10),
+            4096,
+        )
+        .unwrap();
+        let mut socks_server = BlockingSocks5ProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_millis(10),
+            4096,
+        )
+        .unwrap();
+        let mut task_set = BlockingRuntimeTaskSet::new();
+        task_set
+            .spawn_cancellable_task(
+                RuntimeComponent::DnsListener,
+                "dns_accept_loop",
+                move |token| {
+                    dns_server.run_until_cancelled("s1", 1_000, 32, || token.is_cancelled())
+                },
+            )
+            .unwrap();
+        task_set
+            .spawn_cancellable_task(
+                RuntimeComponent::HttpProxyListener,
+                "http_proxy_accept_loop",
+                move |token| http_server.run_until_cancelled(1_000, 32, || token.is_cancelled()),
+            )
+            .unwrap();
+        task_set
+            .spawn_cancellable_task(
+                RuntimeComponent::Socks5Listener,
+                "socks5_accept_loop",
+                move |token| socks_server.run_until_cancelled(1_000, 32, || token.is_cancelled()),
+            )
+            .unwrap();
+        let expectations = task_set.expectations();
+        assert_eq!(task_set.request_cancellation(), 3);
+
+        let report = task_set.join_all_with_timeout(Duration::from_secs(1));
+        let mut lifecycle = RuntimeLifecycleHarness::new("task-sandbox", 8);
+        lifecycle
+            .start_with_task_expectations(
+                vec![
+                    RuntimeComponent::DnsListener,
+                    RuntimeComponent::HttpProxyListener,
+                    RuntimeComponent::Socks5Listener,
+                ],
+                expectations,
+                1_000,
+            )
+            .unwrap();
+        lifecycle
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![
+                    RuntimeCleanupAction::DnsListener,
+                    RuntimeCleanupAction::HttpProxyListener,
+                    RuntimeCleanupAction::Socks5Listener,
+                ]),
+                None,
+                Some(report),
+                1_100,
+            )
+            .unwrap();
+
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        let exit = records.last().unwrap();
+        assert_eq!(exit.kind, AuditKind::NetworkSessionExit);
+        assert_eq!(exit.decision, Some(Decision::Allow));
+        assert_eq!(exit.details["task_join_status"], "complete");
+        assert_eq!(exit.details["failed_runtime_task_count"], "0");
+        assert_eq!(
+            exit.details["runtime_tasks"],
+            "dns_listener:dns_accept_loop:cancelled,http_proxy_listener:http_proxy_accept_loop:cancelled,socks5_listener:socks5_accept_loop:cancelled"
         );
     }
 

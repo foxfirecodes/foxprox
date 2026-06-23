@@ -2868,3 +2868,33 @@ Extended the idle-vs-failure distinction to all blocking listener frontends. DNS
 
 ### Remaining blind spots
 - Final runtime still needs actual task-loop wrappers that convert repeated idle, real listener failures, cancellation, and timeouts into registered task outcomes and fan-in audit evidence.
+
+## 2026-06-23 — Feed real listener loops into lifecycle task evidence
+
+### Commands run
+- `cargo test -p foxprox-egress blocking_listener_loop_tasks_feed_lifecycle_exit --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 53 egress tests, and 13 stack tests.
+- `cargo fmt` — applied formatting after the listener-loop wrapper test changed layout.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_listener_loop_tasks_feed_lifecycle_exit ... ok`
+- `tests::blocking_dns_broker_server_reports_idle_without_failure ... ok`
+- `tests::blocking_http_proxy_server_reports_idle_without_failure ... ok`
+- `tests::blocking_socks5_proxy_server_reports_idle_without_failure ... ok`
+
+### Interpretation
+Added `run_until_cancelled(...)` loop wrappers for DNS, HTTP, and SOCKS blocking listener servers. These wrappers consume the idle-vs-handled-vs-error `handle_one(...)` result directly: idle continues, handled traffic resets the idle budget, cancellation returns `RuntimeTaskStatus::Cancelled`, and real listener errors return `RuntimeTaskStatus::Failed`. The lifecycle regression runs actual DNS/HTTP/SOCKS listener loop tasks through `BlockingRuntimeTaskSet`, requests cancellation, joins them, and verifies `network_session_exit` records all three listener tasks as `cancelled` with `task_join_status=complete` and zero failed tasks.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Review follow-up
+- Round-61 validation identified real listener task-loop wrappers as the next runtime gap. This commit adds the wrappers and proves their clean cancellation path is fed into lifecycle evidence. Real listener error injection remains a future targeted proof.
+
+### Remaining blind spots
+- Need deterministic listener error injection or adapter traits to prove `run_until_cancelled(...) -> Failed` for actual socket failures without relying on OS-specific invalid handles.
+- Final async runtime still needs readiness/timer integration, task registration, cancellation/join ordering, and fan-in audit drain for concrete runtime tasks.
