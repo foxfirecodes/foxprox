@@ -4040,3 +4040,21 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Smoltcp ready-task dispatch now has deterministic bridge-loop evidence. Remaining final gap is integrating actual Tokio fd/socket/TUN readiness, smoltcp timer wakeups, and the full end-to-end async runtime loop with real task driving and shutdown final drain.
+
+## 2026-06-23 — Add smoltcp timer-ready dispatch without TUN input
+
+### Fix
+- Added `SmoltcpIpStack::runtime_timer_readiness(now_ms)`, deriving `smoltcp_stack:smoltcp_tun_bridge_loop` readiness directly from `Interface::poll_delay(...)` at a scheduler timestamp.
+- Added `SmoltcpIpStack::poll_ready_task(...)`, mapping `smoltcp_stack:smoltcp_tun_bridge_loop` ready task expectations to a direct stack poll without requiring a TUN packet read first.
+- Added `smoltcp_timer_readiness_dispatch_polls_stack_without_tun_packet`, proving a smoltcp TCP timer plan starts as `wait_for_timer`, becomes ready at the due timestamp, and dispatches a stack poll from the ready task while ignoring unrelated ready tasks.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- Initial targeted stack test compile failed because `Interface::poll_delay(...)` requires mutable access; fixed `runtime_timer_readiness` to take `&mut self`.
+- `cargo test -p foxprox-stack smoltcp_timer_readiness_dispatch_polls_stack_without_tun_packet --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 82 egress tests, and 15 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Smoltcp timer readiness can now drive a stack poll without packet input in the deterministic stack adapter. Remaining final gap is still true Tokio fd/socket/TUN readiness and an end-to-end async runtime loop that wires live timers, live listener/TUN readiness, cancellation/join, audit fan-in, and shutdown final drain together.

@@ -198,6 +198,28 @@ impl SmoltcpIpStack {
         }
     }
 
+    pub fn runtime_timer_readiness(&mut self, now_ms: i64) -> RuntimeTaskReadiness {
+        let next_poll_delay_ms = self
+            .iface
+            .poll_delay(Instant::from_millis(now_ms), &self.sockets)
+            .map(|delay| delay.total_millis());
+        RuntimeTaskReadiness::new(RuntimeComponent::SmoltcpStack, "smoltcp_tun_bridge_loop")
+            .with_ready(next_poll_delay_ms == Some(0))
+            .with_next_ready_delay_ms(next_poll_delay_ms.filter(|delay| *delay > 0))
+    }
+
+    pub fn poll_ready_task(
+        &mut self,
+        ready_tasks: &[RuntimeTaskExpectation],
+        now_ms: i64,
+    ) -> Option<StackPollEvidence> {
+        let should_poll = ready_tasks.iter().any(|task| {
+            task.component == RuntimeComponent::SmoltcpStack
+                && task.task_name == "smoltcp_tun_bridge_loop"
+        });
+        should_poll.then(|| self.poll(now_ms))
+    }
+
     pub fn poll(&mut self, now_ms: i64) -> StackPollEvidence {
         let before = self.device.outbound.borrow().len();
         let result = self.iface.poll(
@@ -1094,6 +1116,55 @@ mod tests {
         );
         assert_eq!(report.task_outcome.task_name, "smoltcp_tun_bridge_loop");
         assert_eq!(report.task_outcome.status, RuntimeTaskStatus::TimedOut);
+    }
+
+    #[test]
+    fn smoltcp_timer_readiness_dispatch_polls_stack_without_tun_packet() {
+        let mut stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        stack.listen_tcp(8080, 1024, 1024);
+        let client_seq = 0x0102_0304;
+        stack.inject_packet(ipv4_tcp_packet(TcpPacketSpec {
+            source: [10, 0, 2, 15],
+            destination: [10, 0, 2, 1],
+            source_port: 50_000,
+            destination_port: 8080,
+            sequence: client_seq,
+            acknowledgment: 0,
+            flags: TCP_SYN,
+            payload: &[],
+        }));
+        let syn_ack_evidence = stack.poll(3_000);
+        let delay = syn_ack_evidence.next_poll_delay_ms.unwrap();
+        let waiting_readiness = stack.runtime_timer_readiness(3_000);
+        let waiting_plan = RuntimeReadinessPlan::from_tasks(&[waiting_readiness]);
+        assert_eq!(waiting_plan.status_detail(), "timer_wait");
+        assert_eq!(waiting_plan.next_ready_delay_ms, Some(delay));
+
+        let due_ms = 3_000 + delay as i64;
+        let ready = stack.runtime_timer_readiness(due_ms);
+        assert_eq!(
+            ready,
+            RuntimeTaskReadiness::ready(RuntimeComponent::SmoltcpStack, "smoltcp_tun_bridge_loop")
+        );
+        let ready_tasks = vec![RuntimeTaskExpectation::new(
+            RuntimeComponent::SmoltcpStack,
+            "smoltcp_tun_bridge_loop",
+        )];
+        let before_outbound = stack.outbound_len();
+
+        let poll = stack.poll_ready_task(&ready_tasks, due_ms).unwrap();
+
+        assert!(poll.next_poll_delay_ms.is_some());
+        assert!(stack.outbound_len() >= before_outbound);
+        assert!(stack
+            .poll_ready_task(
+                &[RuntimeTaskExpectation::new(
+                    RuntimeComponent::AuditFanIn,
+                    "audit_fan_in_loop"
+                )],
+                due_ms,
+            )
+            .is_none());
     }
 
     #[test]

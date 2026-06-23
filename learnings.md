@@ -470,3 +470,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Smoltcp bridge ready-task dispatch narrows stack integration separately from timers
 
 - Smoltcp stack timer readiness and TUN packet bridge dispatch are related but distinct. Add a ready-task dispatch helper for `smoltcp_stack:smoltcp_tun_bridge_loop` so scheduler evidence can drive bridge processing while preserving real async timer/fd readiness as remaining integration work.
+
+## 2026-06-23 — Smoltcp timer readiness can be dispatched without a TUN packet read
+
+- Smoltcp timers need a scheduler path that polls the stack when a timer matures even if no new TUN packet is read. Expose timer readiness from `Interface::poll_delay(...)` and a matching ready-task poll helper so timer wakeups are not hidden behind packet input.
