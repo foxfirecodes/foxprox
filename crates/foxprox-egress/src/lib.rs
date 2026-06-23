@@ -341,13 +341,47 @@ impl<U: DnsUpstream> BlockingDnsBrokerServer<U> {
     ) -> RuntimeTaskStatus {
         let sandbox_id = sandbox_id.into();
         run_blocking_listener_loop_until_cancelled(max_idle_steps, should_cancel, || {
-            self.handle_one(sandbox_id.clone(), now_ms)
-                .map(|step| step.map(|_| ()))
+            match self.handle_one(sandbox_id.clone(), now_ms) {
+                Ok(step) => Ok(step.map(|_| ())),
+                Err(error) => {
+                    self.record_listener_loop_error(&sandbox_id, now_ms, &error);
+                    Err(error)
+                }
+            }
         })
     }
 
     pub fn handler(&self) -> &DnsBrokerHandler<U> {
         &self.handler
+    }
+
+    fn record_listener_loop_error(
+        &mut self,
+        sandbox_id: &str,
+        now_ms: u64,
+        error: &DnsUpstreamError,
+    ) {
+        let request = PolicyRequest::unsupported(
+            sandbox_id.to_string(),
+            Frontend::Core,
+            DenialReason::RuntimeState,
+        );
+        let audit = AuditRecord::new_at(
+            AuditKind::BrokerError,
+            sandbox_id.to_string(),
+            now_ms as u128,
+        )
+        .with_frontend(Frontend::Core)
+        .with_protocol(Protocol::Dns)
+        .with_decision(Decision::FailClosed, Some(DenialReason::RuntimeState))
+        .with_detail("runtime_error", "listener_loop_error")
+        .with_detail(
+            "listener_component",
+            RuntimeComponent::DnsListener.as_detail(),
+        )
+        .with_detail("listener_task", "dns_accept_loop")
+        .with_detail("listener_error", dns_upstream_error_detail(error));
+        let _ = self.handler.broker_mut().append_audit_for(&request, audit);
     }
 
     fn record_client_send_failure(
@@ -396,7 +430,21 @@ fn run_blocking_listener_loop_until_cancelled<E>(
             Err(_) => return RuntimeTaskStatus::Failed,
         }
     }
-    RuntimeTaskStatus::Cancelled
+    RuntimeTaskStatus::TimedOut
+}
+
+fn dns_upstream_error_detail(error: &DnsUpstreamError) -> &'static str {
+    match error {
+        DnsUpstreamError::Unavailable => "unavailable",
+        DnsUpstreamError::SourceMismatch => "source_mismatch",
+        DnsUpstreamError::MalformedResponse => "malformed_response",
+    }
+}
+
+fn proxy_egress_error_detail(error: &ProxyEgressError) -> &'static str {
+    match error {
+        ProxyEgressError::SendFailed => "send_failed",
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -421,6 +469,8 @@ pub struct BlockingHttpProxyServer<E> {
 }
 
 impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
+    const LISTENER_TASK_NAME: &'static str = "http_proxy_accept_loop";
+
     pub fn bind(
         bind_addr: SocketAddr,
         frontend: ExplicitProxyFrontend<E>,
@@ -479,12 +529,39 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
         should_cancel: impl FnMut() -> bool,
     ) -> RuntimeTaskStatus {
         run_blocking_listener_loop_until_cancelled(max_idle_steps, should_cancel, || {
-            self.handle_one(now_ms).map(|step| step.map(|_| ()))
+            match self.handle_one(now_ms) {
+                Ok(step) => Ok(step.map(|_| ())),
+                Err(error) => {
+                    self.record_listener_loop_error(now_ms, &error);
+                    Err(error)
+                }
+            }
         })
     }
 
     pub fn frontend(&self) -> &ExplicitProxyFrontend<E> {
         &self.frontend
+    }
+
+    fn record_listener_loop_error(&mut self, now_ms: u64, error: &ProxyEgressError) {
+        let sandbox_id = self.frontend.sandbox_id().to_string();
+        let request = PolicyRequest::unsupported(
+            sandbox_id.clone(),
+            Frontend::HttpProxy,
+            DenialReason::RuntimeState,
+        );
+        let audit = AuditRecord::new_at(AuditKind::BrokerError, sandbox_id, now_ms as u128)
+            .with_frontend(Frontend::HttpProxy)
+            .with_protocol(Protocol::Http)
+            .with_decision(Decision::FailClosed, Some(DenialReason::RuntimeState))
+            .with_detail("runtime_error", "listener_loop_error")
+            .with_detail(
+                "listener_component",
+                RuntimeComponent::HttpProxyListener.as_detail(),
+            )
+            .with_detail("listener_task", Self::LISTENER_TASK_NAME)
+            .with_detail("listener_error", proxy_egress_error_detail(error));
+        let _ = self.frontend.broker_mut().append_audit_for(&request, audit);
     }
 
     fn handle_http_proxy_request<W: Write>(
@@ -560,9 +637,10 @@ fn read_http_proxy_request(
     while request.len() < max_request_bytes.max(1) {
         let remaining = max_request_bytes.max(1).saturating_sub(request.len());
         let read_len = remaining.min(chunk.len());
-        let len = stream
-            .read(&mut chunk[..read_len])
-            .map_err(|_| ProxyEgressError::SendFailed)?;
+        let len = match stream.read(&mut chunk[..read_len]) {
+            Ok(len) => len,
+            Err(_) => break,
+        };
         if len == 0 {
             break;
         }
@@ -627,6 +705,8 @@ pub struct BlockingSocks5ProxyServer<E> {
 }
 
 impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
+    const LISTENER_TASK_NAME: &'static str = "socks5_accept_loop";
+
     pub fn bind(
         bind_addr: SocketAddr,
         frontend: ExplicitProxyFrontend<E>,
@@ -737,12 +817,39 @@ impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
         should_cancel: impl FnMut() -> bool,
     ) -> RuntimeTaskStatus {
         run_blocking_listener_loop_until_cancelled(max_idle_steps, should_cancel, || {
-            self.handle_one(now_ms).map(|step| step.map(|_| ()))
+            match self.handle_one(now_ms) {
+                Ok(step) => Ok(step.map(|_| ())),
+                Err(error) => {
+                    self.record_listener_loop_error(now_ms, &error);
+                    Err(error)
+                }
+            }
         })
     }
 
     pub fn frontend(&self) -> &ExplicitProxyFrontend<E> {
         &self.frontend
+    }
+
+    fn record_listener_loop_error(&mut self, now_ms: u64, error: &ProxyEgressError) {
+        let sandbox_id = self.frontend.sandbox_id().to_string();
+        let request = PolicyRequest::unsupported(
+            sandbox_id.clone(),
+            Frontend::Socks5Proxy,
+            DenialReason::RuntimeState,
+        );
+        let audit = AuditRecord::new_at(AuditKind::BrokerError, sandbox_id, now_ms as u128)
+            .with_frontend(Frontend::Socks5Proxy)
+            .with_protocol(Protocol::Socks)
+            .with_decision(Decision::FailClosed, Some(DenialReason::RuntimeState))
+            .with_detail("runtime_error", "listener_loop_error")
+            .with_detail(
+                "listener_component",
+                RuntimeComponent::Socks5Listener.as_detail(),
+            )
+            .with_detail("listener_task", Self::LISTENER_TASK_NAME)
+            .with_detail("listener_error", proxy_egress_error_detail(error));
+        let _ = self.frontend.broker_mut().append_audit_for(&request, audit);
     }
 
     fn handle_socks5_method_selection_response<W: Write>(
@@ -2414,8 +2521,29 @@ mod tests {
             },
         );
 
-        assert_eq!(status, RuntimeTaskStatus::Cancelled);
+        assert_eq!(status, RuntimeTaskStatus::TimedOut);
         assert_eq!(calls, 4);
+    }
+
+    #[test]
+    fn blocking_listener_loop_helper_reserves_cancelled_for_observed_cancellation() {
+        let mut cancel_checks = 0usize;
+        let mut calls = 0usize;
+
+        let status = run_blocking_listener_loop_until_cancelled(
+            8,
+            || {
+                cancel_checks += 1;
+                cancel_checks == 2
+            },
+            || -> Result<Option<()>, ()> {
+                calls += 1;
+                Ok(None)
+            },
+        );
+
+        assert_eq!(status, RuntimeTaskStatus::Cancelled);
+        assert_eq!(calls, 1);
     }
 
     #[test]
@@ -2464,7 +2592,7 @@ mod tests {
                 RuntimeComponent::DnsListener,
                 "dns_accept_loop",
                 move |token| {
-                    dns_server.run_until_cancelled("s1", 1_000, 32, || token.is_cancelled())
+                    dns_server.run_until_cancelled("s1", 1_000, 1_000_000, || token.is_cancelled())
                 },
             )
             .unwrap();
@@ -2472,14 +2600,18 @@ mod tests {
             .spawn_cancellable_task(
                 RuntimeComponent::HttpProxyListener,
                 "http_proxy_accept_loop",
-                move |token| http_server.run_until_cancelled(1_000, 32, || token.is_cancelled()),
+                move |token| {
+                    http_server.run_until_cancelled(1_000, 1_000_000, || token.is_cancelled())
+                },
             )
             .unwrap();
         task_set
             .spawn_cancellable_task(
                 RuntimeComponent::Socks5Listener,
                 "socks5_accept_loop",
-                move |token| socks_server.run_until_cancelled(1_000, 32, || token.is_cancelled()),
+                move |token| {
+                    socks_server.run_until_cancelled(1_000, 1_000_000, || token.is_cancelled())
+                },
             )
             .unwrap();
         let expectations = task_set.expectations();
@@ -3140,6 +3272,40 @@ mod tests {
         let records: Vec<_> = server.frontend().broker().audit().records().collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].decision, Some(Decision::DenyDrop));
+    }
+
+    #[test]
+    fn blocking_http_proxy_server_read_timeout_is_audited_request_failure() {
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 8);
+        let frontend =
+            ExplicitProxyFrontend::new("s1", broker, InMemoryExplicitProxyEgress::default());
+        let mut server = BlockingHttpProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            frontend,
+            Duration::from_millis(5),
+            4096,
+        )
+        .unwrap();
+        let mut client = TcpStream::connect(server.local_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+
+        let step = server.handle_one(1_000).unwrap().unwrap();
+        assert_eq!(step.decision, Decision::FailClosed);
+        assert_eq!(step.reason, Some(DenialReason::ProxyMalformed));
+        assert!(!step.forwarded);
+        assert_eq!(step.status_code, 400);
+        assert_eq!(step.send_status, "sent");
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+
+        let records: Vec<_> = server.frontend().broker().audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::UnsupportedDenied);
+        assert_eq!(records[0].decision, Some(Decision::FailClosed));
+        assert_eq!(records[0].reason, Some(DenialReason::ProxyMalformed));
     }
 
     #[test]

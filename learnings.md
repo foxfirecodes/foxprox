@@ -302,3 +302,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Listener task loops need reusable status mapping
 
 - Per-listener cancellation loops should share one idle/handled/error mapping so DNS, HTTP, and SOCKS cannot drift: handled work resets idle budget, idle advances it, cancellation returns `cancelled`, and real listener errors return `failed` for lifecycle task evidence.
+
+## 2026-06-23 — Idle budget exhaustion is not cancellation evidence
+
+- Listener loop helpers must reserve `RuntimeTaskStatus::Cancelled` for an observed cancellation signal. Idle-budget exhaustion without cancellation is a timeout/fail-closed task outcome, while per-client read timeouts should be audited as request failures and should not stop the listener task.

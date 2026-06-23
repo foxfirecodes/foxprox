@@ -2924,3 +2924,30 @@ Refactored DNS/HTTP/SOCKS `run_until_cancelled(...)` wrappers through a shared `
 ### Remaining blind spots
 - Need concrete adapter-level tests for actual OS listener/socket errors once the listener abstraction can inject them without unsafe fd manipulation.
 - Final async runtime still needs readiness/timer integration and audit fan-in wiring for real task loops.
+
+## 2026-06-23 — Fix listener loop cancellation overclaim and client-read handling
+
+### Commands run
+- `cargo fmt` — applied formatting for listener-loop follow-up changes.
+- `cargo test -p foxprox-egress blocking_listener_loop --all-targets --all-features` — passed, 4 listener-loop tests.
+- `cargo test -p foxprox-egress blocking_http_proxy_server_read_timeout_is_audited_request_failure --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 57 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_listener_loop_helper_reserves_cancelled_for_observed_cancellation ... ok`
+- `tests::blocking_listener_loop_helper_resets_idle_budget_after_work ... ok` now expects `RuntimeTaskStatus::TimedOut` for idle-budget exhaustion without cancellation.
+- `tests::blocking_http_proxy_server_read_timeout_is_audited_request_failure ... ok`
+
+### Interpretation
+Round-62/63 review found two high-risk overclaims: idle-budget exhaustion was being reported as `cancelled`, and HTTP client read timeouts could become listener-task failures. The shared listener loop now reports idle-budget exhaustion as `timed_out` and reserves `cancelled` for observed cancellation. DNS/HTTP/SOCKS run-loop wrappers also append structured `broker_error` evidence before returning `failed` on listener-loop errors. HTTP request read errors are handled as per-request fail-closed malformed proxy decisions, keeping the listener alive instead of converting a slow/reset client into a task failure.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Still need adapter-level listener/socket error injection to prove real OS accept/recv failures hit the new `listener_loop_error` audit path deterministically.
+- Final async runtime still needs readiness/timer integration and audit fan-in wiring for real task loops.
