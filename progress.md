@@ -3819,3 +3819,28 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - The scheduler now executes concrete Tokio actions from audited readiness plans, but live source integration remains: DNS/HTTP/SOCKS listener readiness, TUN packet readiness, smoltcp timer evidence, fan-in progress, task spawning/joining, and shutdown final-drain still need to be wired into an end-to-end runtime loop.
+
+## 2026-06-23 — Round-94 clean; add idle and bounded scheduler-loop evidence
+
+### Review
+- Round-94 correctness and validation found no blockers or high issues.
+- Validation noted one minor non-blocking evidence gap: the scheduler step had an `idle` branch without direct scheduler-step test coverage.
+
+### Fix
+- Added direct idle scheduler-step coverage proving an idle readiness plan records `scheduler_action=idle`, dispatches no ready tasks, and yields once.
+- Added `run_async_runtime_scheduler_loop_until_cancelled(...)`, a bounded Tokio scheduler loop that repeatedly gathers readiness from an injected source, records/executes scheduler steps, and stops on cancellation or a step limit.
+- Added `AsyncRuntimeSchedulerLoopReport` and `AsyncRuntimeSchedulerLoopStatus`.
+- Added loop coverage proving a ready DNS step dispatches first, a later smoltcp timer wait is preempted by cancellation, and readiness audit records the sequential scheduler actions.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_scheduler --all-targets --all-features` — passed 4 scheduler tests.
+- Initial full validation found a clippy `redundant_closure` warning in the loop helper; replaced the closure with `&mut run_ready_tasks`.
+- `cargo fmt` — reapplied formatting after clippy fix.
+- `cargo test -p foxprox-egress async_runtime_scheduler --all-targets --all-features` — passed 4 scheduler tests.
+- `cargo test --all-targets --all-features` — passed, including 73 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The scheduler loop is now concrete and cancellation-aware, but readiness is still supplied by an injected source. Remaining live-source integration: DNS/HTTP/SOCKS listener readiness, TUN packet readiness, smoltcp timer evidence, fan-in progress, task spawning/joining, and shutdown final-drain in an end-to-end runtime loop.

@@ -430,3 +430,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Scheduler action should execute from the same audited readiness plan
 
 - When narrowing the async scheduler gap, record the `RuntimeReadinessPlan` before acting and return a step report that carries the same scheduler action, dispatched tasks, and wait result. This keeps runtime evidence and actual control flow tied to the same readiness snapshot.
+
+## 2026-06-23 — Bound scheduler loops while live sources are still injected
+
+- Before the end-to-end live runtime exists, keep Tokio scheduler-loop helpers bounded by an explicit step limit and report whether the loop stopped from cancellation or the bound. This preserves deterministic tests and avoids claiming an unbounded production loop is complete.
