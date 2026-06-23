@@ -2522,3 +2522,28 @@ Addressed round-48 highs. `RuntimeLifecycleHarness::start_with_task_expectations
 
 ### Remaining blind spots
 - Audit sink failure evidence is returned to the caller, not yet routed to a separate durable emergency sink. Final runtime should define where that failure record is persisted when the primary audit sink is unavailable.
+
+## 2026-06-22 — Add emergency sink path for fan-in drain failures
+
+### Commands run
+- `cargo fmt` — applied formatting for emergency fan-in drain changes.
+- `cargo test -p foxprox-core runtime::tests::runtime_audit_fan_in --all-targets --all-features` — passed, 7 fan-in tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 149 core tests, 3 device tests, 41 egress tests, and 12 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_audit_fan_in_writes_sink_failure_to_emergency_sink ... ok`
+- `runtime::tests::runtime_audit_fan_in_sink_failure_preserves_full_undrained_ledger ... ok`
+- `runtime::tests::runtime_audit_fan_in_drains_to_json_sink_once ... ok`
+
+### Interpretation
+Added `RuntimeAuditFanIn::drain_to_sink_with_failure_sink(...)`, allowing a caller to provide an emergency/failure sink for the structured `audit_sink_write_failed` record when the primary audit sink rejects a record. The primary drain cursor remains unchanged and undrained records stay in the fan-in ledger, while the failure sink receives the broker-error evidence when available.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- The emergency sink is still caller-provided and synchronous. Final runtime should define a concrete fallback destination and bounded behavior when both primary and emergency sinks fail.

@@ -536,6 +536,14 @@ impl RuntimeAuditFanIn {
         &mut self,
         sink: &mut JsonLineAuditSink<W>,
     ) -> Result<RuntimeAuditDrainReport, RuntimeAuditDrainError> {
+        self.drain_to_sink_with_failure_sink(sink, None::<&mut JsonLineAuditSink<Vec<u8>>>)
+    }
+
+    pub fn drain_to_sink_with_failure_sink<W: Write, E: Write>(
+        &mut self,
+        sink: &mut JsonLineAuditSink<W>,
+        mut failure_sink: Option<&mut JsonLineAuditSink<E>>,
+    ) -> Result<RuntimeAuditDrainReport, RuntimeAuditDrainError> {
         let records: Vec<_> = self
             .audit
             .records()
@@ -555,6 +563,9 @@ impl RuntimeAuditFanIn {
                             "last_drained_sequence",
                             self.last_drained_sequence.to_string(),
                         );
+                if let Some(failure_sink) = failure_sink.as_deref_mut() {
+                    let _ = failure_sink.append(&failure_record);
+                }
                 return Err(RuntimeAuditDrainError::SinkWriteFailed {
                     attempted_sequence: record.sequence,
                     failure_record: Box::new(failure_record),
@@ -1204,6 +1215,42 @@ mod tests {
             "audit_sink_write_failed"
         );
         assert_eq!(failure_record.details["attempted_sequence"], "1");
+        let records: Vec<_> = fan_in.audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::NetworkSessionStart);
+    }
+
+    #[test]
+    fn runtime_audit_fan_in_writes_sink_failure_to_emergency_sink() {
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 1);
+        let mut start = AuditRecord::new_at(AuditKind::NetworkSessionStart, "s1", 1_000);
+        start.sequence = 1;
+        fan_in.ingest("lifecycle", &[start]).unwrap();
+
+        let mut primary = JsonLineAuditSink::new(FailingAuditWriter);
+        let mut emergency = JsonLineAuditSink::new(Vec::new());
+        let error = fan_in
+            .drain_to_sink_with_failure_sink(&mut primary, Some(&mut emergency))
+            .unwrap_err();
+
+        let RuntimeAuditDrainError::SinkWriteFailed {
+            attempted_sequence,
+            failure_record,
+        } = error;
+        assert_eq!(attempted_sequence, 1);
+        assert_eq!(
+            failure_record.details["runtime_error"],
+            "audit_sink_write_failed"
+        );
+        assert_eq!(emergency.records_written(), 1);
+        let emergency_output = String::from_utf8(emergency.into_inner()).unwrap();
+        let emergency_record: serde_json::Value =
+            serde_json::from_str(emergency_output.lines().next().unwrap()).unwrap();
+        assert_eq!(emergency_record["kind"], "broker_error");
+        assert_eq!(
+            emergency_record["details"]["runtime_error"],
+            "audit_sink_write_failed"
+        );
         let records: Vec<_> = fan_in.audit().records().collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, AuditKind::NetworkSessionStart);

@@ -245,3 +245,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 
 - Duplicate task-name protection must exist both at supervisor registration and direct lifecycle start with explicit expectations; direct callers can bypass supervisor checks otherwise.
 - Audit sink write failure evidence should not be lossy-appended into the same full ledger that still contains undrained records. Return the failure record separately so retry/durable-drain evidence is not evicted before it reaches the sink.
+
+## 2026-06-22 — Primary audit sink failures need a separate emergency path
+
+- Returning sink-failure records preserves undrained in-memory records, but a caller also needs a way to write the failure record somewhere other than the failed primary sink. A fan-in drain helper can attempt an emergency/failure sink without advancing the primary drain cursor.
