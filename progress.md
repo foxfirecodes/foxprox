@@ -4020,3 +4020,23 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - TUN scheduler evidence is still in-memory packet-queue readiness and blocking harness dispatch. Final gap remains real Tokio TUN fd readiness, smoltcp timer/readiness integration, and end-to-end async task driving/final drain.
+
+## 2026-06-23 — Add smoltcp bridge ready-task dispatch evidence
+
+### Review
+- Round-103 correctness and validation found no blockers or high issues.
+- Both reviews identified the next gap as real Tokio TUN fd readiness, smoltcp timer/readiness integration, and end-to-end async task driving/final drain.
+
+### Fix
+- Added `SmoltcpTunBridge::process_ready_task(...)`, mapping `smoltcp_stack:smoltcp_tun_bridge_loop` runtime task expectations to smoltcp bridge packet-loop processing.
+- Added `smoltcp_tun_bridge_processes_ready_scheduler_task`, proving the ready-task mapping processes an inbound packet, emits/writes a stack output packet, records smoltcp packet audit evidence, and ignores unrelated ready tasks.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-stack smoltcp_tun_bridge_processes_ready_scheduler_task --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 82 egress tests, and 14 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Smoltcp ready-task dispatch now has deterministic bridge-loop evidence. Remaining final gap is integrating actual Tokio fd/socket/TUN readiness, smoltcp timer wakeups, and the full end-to-end async runtime loop with real task driving and shutdown final drain.

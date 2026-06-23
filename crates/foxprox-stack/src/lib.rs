@@ -10,8 +10,8 @@
 use foxprox_core::{
     AuditKind, AuditRecord, BrokerCore, ByteCounts, Decision, DenialReason, DeviceIoError,
     Frontend, NetworkEndpoint, PacketDevice, ParsedIpPacket, PolicyDecision, PolicyRequest,
-    RuntimeComponent, RuntimeTaskOutcome, RuntimeTaskReadiness, RuntimeTaskStatus, TcpEgress,
-    TcpEgressError,
+    RuntimeComponent, RuntimeTaskExpectation, RuntimeTaskOutcome, RuntimeTaskReadiness,
+    RuntimeTaskStatus, TcpEgress, TcpEgressError,
 };
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -538,6 +538,19 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         }
     }
 
+    pub fn process_ready_task(
+        &mut self,
+        ready_tasks: &[RuntimeTaskExpectation],
+        now_ms: i64,
+        max_packets: usize,
+    ) -> Option<SmoltcpBridgeLoopReport> {
+        let should_process = ready_tasks.iter().any(|task| {
+            task.component == RuntimeComponent::SmoltcpStack
+                && task.task_name == "smoltcp_tun_bridge_loop"
+        });
+        should_process.then(|| self.process_packet_loop(now_ms, max_packets))
+    }
+
     fn record_device_read_failure(&mut self, now_ms: i64) {
         let request = PolicyRequest::unsupported(
             self.sandbox_id.clone(),
@@ -984,6 +997,46 @@ mod tests {
         );
         assert_eq!(report.task_outcome.task_name, "smoltcp_tun_bridge_loop");
         assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Completed);
+    }
+
+    #[test]
+    fn smoltcp_tun_bridge_processes_ready_scheduler_task() {
+        let packet = ipv4_icmp_echo_request();
+        let device = InMemoryPacketDevice::with_inbound([packet]);
+        let config = PolicyConfig {
+            allow_ping: true,
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 16);
+        let stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+        let ready_tasks = vec![RuntimeTaskExpectation::new(
+            RuntimeComponent::SmoltcpStack,
+            "smoltcp_tun_bridge_loop",
+        )];
+
+        let report = bridge.process_ready_task(&ready_tasks, 2_792, 8).unwrap();
+
+        assert_eq!(report.processed_packets, 1);
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Completed);
+        assert_eq!(bridge.device().outbound().len(), 1);
+        let records: Vec<_> = bridge.broker().audit().records().collect();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].kind, AuditKind::PacketObserved);
+        assert_eq!(records[0].details["stack"], "smoltcp");
+        assert_eq!(records[1].kind, AuditKind::IcmpDecision);
+        assert_eq!(records[2].details["direction"], "to_sandbox");
+        assert!(bridge
+            .process_ready_task(
+                &[RuntimeTaskExpectation::new(
+                    RuntimeComponent::AuditFanIn,
+                    "audit_fan_in_loop"
+                )],
+                2_793,
+                8,
+            )
+            .is_none());
     }
 
     #[test]

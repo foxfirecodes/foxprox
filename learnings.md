@@ -466,3 +466,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Model TUN packet readiness before OS-level TUN readiness
 
 - In-memory TUN devices can expose packet-queue readiness and ready-task dispatch without claiming the production TUN fd readiness integration is complete. This gives deterministic evidence for scheduler-driven TUN packet processing while preserving the final Tokio fd-readiness gap.
+
+## 2026-06-23 — Smoltcp bridge ready-task dispatch narrows stack integration separately from timers
+
+- Smoltcp stack timer readiness and TUN packet bridge dispatch are related but distinct. Add a ready-task dispatch helper for `smoltcp_stack:smoltcp_tun_bridge_loop` so scheduler evidence can drive bridge processing while preserving real async timer/fd readiness as remaining integration work.
