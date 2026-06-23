@@ -4337,3 +4337,24 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Non-`Send` smoltcp state now has local task ownership evidence, but it is not yet wired into a production runtime loop with live UDP/TCP/packet-fd readiness, audit fan-in, and shutdown final drain. Actual `/dev/net/tun` setup/handoff remains outside the proof.
+
+## 2026-06-23 — Drain local smoltcp task lifecycle evidence after cancellation
+
+### Review
+- Round-118 correctness and validation found no blockers or high issues.
+- Reviewers identified the next highest runtime gap as production integration: real `/dev/net/tun` setup/handoff and one owned runtime loop combining live UDP/TCP/packet-fd readiness, local smoltcp dispatch, audit fan-in, cancellation/join, and shutdown final drain.
+
+### Fix
+- Added `async_local_smoltcp_task_exit_drains_final_lifecycle_audit`.
+- The test runs a non-`Send` smoltcp scheduler task under `AsyncLocalRuntimeTaskSet`, dispatches real smoltcp timer readiness, cancels and joins it as `RuntimeTaskStatus::Cancelled`, then feeds that join report into a lifecycle exit that expects `smoltcp_stack:smoltcp_tun_bridge_loop`.
+- The test ingests lifecycle records into `RuntimeAuditFanIn`, drains them to a JSON sink, and asserts final drain evidence includes `network_session_start`, `network_session_exit`, `smoltcp_stack:smoltcp_tun_bridge_loop:cancelled`, `task_join_status=complete`, and smoltcp cleanup evidence.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_local_smoltcp_task_exit_drains_final_lifecycle_audit --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 98 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- This ties local non-`Send` smoltcp task ownership to lifecycle exit and fan-in final drain evidence, but it is still a dedicated lifecycle proof. Remaining final runtime gap is one production-owned runtime loop combining live UDP/TCP/packet-fd readiness, local smoltcp dispatch, audit fan-in, cancellation/join, shutdown final drain, and actual `/dev/net/tun` setup/handoff.

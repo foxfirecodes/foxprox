@@ -4583,6 +4583,173 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn async_local_smoltcp_task_exit_drains_final_lifecycle_audit() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let wait_requested = Arc::new(AtomicBool::new(false));
+                let wait_notify = Arc::new(tokio::sync::Notify::new());
+                let wait_report = Arc::new(std::sync::Mutex::new(None));
+                let mut task_set = AsyncLocalRuntimeTaskSet::new();
+                let wait_observed = wait_requested.clone();
+                let wait_notification = wait_notify.clone();
+                let wait_report_slot = wait_report.clone();
+                task_set
+                    .spawn_cancellable_task(
+                        RuntimeComponent::SmoltcpStack,
+                        "smoltcp_tun_bridge_loop",
+                        move |token| async move {
+                            let mut stack =
+                                foxprox_stack::SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+                            stack.listen_tcp(8080, 1024, 1024);
+                            stack.inject_packet(egress_ipv4_tcp_packet(EgressTcpPacketSpec {
+                                source: [10, 0, 2, 15],
+                                destination: [10, 0, 2, 1],
+                                source_port: 50_000,
+                                destination_port: 8080,
+                                sequence: 0x0102_0304,
+                                acknowledgment: 0,
+                                flags: EGRESS_TCP_SYN,
+                                payload: &[],
+                            }));
+                            let syn_ack = stack.poll(9_300);
+                            let due_ms = 9_300 + syn_ack.next_poll_delay_ms.unwrap() as i64;
+                            let stack = std::rc::Rc::new(std::cell::RefCell::new(stack));
+                            let readiness_stack = std::rc::Rc::clone(&stack);
+                            let dispatch_stack = std::rc::Rc::clone(&stack);
+                            let mut task_lifecycle =
+                                RuntimeLifecycleHarness::new("local-smoltcp-owned-task", 8);
+                            task_lifecycle
+                                .start_with_task_expectations(
+                                    vec![RuntimeComponent::SmoltcpStack],
+                                    vec![RuntimeTaskExpectation::new(
+                                        RuntimeComponent::SmoltcpStack,
+                                        "smoltcp_tun_bridge_loop",
+                                    )],
+                                    due_ms as u64,
+                                )
+                                .unwrap();
+                            let dispatch_report = run_async_runtime_scheduler_loop_until_cancelled(
+                                &mut task_lifecycle,
+                                &token,
+                                due_ms as u64,
+                                1,
+                                1,
+                                move |_step| {
+                                    vec![readiness_stack
+                                        .borrow_mut()
+                                        .runtime_timer_readiness(due_ms)]
+                                },
+                                move |ready_tasks| {
+                                    let dispatch_stack = std::rc::Rc::clone(&dispatch_stack);
+                                    async move {
+                                        let evidence = dispatch_stack
+                                            .borrow_mut()
+                                            .poll_ready_task(&ready_tasks, due_ms)
+                                            .unwrap();
+                                        assert_eq!(evidence.packets_emitted, 1);
+                                    }
+                                },
+                            )
+                            .await
+                            .unwrap();
+                            assert_eq!(
+                                dispatch_report.status,
+                                AsyncRuntimeSchedulerLoopStatus::StepLimitReached
+                            );
+                            let wait_report = run_async_runtime_scheduler_loop_until_cancelled(
+                                &mut task_lifecycle,
+                                &token,
+                                due_ms as u64 + 1,
+                                1,
+                                10,
+                                move |_step| {
+                                    wait_observed.store(true, Ordering::SeqCst);
+                                    wait_notification.notify_waiters();
+                                    vec![RuntimeTaskReadiness::new(
+                                        RuntimeComponent::SmoltcpStack,
+                                        "smoltcp_tun_bridge_loop",
+                                    )
+                                    .with_next_ready_delay_ms(Some(60_000))]
+                                },
+                                |_ready_tasks| async {},
+                            )
+                            .await
+                            .unwrap();
+                            *wait_report_slot.lock().unwrap() = Some(wait_report.clone());
+                            if wait_report.status == AsyncRuntimeSchedulerLoopStatus::Cancelled {
+                                RuntimeTaskStatus::Cancelled
+                            } else {
+                                RuntimeTaskStatus::TimedOut
+                            }
+                        },
+                    )
+                    .unwrap();
+                if !wait_requested.load(Ordering::SeqCst) {
+                    tokio::time::timeout(Duration::from_secs(1), wait_notify.notified())
+                        .await
+                        .unwrap();
+                }
+                assert_eq!(task_set.request_cancellation(), 1);
+                let task_report = task_set.join_all_with_timeout(Duration::from_secs(1)).await;
+                assert_eq!(task_report.outcomes.len(), 1);
+                assert_eq!(
+                    task_report.outcomes[0].component,
+                    RuntimeComponent::SmoltcpStack
+                );
+                assert_eq!(task_report.outcomes[0].status, RuntimeTaskStatus::Cancelled);
+                let wait_report = wait_report.lock().unwrap().clone().unwrap();
+                assert_eq!(
+                    wait_report.status,
+                    AsyncRuntimeSchedulerLoopStatus::Cancelled
+                );
+                assert_eq!(
+                    wait_report.steps[0].wait_status,
+                    AsyncRuntimeSchedulerWaitStatus::Cancelled
+                );
+
+                let mut lifecycle = RuntimeLifecycleHarness::new("local-smoltcp-final-drain", 16);
+                lifecycle
+                    .start_with_task_expectations(
+                        vec![RuntimeComponent::SmoltcpStack],
+                        vec![RuntimeTaskExpectation::new(
+                            RuntimeComponent::SmoltcpStack,
+                            "smoltcp_tun_bridge_loop",
+                        )],
+                        9_500,
+                    )
+                    .unwrap();
+                lifecycle
+                    .exit_with_cleanup_child_and_tasks(
+                        RuntimeExitStatus::Clean,
+                        RuntimeCleanupReport::all_succeeded(vec![
+                            RuntimeCleanupAction::SmoltcpStack,
+                        ]),
+                        None,
+                        Some(task_report),
+                        9_600,
+                    )
+                    .unwrap();
+                let mut fan_in = RuntimeAuditFanIn::new("local-smoltcp-final-drain", 16);
+                fan_in
+                    .ingest("lifecycle", lifecycle.audit().records())
+                    .unwrap();
+                let mut sink = JsonLineAuditSink::new(Vec::new());
+                let drain = fan_in.drain_to_sink(&mut sink).unwrap();
+                assert_eq!(drain.drained_records, 2);
+                let output = String::from_utf8(sink.into_inner()).unwrap();
+                assert!(output.contains("network_session_start"));
+                assert!(output.contains("network_session_exit"));
+                assert!(output.contains("smoltcp_stack:smoltcp_tun_bridge_loop:cancelled"));
+                let exit = lifecycle.audit().records().last().unwrap();
+                assert_eq!(exit.kind, AuditKind::NetworkSessionExit);
+                assert_eq!(exit.details["task_join_status"], "complete");
+                assert_eq!(exit.details["cleanup_actions"], "smoltcp_stack");
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn async_runtime_scheduler_step_runs_ready_tasks_and_audits_action() {
         let cancellation =
             AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));

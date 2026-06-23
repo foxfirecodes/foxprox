@@ -526,3 +526,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Local Tokio task sets can own non-Send smoltcp scheduler state
 
 - `tokio::task::spawn_local` under a `LocalSet` provides an ownership path for non-`Send` smoltcp state. A local runtime task set can dispatch real smoltcp timer readiness and still use the same cancellation/join evidence pattern, while the Send task set remains appropriate for ordinary spawned runtime tasks.
+
+## 2026-06-23 — Local smoltcp task joins can feed lifecycle fan-in final drain
+
+- To connect non-`Send` smoltcp ownership to final drain without pretending it is the full production runtime, start a dedicated lifecycle harness with expected `smoltcp_stack:smoltcp_tun_bridge_loop`, join an `AsyncLocalRuntimeTaskSet`, exit with smoltcp cleanup, ingest lifecycle records into `RuntimeAuditFanIn`, and drain to JSON sink.
