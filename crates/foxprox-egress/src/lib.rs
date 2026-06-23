@@ -1299,6 +1299,7 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
                 vec![
                     RuntimeComponent::DnsListener,
                     RuntimeComponent::HttpProxyListener,
+                    RuntimeComponent::AuditFanIn,
                 ],
                 vec![
                     RuntimeTaskExpectation::new(RuntimeComponent::DnsListener, "dns_accept_loop"),
@@ -1306,6 +1307,7 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
                         RuntimeComponent::HttpProxyListener,
                         "http_proxy_accept_loop",
                     ),
+                    RuntimeTaskExpectation::new(RuntimeComponent::AuditFanIn, "audit_fan_in_loop"),
                 ],
                 now_ms,
             )
@@ -1426,6 +1428,7 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
         if self.http_proxy_server.is_some() {
             cleanup_actions.push(RuntimeCleanupAction::HttpProxyListener);
         }
+        cleanup_actions.push(RuntimeCleanupAction::AuditFanIn);
         let result = self.lifecycle.exit_with_cleanup_child_and_tasks(
             status,
             RuntimeCleanupReport::all_succeeded(cleanup_actions),
@@ -4995,7 +4998,7 @@ mod tests {
         assert_eq!(lifecycle_records[0].kind, AuditKind::NetworkSessionStart);
         assert_eq!(
             lifecycle_records[0].details["runtime_components"],
-            "dns_listener,http_proxy_listener"
+            "dns_listener,http_proxy_listener,audit_fan_in"
         );
         assert_eq!(
             lifecycle_records[1].kind,
@@ -5046,7 +5049,7 @@ mod tests {
         assert_eq!(lifecycle_records[3].details["cleanup_status"], "complete");
         assert_eq!(
             lifecycle_records[3].details["cleanup_actions"],
-            "dns_listener,http_proxy_listener"
+            "dns_listener,http_proxy_listener,audit_fan_in"
         );
         assert_eq!(
             runtime.handle_dns_once(1_101).unwrap_err(),

@@ -370,3 +370,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Runtime-owned fan-in must be in the runtime contract
 
 - When a runtime owns audit fan-in, include `AuditFanIn` in lifecycle components, task expectations, cleanup actions, and joined task reports. Standalone fan-in tests are not enough to catch missing runtime-exit ownership.
+
+## 2026-06-23 — Runtime fan-in ownership applies to reduced runtimes too
+
+- If a reduced blocking runtime variant starts listener task expectations, it should also declare and clean up audit fan-in consistently with the fuller runtime. Otherwise lifecycle proofs can pass in the full path while older DNS/HTTP-only runtime evidence omits the fan-in task contract.

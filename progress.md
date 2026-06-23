@@ -3366,3 +3366,32 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - This adds blocking runtime lifecycle ownership/expectation for the fan-in task, but the fan-in loop remains synthetic in tests. Final async readiness/timer-driven orchestration over live listener/TUN/smoltcp sources remains outstanding.
+
+## 2026-06-23 — Extend audit fan-in lifecycle ownership to DNS/HTTP runtime
+
+### Reviewer feedback
+- Round-80 review found no blocker/high issues. The next gap remained moving from isolated blocking proofs toward runtime-owned fan-in task registration and cleanup across concrete runtime variants.
+
+### Commands run
+- `cargo fmt` — applied formatting for DNS/HTTP runtime lifecycle updates.
+- `cargo test -p foxprox-egress --all-targets --all-features` — passed, 63 egress tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 153 core tests, 4 device tests, 63 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners ... ok`
+- `tests::blocking_dns_http_runtime_exit_backpressure_still_closes_listeners ... ok`
+
+### Fix
+- `BlockingDnsHttpRuntime::bind(...)` now declares `RuntimeComponent::AuditFanIn` and the `audit_fan_in_loop` task expectation alongside DNS and HTTP listener tasks.
+- `BlockingDnsHttpRuntime::exit_with_task_report(...)` now includes `RuntimeCleanupAction::AuditFanIn` in cleanup evidence.
+- Updated DNS/HTTP runtime regression expectations so startup `runtime_components` and exit `cleanup_actions` include `audit_fan_in`.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Audit fan-in is now lifecycle-owned by both blocking runtime variants, but the fan-in loop remains blocking/synthetic. Final async readiness/timer-driven orchestration over live listener/TUN/smoltcp sources remains outstanding.
