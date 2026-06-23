@@ -1681,6 +1681,14 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlockingProxyRuntimeReadyTaskReport {
+    pub dispatched_tasks: Vec<RuntimeTaskExpectation>,
+    pub dns_step: Option<DnsBrokerStepResult>,
+    pub http_proxy_step: Option<HttpProxyListenerStepResult>,
+    pub socks5_proxy_step: Option<Socks5ListenerStepResult>,
+}
+
 #[derive(Debug)]
 pub struct BlockingProxyRuntime<U, H, S> {
     sandbox_id: String,
@@ -1882,6 +1890,38 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
             .handle_one(now_ms);
         self.archive_new_socks5_records();
         result
+    }
+
+    pub fn dispatch_ready_proxy_listener_tasks(
+        &mut self,
+        ready_tasks: &[RuntimeTaskExpectation],
+        now_ms: u64,
+    ) -> Result<BlockingProxyRuntimeReadyTaskReport, BlockingProxyRuntimeError> {
+        let mut report = BlockingProxyRuntimeReadyTaskReport::default();
+        for task in ready_tasks {
+            match (task.component, task.task_name.as_str()) {
+                (RuntimeComponent::DnsListener, "dns_accept_loop") => {
+                    report.dispatched_tasks.push(task.clone());
+                    report.dns_step = self
+                        .handle_dns_once(now_ms)
+                        .map_err(BlockingProxyRuntimeError::Dns)?;
+                }
+                (RuntimeComponent::HttpProxyListener, "http_proxy_accept_loop") => {
+                    report.dispatched_tasks.push(task.clone());
+                    report.http_proxy_step = self
+                        .handle_http_proxy_once(now_ms)
+                        .map_err(BlockingProxyRuntimeError::HttpProxy)?;
+                }
+                (RuntimeComponent::Socks5Listener, "socks5_accept_loop") => {
+                    report.dispatched_tasks.push(task.clone());
+                    report.socks5_proxy_step = self
+                        .handle_socks5_proxy_once(now_ms)
+                        .map_err(BlockingProxyRuntimeError::Socks5Proxy)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(report)
     }
 
     pub fn exit(
@@ -3903,6 +3943,122 @@ mod tests {
         assert_eq!(
             records[1].details["ready_runtime_tasks"],
             "audit_fan_in:audit_fan_in_loop"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_scheduler_dispatch_drives_ready_dns_listener_once() {
+        let query = dns_query(0x8123, "Dispatch.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let mut dns_config = PolicyConfig::default();
+        dns_config.rules.push(
+            PolicyRule::allow("allow-dispatch-dns")
+                .protocol(Protocol::Dns)
+                .hostname("dispatch.test"),
+        );
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(dns_config), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut runtime = BlockingProxyRuntime::bind(
+            "s1",
+            8,
+            SharedDnsCache::default(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            8_100,
+        )
+        .unwrap();
+        let dns_client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        dns_client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        dns_client
+            .send_to(&query, runtime.dns_addr().unwrap())
+            .unwrap();
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-scheduler", 8);
+        lifecycle
+            .start_with_task_expectations(
+                vec![RuntimeComponent::DnsListener],
+                vec![RuntimeTaskExpectation::new(
+                    RuntimeComponent::DnsListener,
+                    "dns_accept_loop",
+                )],
+                8_100,
+            )
+            .unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let mut dispatch_report = None;
+
+        let scheduler_report = run_async_runtime_scheduler_step(
+            &mut lifecycle,
+            &[RuntimeTaskReadiness::ready(
+                RuntimeComponent::DnsListener,
+                "dns_accept_loop",
+            )],
+            8_110,
+            &cancellation,
+            |ready_tasks| {
+                let runtime = &mut runtime;
+                let dispatch_report = &mut dispatch_report;
+                async move {
+                    *dispatch_report = Some(
+                        runtime
+                            .dispatch_ready_proxy_listener_tasks(&ready_tasks, 8_120)
+                            .unwrap(),
+                    );
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            scheduler_report.scheduler_action,
+            RuntimeSchedulerAction::RunReadyTasks
+        );
+        let dispatch_report = dispatch_report.unwrap();
+        assert_eq!(
+            dispatch_report.dispatched_tasks,
+            vec![RuntimeTaskExpectation::new(
+                RuntimeComponent::DnsListener,
+                "dns_accept_loop"
+            )]
+        );
+        let dns_step = dispatch_report.dns_step.unwrap();
+        assert_eq!(dns_step.decision, Decision::Allow);
+        assert!(dns_step.sent_response);
+        let mut dns_reply = [0u8; 512];
+        let (reply_len, _) = dns_client.recv_from(&mut dns_reply).unwrap();
+        assert!(reply_len > 0);
+        assert!(runtime
+            .audit_records()
+            .iter()
+            .any(|record| record.kind == AuditKind::DnsQueryDecision));
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].details["scheduler_action"], "run_ready_tasks");
+        assert_eq!(
+            records[1].details["ready_runtime_tasks"],
+            "dns_listener:dns_accept_loop"
         );
     }
 

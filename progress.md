@@ -3959,3 +3959,27 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Fan-in readiness/progress now has a concrete scheduler-dispatched drain action. Remaining final runtime gap is actual Tokio socket/TUN readiness and smoltcp timer integration with real listener/TUN task driving, not just blocking-reference pollability or deterministic harness dispatch.
+
+## 2026-06-23 — Dispatch ready DNS listener task from scheduler action
+
+### Review
+- Round-100 correctness and validation found no blockers or high issues.
+- Both reviews identified the remaining highest gap as actual Tokio socket/TUN readiness and smoltcp timer integration with real listener/TUN task driving.
+
+### Fix
+- Added `BlockingProxyRuntimeReadyTaskReport` and `BlockingProxyRuntime::dispatch_ready_proxy_listener_tasks(...)`.
+- The dispatch helper maps scheduler-dispatched runtime task expectations to real listener one-step handlers:
+  - `dns_listener:dns_accept_loop` -> `handle_dns_once(...)`
+  - `http_proxy_listener:http_proxy_accept_loop` -> `handle_http_proxy_once(...)`
+  - `socks5_listener:socks5_accept_loop` -> `handle_socks5_proxy_once(...)`
+- Added `async_runtime_scheduler_dispatch_drives_ready_dns_listener_once`, proving an audited scheduler `run_ready_tasks` action can drive a real DNS listener step, send a DNS response, and archive DNS decision audit evidence.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_scheduler_dispatch_drives_ready_dns_listener_once --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 159 core tests and 81 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Scheduler-dispatched listener task driving is now proven for a real DNS listener one-step. HTTP/SOCKS dispatch paths exist but need comparable runtime tests. Final runtime gap remains actual Tokio socket/TUN readable readiness, smoltcp timer integration, and end-to-end async task driving rather than blocking one-step dispatch.

@@ -454,3 +454,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Scheduler-dispatched fan-in drains close a live progress loop
 
 - Once fan-in readiness is based on undrained records, the scheduler's ready-task dispatcher should actually drain fan-in and then observe readiness returning to idle. This gives a concrete readiness-action-feedback loop without claiming final socket/TUN readiness is complete.
+
+## 2026-06-23 — Scheduler-dispatched listener tasks can drive one real listener step
+
+- Before replacing blocking listeners with Tokio sockets, an audited scheduler ready-task dispatch can still drive a real nonblocking listener one-step and verify policy/audit side effects. This narrows task-driving evidence while keeping OS-level readiness as the remaining gap.
