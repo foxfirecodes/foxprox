@@ -362,3 +362,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Listener and fan-in task outcomes should join together
 
 - Runtime lifecycle coverage should include listener loops and audit fan-in in the same task report. This catches ordering/coverage bugs where listeners cancel cleanly but the fan-in task is omitted from expected runtime components or cleanup evidence.
+
+## 2026-06-23 — Runtime fan-in sink cursor must be all-or-nothing
+
+- `RuntimeAuditFanIn::drain_to_sink_with_failure_sink` must stage `last_drained_sequence` locally and commit it only after every pending record appends successfully. Advancing the cursor per record can skip already-written-but-uncommitted records on retry if the sink fails mid-batch.

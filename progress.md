@@ -3301,3 +3301,34 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 ### Remaining blind spots
 - The fan-in task in this combined lifecycle proof remains a blocking synthetic loop, not final async readiness/timer-driven fan-in over live listener/TUN/smoltcp sources.
 - Final async runtime still needs readiness/timer orchestration across all concrete runtime tasks.
+
+## 2026-06-23 — Fix fan-in drain cursor after partial sink failure
+
+### Reviewer feedback
+- Round-78 correctness review found a high issue: `RuntimeAuditFanIn::drain_to_sink_with_failure_sink(...)` advanced `last_drained_sequence` after each successful append. A sink failure after one successful record could leave the cursor advanced and cause retries to skip records.
+
+### Commands run
+- `cargo fmt` — applied formatting for core fan-in cursor fix and regression.
+- `cargo test -p foxprox-core runtime_audit_fan_in_partial_sink_failure_retries_full_batch --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 153 core tests, 4 device tests, 63 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `runtime::tests::runtime_audit_fan_in_partial_sink_failure_retries_full_batch ... ok`
+
+### Fix
+- Staged the fan-in drain cursor in a local `next_drained_sequence` and assigned `self.last_drained_sequence` only after all pending records append successfully.
+- Added a two-record partial sink failure regression with a writer that accepts exactly one complete JSONL record, then fails. The test asserts:
+  - first drain fails on sequence `2`,
+  - failure evidence reports `last_drained_sequence=0`,
+  - fan-in cursor remains `0`,
+  - retry drains both records and advances to sequence `2`.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Final async runtime still needs readiness/timer orchestration and real audit fan-in ownership across live listener/TUN/smoltcp tasks.

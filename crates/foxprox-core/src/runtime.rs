@@ -557,6 +557,7 @@ impl RuntimeAuditFanIn {
             .filter(|record| record.sequence > self.last_drained_sequence)
             .cloned()
             .collect();
+        let mut next_drained_sequence = self.last_drained_sequence;
         let mut drained_records = 0usize;
         for record in records {
             if sink.append(&record).is_err() {
@@ -596,9 +597,10 @@ impl RuntimeAuditFanIn {
                     failure_sink_error_record,
                 });
             }
-            self.last_drained_sequence = record.sequence;
+            next_drained_sequence = record.sequence;
             drained_records += 1;
         }
+        self.last_drained_sequence = next_drained_sequence;
         Ok(RuntimeAuditDrainReport {
             drained_records,
             last_drained_sequence: self.last_drained_sequence,
@@ -1349,6 +1351,65 @@ mod tests {
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].kind, AuditKind::NetworkSessionStart);
         assert_eq!(fan_in.last_drained_sequence, 0);
+    }
+
+    #[derive(Debug, Default)]
+    struct FailAfterOneRecordWriter {
+        bytes: Vec<u8>,
+        completed_records: usize,
+    }
+
+    impl std::io::Write for FailAfterOneRecordWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.completed_records >= 1 {
+                return Err(std::io::Error::other(
+                    "audit sink unavailable after one record",
+                ));
+            }
+            self.completed_records += buf.iter().filter(|byte| **byte == b'\n').count();
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn runtime_audit_fan_in_partial_sink_failure_retries_full_batch() {
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 4);
+        let mut start = AuditRecord::new_at(AuditKind::NetworkSessionStart, "s1", 1_000);
+        start.sequence = 1;
+        let mut exit = AuditRecord::new_at(AuditKind::NetworkSessionExit, "s1", 1_100);
+        exit.sequence = 2;
+        fan_in.ingest("lifecycle", &[start, exit]).unwrap();
+
+        let mut failing_sink = JsonLineAuditSink::new(FailAfterOneRecordWriter::default());
+        let error = fan_in.drain_to_sink(&mut failing_sink).unwrap_err();
+
+        let RuntimeAuditDrainError::SinkWriteFailed {
+            attempted_sequence,
+            failure_record,
+            failure_sink_error_record,
+        } = error;
+        assert_eq!(attempted_sequence, 2);
+        assert_eq!(failure_record.details["attempted_sequence"], "2");
+        assert_eq!(failure_record.details["last_drained_sequence"], "0");
+        assert!(failure_sink_error_record.is_none());
+        assert_eq!(fan_in.last_drained_sequence, 0);
+
+        let mut retry_sink = JsonLineAuditSink::new(Vec::new());
+        let retry = fan_in.drain_to_sink(&mut retry_sink).unwrap();
+        assert_eq!(retry.drained_records, 2);
+        assert_eq!(retry.last_drained_sequence, 2);
+        assert_eq!(retry_sink.records_written(), 2);
+        let retry_output = String::from_utf8(retry_sink.into_inner()).unwrap();
+        let kinds: Vec<_> = retry_output
+            .lines()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()["kind"].clone())
+            .collect();
+        assert_eq!(kinds, vec!["network_session_start", "network_session_exit"]);
     }
 
     #[test]
