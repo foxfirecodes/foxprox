@@ -4078,3 +4078,26 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Smoltcp timer-ready bridge dispatch now audits and writes timer-generated outbound packets in the deterministic adapter. Remaining final runtime gap is actual Tokio fd/socket/TUN readiness and the full end-to-end async runtime loop wiring live timers, live listener/TUN readiness, cancellation/join, audit fan-in, and shutdown final drain.
+
+## 2026-06-23 — Add Tokio UDP socket readiness evidence
+
+### Review
+- Round-106 correctness and validation found no blockers or high issues.
+- Reviewers identified the next highest runtime gap as actual Tokio OS-level socket/TUN readiness plus end-to-end runtime loop wiring.
+
+### Fix
+- Enabled Tokio `net` support in `foxprox-egress`.
+- Added `AsyncRuntimeIoReadinessStatus`, `AsyncRuntimeIoReadinessReport`, and `wait_for_async_udp_socket_readiness(...)`.
+- Mapped actual `tokio::net::UdpSocket::readable()` readiness into `RuntimeTaskReadiness` for a named runtime component/task, with cancellation and timeout outcomes that do not mark the task ready.
+- Added regression coverage proving a real loopback UDP datagram wakes Tokio OS-level readiness, feeds a `RuntimeReadinessPlan` with `scheduler_action=run_ready_tasks`, and leaves the packet available to be consumed by a later dispatch path.
+- Added cancellation coverage proving socket readiness waits can be preempted before any packet arrives.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_udp_socket_readiness --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 84 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- This narrows real Tokio OS socket readiness for UDP/DNS-style sockets only. Remaining final runtime gap is Tokio TCP listener readiness/accept integration, real TUN fd readiness, live smoltcp timer wake wiring, full ready-task dispatch in one end-to-end async runtime loop, cancellation/join, audit fan-in, and shutdown final drain.

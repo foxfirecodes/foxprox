@@ -478,3 +478,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Timer-only smoltcp polls must write audited outbound packets
 
 - A smoltcp timer wake can emit retransmitted packets even when no new TUN packet was read. Bridge-level timer dispatch must therefore audit and write newly emitted stack packets, not just poll the in-memory stack.
+
+## 2026-06-23 — Tokio UDP readiness can feed the same readiness ledger without consuming packets
+
+- `tokio::net::UdpSocket::readable()` provides real OS-level socket readiness that can be converted into `RuntimeTaskReadiness` and audited via `RuntimeReadinessPlan` while leaving the packet available for the later ready-task dispatch path.

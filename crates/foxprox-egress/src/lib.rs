@@ -2588,6 +2588,46 @@ pub struct AsyncRuntimeSchedulerStepReport {
     pub wait_status: AsyncRuntimeSchedulerWaitStatus,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AsyncRuntimeIoReadinessStatus {
+    Ready,
+    Cancelled,
+    TimedOut,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AsyncRuntimeIoReadinessReport {
+    pub status: AsyncRuntimeIoReadinessStatus,
+    pub readiness: RuntimeTaskReadiness,
+}
+
+pub async fn wait_for_async_udp_socket_readiness(
+    socket: &tokio::net::UdpSocket,
+    component: RuntimeComponent,
+    task_name: impl Into<String>,
+    max_wait: Duration,
+    cancellation: &AsyncRuntimeCancellationToken,
+) -> AsyncRuntimeIoReadinessReport {
+    let task_name = task_name.into();
+    let status = tokio::select! {
+        result = socket.readable() => {
+            if result.is_ok() {
+                AsyncRuntimeIoReadinessStatus::Ready
+            } else {
+                AsyncRuntimeIoReadinessStatus::Failed
+            }
+        }
+        () = tokio::time::sleep(max_wait) => AsyncRuntimeIoReadinessStatus::TimedOut,
+        () = cancellation.cancelled() => AsyncRuntimeIoReadinessStatus::Cancelled,
+    };
+    AsyncRuntimeIoReadinessReport {
+        readiness: RuntimeTaskReadiness::new(component, task_name)
+            .with_ready(status == AsyncRuntimeIoReadinessStatus::Ready),
+        status,
+    }
+}
+
 pub async fn run_async_runtime_scheduler_step<F, Fut>(
     lifecycle: &mut RuntimeLifecycleHarness,
     task_readiness: &[RuntimeTaskReadiness],
@@ -3381,6 +3421,82 @@ mod tests {
 
         assert_eq!(report.outcomes.len(), 1);
         assert_eq!(report.outcomes[0].status, RuntimeTaskStatus::Cancelled);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_udp_socket_readiness_uses_os_readable_state_and_audits_plan() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        sender
+            .send_to(b"dns-ready", socket.local_addr().unwrap())
+            .unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+
+        let report = wait_for_async_udp_socket_readiness(
+            &socket,
+            RuntimeComponent::DnsListener,
+            "dns_accept_loop",
+            Duration::from_secs(1),
+            &cancellation,
+        )
+        .await;
+
+        assert_eq!(report.status, AsyncRuntimeIoReadinessStatus::Ready);
+        assert_eq!(
+            report.readiness,
+            RuntimeTaskReadiness::ready(RuntimeComponent::DnsListener, "dns_accept_loop")
+        );
+        let mut packet = [0u8; 64];
+        let (len, _) = socket.try_recv_from(&mut packet).unwrap();
+        assert_eq!(&packet[..len], b"dns-ready");
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-io-readiness", 4);
+        lifecycle
+            .start_with_task_expectations(
+                vec![RuntimeComponent::DnsListener],
+                vec![RuntimeTaskExpectation::new(
+                    RuntimeComponent::DnsListener,
+                    "dns_accept_loop",
+                )],
+                8_500,
+            )
+            .unwrap();
+        let plan = RuntimeReadinessPlan::from_tasks(&[report.readiness]);
+        lifecycle.record_readiness_plan(&plan, 8_510).unwrap();
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::RuntimeReadiness);
+        assert_eq!(records[1].details["scheduler_action"], "run_ready_tasks");
+        assert_eq!(
+            records[1].details["ready_runtime_tasks"],
+            "dns_listener:dns_accept_loop"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_udp_socket_readiness_can_be_cancelled_before_packet() {
+        let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let cancellation_state = Arc::new(AsyncRuntimeCancellationState::new());
+        let cancellation = AsyncRuntimeCancellationToken::new(cancellation_state.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            cancellation_state.cancelled.store(true, Ordering::SeqCst);
+            cancellation_state.notify.notify_waiters();
+        });
+
+        let report = wait_for_async_udp_socket_readiness(
+            &socket,
+            RuntimeComponent::DnsListener,
+            "dns_accept_loop",
+            Duration::from_secs(60),
+            &cancellation,
+        )
+        .await;
+
+        assert_eq!(report.status, AsyncRuntimeIoReadinessStatus::Cancelled);
+        assert_eq!(
+            report.readiness,
+            RuntimeTaskReadiness::new(RuntimeComponent::DnsListener, "dns_accept_loop")
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
