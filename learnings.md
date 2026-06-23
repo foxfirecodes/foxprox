@@ -406,3 +406,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Readiness audit invalid transitions need both lifecycle edges
 
 - When adding lifecycle-scoped audit evidence, test both not-started and already-exited rejection paths. The exited case should preserve prior duration/runtime status details while still recording the attempted transition as fail-closed evidence.
+
+## 2026-06-23 — Fan-in progress can be scheduler readiness evidence
+
+- A sink-backed fan-in drain that accepts or drains records should be convertible into `audit_fan_in_loop` readiness evidence. Recording that plan before shutdown proves the future scheduler can see audit fan-in progress as a runnable task, not only as JSONL sink output.

@@ -15,9 +15,10 @@ use foxprox_core::{
     RuntimeAuditDrainError, RuntimeAuditDrainReport, RuntimeAuditFanIn, RuntimeAuditFanInError,
     RuntimeAuditIngestReport, RuntimeChildExit, RuntimeCleanupAction, RuntimeCleanupReport,
     RuntimeComponent, RuntimeExitStatus, RuntimeLifecycleError, RuntimeLifecycleHarness,
-    RuntimeListenerConfig, RuntimeTaskExpectation, RuntimeTaskHandle, RuntimeTaskJoinReport,
-    RuntimeTaskStatus, RuntimeTaskSupervisor, RuntimeTaskSupervisorError, SharedDnsCache,
-    SocksConnectMetadata, TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
+    RuntimeListenerConfig, RuntimeReadinessPlan, RuntimeTaskExpectation, RuntimeTaskHandle,
+    RuntimeTaskJoinReport, RuntimeTaskReadiness, RuntimeTaskStatus, RuntimeTaskSupervisor,
+    RuntimeTaskSupervisorError, SharedDnsCache, SocksConnectMetadata, TcpEgress, TcpEgressError,
+    UdpEgress, UdpEgressError,
 };
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -1259,6 +1260,11 @@ impl BlockingRuntimeAuditFanInDrainReport {
             .any(|report| report.accepted_records > 0)
             || self.drain_report.drained_records > 0
     }
+
+    pub fn runtime_readiness(&self) -> RuntimeTaskReadiness {
+        RuntimeTaskReadiness::new(RuntimeComponent::AuditFanIn, "audit_fan_in_loop")
+            .with_ready(self.made_progress())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1537,6 +1543,16 @@ impl<U: DnsUpstream, E: ExplicitProxyEgress> BlockingDnsHttpRuntime<U, E> {
             ingest_reports,
             drain_report,
         })
+    }
+
+    pub fn record_readiness_plan(
+        &mut self,
+        plan: &RuntimeReadinessPlan,
+        now_ms: u64,
+    ) -> Result<(), RuntimeLifecycleError> {
+        let result = self.lifecycle.record_readiness_plan(plan, now_ms);
+        self.archive_new_lifecycle_records();
+        result
     }
 
     pub fn exit_and_drain_live_audit_sources_to_sink<W: Write>(
@@ -1971,6 +1987,16 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
             ingest_reports,
             drain_report,
         })
+    }
+
+    pub fn record_readiness_plan(
+        &mut self,
+        plan: &RuntimeReadinessPlan,
+        now_ms: u64,
+    ) -> Result<(), RuntimeLifecycleError> {
+        let result = self.lifecycle.record_readiness_plan(plan, now_ms);
+        self.archive_new_lifecycle_records();
+        result
     }
 
     pub fn exit_and_drain_live_audit_sources_to_sink<W: Write>(
@@ -5241,6 +5267,15 @@ mod tests {
             .unwrap();
         assert!(!duplicate_report.made_progress());
         assert_eq!(duplicate_report.drain_report.drained_records, 0);
+        let readiness_plan = RuntimeReadinessPlan::from_tasks(&[fan_in_report.runtime_readiness()]);
+        assert_eq!(readiness_plan.status_detail(), "ready");
+        assert_eq!(
+            readiness_plan.ready_task_details(),
+            "audit_fan_in:audit_fan_in_loop"
+        );
+        runtime
+            .record_readiness_plan(&readiness_plan, 1_030)
+            .unwrap();
         let shutdown_drain = runtime
             .exit_and_drain_live_audit_sources_to_sink(
                 RuntimeExitStatus::Clean,
@@ -5250,21 +5285,29 @@ mod tests {
                 1_100,
             )
             .unwrap();
-        assert!(!shutdown_drain.before_exit.made_progress());
+        assert!(shutdown_drain.before_exit.made_progress());
+        assert_eq!(shutdown_drain.before_exit.drain_report.drained_records, 1);
         assert!(shutdown_drain.after_exit.made_progress());
         assert_eq!(shutdown_drain.after_exit.drain_report.drained_records, 1);
         let fan_in_output = String::from_utf8(sink.into_inner()).unwrap();
         assert!(fan_in_output.contains("network_session_start"));
         assert!(fan_in_output.contains("proxy_destination_resolved"));
         assert!(fan_in_output.contains("http_request_decision"));
+        assert!(fan_in_output.contains("runtime_readiness"));
         assert!(fan_in_output.contains("network_session_exit"));
         let lifecycle_records: Vec<_> = runtime.lifecycle().audit().records().collect();
-        assert_eq!(lifecycle_records.len(), 4);
-        assert_eq!(lifecycle_records[3].kind, AuditKind::NetworkSessionExit);
-        assert_eq!(lifecycle_records[3].duration_ms, Some(100));
-        assert_eq!(lifecycle_records[3].details["cleanup_status"], "complete");
+        assert_eq!(lifecycle_records.len(), 5);
+        assert_eq!(lifecycle_records[3].kind, AuditKind::RuntimeReadiness);
+        assert_eq!(lifecycle_records[3].details["readiness_status"], "ready");
         assert_eq!(
-            lifecycle_records[3].details["cleanup_actions"],
+            lifecycle_records[3].details["ready_runtime_tasks"],
+            "audit_fan_in:audit_fan_in_loop"
+        );
+        assert_eq!(lifecycle_records[4].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(lifecycle_records[4].duration_ms, Some(100));
+        assert_eq!(lifecycle_records[4].details["cleanup_status"], "complete");
+        assert_eq!(
+            lifecycle_records[4].details["cleanup_actions"],
             "dns_listener,http_proxy_listener,audit_fan_in"
         );
         assert_eq!(

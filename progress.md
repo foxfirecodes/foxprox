@@ -3652,3 +3652,33 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Readiness planning and invalid-transition evidence are now stronger, but the final async scheduler still needs to consume live listener/TUN/smoltcp/fan-in readiness and own cancellation/join/final-drain behavior.
+
+## 2026-06-23 — Convert audit fan-in progress into readiness evidence
+
+### Commands run
+- `cargo fmt` — applied formatting for fan-in readiness helpers and runtime coverage.
+- `cargo test -p foxprox-egress blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 158 core tests, 4 device tests, 65 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_dns_http_runtime_shares_delivered_dns_cache_between_listeners ... ok`
+
+### Fix
+- Added `BlockingRuntimeAuditFanInDrainReport::runtime_readiness()` to convert sink-backed fan-in progress into `RuntimeTaskReadiness` for `audit_fan_in:audit_fan_in_loop`.
+- Added `record_readiness_plan(...)` methods to both blocking runtime variants so runtime-owned readiness plans are archived into lifecycle audit and aggregate records.
+- Extended the DNS/HTTP runtime regression so:
+  - a successful fan-in drain produces a `ready` readiness plan for `audit_fan_in:audit_fan_in_loop`,
+  - the runtime records a `runtime_readiness` audit record before shutdown,
+  - shutdown pre-exit drain captures that readiness record,
+  - JSONL output includes `runtime_readiness`, and
+  - lifecycle audit asserts the structured ready task evidence.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Audit fan-in progress is now converted into readiness evidence, but listener readiness, TUN readiness, smoltcp timers, fan-in progress, cancellation/join, and shutdown final-drain still need to be consumed by a concrete async scheduler loop.
