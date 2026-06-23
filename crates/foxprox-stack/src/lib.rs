@@ -27,6 +27,7 @@ pub struct StackPollEvidence {
     pub poll_result: &'static str,
     pub packets_emitted: usize,
     pub outbound_bytes: usize,
+    pub next_poll_delay_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -198,10 +199,15 @@ impl SmoltcpIpStack {
         let outbound = self.device.outbound.borrow();
         let emitted = outbound.len().saturating_sub(before);
         let outbound_bytes = outbound.iter().skip(before).map(Vec::len).sum();
+        let next_poll_delay_ms = self
+            .iface
+            .poll_delay(Instant::from_millis(now_ms), &self.sockets)
+            .map(|delay| delay.total_millis());
         StackPollEvidence {
             poll_result: poll_result_name(result),
             packets_emitted: emitted,
             outbound_bytes,
+            next_poll_delay_ms,
         }
     }
 
@@ -698,6 +704,7 @@ impl StackPollEvidence {
             poll_result: "none",
             packets_emitted: 0,
             outbound_bytes: 0,
+            next_poll_delay_ms: None,
         }
     }
 }
@@ -821,6 +828,7 @@ mod tests {
         assert_eq!(evidence.packets_emitted, 1);
         assert!(evidence.outbound_bytes >= 28);
         assert_eq!(evidence.poll_result, "socket_state_changed");
+        assert_eq!(evidence.next_poll_delay_ms, None);
 
         let outbound = stack.outbound_packets();
         let parsed = ParsedIpPacket::parse_ipv4(&outbound[0]).unwrap();
@@ -1042,6 +1050,7 @@ mod tests {
         }));
         let syn_ack_evidence = stack.poll(3_000);
         assert_eq!(syn_ack_evidence.packets_emitted, 1);
+        assert!(syn_ack_evidence.next_poll_delay_ms.is_some());
         let syn_ack_packets = stack.outbound_packets();
         let syn_ack = &syn_ack_packets[0];
         let syn_ack_tcp = &syn_ack[20..];

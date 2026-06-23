@@ -390,3 +390,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — TUN and smoltcp budgets are timeouts, not cancellation
 
 - Packet-loop budget exhaustion should report `RuntimeTaskStatus::TimedOut`; reserve `Cancelled` for observed cancellation tokens. This keeps TUN/smoltcp task lifecycle semantics aligned with listener and fan-in loops.
+
+## 2026-06-23 — smoltcp timer readiness should be explicit evidence
+
+- `smoltcp` exposes the next required poll via `Interface::poll_delay(...)`. Preserve that value in stack poll evidence so the eventual runtime scheduler can distinguish immediate re-polls, finite timer waits, and no active timer.

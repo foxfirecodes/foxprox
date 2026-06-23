@@ -3524,3 +3524,32 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - TUN and smoltcp loop outcomes now distinguish timeout from cancellation, but there is still no final async readiness/timer-driven scheduler wiring live listener/TUN/smoltcp/fan-in tasks together.
+
+## 2026-06-23 — Expose smoltcp next-poll timer evidence
+
+### Reviewer feedback
+- Round-85 review found no blocker/high issues. The remaining runtime gap is final readiness/timer-driven scheduling over live listener/TUN/smoltcp/fan-in tasks. As the next narrow step, smoltcp poll evidence did not expose the next timer deadline needed by a scheduler.
+
+### Commands run
+- `cargo test -p foxprox-stack smoltcp_stack_consumes_ip_packet_and_emits_icmp_reply --all-targets --all-features` — passed.
+- `cargo test -p foxprox-stack smoltcp_tcp_listener_accepts_handshake_and_receives_bytes --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 153 core tests, 4 device tests, 65 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::smoltcp_stack_consumes_ip_packet_and_emits_icmp_reply ... ok`
+- `tests::smoltcp_tcp_listener_accepts_handshake_and_receives_bytes ... ok`
+
+### Fix
+- Added `next_poll_delay_ms: Option<u64>` to `StackPollEvidence`, populated from `Interface::poll_delay(...)` after every smoltcp poll.
+- Preserved `None` for `StackPollEvidence::none()` and simple ICMP reply polling where no timer remains active.
+- Added TCP handshake assertion that SYN/SYN-ACK polling produces a non-empty next-poll delay, giving the future runtime scheduler concrete timer evidence to wait on.
+
+### Changed files
+- `crates/foxprox-stack/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- smoltcp timer readiness is now observable, but there is still no final async scheduler that consumes this timer evidence alongside listener readiness, TUN packet readiness, and sink-backed audit fan-in.
