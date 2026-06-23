@@ -426,3 +426,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Async cancellation should wake blocked Tokio tasks
 
 - Polling-only cancellation is insufficient for real async listeners or scheduler loops. Back async cancellation with a `Notify`-style wakeup and expose an awaitable cancellation future so tasks can use `tokio::select!` instead of relying on sleep polling or abort timeouts.
+
+## 2026-06-23 — Scheduler action should execute from the same audited readiness plan
+
+- When narrowing the async scheduler gap, record the `RuntimeReadinessPlan` before acting and return a step report that carries the same scheduler action, dispatched tasks, and wait result. This keeps runtime evidence and actual control flow tied to the same readiness snapshot.

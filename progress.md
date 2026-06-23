@@ -3796,3 +3796,26 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Cancellation can now wake async tasks, but the concrete Tokio scheduler loop still needs to combine live listener/TUN/smoltcp/fan-in readiness, runtime timers, cancellation, joins, and shutdown final-drain behavior.
+
+## 2026-06-23 — Add concrete Tokio scheduler step over readiness plans
+
+### Fix
+- Added `run_async_runtime_scheduler_step(...)` to record a `RuntimeReadinessPlan` and execute the matching Tokio scheduler action:
+  - `run_ready_tasks` dispatches the ready task list to an async runner.
+  - `wait_for_timer` awaits the shortest readiness timer or cancellation, whichever wins.
+  - `idle` yields once or exits on cancellation.
+- Added `AsyncRuntimeSchedulerStepReport` and `AsyncRuntimeSchedulerWaitStatus` so tests and callers can inspect the plan, scheduler action, dispatched tasks, and wait/cancellation outcome.
+- Added scheduler-step tests proving:
+  - ready DNS tasks are dispatched and readiness audit records `scheduler_action=run_ready_tasks`.
+  - timer readiness records `scheduler_action=wait_for_timer` and waits for the timer.
+  - cancellation can preempt a long timer wait.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_scheduler --all-targets --all-features` — passed 2 scheduler-step tests.
+- `cargo test --all-targets --all-features` — passed, including 71 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The scheduler now executes concrete Tokio actions from audited readiness plans, but live source integration remains: DNS/HTTP/SOCKS listener readiness, TUN packet readiness, smoltcp timer evidence, fan-in progress, task spawning/joining, and shutdown final-drain still need to be wired into an end-to-end runtime loop.
