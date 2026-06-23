@@ -434,3 +434,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Bound scheduler loops while live sources are still injected
 
 - Before the end-to-end live runtime exists, keep Tokio scheduler-loop helpers bounded by an explicit step limit and report whether the loop stopped from cancellation or the bound. This preserves deterministic tests and avoids claiming an unbounded production loop is complete.
+
+## 2026-06-23 — Scheduler ready dispatch must be cancellable
+
+- A scheduler loop is not truly cancellation-aware if only timer/idle waits race cancellation. Ready-task dispatch futures can also block, so `run_ready_tasks` must be selected against cancellation and dropped when cancellation wins before the loop reports cancellation.

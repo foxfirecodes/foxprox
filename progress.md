@@ -3844,3 +3844,25 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - The scheduler loop is now concrete and cancellation-aware, but readiness is still supplied by an injected source. Remaining live-source integration: DNS/HTTP/SOCKS listener readiness, TUN packet readiness, smoltcp timer evidence, fan-in progress, task spawning/joining, and shutdown final-drain in an end-to-end runtime loop.
+
+## 2026-06-23 — Round-95 high fixed: cancellation preempts ready dispatch
+
+### Review
+- Round-95 correctness found one high issue: `run_async_runtime_scheduler_step(...)` did not race the `run_ready_tasks` future against cancellation, so a pending ready-task runner could prevent cancellation and the loop step bound from being reached.
+- Round-95 validation found no blockers and noted a low follow-up: the loop `StepLimitReached` branch was present but not directly asserted.
+
+### Fix
+- Updated the `run_ready_tasks` scheduler branch to use `tokio::select!` against `cancellation.cancelled()`.
+- If cancellation wins during ready dispatch, the scheduler step reports `AsyncRuntimeSchedulerWaitStatus::Cancelled` and does not claim ready tasks were dispatched.
+- Added `async_runtime_scheduler_step_cancellation_preempts_ready_dispatch`, using a drop flag to prove the pending ready-task future is dropped when cancellation wins.
+- Added `async_runtime_scheduler_loop_reports_step_limit`, proving the bounded scheduler loop returns `StepLimitReached` after the configured number of idle scheduler steps and records ordered idle readiness evidence.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_scheduler --all-targets --all-features` — passed 6 scheduler tests.
+- `cargo test --all-targets --all-features` — passed, including 75 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Scheduler loop cancellation now covers ready dispatch, timer waits, and idle waits. Remaining runtime gap is live-source integration and shutdown final-drain: DNS/HTTP/SOCKS listener readiness, TUN packet readiness, smoltcp timer evidence, fan-in progress, task spawning/joining, and final audit drain in an end-to-end Tokio runtime loop.

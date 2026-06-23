@@ -2517,9 +2517,14 @@ where
     let mut dispatched_tasks = Vec::new();
     let wait_status = match scheduler_action {
         RuntimeSchedulerAction::RunReadyTasks => {
-            dispatched_tasks = plan.ready_tasks.clone();
-            run_ready_tasks(dispatched_tasks.clone()).await;
-            AsyncRuntimeSchedulerWaitStatus::NotWaiting
+            let ready_tasks = plan.ready_tasks.clone();
+            tokio::select! {
+                () = run_ready_tasks(ready_tasks.clone()) => {
+                    dispatched_tasks = ready_tasks;
+                    AsyncRuntimeSchedulerWaitStatus::NotWaiting
+                }
+                () = cancellation.cancelled() => AsyncRuntimeSchedulerWaitStatus::Cancelled,
+            }
         }
         RuntimeSchedulerAction::WaitForTimer => {
             let delay = Duration::from_millis(plan.next_ready_delay_ms.unwrap_or_default());
@@ -3249,6 +3254,62 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_scheduler_step_cancellation_preempts_ready_dispatch() {
+        let cancellation_state = Arc::new(AsyncRuntimeCancellationState::new());
+        let cancellation = AsyncRuntimeCancellationToken::new(cancellation_state.clone());
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-scheduler", 8);
+        lifecycle
+            .start_with_task_expectations(
+                vec![RuntimeComponent::DnsListener],
+                vec![RuntimeTaskExpectation::new(
+                    RuntimeComponent::DnsListener,
+                    "dns_accept_loop",
+                )],
+                1_500,
+            )
+            .unwrap();
+        let runner_dropped = Arc::new(AtomicBool::new(false));
+        let runner_dropped_by_task = runner_dropped.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            cancellation_state.cancelled.store(true, Ordering::SeqCst);
+            cancellation_state.notify.notify_waiters();
+        });
+
+        let report = run_async_runtime_scheduler_step(
+            &mut lifecycle,
+            &[RuntimeTaskReadiness::ready(
+                RuntimeComponent::DnsListener,
+                "dns_accept_loop",
+            )],
+            1_510,
+            &cancellation,
+            move |_ready_tasks| async move {
+                let _drop_flag = DropFlag(runner_dropped_by_task);
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            report.scheduler_action,
+            RuntimeSchedulerAction::RunReadyTasks
+        );
+        assert_eq!(
+            report.wait_status,
+            AsyncRuntimeSchedulerWaitStatus::Cancelled
+        );
+        assert!(report.dispatched_tasks.is_empty());
+        assert!(
+            runner_dropped.load(Ordering::SeqCst),
+            "ready-task future must be dropped when scheduler cancellation wins"
+        );
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].details["scheduler_action"], "run_ready_tasks");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn async_runtime_scheduler_step_waits_for_timer_or_cancellation() {
         let timer_cancellation =
             AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
@@ -3459,6 +3520,53 @@ mod tests {
         let records: Vec<_> = lifecycle.audit().records().collect();
         assert_eq!(records[1].details["scheduler_action"], "run_ready_tasks");
         assert_eq!(records[2].details["scheduler_action"], "wait_for_timer");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_scheduler_loop_reports_step_limit() {
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-scheduler", 8);
+        lifecycle
+            .start_with_task_expectations(
+                vec![RuntimeComponent::AuditFanIn],
+                vec![RuntimeTaskExpectation::new(
+                    RuntimeComponent::AuditFanIn,
+                    "audit_fan_in_loop",
+                )],
+                6_000,
+            )
+            .unwrap();
+
+        let report = run_async_runtime_scheduler_loop_until_cancelled(
+            &mut lifecycle,
+            &cancellation,
+            6_010,
+            10,
+            2,
+            |_step_index| {
+                vec![RuntimeTaskReadiness::new(
+                    RuntimeComponent::AuditFanIn,
+                    "audit_fan_in_loop",
+                )]
+            },
+            |_ready_tasks| async {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            report.status,
+            AsyncRuntimeSchedulerLoopStatus::StepLimitReached
+        );
+        assert_eq!(report.steps.len(), 2);
+        assert!(report
+            .steps
+            .iter()
+            .all(|step| step.scheduler_action == RuntimeSchedulerAction::Idle));
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].details["scheduler_action"], "idle");
+        assert_eq!(records[2].details["scheduler_action"], "idle");
     }
 
     #[tokio::test(flavor = "current_thread")]
