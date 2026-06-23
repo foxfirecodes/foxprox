@@ -2576,3 +2576,35 @@ Addressed round-49/round-50 high review notes. `RuntimeAuditDrainError::SinkWrit
 ### Remaining blind spots
 - The emergency sink destination is still caller-provided; final runtime should choose the concrete fallback sink and bounded retry policy.
 - The blocking task-set proof is still synchronous/thread-based. Final runtime still needs async task handles, cancellation ordering, and real listener/TUN/smoltcp task registration.
+
+## 2026-06-23 — Bound blocking task joins with timeout evidence
+
+### Commands run
+- `cargo fmt` — applied formatting for task timeout changes.
+- `cargo test -p foxprox-egress blocking_runtime_task_set --all-targets --all-features` — passed, 5 blocking task-set tests.
+- `cargo test -p foxprox-core runtime::tests::runtime_lifecycle_task_join_failure_is_fail_closed --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 150 core tests, 3 device tests, 43 egress tests, and 12 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_runtime_task_set_timeout_is_fail_closed ... ok`
+- `tests::blocking_runtime_task_set_spawn_failure_is_join_failed ... ok`
+- `tests::blocking_runtime_task_set_panic_is_join_failed ... ok`
+- `runtime::tests::runtime_lifecycle_task_join_failure_is_fail_closed ... ok`
+
+### Interpretation
+Added `RuntimeTaskStatus::TimedOut` as a failed task outcome and extended `BlockingRuntimeTaskSet` with `join_all_with_timeout(...)`. Blocking tasks now publish completion status through a bounded receiver path; if status is not observed before the timeout, the task report records `timed_out`, and lifecycle exit emits fail-closed `network_session_exit` evidence with `task_join_status=failed`, the specific timed-out task name, and failed task counts.
+
+### Changed files
+- `crates/foxprox-core/src/runtime.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Commit checkpoints
+- `1a90eba Make fallback runtime failures observable` was validated by round-51 review: no blocker/high findings.
+
+### Remaining blind spots
+- The timeout path detaches still-running blocking threads after recording `timed_out`; final async runtime should actively signal cancellation and then join with a bounded deadline.
+- Listener/TUN/smoltcp tasks still need concrete registration and cancellation wiring in the final runtime.

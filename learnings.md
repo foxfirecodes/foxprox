@@ -254,3 +254,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 
 - Do not discard secondary evidence-path failures with `let _ = ...`; if an emergency/failure audit sink fails, return a structured failure record so the caller can distinguish persisted fallback evidence from total sink loss.
 - Blocking runtime task spawning should use `std::thread::Builder::spawn` rather than `std::thread::spawn` so OS thread creation failure can be represented as a task `join_failed` outcome and drive fail-closed lifecycle exit evidence instead of panicking.
+
+## 2026-06-23 — Blocking task joins need bounded timeout evidence
+
+- A task registry can still hang shutdown if joining waits forever. Blocking task supervision needs a bounded join path that records a structured `timed_out` task outcome so lifecycle exit can fail closed with inspectable evidence.

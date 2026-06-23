@@ -115,6 +115,7 @@ pub enum RuntimeTaskStatus {
     Cancelled,
     Failed,
     JoinFailed,
+    TimedOut,
 }
 
 impl RuntimeTaskStatus {
@@ -124,11 +125,12 @@ impl RuntimeTaskStatus {
             Self::Cancelled => "cancelled",
             Self::Failed => "failed",
             Self::JoinFailed => "join_failed",
+            Self::TimedOut => "timed_out",
         }
     }
 
     fn is_failed(self) -> bool {
-        matches!(self, Self::Failed | Self::JoinFailed)
+        matches!(self, Self::Failed | Self::JoinFailed | Self::TimedOut)
     }
 }
 

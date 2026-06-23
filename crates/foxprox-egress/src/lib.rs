@@ -23,6 +23,7 @@ use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 #[cfg(unix)]
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -1517,7 +1518,14 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
 #[derive(Debug, Default)]
 pub struct BlockingRuntimeTaskSet {
     supervisor: RuntimeTaskSupervisor,
-    tasks: Vec<(RuntimeTaskHandle, JoinHandle<RuntimeTaskStatus>)>,
+    tasks: Vec<BlockingRuntimeTask>,
+}
+
+#[derive(Debug)]
+struct BlockingRuntimeTask {
+    handle: RuntimeTaskHandle,
+    join: JoinHandle<RuntimeTaskStatus>,
+    status_rx: Receiver<RuntimeTaskStatus>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1552,8 +1560,12 @@ impl BlockingRuntimeTaskSet {
     where
         F: FnOnce() -> RuntimeTaskStatus + Send + 'static,
     {
-        self.spawn_task_with_spawner(component, task_name, task, |task_name, task| {
-            std::thread::Builder::new().name(task_name).spawn(task)
+        self.spawn_task_with_spawner(component, task_name, task, |task_name, task, status_tx| {
+            std::thread::Builder::new().name(task_name).spawn(move || {
+                let status = task();
+                let _ = status_tx.send(status);
+                status
+            })
         })
     }
 
@@ -1566,15 +1578,24 @@ impl BlockingRuntimeTaskSet {
     ) -> Result<RuntimeTaskHandle, BlockingRuntimeTaskSetError>
     where
         F: FnOnce() -> RuntimeTaskStatus + Send + 'static,
-        S: FnOnce(String, F) -> std::io::Result<JoinHandle<RuntimeTaskStatus>>,
+        S: FnOnce(
+            String,
+            F,
+            mpsc::Sender<RuntimeTaskStatus>,
+        ) -> std::io::Result<JoinHandle<RuntimeTaskStatus>>,
     {
         let task_name = task_name.into();
         let handle = self
             .supervisor
             .register_task(component, task_name.clone())?;
-        match spawner(task_name.clone(), task) {
-            Ok(task) => {
-                self.tasks.push((handle, task));
+        let (status_tx, status_rx) = mpsc::channel();
+        match spawner(task_name.clone(), task, status_tx) {
+            Ok(join) => {
+                self.tasks.push(BlockingRuntimeTask {
+                    handle,
+                    join,
+                    status_rx,
+                });
                 Ok(handle)
             }
             Err(_) => {
@@ -1594,10 +1615,30 @@ impl BlockingRuntimeTaskSet {
     }
 
     pub fn join_all(mut self) -> RuntimeTaskJoinReport {
-        for (handle, task) in self.tasks {
-            let status = task.join().unwrap_or(RuntimeTaskStatus::JoinFailed);
+        for task in self.tasks {
+            let status = task.join.join().unwrap_or(RuntimeTaskStatus::JoinFailed);
             self.supervisor
-                .record_outcome(handle, status)
+                .record_outcome(task.handle, status)
+                .expect("joined task was registered once");
+        }
+        self.supervisor.join_report()
+    }
+
+    pub fn join_all_with_timeout(mut self, timeout: Duration) -> RuntimeTaskJoinReport {
+        for task in self.tasks {
+            let status = match task.status_rx.recv_timeout(timeout) {
+                Ok(status) => match task.join.join() {
+                    Ok(join_status) if join_status == status => status,
+                    Ok(join_status) => join_status,
+                    Err(_) => RuntimeTaskStatus::JoinFailed,
+                },
+                Err(RecvTimeoutError::Timeout) => RuntimeTaskStatus::TimedOut,
+                Err(RecvTimeoutError::Disconnected) => {
+                    task.join.join().unwrap_or(RuntimeTaskStatus::JoinFailed)
+                }
+            };
+            self.supervisor
+                .record_outcome(task.handle, status)
                 .expect("joined task was registered once");
         }
         self.supervisor.join_report()
@@ -1959,7 +2000,7 @@ mod tests {
                 RuntimeComponent::DnsListener,
                 "dns_accept_loop",
                 || RuntimeTaskStatus::Completed,
-                |_task_name, _task| {
+                |_task_name, _task, _status_tx| {
                     Err(std::io::Error::new(
                         ErrorKind::WouldBlock,
                         "deterministic thread spawn failure",
@@ -2002,6 +2043,46 @@ mod tests {
             records[1].details["runtime_tasks"],
             "dns_listener:dns_accept_loop:join_failed"
         );
+    }
+
+    #[test]
+    fn blocking_runtime_task_set_timeout_is_fail_closed() {
+        let mut task_set = BlockingRuntimeTaskSet::new();
+        task_set
+            .spawn_task(RuntimeComponent::DnsListener, "dns_accept_loop", || {
+                std::thread::sleep(Duration::from_millis(50));
+                RuntimeTaskStatus::Completed
+            })
+            .unwrap();
+        let expectations = task_set.expectations();
+
+        let mut lifecycle = RuntimeLifecycleHarness::new("task-sandbox", 4);
+        lifecycle
+            .start_with_task_expectations(vec![RuntimeComponent::DnsListener], expectations, 1_000)
+            .unwrap();
+        let report = task_set.join_all_with_timeout(Duration::from_millis(1));
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].status, RuntimeTaskStatus::TimedOut);
+        lifecycle
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::DnsListener]),
+                None,
+                Some(report),
+                1_100,
+            )
+            .unwrap();
+
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["task_join_status"], "failed");
+        assert_eq!(
+            records[1].details["runtime_tasks"],
+            "dns_listener:dns_accept_loop:timed_out"
+        );
+        assert_eq!(records[1].details["failed_runtime_task_count"], "1");
     }
 
     #[test]
