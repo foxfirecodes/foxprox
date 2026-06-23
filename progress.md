@@ -3890,3 +3890,24 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - The scheduler loop now polls readiness-source adapters instead of only accepting a precomputed vector or step-index closure, but the sources in tests are still deterministic adapters. Remaining work is concrete adapters for real DNS/HTTP/SOCKS listeners, TUN packet readiness, smoltcp timer polling, fan-in drain progress, task joins, and shutdown final drain in an end-to-end Tokio runtime.
+
+## 2026-06-23 — Add async task-set shutdown final-drain helper
+
+### Fix
+- Added `AsyncRuntimeAuditFanInShutdownDrainReport` and `AsyncRuntimeAuditFanInShutdownDrainError` to carry async task cancellation/join evidence alongside the existing shutdown fan-in drain report.
+- Added `BlockingProxyRuntime::exit_with_async_task_set_and_drain_live_audit_sources_to_sink(...)`:
+  - requests cancellation for an `AsyncRuntimeTaskSet`,
+  - awaits async task joins with a timeout,
+  - exits with the resulting `RuntimeTaskJoinReport`,
+  - drains live audit sources before and after lifecycle exit through `RuntimeAuditFanIn`.
+- Added `blocking_proxy_runtime_async_task_shutdown_drains_final_audit`, proving DNS/HTTP/SOCKS/audit-fan-in async tasks are cancelled and joined, lifecycle exit records clean task outcomes, the final drain includes `network_session_exit`, and listeners are closed after shutdown.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_async_task_shutdown_drains_final_audit --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 78 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Async task cancellation/join is now tied to shutdown final drain for the full blocking proxy runtime. Remaining work is still the true end-to-end Tokio runtime with concrete live readiness adapters for DNS/HTTP/SOCKS sockets, TUN packets, smoltcp timers, fan-in progress, and real task spawning/driving rather than synthetic async task bodies.

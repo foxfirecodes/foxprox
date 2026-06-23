@@ -1300,6 +1300,22 @@ pub enum BlockingRuntimeAuditFanInShutdownDrainError {
     },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AsyncRuntimeAuditFanInShutdownDrainReport {
+    pub cancelled_tasks: usize,
+    pub task_report: RuntimeTaskJoinReport,
+    pub shutdown_drain: BlockingRuntimeAuditFanInShutdownDrainReport,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AsyncRuntimeAuditFanInShutdownDrainError {
+    ShutdownDrain {
+        cancelled_tasks: usize,
+        task_report: RuntimeTaskJoinReport,
+        error: BlockingRuntimeAuditFanInShutdownDrainError,
+    },
+}
+
 #[derive(Debug)]
 pub struct BlockingDnsHttpRuntime<U, E> {
     sandbox_id: String,
@@ -2041,6 +2057,38 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
                     error,
                 })
             }
+        }
+    }
+
+    pub async fn exit_with_async_task_set_and_drain_live_audit_sources_to_sink<W: Write>(
+        &mut self,
+        status: RuntimeExitStatus,
+        mut task_set: AsyncRuntimeTaskSet,
+        join_timeout: Duration,
+        fan_in: &mut RuntimeAuditFanIn,
+        sink: &mut JsonLineAuditSink<W>,
+        now_ms: u64,
+    ) -> Result<AsyncRuntimeAuditFanInShutdownDrainReport, AsyncRuntimeAuditFanInShutdownDrainError>
+    {
+        let cancelled_tasks = task_set.request_cancellation();
+        let task_report = task_set.join_all_with_timeout(join_timeout).await;
+        match self.exit_and_drain_live_audit_sources_to_sink(
+            status,
+            Some(task_report.clone()),
+            fan_in,
+            sink,
+            now_ms,
+        ) {
+            Ok(shutdown_drain) => Ok(AsyncRuntimeAuditFanInShutdownDrainReport {
+                cancelled_tasks,
+                task_report,
+                shutdown_drain,
+            }),
+            Err(error) => Err(AsyncRuntimeAuditFanInShutdownDrainError::ShutdownDrain {
+                cancelled_tasks,
+                task_report,
+                error,
+            }),
         }
     }
 
@@ -6453,6 +6501,115 @@ mod tests {
         );
         assert_eq!(
             runtime.handle_http_proxy_once(1_301).unwrap_err(),
+            ProxyEgressError::SendFailed
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_proxy_runtime_async_task_shutdown_drains_final_audit() {
+        let query = dns_query(0x7c7e, "AsyncShutdownFull.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut runtime = BlockingProxyRuntime::bind(
+            "s1",
+            8,
+            SharedDnsCache::default(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            1_350,
+        )
+        .unwrap();
+        let mut task_set = AsyncRuntimeTaskSet::new();
+        for (component, task_name) in [
+            (RuntimeComponent::DnsListener, "dns_accept_loop"),
+            (
+                RuntimeComponent::HttpProxyListener,
+                "http_proxy_accept_loop",
+            ),
+            (RuntimeComponent::Socks5Listener, "socks5_accept_loop"),
+            (RuntimeComponent::AuditFanIn, "audit_fan_in_loop"),
+        ] {
+            task_set
+                .spawn_cancellable_task(component, task_name, |token| async move {
+                    token.cancelled().await;
+                    RuntimeTaskStatus::Cancelled
+                })
+                .unwrap();
+        }
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 16);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+
+        let shutdown = runtime
+            .exit_with_async_task_set_and_drain_live_audit_sources_to_sink(
+                RuntimeExitStatus::Clean,
+                task_set,
+                Duration::from_secs(1),
+                &mut fan_in,
+                &mut sink,
+                1_450,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(shutdown.cancelled_tasks, 4);
+        assert_eq!(shutdown.task_report.outcomes.len(), 4);
+        assert!(shutdown
+            .task_report
+            .outcomes
+            .iter()
+            .all(|outcome| outcome.status == RuntimeTaskStatus::Cancelled));
+        assert!(shutdown.shutdown_drain.before_exit.made_progress());
+        assert!(shutdown.shutdown_drain.after_exit.made_progress());
+        assert_eq!(
+            shutdown
+                .shutdown_drain
+                .after_exit
+                .drain_report
+                .drained_records,
+            1
+        );
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+        assert!(output.contains("network_session_start"));
+        assert!(output.contains("network_session_exit"));
+        assert!(output.contains("dns_listener:dns_accept_loop:cancelled"));
+        assert!(output.contains("http_proxy_listener:http_proxy_accept_loop:cancelled"));
+        assert!(output.contains("socks5_listener:socks5_accept_loop:cancelled"));
+        assert!(output.contains("audit_fan_in:audit_fan_in_loop:cancelled"));
+        let exit = runtime.lifecycle().audit().records().last().unwrap();
+        assert_eq!(exit.kind, AuditKind::NetworkSessionExit);
+        assert_eq!(exit.decision, Some(Decision::Allow));
+        assert_eq!(exit.details["task_join_status"], "complete");
+        assert_eq!(
+            runtime.handle_dns_once(1_451).unwrap_err(),
+            DnsUpstreamError::Unavailable
+        );
+        assert_eq!(
+            runtime.handle_http_proxy_once(1_451).unwrap_err(),
+            ProxyEgressError::SendFailed
+        );
+        assert_eq!(
+            runtime.handle_socks5_proxy_once(1_451).unwrap_err(),
             ProxyEgressError::SendFailed
         );
     }

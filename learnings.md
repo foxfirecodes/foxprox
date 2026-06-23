@@ -442,3 +442,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Use source traits to bridge injected scheduler tests toward live readiness
 
 - A small readiness-source trait is a useful intermediate step between precomputed readiness vectors and the final runtime: the scheduler can poll heterogeneous listener/TUN/stack/fan-in readiness producers each iteration while tests remain deterministic and bounded.
+
+## 2026-06-23 — Couple async task joins to final shutdown drain
+
+- Shutdown helpers that own async runtime tasks should request cancellation, await the async join report, and only then perform the existing pre/post-exit fan-in drain. This keeps lifecycle task evidence and final audit drain evidence tied to the same shutdown path.
