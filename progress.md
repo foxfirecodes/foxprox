@@ -2977,3 +2977,29 @@ Round-64 review found no blocker/high issues and identified deterministic listen
 ### Remaining blind spots
 - Need real adapter-level/OS listener error injection so DNS/HTTP/SOCKS `run_until_cancelled(...)` can be proven to hit these recorders from concrete accept/recv failures without unsafe fd manipulation.
 - Final async runtime still needs readiness/timer integration and audit fan-in wiring for real task loops.
+
+## 2026-06-23 — Complete listener-loop audit field assertions
+
+### Commands run
+- `cargo fmt` — applied formatting for audit assertion follow-up.
+- `cargo test -p foxprox-egress blocking_listener_loop_error_recorders_append_structured_broker_errors --all-targets --all-features` — passed.
+- `cargo test -p foxprox-egress blocking_listener_loop --all-targets --all-features` — passed, 5 listener-loop tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 58 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_listener_loop_error_recorders_append_structured_broker_errors ... ok`
+- The test now asserts typed `frontend`/`protocol` fields and `runtime_error=listener_loop_error` detail for DNS, HTTP, and SOCKS listener-loop error records.
+
+### Interpretation
+Round-65 review found no blocker/high issues but noted that the previous assertions did not fully cover HTTP/SOCKS `runtime_error` and typed frontend/protocol fields. This follow-up closes that assertion gap so the test matches the progress/learnings claims for all three listener frontends.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Need real adapter-level/OS listener error injection so DNS/HTTP/SOCKS `run_until_cancelled(...)` can be proven to hit these recorders from concrete accept/recv failures without unsafe fd manipulation.
+- Final async runtime still needs readiness/timer integration and audit fan-in wiring for real task loops.

@@ -2566,6 +2566,8 @@ mod tests {
         let dns_records: Vec<_> = dns_server.handler().broker().audit().records().collect();
         assert_eq!(dns_records.len(), 1);
         assert_eq!(dns_records[0].kind, AuditKind::BrokerError);
+        assert_eq!(dns_records[0].frontend, Some(Frontend::Core));
+        assert_eq!(dns_records[0].protocol, Some(Protocol::Dns));
         assert_eq!(dns_records[0].decision, Some(Decision::FailClosed));
         assert_eq!(dns_records[0].reason, Some(DenialReason::RuntimeState));
         assert_eq!(
@@ -2592,8 +2594,14 @@ mod tests {
         let http_records: Vec<_> = http_server.frontend().broker().audit().records().collect();
         assert_eq!(http_records.len(), 1);
         assert_eq!(http_records[0].kind, AuditKind::BrokerError);
+        assert_eq!(http_records[0].frontend, Some(Frontend::HttpProxy));
+        assert_eq!(http_records[0].protocol, Some(Protocol::Http));
         assert_eq!(http_records[0].decision, Some(Decision::FailClosed));
         assert_eq!(http_records[0].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(
+            http_records[0].details["runtime_error"],
+            "listener_loop_error"
+        );
         assert_eq!(
             http_records[0].details["listener_component"],
             "http_proxy_listener"
@@ -2620,8 +2628,14 @@ mod tests {
         let socks_records: Vec<_> = socks_server.frontend().broker().audit().records().collect();
         assert_eq!(socks_records.len(), 1);
         assert_eq!(socks_records[0].kind, AuditKind::BrokerError);
+        assert_eq!(socks_records[0].frontend, Some(Frontend::Socks5Proxy));
+        assert_eq!(socks_records[0].protocol, Some(Protocol::Socks));
         assert_eq!(socks_records[0].decision, Some(Decision::FailClosed));
         assert_eq!(socks_records[0].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(
+            socks_records[0].details["runtime_error"],
+            "listener_loop_error"
+        );
         assert_eq!(
             socks_records[0].details["listener_component"],
             "socks5_listener"

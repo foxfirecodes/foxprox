@@ -310,3 +310,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Listener error audits should be asserted per frontend
 
 - Shared listener-loop status tests are not enough on their own; each listener frontend should have structured audit assertions for `listener_loop_error` records so DNS/HTTP/SOCKS task failures retain component, task, frontend/protocol, and error detail evidence.
+
+## 2026-06-23 — Audit assertions should cover typed and detail fields
+
+- When documenting structured audit coverage, assert both typed record fields (`frontend`, `protocol`, `decision`, `reason`) and string details (`runtime_error`, component, task, error detail) for every frontend to avoid overclaiming observability evidence.
