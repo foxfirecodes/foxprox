@@ -2337,21 +2337,49 @@ pub struct AsyncRuntimeTaskSet {
 struct AsyncRuntimeTask {
     handle: RuntimeTaskHandle,
     join: tokio::task::JoinHandle<RuntimeTaskStatus>,
-    cancellation: Option<Arc<AtomicBool>>,
+    cancellation: Option<Arc<AsyncRuntimeCancellationState>>,
+}
+
+#[derive(Debug)]
+struct AsyncRuntimeCancellationState {
+    cancelled: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl AsyncRuntimeCancellationState {
+    fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct AsyncRuntimeCancellationToken {
-    cancelled: Arc<AtomicBool>,
+    state: Arc<AsyncRuntimeCancellationState>,
 }
 
 impl AsyncRuntimeCancellationToken {
-    fn new(cancelled: Arc<AtomicBool>) -> Self {
-        Self { cancelled }
+    fn new(state: Arc<AsyncRuntimeCancellationState>) -> Self {
+        Self { state }
     }
 
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
+        self.state.cancelled.load(Ordering::SeqCst)
+    }
+
+    pub async fn cancelled(&self) {
+        loop {
+            let notified = self.state.notify.notified();
+            if self.is_cancelled() {
+                return;
+            }
+            notified.await;
+            if self.is_cancelled() {
+                return;
+            }
+        }
     }
 }
 
@@ -2404,7 +2432,7 @@ impl AsyncRuntimeTaskSet {
         F: FnOnce(AsyncRuntimeCancellationToken) -> Fut,
         Fut: Future<Output = RuntimeTaskStatus> + Send + 'static,
     {
-        let cancellation = Arc::new(AtomicBool::new(false));
+        let cancellation = Arc::new(AsyncRuntimeCancellationState::new());
         let token = AsyncRuntimeCancellationToken::new(cancellation.clone());
         let task_name = task_name.into();
         let handle = self.supervisor.register_task(component, task_name)?;
@@ -2428,7 +2456,9 @@ impl AsyncRuntimeTaskSet {
             .iter()
             .filter_map(|task| task.cancellation.as_ref())
         {
-            cancellation.store(true, Ordering::SeqCst);
+            if !cancellation.cancelled.swap(true, Ordering::SeqCst) {
+                cancellation.notify.notify_waiters();
+            }
             cancelled += 1;
         }
         cancelled
@@ -3007,6 +3037,29 @@ mod tests {
             records[1].details["runtime_tasks"],
             "audit_fan_in:audit_fan_in_loop:cancelled"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_cancellation_token_wakes_awaiting_task() {
+        let mut task_set = AsyncRuntimeTaskSet::new();
+        task_set
+            .spawn_cancellable_task(
+                RuntimeComponent::AuditFanIn,
+                "audit_fan_in_loop",
+                |token| async move {
+                    tokio::select! {
+                        () = token.cancelled() => RuntimeTaskStatus::Cancelled,
+                        () = tokio::time::sleep(Duration::from_secs(60)) => RuntimeTaskStatus::TimedOut,
+                    }
+                },
+            )
+            .unwrap();
+
+        assert_eq!(task_set.request_cancellation(), 1);
+        let report = task_set.join_all_with_timeout(Duration::from_secs(1)).await;
+
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].status, RuntimeTaskStatus::Cancelled);
     }
 
     #[tokio::test(flavor = "current_thread")]

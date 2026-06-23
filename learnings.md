@@ -422,3 +422,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Await aborted Tokio tasks before emitting join evidence
 
 - For async runtime join evidence, calling `JoinHandle::abort()` is not enough. Await the aborted handle before recording a timeout outcome so lifecycle evidence does not claim a task was joined while cleanup/drop is still pending.
+
+## 2026-06-23 — Async cancellation should wake blocked Tokio tasks
+
+- Polling-only cancellation is insufficient for real async listeners or scheduler loops. Back async cancellation with a `Notify`-style wakeup and expose an awaitable cancellation future so tasks can use `tokio::select!` instead of relying on sleep polling or abort timeouts.

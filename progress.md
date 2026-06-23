@@ -3778,3 +3778,21 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Async task timeout evidence now confirms abort completion before report emission, but cancellation is still polling-only. The next highest gap remains an awaitable/select-able cancellation mechanism and the concrete Tokio scheduler consuming live readiness/timers/fan-in sources with shutdown final drain.
+
+## 2026-06-23 — Add awaitable async cancellation token
+
+### Fix
+- Extended `AsyncRuntimeCancellationToken` with an awaitable `cancelled()` method backed by `tokio::sync::Notify` plus an atomic cancellation state.
+- Updated `AsyncRuntimeTaskSet::request_cancellation()` to wake waiting async tasks when cancellation is first requested.
+- Added `async_runtime_cancellation_token_wakes_awaiting_task`, proving an async task blocked in `tokio::select!` wakes on cancellation and exits with `RuntimeTaskStatus::Cancelled` without sleep polling.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- First validation attempt failed because `tokio::sync::Notify` requires Tokio's `sync` feature; fixed `crates/foxprox-egress/Cargo.toml` to include `sync`.
+- `cargo test -p foxprox-egress async_runtime --all-targets --all-features` — passed 4 async runtime tests.
+- `cargo test --all-targets --all-features` — passed, including 69 egress tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Cancellation can now wake async tasks, but the concrete Tokio scheduler loop still needs to combine live listener/TUN/smoltcp/fan-in readiness, runtime timers, cancellation, joins, and shutdown final-drain behavior.
