@@ -3253,3 +3253,27 @@ Round-75 review found no blocker/high issues and kept final async fan-in as the 
 ### Remaining blind spots
 - The fan-in task proof is still a blocking harness with synthetic source records; it is not yet final async readiness/timer-driven fan-in over live listener/TUN/smoltcp sources.
 - Final async runtime still needs readiness/timer orchestration across all concrete runtime tasks.
+
+## 2026-06-23 — Pump live runtime ledgers through fan-in loop
+
+### Commands run
+- `cargo fmt` — applied formatting for live fan-in loop coverage.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_aggregate_captures_http_read_failures --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 63 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_proxy_runtime_aggregate_captures_http_read_failures ... ok`
+
+### Interpretation
+Extended the live blocking-runtime fan-in proof so `BlockingProxyRuntime` source ledgers are ingested and drained through the same bounded fan-in pump loop used by the audit fan-in task. The loop first ingests/drains lifecycle and HTTP partial-read records, then reaches idle and returns `timed_out`; sink output contains `network_session_start`, `http_proxy_client_read_incomplete`, and `unsupported_denied`. This ties live source-ledger fan-in to the pump loop semantics without claiming final async readiness/timer orchestration.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This still runs synchronously in the blocking harness; it is not yet the final async readiness/timer-driven fan-in task over live listener/TUN/smoltcp sources.
+- Final async runtime still needs readiness/timer orchestration across all concrete runtime tasks.

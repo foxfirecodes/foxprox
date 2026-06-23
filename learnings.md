@@ -354,3 +354,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Fan-in task failures must fail closed in lifecycle
 
 - In addition to clean cancellation, audit fan-in runtime tasks need failure-path lifecycle coverage. Pump/drain errors should return `RuntimeTaskStatus::Failed`, and `network_session_exit` should fail closed with the `audit_fan_in:audit_fan_in_loop:failed` task outcome.
+
+## 2026-06-23 — Live source fan-in should run through the same pump loop
+
+- After proving source-specific fan-in ingestion directly, also drive live runtime ledgers through the fan-in pump loop. This verifies progress/idle handling, duplicate source cursor behavior, and sink output under the same loop semantics used by the audit fan-in runtime task.

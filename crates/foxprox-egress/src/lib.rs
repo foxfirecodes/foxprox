@@ -5566,6 +5566,27 @@ mod tests {
         assert!(fan_in_json.contains("http_proxy_client_read_incomplete"));
         assert!(fan_in_json.contains("unsupported_denied"));
 
+        let mut loop_fan_in = RuntimeAuditFanIn::new("s1", 16);
+        let mut loop_sink = JsonLineAuditSink::new(Vec::new());
+        let loop_status = run_blocking_audit_fan_in_until_cancelled(
+            1,
+            || false,
+            || -> Result<bool, ()> {
+                let reports = runtime
+                    .ingest_live_audit_sources_into_fan_in(&mut loop_fan_in)
+                    .map_err(|_| ())?;
+                let accepted_records: usize =
+                    reports.iter().map(|report| report.accepted_records).sum();
+                let drain = loop_fan_in.drain_to_sink(&mut loop_sink).map_err(|_| ())?;
+                Ok(accepted_records > 0 || drain.drained_records > 0)
+            },
+        );
+        assert_eq!(loop_status, RuntimeTaskStatus::TimedOut);
+        let loop_json = String::from_utf8(loop_sink.into_inner()).unwrap();
+        assert!(loop_json.contains("network_session_start"));
+        assert!(loop_json.contains("http_proxy_client_read_incomplete"));
+        assert!(loop_json.contains("unsupported_denied"));
+
         let mut failing_sink = JsonLineAuditSink::new(FailingWriter);
         assert!(runtime
             .drain_aggregate_audit_to_sink(&mut failing_sink)
