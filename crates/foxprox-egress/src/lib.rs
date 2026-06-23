@@ -3223,6 +3223,59 @@ mod tests {
     #[derive(Clone, Debug, Default)]
     struct FailingTcpListenerSocket;
 
+    const EGRESS_TCP_SYN: u8 = 0x02;
+
+    #[derive(Clone, Copy)]
+    struct EgressTcpPacketSpec<'a> {
+        source: [u8; 4],
+        destination: [u8; 4],
+        source_port: u16,
+        destination_port: u16,
+        sequence: u32,
+        acknowledgment: u32,
+        flags: u8,
+        payload: &'a [u8],
+    }
+
+    fn egress_ipv4_tcp_packet(spec: EgressTcpPacketSpec<'_>) -> Vec<u8> {
+        let tcp_len = 20 + spec.payload.len();
+        let total_len = 20 + tcp_len;
+        let mut packet = vec![0u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&spec.source);
+        packet[16..20].copy_from_slice(&spec.destination);
+
+        let tcp = &mut packet[20..];
+        tcp[0..2].copy_from_slice(&spec.source_port.to_be_bytes());
+        tcp[2..4].copy_from_slice(&spec.destination_port.to_be_bytes());
+        tcp[4..8].copy_from_slice(&spec.sequence.to_be_bytes());
+        tcp[8..12].copy_from_slice(&spec.acknowledgment.to_be_bytes());
+        tcp[12] = 5 << 4;
+        tcp[13] = spec.flags;
+        tcp[14..16].copy_from_slice(&4096u16.to_be_bytes());
+        tcp[20..].copy_from_slice(spec.payload);
+
+        let tcp_checksum = egress_tcp_checksum(spec.source, spec.destination, tcp);
+        packet[36..38].copy_from_slice(&tcp_checksum.to_be_bytes());
+        let header_checksum = foxprox_core::checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
+        packet
+    }
+
+    fn egress_tcp_checksum(source: [u8; 4], destination: [u8; 4], tcp: &[u8]) -> u16 {
+        let mut bytes = Vec::with_capacity(12 + tcp.len());
+        bytes.extend_from_slice(&source);
+        bytes.extend_from_slice(&destination);
+        bytes.push(0);
+        bytes.push(6);
+        bytes.extend_from_slice(&(tcp.len() as u16).to_be_bytes());
+        bytes.extend_from_slice(tcp);
+        foxprox_core::checksum(&bytes)
+    }
+
     impl BlockingTcpListenerSocket for FailingTcpListenerSocket {
         fn accept(&self) -> IoResult<(TcpStream, SocketAddr)> {
             Err(std::io::Error::other("forced tcp listener accept failure"))
@@ -4114,6 +4167,91 @@ mod tests {
         assert_eq!(
             records[1].details["ready_runtime_tasks"],
             "dns_listener:dns_accept_loop,http_proxy_listener:http_proxy_accept_loop,audit_fan_in:audit_fan_in_loop,tun_device:tun_packet_loop"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_scheduler_loop_dispatches_live_smoltcp_timer_wake() {
+        let mut stack = foxprox_stack::SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        stack.listen_tcp(8080, 1024, 1024);
+        stack.inject_packet(egress_ipv4_tcp_packet(EgressTcpPacketSpec {
+            source: [10, 0, 2, 15],
+            destination: [10, 0, 2, 1],
+            source_port: 50_000,
+            destination_port: 8080,
+            sequence: 0x0102_0304,
+            acknowledgment: 0,
+            flags: EGRESS_TCP_SYN,
+            payload: &[],
+        }));
+        let syn_ack = stack.poll(9_000);
+        assert_eq!(syn_ack.packets_emitted, 1);
+        let due_ms = 9_000 + syn_ack.next_poll_delay_ms.unwrap() as i64;
+        let stack = std::rc::Rc::new(std::cell::RefCell::new(stack));
+        let dispatched = std::rc::Rc::new(std::cell::Cell::new(false));
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-smoltcp-loop", 4);
+        lifecycle
+            .start_with_task_expectations(
+                vec![RuntimeComponent::SmoltcpStack],
+                vec![RuntimeTaskExpectation::new(
+                    RuntimeComponent::SmoltcpStack,
+                    "smoltcp_tun_bridge_loop",
+                )],
+                due_ms as u64,
+            )
+            .unwrap();
+        let readiness_stack = std::rc::Rc::clone(&stack);
+        let dispatch_stack = std::rc::Rc::clone(&stack);
+        let dispatch_observed = std::rc::Rc::clone(&dispatched);
+
+        let report = run_async_runtime_scheduler_loop_until_cancelled(
+            &mut lifecycle,
+            &cancellation,
+            due_ms as u64,
+            1,
+            1,
+            move |_step| vec![readiness_stack.borrow_mut().runtime_timer_readiness(due_ms)],
+            move |ready_tasks| {
+                let dispatch_stack = std::rc::Rc::clone(&dispatch_stack);
+                let dispatch_observed = std::rc::Rc::clone(&dispatch_observed);
+                async move {
+                    let evidence = dispatch_stack
+                        .borrow_mut()
+                        .poll_ready_task(&ready_tasks, due_ms)
+                        .unwrap();
+                    assert_eq!(evidence.packets_emitted, 1);
+                    dispatch_observed.set(true);
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            report.status,
+            AsyncRuntimeSchedulerLoopStatus::StepLimitReached
+        );
+        assert_eq!(report.steps.len(), 1);
+        assert_eq!(
+            report.steps[0].scheduler_action,
+            RuntimeSchedulerAction::RunReadyTasks
+        );
+        assert_eq!(
+            report.steps[0].dispatched_tasks,
+            vec![RuntimeTaskExpectation::new(
+                RuntimeComponent::SmoltcpStack,
+                "smoltcp_tun_bridge_loop",
+            )]
+        );
+        assert!(dispatched.get());
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::RuntimeReadiness);
+        assert_eq!(records[1].details["scheduler_action"], "run_ready_tasks");
+        assert_eq!(
+            records[1].details["ready_runtime_tasks"],
+            "smoltcp_stack:smoltcp_tun_bridge_loop"
         );
     }
 

@@ -4211,3 +4211,24 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - The collector branch/order is now directly covered. Remaining final runtime gap is still actual `/dev/net/tun` setup/handoff, live smoltcp timer wake dispatch in the same repeated runtime loop, full lifecycle ownership, cancellation/join, audit fan-in, and shutdown final drain.
+
+## 2026-06-23 — Dispatch live smoltcp timer wake inside the Tokio scheduler loop
+
+### Review
+- Round-112 correctness and validation found no blockers or high issues.
+- Reviewers identified the next highest gap as actual `/dev/net/tun` setup/handoff plus live smoltcp timer wake dispatch in the same repeated async runtime loop with lifecycle ownership and shutdown final drain.
+
+### Fix
+- Added `foxprox-stack` as a dev-dependency of `foxprox-egress` so egress scheduler tests can exercise real stack timer readiness without changing production core layering.
+- Added `async_runtime_scheduler_loop_dispatches_live_smoltcp_timer_wake`, proving the Tokio scheduler loop can collect a real `SmoltcpIpStack::runtime_timer_readiness(...)` timer-due task and dispatch it via `SmoltcpIpStack::poll_ready_task(...)` in the ready-task closure.
+- The test drives a real smoltcp TCP SYN/SYN-ACK timer path, starts the scheduler loop at the due timestamp, records `scheduler_action=run_ready_tasks`, dispatches `smoltcp_stack:smoltcp_tun_bridge_loop`, and observes a retransmitted packet emitted by the stack poll.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_scheduler_loop_dispatches_live_smoltcp_timer_wake --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 93 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- This brings real smoltcp timer wake dispatch into the Tokio scheduler loop as test evidence, but it starts the loop at the due timestamp and does not yet prove the full production runtime waits until that deadline, owns repeated task lifecycles, or performs shutdown final drain. Actual `/dev/net/tun` setup/handoff also remains outside the proof.

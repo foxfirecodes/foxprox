@@ -98,6 +98,7 @@ name = "foxprox-egress"
 version = "0.1.0"
 dependencies = [
  "foxprox-core",
+ "foxprox-stack",
  "tokio",
 ]
 

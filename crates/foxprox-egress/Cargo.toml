@@ -10,5 +10,8 @@ rust-version.workspace = true
 foxprox-core = { path = "../foxprox-core" }
 tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
 
+[dev-dependencies]
+foxprox-stack = { path = "../foxprox-stack" }
+
 [lib]
 path = "src/lib.rs"

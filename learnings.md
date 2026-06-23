@@ -502,3 +502,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Collector branch coverage should include packet-read reports directly
 
 - When a fan-in helper accepts multiple report classes, integration tests that append one class manually can miss regressions in that helper branch. Add a focused order assertion that feeds packet-read reports directly through the collector.
+
+## 2026-06-23 — Smoltcp timer wakes can be exercised inside the Tokio scheduler loop with a dev-only stack dependency
+
+- A focused egress test can depend on `foxprox-stack` as a dev-dependency to prove the Tokio scheduler loop dispatches a real `SmoltcpIpStack::runtime_timer_readiness(...)` wake via `poll_ready_task(...)`. Keep this as test evidence; production crate layering still avoids pulling smoltcp into core.
