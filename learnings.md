@@ -518,3 +518,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Shutdown cancellation tests must assert the scheduler was inside a wait step
 
 - A flag set before entering the scheduler loop is not enough to prove cancellation woke an in-flight timer wait. Capture the scheduler loop report and assert it contains a `WaitForTimer` step with `wait_status=Cancelled`, timer evidence, and no dispatched tasks.
+
+## 2026-06-23 — Owned live-IO scheduler tasks can dispatch Send-ready inputs but not non-Send smoltcp state
+
+- `AsyncRuntimeTaskSet` uses `tokio::spawn`, so owned scheduler task futures must be `Send`. `SmoltcpIpStack` currently carries non-`Send` state, so keep real smoltcp dispatch in bounded local scheduler tests unless the runtime adds a local task set or another ownership boundary. Live UDP/TCP/packet-fd inputs can still be dispatched from an owned scheduler task and tied to shutdown final drain.

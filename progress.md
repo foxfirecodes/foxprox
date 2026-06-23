@@ -4295,3 +4295,24 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - The owned scheduler shutdown proof now verifies a cancelled timer-wait step, but it still uses synthetic readiness. Remaining final runtime gap is actual `/dev/net/tun` setup/handoff plus a production-owned loop combining live UDP/TCP/packet-fd readiness and smoltcp timer dispatch with shutdown final drain.
+
+## 2026-06-23 — Dispatch live Tokio IO from an owned scheduler task before shutdown drain
+
+### Review
+- Round-116 correctness and validation found no blockers or high issues.
+- Reviewers identified the remaining gap as actual `/dev/net/tun` setup/handoff plus a production-owned loop combining live UDP/TCP/packet-fd readiness and smoltcp timer dispatch with shutdown final drain.
+
+### Fix
+- Added `async_owned_live_io_scheduler_task_dispatches_then_shutdown_drains`.
+- The test runs an owned Tokio scheduler task inside `AsyncRuntimeTaskSet`, gathers real UDP socket readiness, real TCP accept ownership, and real packet-fd readiness, then dispatches all three live inputs plus audit-fan-in readiness through `run_async_runtime_scheduler_step(...)`.
+- After live dispatch, the owned scheduler task enters a cancellation-aware timer wait; runtime shutdown cancels and joins it through `exit_with_async_task_set_and_drain_live_audit_sources_to_sink(...)`, preserving final `network_session_exit` and cancelled `audit_fan_in_loop` evidence.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_owned_live_io_scheduler_task_dispatches_then_shutdown_drains --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 96 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- This covers production-owned live UDP/TCP/packet-fd dispatch plus shutdown final drain. It does not include real smoltcp dispatch in the owned task because `SmoltcpIpStack` is not `Send` under the current `tokio::spawn`-based task set; smoltcp timer dispatch remains covered by bounded scheduler-loop tests. Actual `/dev/net/tun` setup/handoff remains outside the proof.

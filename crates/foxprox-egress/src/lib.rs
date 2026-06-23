@@ -8129,6 +8129,270 @@ mod tests {
         assert_eq!(exit.details["task_join_status"], "complete");
     }
 
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_owned_live_io_scheduler_task_dispatches_then_shutdown_drains() {
+        let query = dns_query(0x7d8e, "OwnedLiveSchedulerShutdown.TEST", 1);
+        let response = dns_a_response(&query, [127, 0, 0, 1], 30);
+        let dns_handler = DnsBrokerHandler::new(
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut runtime = BlockingProxyRuntime::bind(
+            "s1",
+            8,
+            SharedDnsCache::default(),
+            "127.0.0.1:0".parse().unwrap(),
+            dns_handler,
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_secs(1),
+            512,
+            4096,
+            1_750,
+        )
+        .unwrap();
+        let live_dispatch_done = Arc::new(AtomicBool::new(false));
+        let shutdown_wait_requested = Arc::new(AtomicBool::new(false));
+        let shutdown_wait_notify = Arc::new(tokio::sync::Notify::new());
+        let shutdown_report = Arc::new(std::sync::Mutex::new(None));
+        let mut task_set = AsyncRuntimeTaskSet::new();
+        for (component, task_name) in [
+            (RuntimeComponent::DnsListener, "dns_accept_loop"),
+            (
+                RuntimeComponent::HttpProxyListener,
+                "http_proxy_accept_loop",
+            ),
+            (RuntimeComponent::Socks5Listener, "socks5_accept_loop"),
+        ] {
+            task_set
+                .spawn_cancellable_task(component, task_name, |token| async move {
+                    token.cancelled().await;
+                    RuntimeTaskStatus::Cancelled
+                })
+                .unwrap();
+        }
+        let dispatch_done = live_dispatch_done.clone();
+        let wait_requested = shutdown_wait_requested.clone();
+        let wait_notify = shutdown_wait_notify.clone();
+        let report_slot = shutdown_report.clone();
+        task_set
+            .spawn_cancellable_task(
+                RuntimeComponent::AuditFanIn,
+                "audit_fan_in_loop",
+                move |token| async move {
+                    let mut lifecycle = RuntimeLifecycleHarness::new("owned-live-scheduler", 16);
+                    lifecycle
+                        .start_with_task_expectations(
+                            vec![
+                                RuntimeComponent::DnsListener,
+                                RuntimeComponent::HttpProxyListener,
+                                RuntimeComponent::TunDevice,
+                                RuntimeComponent::AuditFanIn,
+                            ],
+                            vec![
+                                RuntimeTaskExpectation::new(
+                                    RuntimeComponent::DnsListener,
+                                    "dns_accept_loop",
+                                ),
+                                RuntimeTaskExpectation::new(
+                                    RuntimeComponent::HttpProxyListener,
+                                    "http_proxy_accept_loop",
+                                ),
+                                RuntimeTaskExpectation::new(
+                                    RuntimeComponent::TunDevice,
+                                    "tun_packet_loop",
+                                ),
+                                RuntimeTaskExpectation::new(
+                                    RuntimeComponent::AuditFanIn,
+                                    "audit_fan_in_loop",
+                                ),
+                            ],
+                            1_760,
+                        )
+                        .unwrap();
+
+                    let udp_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                    let udp_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+                    udp_sender
+                        .send_to(b"owned-dns-ready", udp_socket.local_addr().unwrap())
+                        .unwrap();
+                    let udp_report = wait_for_async_udp_socket_readiness(
+                        &udp_socket,
+                        RuntimeComponent::DnsListener,
+                        "dns_accept_loop",
+                        Duration::from_secs(1),
+                        &token,
+                    )
+                    .await;
+
+                    let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let listener_addr = tcp_listener.local_addr().unwrap();
+                    let client = tokio::spawn(async move {
+                        let stream = tokio::net::TcpStream::connect(listener_addr).await.unwrap();
+                        stream.local_addr().unwrap()
+                    });
+                    let tcp_report = accept_async_tcp_listener_when_ready(
+                        &tcp_listener,
+                        RuntimeComponent::HttpProxyListener,
+                        "http_proxy_accept_loop",
+                        Duration::from_secs(1),
+                        &token,
+                    )
+                    .await;
+                    let tcp_client_addr = client.await.unwrap();
+
+                    let (packet_fd, mut sandbox_peer) =
+                        std::os::unix::net::UnixStream::pair().unwrap();
+                    packet_fd.set_nonblocking(true).unwrap();
+                    let async_packet_fd = tokio::io::unix::AsyncFd::new(packet_fd).unwrap();
+                    sandbox_peer.write_all(b"owned-tun-ready").unwrap();
+                    let packet_report = wait_for_async_packet_fd_readiness(
+                        &async_packet_fd,
+                        Duration::from_secs(1),
+                        &token,
+                    )
+                    .await;
+
+                    let audit_ready = RuntimeTaskReadiness::ready(
+                        RuntimeComponent::AuditFanIn,
+                        "audit_fan_in_loop",
+                    );
+                    let io_reports = [udp_report, packet_report];
+                    let readiness = collect_async_runtime_readiness_from_reports(
+                        &io_reports,
+                        std::slice::from_ref(&tcp_report),
+                        &[],
+                        &[audit_ready],
+                    );
+                    let mut tcp_stream = Some(tcp_report.stream.unwrap());
+                    let tcp_peer = tcp_report.accepted_peer;
+                    let dispatch_token = token.clone();
+                    let dispatch_step = run_async_runtime_scheduler_step(
+                        &mut lifecycle,
+                        &readiness,
+                        1_770,
+                        &token,
+                        |ready_tasks| async move {
+                            let mut packet = [0u8; 64];
+                            let (udp_len, _) = udp_socket.try_recv_from(&mut packet).unwrap();
+                            assert_eq!(&packet[..udp_len], b"owned-dns-ready");
+                            assert_eq!(tcp_peer, Some(tcp_client_addr));
+                            assert!(tcp_stream.take().is_some());
+                            let packet_read = read_async_packet_fd_ready_task(
+                                &async_packet_fd,
+                                &ready_tasks,
+                                64,
+                                Duration::from_secs(1),
+                                &dispatch_token,
+                            )
+                            .await
+                            .unwrap()
+                            .unwrap();
+                            assert_eq!(
+                                packet_read.packet.as_deref(),
+                                Some(&b"owned-tun-ready"[..])
+                            );
+                            assert!(ready_tasks.iter().any(|task| {
+                                task.component == RuntimeComponent::AuditFanIn
+                                    && task.task_name == "audit_fan_in_loop"
+                            }));
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        dispatch_step.scheduler_action,
+                        RuntimeSchedulerAction::RunReadyTasks
+                    );
+                    assert_eq!(dispatch_step.dispatched_tasks.len(), 4);
+                    dispatch_done.store(true, Ordering::SeqCst);
+
+                    let shutdown_report = run_async_runtime_scheduler_loop_until_cancelled(
+                        &mut lifecycle,
+                        &token,
+                        1_780,
+                        1,
+                        10,
+                        move |_step| {
+                            wait_requested.store(true, Ordering::SeqCst);
+                            wait_notify.notify_waiters();
+                            vec![RuntimeTaskReadiness::new(
+                                RuntimeComponent::AuditFanIn,
+                                "audit_fan_in_loop",
+                            )
+                            .with_next_ready_delay_ms(Some(60_000))]
+                        },
+                        |_ready_tasks| async {},
+                    )
+                    .await
+                    .unwrap();
+                    *report_slot.lock().unwrap() = Some(shutdown_report.clone());
+                    if shutdown_report.status == AsyncRuntimeSchedulerLoopStatus::Cancelled {
+                        RuntimeTaskStatus::Cancelled
+                    } else {
+                        RuntimeTaskStatus::TimedOut
+                    }
+                },
+            )
+            .unwrap();
+        if !shutdown_wait_requested.load(Ordering::SeqCst) {
+            tokio::time::timeout(Duration::from_secs(1), shutdown_wait_notify.notified())
+                .await
+                .unwrap();
+        }
+        assert!(live_dispatch_done.load(Ordering::SeqCst));
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 16);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+
+        let shutdown = runtime
+            .exit_with_async_task_set_and_drain_live_audit_sources_to_sink(
+                RuntimeExitStatus::Clean,
+                task_set,
+                Duration::from_secs(1),
+                &mut fan_in,
+                &mut sink,
+                1_850,
+            )
+            .await
+            .unwrap();
+
+        let shutdown_report = shutdown_report.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            shutdown_report.status,
+            AsyncRuntimeSchedulerLoopStatus::Cancelled
+        );
+        assert_eq!(shutdown_report.steps.len(), 1);
+        assert_eq!(
+            shutdown_report.steps[0].wait_status,
+            AsyncRuntimeSchedulerWaitStatus::Cancelled
+        );
+        assert_eq!(shutdown.cancelled_tasks, 4);
+        assert!(shutdown
+            .task_report
+            .outcomes
+            .iter()
+            .all(|outcome| outcome.status == RuntimeTaskStatus::Cancelled));
+        assert!(shutdown.shutdown_drain.before_exit.made_progress());
+        assert!(shutdown.shutdown_drain.after_exit.made_progress());
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+        assert!(output.contains("network_session_exit"));
+        assert!(output.contains("audit_fan_in:audit_fan_in_loop:cancelled"));
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn blocking_proxy_runtime_async_task_shutdown_drains_final_audit() {
         let query = dns_query(0x7c7e, "AsyncShutdownFull.TEST", 1);
