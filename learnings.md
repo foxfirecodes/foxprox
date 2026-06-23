@@ -278,3 +278,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Cleanup must run even when exit audit is backpressured
 
 - Runtime shutdown cannot return early on lifecycle audit backpressure before retiring listeners/devices. Archive whatever evidence exists, close listener handles, then return the audit error so fail-closed evidence and cleanup robustness both hold.
+
+## 2026-06-23 — Cancellation-aware loops require nonblocking IO contracts
+
+- Checking a cancellation token before each loop iteration is only meaningful if the underlying IO operation is nonblocking or time-bounded. Listener accept loops and TUN reads should treat WouldBlock/no-ready as idle, allowing shutdown tokens to be observed without waiting for traffic.

@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
 pub trait PacketDevice {
+    /// Return one packet, `Ok(None)` when no packet is currently ready, or a
+    /// fail-closed device error. Runtime adapters must make this operation
+    /// nonblocking or time-bounded so cancellation can be observed between
+    /// reads by `process_packet_loop_until`.
     fn read_packet(&mut self) -> Result<Option<Vec<u8>>, DeviceIoError>;
     fn write_packet(&mut self, packet: &[u8]) -> Result<(), DeviceIoError>;
 }
@@ -467,6 +471,26 @@ mod tests {
         assert_eq!(report.task_outcome.component, RuntimeComponent::TunDevice);
         assert_eq!(report.task_outcome.task_name, "tun_packet_loop");
         assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Completed);
+    }
+
+    #[test]
+    fn tun_packet_loop_reports_cancellation_before_idle_read() {
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let device = InMemoryPacketDevice::default();
+        let mut harness = TunPacketHarness::new("s1", broker, device);
+
+        let report = harness.process_packet_loop_until(1_000, 8, || true);
+
+        assert_eq!(report.processed_packets, 0);
+        assert_eq!(report.error, None);
+        assert_eq!(report.task_outcome.component, RuntimeComponent::TunDevice);
+        assert_eq!(report.task_outcome.task_name, "tun_packet_loop");
+        assert_eq!(report.task_outcome.status, RuntimeTaskStatus::Cancelled);
+        assert!(harness.broker().audit().records().next().is_none());
     }
 
     #[test]

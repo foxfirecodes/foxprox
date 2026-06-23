@@ -38,6 +38,7 @@ impl<RW: Read + Write> PacketDevice for TunIoPacketDevice<RW> {
                 packet.truncate(len);
                 Ok(Some(packet))
             }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
             Err(_) => Err(DeviceIoError::ReadFailed),
         }
     }
@@ -148,6 +149,18 @@ mod tests {
         let io = device.into_inner();
         assert_eq!(io.writes.len(), 1);
         assert_eq!(io.writes[0][20], 0);
+    }
+
+    #[test]
+    fn tun_io_device_maps_would_block_to_idle_read() {
+        let mut io = ScriptedTunIo::default();
+        io.reads.push_back(Err(io::Error::new(
+            io::ErrorKind::WouldBlock,
+            "no packet ready",
+        )));
+        let mut device = TunIoPacketDevice::new(io, 1500);
+
+        assert_eq!(device.read_packet().unwrap(), None);
     }
 
     #[test]

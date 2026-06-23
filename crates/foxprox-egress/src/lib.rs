@@ -385,7 +385,7 @@ impl<E: ExplicitProxyEgress> BlockingHttpProxyServer<E> {
     ) -> Result<Self, ProxyEgressError> {
         let listener = TcpListener::bind(bind_addr).map_err(|_| ProxyEgressError::SendFailed)?;
         listener
-            .set_nonblocking(false)
+            .set_nonblocking(true)
             .map_err(|_| ProxyEgressError::SendFailed)?;
         Ok(Self {
             listener,
@@ -571,7 +571,7 @@ impl<E: ExplicitProxyEgress> BlockingSocks5ProxyServer<E> {
     ) -> Result<Self, ProxyEgressError> {
         let listener = TcpListener::bind(bind_addr).map_err(|_| ProxyEgressError::SendFailed)?;
         listener
-            .set_nonblocking(false)
+            .set_nonblocking(true)
             .map_err(|_| ProxyEgressError::SendFailed)?;
         Ok(Self {
             listener,
@@ -2175,6 +2175,82 @@ mod tests {
             "dns_listener:dns_accept_loop:timed_out"
         );
         assert_eq!(records[1].details["failed_runtime_task_count"], "1");
+    }
+
+    #[test]
+    fn blocking_proxy_listener_tasks_cancel_without_clients() {
+        let http_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let socks_frontend = ExplicitProxyFrontend::new(
+            "s1",
+            BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16),
+            InMemoryExplicitProxyEgress::default(),
+        );
+        let mut http_server = BlockingHttpProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            http_frontend,
+            Duration::from_millis(10),
+            4096,
+        )
+        .unwrap();
+        let mut socks_server = BlockingSocks5ProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            socks_frontend,
+            Duration::from_millis(10),
+            4096,
+        )
+        .unwrap();
+        let mut task_set = BlockingRuntimeTaskSet::new();
+        task_set
+            .spawn_cancellable_task(
+                RuntimeComponent::HttpProxyListener,
+                "http_proxy_accept_loop",
+                move |token| {
+                    while !token.is_cancelled() {
+                        let _ = http_server.handle_one(1_000);
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    RuntimeTaskStatus::Cancelled
+                },
+            )
+            .unwrap();
+        task_set
+            .spawn_cancellable_task(
+                RuntimeComponent::Socks5Listener,
+                "socks5_accept_loop",
+                move |token| {
+                    while !token.is_cancelled() {
+                        let _ = socks_server.handle_one(1_000);
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    RuntimeTaskStatus::Cancelled
+                },
+            )
+            .unwrap();
+
+        assert_eq!(task_set.request_cancellation(), 2);
+        let report = task_set.join_all_with_timeout(Duration::from_secs(1));
+
+        assert_eq!(report.outcomes.len(), 2);
+        assert_eq!(
+            report.outcomes[0],
+            RuntimeTaskOutcome::new(
+                RuntimeComponent::HttpProxyListener,
+                "http_proxy_accept_loop",
+                RuntimeTaskStatus::Cancelled,
+            )
+        );
+        assert_eq!(
+            report.outcomes[1],
+            RuntimeTaskOutcome::new(
+                RuntimeComponent::Socks5Listener,
+                "socks5_accept_loop",
+                RuntimeTaskStatus::Cancelled,
+            )
+        );
     }
 
     #[test]

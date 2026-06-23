@@ -2749,3 +2749,37 @@ Addressed round-54 high feedback and the round-56 validation clippy overclaim. B
 ### Remaining blind spots
 - The real blocking accept loops still need nonblocking/cancellation-aware accept semantics before claiming actual listener tasks can stop while blocked in `accept()`.
 - Raw TUN and smoltcp cancellation predicates still need concrete fd readiness/wakeup integration for blocked reads.
+
+## 2026-06-23 — Make listener accept and TUN idle paths cancellation-aware
+
+### Commands run
+- `cargo fmt` — applied formatting for nonblocking listener/TUN changes.
+- `cargo test -p foxprox-device tun_io_device_maps_would_block_to_idle_read --all-targets --all-features` — passed.
+- `cargo test -p foxprox-core tun::tests::tun_packet_loop_reports_cancellation_before_idle_read --all-targets --all-features` — passed.
+- `cargo test -p foxprox-egress blocking_proxy_listener_tasks_cancel_without_clients --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 48 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::tun_io_device_maps_would_block_to_idle_read ... ok`
+- `tun::tests::tun_packet_loop_reports_cancellation_before_idle_read ... ok`
+- `tests::blocking_proxy_listener_tasks_cancel_without_clients ... ok`
+- `tests::blocking_proxy_runtime_exit_backpressure_still_closes_listeners ... ok`
+
+### Interpretation
+Addressed round-55 high feedback. The `PacketDevice` contract now explicitly requires nonblocking or time-bounded reads so cancellation can be observed between packet reads, and `TunIoPacketDevice` maps `WouldBlock` to `Ok(None)`. Added a TUN loop regression that cancels before an idle read without emitting spurious audit. HTTP and SOCKS listener sockets are now nonblocking, and the listener-task regression proves actual HTTP/SOCKS accept-loop tasks with no clients can observe cancellation and join as `cancelled` instead of hanging in `accept()`.
+
+### Changed files
+- `crates/foxprox-core/src/tun.rs`
+- `crates/foxprox-device/src/lib.rs`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Review follow-up
+- Round-55 high findings called out cancellation not being observable while TUN reads or HTTP/SOCKS accepts were blocked. This commit establishes nonblocking idle semantics and tests cancellation with idle/no-client paths.
+
+### Remaining blind spots
+- Concrete Linux TUN fd creation still needs to set/verify nonblocking mode when the real fd-backed adapter lands.
+- Final async runtime still needs fd readiness/timer integration rather than polling sleeps in blocking proof tasks.
