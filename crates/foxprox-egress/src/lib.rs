@@ -3914,6 +3914,50 @@ mod tests {
         assert!(!drained.readiness.ready);
     }
 
+    #[test]
+    fn async_runtime_report_collector_preserves_packet_readiness_order() {
+        let io_report = AsyncRuntimeIoReadinessReport {
+            status: AsyncRuntimeIoReadinessStatus::Ready,
+            readiness: RuntimeTaskReadiness::ready(
+                RuntimeComponent::DnsListener,
+                "dns_accept_loop",
+            ),
+        };
+        let tcp_report = AsyncRuntimeTcpAcceptReport {
+            status: AsyncRuntimeIoReadinessStatus::Ready,
+            readiness: RuntimeTaskReadiness::ready(
+                RuntimeComponent::HttpProxyListener,
+                "http_proxy_accept_loop",
+            ),
+            accepted_peer: None,
+            stream: None,
+        };
+        let packet_report = AsyncRuntimePacketFdReadReport {
+            status: AsyncRuntimeIoReadinessStatus::Ready,
+            readiness: RuntimeTaskReadiness::ready(RuntimeComponent::TunDevice, "tun_packet_loop"),
+            bytes_read: 6,
+            packet: Some(b"packet".to_vec()),
+        };
+        let additional = [RuntimeTaskReadiness::ready(
+            RuntimeComponent::AuditFanIn,
+            "audit_fan_in_loop",
+        )];
+
+        let readiness = collect_async_runtime_readiness_from_reports(
+            &[io_report],
+            &[tcp_report],
+            &[packet_report],
+            &additional,
+        );
+        let plan = RuntimeReadinessPlan::from_tasks(&readiness);
+
+        assert_eq!(readiness.len(), 4);
+        assert_eq!(
+            plan.ready_task_details(),
+            "dns_listener:dns_accept_loop,http_proxy_listener:http_proxy_accept_loop,tun_device:tun_packet_loop,audit_fan_in:audit_fan_in_loop"
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test(flavor = "current_thread")]
     async fn async_runtime_scheduler_step_integrates_live_io_reports_and_dispatch() {

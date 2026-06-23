@@ -4191,3 +4191,23 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - This is a bounded integration proof for live UDP/TCP/packet-fd readiness reports and dispatch in one scheduler step. It is not yet real `/dev/net/tun` setup/handoff, live smoltcp timer wake dispatch in the same loop, full task lifecycle ownership across repeated runtime iterations, or shutdown final-drain integration.
+
+## 2026-06-23 — Cover packet-read branch in live readiness report collector
+
+### Review
+- Round-111 correctness and validation found no blockers or high issues.
+- Reviewers noted a non-blocking coverage gap: the unified scheduler-step test appended packet-fd readiness manually after calling `collect_async_runtime_readiness_from_reports(...)`, so the helper's `packet_read_reports` branch/order was not directly exercised.
+
+### Fix
+- Added `async_runtime_report_collector_preserves_packet_readiness_order`, proving `collect_async_runtime_readiness_from_reports(...)` preserves source order across IO reports, TCP accept reports, packet-read reports, and additional readiness.
+- The test asserts the resulting ready-task detail order includes `tun_device:tun_packet_loop` from the packet-read report branch before `audit_fan_in:audit_fan_in_loop` additional readiness.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_report_collector_preserves_packet_readiness_order --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 92 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The collector branch/order is now directly covered. Remaining final runtime gap is still actual `/dev/net/tun` setup/handoff, live smoltcp timer wake dispatch in the same repeated runtime loop, full lifecycle ownership, cancellation/join, audit fan-in, and shutdown final drain.
