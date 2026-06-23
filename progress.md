@@ -3720,3 +3720,41 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Scheduler actions are now typed and audited, but a concrete async scheduler loop still needs to consume real listener/TUN/smoltcp/fan-in readiness, run tasks, handle cancellation/join, and perform shutdown final drains.
+
+## 2026-06-23 — Introduce Tokio async runtime task set
+
+### Decision
+- Asked for direction before introducing an async runtime dependency. User selected: introduce Tokio and start the real async scheduler path.
+
+### Commands run
+- `cargo fmt` — applied formatting for Tokio async task set and tests.
+- `cargo test -p foxprox-egress async_runtime_task_set --all-targets --all-features` — passed two async task-set tests.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 158 core tests, 4 device tests, 67 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::async_runtime_task_set_cancellation_is_joined_cleanly ... ok`
+- `tests::async_runtime_task_set_timeout_is_fail_closed ... ok`
+
+### Fix
+- Added Tokio to `foxprox-egress` with `macros`, `rt`, and `time` features.
+- Added `AsyncRuntimeTaskSet` and `AsyncRuntimeCancellationToken` using `tokio::spawn` and Tokio timeouts.
+- Async task-set cancellation test proves:
+  - cancellation is requested through a token,
+  - the async task returns `RuntimeTaskStatus::Cancelled`,
+  - lifecycle exit records `audit_fan_in:audit_fan_in_loop:cancelled` with clean task join status.
+- Async timeout test proves:
+  - an over-budget async task records `RuntimeTaskStatus::TimedOut`,
+  - lifecycle exit fails closed with `RuntimeState`,
+  - timed-out smoltcp task outcome is structured in `runtime_tasks`.
+
+### Changed files
+- `Cargo.lock`
+- `crates/foxprox-egress/Cargo.toml`
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Tokio task ownership/cancellation/join evidence is now present, but the final async scheduler still needs to consume real listener/TUN/smoltcp/fan-in readiness, run ready tasks or wait timers, and perform shutdown final-drain over live runtime sources.

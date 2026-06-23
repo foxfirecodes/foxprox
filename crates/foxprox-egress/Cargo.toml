@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 foxprox-core = { path = "../foxprox-core" }
+tokio = { version = "1", features = ["macros", "rt", "time"] }
 
 [lib]
 path = "src/lib.rs"

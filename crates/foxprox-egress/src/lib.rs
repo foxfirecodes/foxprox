@@ -21,6 +21,7 @@ use foxprox_core::{
     UdpEgress, UdpEgressError,
 };
 use std::ffi::OsStr;
+use std::future::Future;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 #[cfg(unix)]
@@ -2326,6 +2327,132 @@ impl BlockingRuntimeTaskSet {
     }
 }
 
+#[derive(Debug, Default)]
+pub struct AsyncRuntimeTaskSet {
+    supervisor: RuntimeTaskSupervisor,
+    tasks: Vec<AsyncRuntimeTask>,
+}
+
+#[derive(Debug)]
+struct AsyncRuntimeTask {
+    handle: RuntimeTaskHandle,
+    join: tokio::task::JoinHandle<RuntimeTaskStatus>,
+    cancellation: Option<Arc<AtomicBool>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct AsyncRuntimeCancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl AsyncRuntimeCancellationToken {
+    fn new(cancelled: Arc<AtomicBool>) -> Self {
+        Self { cancelled }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AsyncRuntimeTaskSetError {
+    Supervisor(RuntimeTaskSupervisorError),
+}
+
+impl From<RuntimeTaskSupervisorError> for AsyncRuntimeTaskSetError {
+    fn from(error: RuntimeTaskSupervisorError) -> Self {
+        Self::Supervisor(error)
+    }
+}
+
+impl AsyncRuntimeTaskSet {
+    pub fn new() -> Self {
+        Self {
+            supervisor: RuntimeTaskSupervisor::new(),
+            tasks: Vec::new(),
+        }
+    }
+
+    pub fn spawn_task<Fut>(
+        &mut self,
+        component: RuntimeComponent,
+        task_name: impl Into<String>,
+        task: Fut,
+    ) -> Result<RuntimeTaskHandle, AsyncRuntimeTaskSetError>
+    where
+        Fut: Future<Output = RuntimeTaskStatus> + Send + 'static,
+    {
+        let task_name = task_name.into();
+        let handle = self.supervisor.register_task(component, task_name)?;
+        let join = tokio::spawn(task);
+        self.tasks.push(AsyncRuntimeTask {
+            handle,
+            join,
+            cancellation: None,
+        });
+        Ok(handle)
+    }
+
+    pub fn spawn_cancellable_task<F, Fut>(
+        &mut self,
+        component: RuntimeComponent,
+        task_name: impl Into<String>,
+        task: F,
+    ) -> Result<RuntimeTaskHandle, AsyncRuntimeTaskSetError>
+    where
+        F: FnOnce(AsyncRuntimeCancellationToken) -> Fut,
+        Fut: Future<Output = RuntimeTaskStatus> + Send + 'static,
+    {
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let token = AsyncRuntimeCancellationToken::new(cancellation.clone());
+        let task_name = task_name.into();
+        let handle = self.supervisor.register_task(component, task_name)?;
+        let join = tokio::spawn(task(token));
+        self.tasks.push(AsyncRuntimeTask {
+            handle,
+            join,
+            cancellation: Some(cancellation),
+        });
+        Ok(handle)
+    }
+
+    pub fn expectations(&self) -> Vec<RuntimeTaskExpectation> {
+        self.supervisor.expectations()
+    }
+
+    pub fn request_cancellation(&mut self) -> usize {
+        let mut cancelled = 0usize;
+        for cancellation in self
+            .tasks
+            .iter()
+            .filter_map(|task| task.cancellation.as_ref())
+        {
+            cancellation.store(true, Ordering::SeqCst);
+            cancelled += 1;
+        }
+        cancelled
+    }
+
+    pub async fn join_all_with_timeout(mut self, timeout: Duration) -> RuntimeTaskJoinReport {
+        for task in self.tasks {
+            let mut join = task.join;
+            let status = match tokio::time::timeout(timeout, &mut join).await {
+                Ok(Ok(status)) => status,
+                Ok(Err(_)) => RuntimeTaskStatus::JoinFailed,
+                Err(_) => {
+                    join.abort();
+                    RuntimeTaskStatus::TimedOut
+                }
+            };
+            self.supervisor
+                .record_outcome(task.handle, status)
+                .expect("joined task was registered once");
+        }
+        self.supervisor.join_report()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChildSupervisorError {
     SpawnFailed,
@@ -2818,6 +2945,102 @@ mod tests {
             "dns_listener:dns_accept_loop:timed_out"
         );
         assert_eq!(records[1].details["failed_runtime_task_count"], "1");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_task_set_cancellation_is_joined_cleanly() {
+        let mut task_set = AsyncRuntimeTaskSet::new();
+        task_set
+            .spawn_cancellable_task(
+                RuntimeComponent::AuditFanIn,
+                "audit_fan_in_loop",
+                |token| async move {
+                    while !token.is_cancelled() {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    RuntimeTaskStatus::Cancelled
+                },
+            )
+            .unwrap();
+        let expectations = task_set.expectations();
+        assert_eq!(task_set.request_cancellation(), 1);
+
+        let report = task_set.join_all_with_timeout(Duration::from_secs(1)).await;
+
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(
+            report.outcomes[0],
+            RuntimeTaskOutcome::new(
+                RuntimeComponent::AuditFanIn,
+                "audit_fan_in_loop",
+                RuntimeTaskStatus::Cancelled,
+            )
+        );
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-task-sandbox", 4);
+        lifecycle
+            .start_with_task_expectations(vec![RuntimeComponent::AuditFanIn], expectations, 1_000)
+            .unwrap();
+        lifecycle
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::AuditFanIn]),
+                None,
+                Some(report),
+                1_100,
+            )
+            .unwrap();
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::Allow));
+        assert_eq!(records[1].details["task_join_status"], "complete");
+        assert_eq!(
+            records[1].details["runtime_tasks"],
+            "audit_fan_in:audit_fan_in_loop:cancelled"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_task_set_timeout_is_fail_closed() {
+        let mut task_set = AsyncRuntimeTaskSet::new();
+        task_set
+            .spawn_task(
+                RuntimeComponent::SmoltcpStack,
+                "smoltcp_tun_bridge_loop",
+                async {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    RuntimeTaskStatus::Completed
+                },
+            )
+            .unwrap();
+        let expectations = task_set.expectations();
+        let report = task_set
+            .join_all_with_timeout(Duration::from_millis(1))
+            .await;
+
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].status, RuntimeTaskStatus::TimedOut);
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-task-sandbox", 4);
+        lifecycle
+            .start_with_task_expectations(vec![RuntimeComponent::SmoltcpStack], expectations, 2_000)
+            .unwrap();
+        lifecycle
+            .exit_with_cleanup_child_and_tasks(
+                RuntimeExitStatus::Clean,
+                RuntimeCleanupReport::all_succeeded(vec![RuntimeCleanupAction::SmoltcpStack]),
+                None,
+                Some(report),
+                2_100,
+            )
+            .unwrap();
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::NetworkSessionExit);
+        assert_eq!(records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(records[1].reason, Some(DenialReason::RuntimeState));
+        assert_eq!(records[1].details["task_join_status"], "failed");
+        assert_eq!(
+            records[1].details["runtime_tasks"],
+            "smoltcp_stack:smoltcp_tun_bridge_loop:timed_out"
+        );
     }
 
     #[test]

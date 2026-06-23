@@ -414,3 +414,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Readiness audit should name scheduler action explicitly
 
 - `readiness_status` is useful for humans, but scheduler-facing evidence should also carry a stable `scheduler_action` such as `run_ready_tasks`, `wait_for_timer`, or `idle`. This avoids future ambiguity between descriptive state and the action a runtime loop should take.
+
+## 2026-06-23 — Start async runtime work with task ownership before full scheduler
+
+- After choosing Tokio for the final runtime path, introduce async task registration/cancellation/join evidence before wiring every live socket/TUN source. This gives lifecycle-visible async task outcomes and timeout behavior while keeping the remaining scheduler integration explicit.
