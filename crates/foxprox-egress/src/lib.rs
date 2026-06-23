@@ -12,11 +12,12 @@ use foxprox_core::{
     DenialReason, DnsBrokerHandler, DnsQueryMetadata, DnsUpstream, DnsUpstreamError,
     ExplicitProxyEgress, ExplicitProxyFrontend, Frontend, HttpProxyRequestMetadata,
     JsonLineAuditSink, NetworkEndpoint, PolicyRequest, Protocol, ProxyEgressError, ProxyParseError,
-    RuntimeChildExit, RuntimeCleanupAction, RuntimeCleanupReport, RuntimeComponent,
-    RuntimeExitStatus, RuntimeLifecycleError, RuntimeLifecycleHarness, RuntimeListenerConfig,
-    RuntimeTaskExpectation, RuntimeTaskHandle, RuntimeTaskJoinReport, RuntimeTaskStatus,
-    RuntimeTaskSupervisor, RuntimeTaskSupervisorError, SharedDnsCache, SocksConnectMetadata,
-    TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
+    RuntimeAuditFanIn, RuntimeAuditFanInError, RuntimeAuditIngestReport, RuntimeChildExit,
+    RuntimeCleanupAction, RuntimeCleanupReport, RuntimeComponent, RuntimeExitStatus,
+    RuntimeLifecycleError, RuntimeLifecycleHarness, RuntimeListenerConfig, RuntimeTaskExpectation,
+    RuntimeTaskHandle, RuntimeTaskJoinReport, RuntimeTaskStatus, RuntimeTaskSupervisor,
+    RuntimeTaskSupervisorError, SharedDnsCache, SocksConnectMetadata, TcpEgress, TcpEgressError,
+    UdpEgress, UdpEgressError,
 };
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -1786,6 +1787,30 @@ impl<U: DnsUpstream, H: ExplicitProxyEgress, S: ExplicitProxyEgress> BlockingPro
         }
         self.drained_aggregate_audit_records = end;
         Ok(end - start)
+    }
+
+    pub fn ingest_live_audit_sources_into_fan_in(
+        &self,
+        fan_in: &mut RuntimeAuditFanIn,
+    ) -> Result<Vec<RuntimeAuditIngestReport>, RuntimeAuditFanInError> {
+        let mut reports = Vec::new();
+        reports.push(fan_in.ingest("lifecycle", self.lifecycle.audit().records())?);
+        if let Some(dns_server) = self.dns_server.as_ref() {
+            reports.push(fan_in.ingest("dns", dns_server.handler().broker().audit().records())?);
+        }
+        if let Some(http_proxy_server) = self.http_proxy_server.as_ref() {
+            reports.push(fan_in.ingest(
+                "http_proxy",
+                http_proxy_server.frontend().broker().audit().records(),
+            )?);
+        }
+        if let Some(socks5_proxy_server) = self.socks5_proxy_server.as_ref() {
+            reports.push(fan_in.ingest(
+                "socks5_proxy",
+                socks5_proxy_server.frontend().broker().audit().records(),
+            )?);
+        }
+        Ok(reports)
     }
 
     pub fn dns_server(&self) -> &BlockingDnsBrokerServer<U> {
@@ -5359,6 +5384,34 @@ mod tests {
                 && record.decision == Some(Decision::FailClosed)
                 && record.reason == Some(DenialReason::ProxyMalformed)
         }));
+
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 16);
+        let fan_in_reports = runtime
+            .ingest_live_audit_sources_into_fan_in(&mut fan_in)
+            .unwrap();
+        assert!(fan_in_reports
+            .iter()
+            .any(|report| report.source == "lifecycle" && report.accepted_records >= 4));
+        assert!(fan_in_reports
+            .iter()
+            .any(|report| report.source == "http_proxy" && report.accepted_records == 2));
+        let duplicate_reports = runtime
+            .ingest_live_audit_sources_into_fan_in(&mut fan_in)
+            .unwrap();
+        assert!(duplicate_reports
+            .iter()
+            .all(|report| report.accepted_records == 0));
+        let fan_in_record_count: usize = fan_in_reports
+            .iter()
+            .map(|report| report.accepted_records)
+            .sum();
+        let mut fan_in_sink = JsonLineAuditSink::new(Vec::new());
+        let fan_in_drain = fan_in.drain_to_sink(&mut fan_in_sink).unwrap();
+        assert_eq!(fan_in_drain.drained_records, fan_in_record_count);
+        let fan_in_json = String::from_utf8(fan_in_sink.into_inner()).unwrap();
+        assert!(fan_in_json.contains("network_session_start"));
+        assert!(fan_in_json.contains("http_proxy_client_read_incomplete"));
+        assert!(fan_in_json.contains("unsupported_denied"));
 
         let mut failing_sink = JsonLineAuditSink::new(FailingWriter);
         assert!(runtime

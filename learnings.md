@@ -342,3 +342,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Commit aggregate drain cursor only after full success
 
 - A sink drain can succeed for some records and then fail. To preserve retry semantics, stage the aggregate drain cursor locally and commit it only after every pending record is appended successfully; otherwise a retry may skip records after partial sink failure.
+
+## 2026-06-23 — Fan-in must ingest live source ledgers by source
+
+- Runtime aggregate records can contain duplicate per-ledger sequence numbers, so core fan-in should ingest live lifecycle/DNS/HTTP/SOCKS ledgers as separate named sources rather than treating a flattened aggregate vector as one source. This preserves source cursors and avoids sequence collisions.

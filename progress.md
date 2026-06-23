@@ -3179,3 +3179,27 @@ Round-72 correctness found that the aggregate sink drain cursor advanced after e
 ### Remaining blind spots
 - This remains a blocking-runtime aggregate drain, not full async fan-in with readiness/timer orchestration.
 - Final async runtime still needs real task registration/cancellation/join ordering and bounded sink-backed fan-in across listener/TUN/smoltcp lifecycle sources.
+
+## 2026-06-23 — Bridge blocking runtime sources into core fan-in
+
+### Commands run
+- `cargo fmt` — applied formatting for live fan-in bridge changes.
+- `cargo test -p foxprox-egress blocking_proxy_runtime_aggregate_captures_http_read_failures --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 61 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_proxy_runtime_aggregate_captures_http_read_failures ... ok`
+
+### Interpretation
+Added `BlockingProxyRuntime::ingest_live_audit_sources_into_fan_in(...)`, which feeds lifecycle, DNS, HTTP proxy, and SOCKS proxy ledgers into `RuntimeAuditFanIn` as separate named sources. The HTTP partial-read runtime regression now proves source-specific fan-in ingestion, duplicate-ingest suppression through source cursors, and sink drain output containing lifecycle start plus precise `http_proxy_client_read_incomplete` and malformed-denial evidence. This is a bridge from the blocking runtime to the core bounded fan-in API without flattening per-source sequence numbers into one ambiguous stream.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- This bridges live blocking-runtime ledgers into core fan-in, but it is still invoked synchronously from tests rather than by an async fan-in task.
+- Final async runtime still needs readiness/timer orchestration plus real task registration/cancellation/join ordering across listener/TUN/smoltcp sources.
