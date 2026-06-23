@@ -314,3 +314,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Audit assertions should cover typed and detail fields
 
 - When documenting structured audit coverage, assert both typed record fields (`frontend`, `protocol`, `decision`, `reason`) and string details (`runtime_error`, component, task, error detail) for every frontend to avoid overclaiming observability evidence.
+
+## 2026-06-23 — HTTP proxy reads must require complete headers
+
+- Treat HTTP proxy client reads that time out or close before `\r\n\r\n` as malformed per-request failures. Returning partial parseable request lines can accidentally allow/forward slow-client requests after a read timeout.

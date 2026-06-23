@@ -3003,3 +3003,29 @@ Round-65 review found no blocker/high issues but noted that the previous asserti
 ### Remaining blind spots
 - Need real adapter-level/OS listener error injection so DNS/HTTP/SOCKS `run_until_cancelled(...)` can be proven to hit these recorders from concrete accept/recv failures without unsafe fd manipulation.
 - Final async runtime still needs readiness/timer integration and audit fan-in wiring for real task loops.
+
+## 2026-06-23 — Fail closed on partial HTTP proxy reads
+
+### Commands run
+- `cargo fmt` — applied formatting for HTTP proxy partial-read changes.
+- `cargo test -p foxprox-egress blocking_http_proxy_server_partial_request_timeout_is_not_forwarded --all-targets --all-features` — passed.
+- `cargo test -p foxprox-egress blocking_http_proxy_server_read_timeout_is_audited_request_failure --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, 8 CLI tests, 152 core tests, 4 device tests, 59 egress tests, and 13 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Evidence excerpts
+- `tests::blocking_http_proxy_server_partial_request_timeout_is_not_forwarded ... ok`
+- `tests::blocking_http_proxy_server_read_timeout_is_audited_request_failure ... ok`
+
+### Interpretation
+Round-66 validation found that a parseable HTTP request line followed by a read timeout could still be forwarded because the request reader returned partial bytes. The HTTP proxy reader now only returns bytes after complete header termination (`\r\n\r\n`); EOF or read error before that returns an empty malformed request, producing fail-closed `UnsupportedDenied` / `ProxyMalformed` evidence and no egress forwarding. This makes the prior per-client read-timeout claim true for both empty and partial parseable request inputs.
+
+### Changed files
+- `crates/foxprox-egress/src/lib.rs`
+- `learnings.md`
+- `progress.md`
+
+### Remaining blind spots
+- Need real adapter-level/OS listener error injection so DNS/HTTP/SOCKS `run_until_cancelled(...)` can be proven to hit listener-loop error recorders from concrete accept/recv failures without unsafe fd manipulation.
+- Final async runtime still needs readiness/timer integration and audit fan-in wiring for real task loops.

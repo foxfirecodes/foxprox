@@ -634,6 +634,7 @@ fn read_http_proxy_request(
 ) -> Result<Vec<u8>, ProxyEgressError> {
     let mut request = Vec::new();
     let mut chunk = [0u8; 256];
+    let mut complete_headers = false;
     while request.len() < max_request_bytes.max(1) {
         let remaining = max_request_bytes.max(1).saturating_sub(request.len());
         let read_len = remaining.min(chunk.len());
@@ -646,10 +647,15 @@ fn read_http_proxy_request(
         }
         request.extend_from_slice(&chunk[..len]);
         if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            complete_headers = true;
             break;
         }
     }
-    Ok(request)
+    if complete_headers {
+        Ok(request)
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 fn http_proxy_response_for(
@@ -3407,6 +3413,50 @@ mod tests {
         assert_eq!(records[0].kind, AuditKind::UnsupportedDenied);
         assert_eq!(records[0].decision, Some(Decision::FailClosed));
         assert_eq!(records[0].reason, Some(DenialReason::ProxyMalformed));
+    }
+
+    #[test]
+    fn blocking_http_proxy_server_partial_request_timeout_is_not_forwarded() {
+        let mut config = PolicyConfig::default();
+        config.rules.push(
+            PolicyRule::allow("allow-http-proxy")
+                .frontend(Frontend::HttpProxy)
+                .protocol(Protocol::Http)
+                .origin("http", "example.com", 80),
+        );
+        let broker = BrokerCore::new(PolicyEngine::new(config), 8);
+        let frontend =
+            ExplicitProxyFrontend::new("s1", broker, InMemoryExplicitProxyEgress::default());
+        let mut server = BlockingHttpProxyServer::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            frontend,
+            Duration::from_millis(5),
+            4096,
+        )
+        .unwrap();
+        let mut client = TcpStream::connect(server.local_addr().unwrap()).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        client
+            .write_all(b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n")
+            .unwrap();
+
+        let step = server.handle_one(1_000).unwrap().unwrap();
+        assert_eq!(step.decision, Decision::FailClosed);
+        assert_eq!(step.reason, Some(DenialReason::ProxyMalformed));
+        assert!(!step.forwarded);
+        assert_eq!(step.status_code, 400);
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
+
+        let records: Vec<_> = server.frontend().broker().audit().records().collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].kind, AuditKind::UnsupportedDenied);
+        assert_eq!(records[0].decision, Some(Decision::FailClosed));
+        assert_eq!(records[0].reason, Some(DenialReason::ProxyMalformed));
+        assert!(server.frontend().egress().forwarded_http().is_empty());
     }
 
     #[test]
