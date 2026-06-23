@@ -2671,6 +2671,33 @@ pub async fn accept_async_tcp_listener_when_ready(
     }
 }
 
+#[cfg(unix)]
+pub async fn wait_for_async_packet_fd_readiness<F>(
+    fd: &tokio::io::unix::AsyncFd<F>,
+    max_wait: Duration,
+    cancellation: &AsyncRuntimeCancellationToken,
+) -> AsyncRuntimeIoReadinessReport
+where
+    F: std::os::fd::AsRawFd,
+{
+    let status = tokio::select! {
+        result = fd.readable() => {
+            if result.is_ok() {
+                AsyncRuntimeIoReadinessStatus::Ready
+            } else {
+                AsyncRuntimeIoReadinessStatus::Failed
+            }
+        }
+        () = tokio::time::sleep(max_wait) => AsyncRuntimeIoReadinessStatus::TimedOut,
+        () = cancellation.cancelled() => AsyncRuntimeIoReadinessStatus::Cancelled,
+    };
+    AsyncRuntimeIoReadinessReport {
+        readiness: RuntimeTaskReadiness::new(RuntimeComponent::TunDevice, "tun_packet_loop")
+            .with_ready(status == AsyncRuntimeIoReadinessStatus::Ready),
+        status,
+    }
+}
+
 pub async fn run_async_runtime_scheduler_step<F, Fut>(
     lifecycle: &mut RuntimeLifecycleHarness,
     task_readiness: &[RuntimeTaskReadiness],
@@ -3648,6 +3675,76 @@ mod tests {
         assert_eq!(
             report.readiness,
             RuntimeTaskReadiness::new(RuntimeComponent::Socks5Listener, "socks5_accept_loop")
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_packet_fd_readiness_uses_asyncfd_and_audits_plan() {
+        let (tun_fd, mut sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        tun_fd.set_nonblocking(true).unwrap();
+        let async_fd = tokio::io::unix::AsyncFd::new(tun_fd).unwrap();
+        sandbox_peer.write_all(b"tun-packet-ready").unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+
+        let report =
+            wait_for_async_packet_fd_readiness(&async_fd, Duration::from_secs(1), &cancellation)
+                .await;
+
+        assert_eq!(report.status, AsyncRuntimeIoReadinessStatus::Ready);
+        assert_eq!(
+            report.readiness,
+            RuntimeTaskReadiness::ready(RuntimeComponent::TunDevice, "tun_packet_loop")
+        );
+        let mut packet = [0u8; 64];
+        let mut tun_reader = async_fd.get_ref();
+        let len = tun_reader.read(&mut packet).unwrap();
+        assert_eq!(&packet[..len], b"tun-packet-ready");
+        let mut lifecycle = RuntimeLifecycleHarness::new("async-tun-fd-readiness", 4);
+        lifecycle
+            .start_with_task_expectations(
+                vec![RuntimeComponent::TunDevice],
+                vec![RuntimeTaskExpectation::new(
+                    RuntimeComponent::TunDevice,
+                    "tun_packet_loop",
+                )],
+                8_700,
+            )
+            .unwrap();
+        let plan = RuntimeReadinessPlan::from_tasks(&[report.readiness]);
+        lifecycle.record_readiness_plan(&plan, 8_710).unwrap();
+        let records: Vec<_> = lifecycle.audit().records().collect();
+        assert_eq!(records[1].kind, AuditKind::RuntimeReadiness);
+        assert_eq!(records[1].details["scheduler_action"], "run_ready_tasks");
+        assert_eq!(
+            records[1].details["ready_runtime_tasks"],
+            "tun_device:tun_packet_loop"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_packet_fd_readiness_can_be_cancelled_before_packet() {
+        let (tun_fd, _sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        tun_fd.set_nonblocking(true).unwrap();
+        let async_fd = tokio::io::unix::AsyncFd::new(tun_fd).unwrap();
+        let cancellation_state = Arc::new(AsyncRuntimeCancellationState::new());
+        let cancellation = AsyncRuntimeCancellationToken::new(cancellation_state.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            cancellation_state.cancelled.store(true, Ordering::SeqCst);
+            cancellation_state.notify.notify_waiters();
+        });
+
+        let report =
+            wait_for_async_packet_fd_readiness(&async_fd, Duration::from_secs(60), &cancellation)
+                .await;
+
+        assert_eq!(report.status, AsyncRuntimeIoReadinessStatus::Cancelled);
+        assert_eq!(
+            report.readiness,
+            RuntimeTaskReadiness::new(RuntimeComponent::TunDevice, "tun_packet_loop")
         );
     }
 

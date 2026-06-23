@@ -4123,3 +4123,24 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Tokio UDP socket readiness and TCP listener accept readiness now have focused OS-level evidence. Remaining final runtime gap is real TUN fd readiness, live smoltcp timer wake wiring, integrating these readiness/accept paths into one end-to-end async runtime loop with ready-task dispatch, cancellation/join, audit fan-in, and shutdown final drain.
+
+## 2026-06-23 — Add Tokio AsyncFd packet readiness evidence for the TUN task boundary
+
+### Review
+- Round-108 correctness and validation found no blockers or high issues.
+- Reviewers identified real TUN fd readiness and integration into the end-to-end async loop as the next highest runtime gap.
+
+### Fix
+- Added Unix-only `wait_for_async_packet_fd_readiness(...)`, using `tokio::io::unix::AsyncFd` to wait for readability and map the result to `tun_device:tun_packet_loop` `RuntimeTaskReadiness`.
+- Added regression coverage using a nonblocking OS fd pair to prove packet-like fd readability feeds a `RuntimeReadinessPlan` with `scheduler_action=run_ready_tasks` and leaves the bytes available for the later TUN dispatch path.
+- Added cancellation coverage proving packet-fd readiness waits can be preempted before any packet arrives and remain non-ready.
+
+### Commands run
+- `cargo fmt` — applied formatting.
+- `cargo test -p foxprox-egress async_runtime_packet_fd_readiness --all-targets --all-features` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 89 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- This is Tokio `AsyncFd` packet-fd readiness evidence for the TUN scheduler boundary using a deterministic fd pair, not a real `/dev/net/tun` creation/handoff proof. Remaining final runtime gap is actual TUN device fd setup/handoff, live smoltcp timer wake wiring, and integrating UDP/TCP/packet-fd readiness into one end-to-end async runtime loop with ready-task dispatch, cancellation/join, audit fan-in, and shutdown final drain.

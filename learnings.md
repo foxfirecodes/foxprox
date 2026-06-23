@@ -486,3 +486,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Tokio TCP listener accept narrows readiness by owning the accepted stream
 
 - For TCP listeners, a concrete Tokio runtime proof can couple readiness to `TcpListener::accept()`: the accepted stream and peer address become dispatch-owned evidence, while timeout/cancellation must produce non-ready readiness and no stream.
+
+## 2026-06-23 — AsyncFd packet-fd readiness can model the TUN scheduler boundary without consuming data
+
+- `tokio::io::unix::AsyncFd` can wait on a nonblocking packet-like fd and feed `tun_device:tun_packet_loop` readiness while leaving bytes available for later dispatch. Until `/dev/net/tun` creation/handoff is wired, keep this scoped as packet-fd readiness, not proof of real TUN device setup.
