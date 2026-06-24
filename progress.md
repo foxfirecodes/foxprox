@@ -4966,3 +4966,26 @@ Commit: 1deff74
 
 ### Remaining blind spots
 - The setup-audit plus packet-fd helper now covers success and key fail-closed local paths. Remaining gaps are still privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and long-running production packet-loop/final-drain wiring.
+
+## 2026-06-24 — Add bounded setup packet loop final drain
+
+Commit: d687bd5
+
+### Review
+- Round-147 correctness and validation found no blocker/high issues. Reviewers confirmed setup packet bridge negative paths cover not-ready, packet-read failure, and sink-drain failure without overclaiming privileged bwrap/real TUN E2E.
+
+### Fix
+- Added `AsyncRuntimeSetupPacketLoopConfig`, `AsyncRuntimeSetupPacketLoopStatus`, and `AsyncRuntimeSetupPacketLoopReport`.
+- Added `run_setup_packet_fd_loop_until_cancelled(...)`, which ingests setup evidence once, repeatedly waits on an existing packet `AsyncFd`, reads ready packets through the existing TUN ready-task helper, stops on cancellation, timeout, failure, or a configured packet limit, and always drains setup evidence to `JsonLineAuditSink` before returning.
+- The loop only counts `Ready` packet read reports as consumed packets and stops on non-ready read reports, avoiding zero-byte/non-ready read reports being miscounted as packet evidence.
+- Added deterministic coverage proving setup evidence drains after a bounded packet loop consumes a packet through the runtime packet-fd path.
+
+### Commands run
+- `cargo test -p foxprox-egress --all-targets --all-features async_runtime_setup_packet_loop_drains_after_packet_limit -- --nocapture` — passed.
+- `cargo clippy -p foxprox-egress --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 29 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 104 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- A bounded async setup packet loop now ties setup evidence, packet fd reads, and final drain together after fd receipt, but privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production integration around this loop remain open.

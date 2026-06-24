@@ -2860,6 +2860,31 @@ pub struct AsyncRuntimePacketFdReadBounds {
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AsyncRuntimeSetupPacketLoopConfig {
+    pub packet_read: AsyncRuntimePacketFdReadBounds,
+    pub max_packets: usize,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AsyncRuntimeSetupPacketLoopStatus {
+    Cancelled,
+    PacketLimitReached,
+    TimedOut,
+    Failed,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct AsyncRuntimeSetupPacketLoopReport {
+    pub setup_ingest: RuntimeAuditIngestReport,
+    pub packet_reads: Vec<AsyncRuntimePacketFdReadReport>,
+    pub status: AsyncRuntimeSetupPacketLoopStatus,
+    pub final_drain: RuntimeAuditDrainReport,
+}
+
+#[cfg(unix)]
 pub async fn drain_setup_audits_and_read_packet_fd_once<F, W>(
     setup_source: impl Into<String>,
     setup_records: &[AuditRecord],
@@ -2912,6 +2937,98 @@ where
         packet_readiness,
         packet_read,
         setup_drain,
+    })
+}
+
+#[cfg(unix)]
+pub async fn run_setup_packet_fd_loop_until_cancelled<F, W>(
+    setup_source: impl Into<String>,
+    setup_records: &[AuditRecord],
+    packet_fd: &tokio::io::unix::AsyncFd<F>,
+    fan_in: &mut RuntimeAuditFanIn,
+    sink: &mut JsonLineAuditSink<W>,
+    config: AsyncRuntimeSetupPacketLoopConfig,
+    cancellation: &AsyncRuntimeCancellationToken,
+) -> Result<AsyncRuntimeSetupPacketLoopReport, AsyncRuntimeSetupPacketDrainError>
+where
+    F: std::os::fd::AsRawFd,
+    for<'a> &'a F: Read,
+    W: Write,
+{
+    let source_records: Vec<_> = setup_records
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, mut record)| {
+            record.sequence = (index + 1) as u64;
+            record
+        })
+        .collect();
+    let setup_ingest = fan_in
+        .ingest(setup_source, &source_records)
+        .map_err(AsyncRuntimeSetupPacketDrainError::Ingest)?;
+    let mut packet_reads = Vec::new();
+    let status = loop {
+        if cancellation.is_cancelled() {
+            break AsyncRuntimeSetupPacketLoopStatus::Cancelled;
+        }
+        if packet_reads.len() >= config.max_packets {
+            break AsyncRuntimeSetupPacketLoopStatus::PacketLimitReached;
+        }
+        let readiness = wait_for_async_packet_fd_readiness(
+            packet_fd,
+            config.packet_read.max_wait,
+            cancellation,
+        )
+        .await;
+        match readiness.status {
+            AsyncRuntimeIoReadinessStatus::Ready => {
+                if let Some(read) = read_async_packet_fd_ready_task(
+                    packet_fd,
+                    &[RuntimeTaskExpectation::new(
+                        RuntimeComponent::TunDevice,
+                        "tun_packet_loop",
+                    )],
+                    config.packet_read.max_packet_bytes,
+                    config.packet_read.max_wait,
+                    cancellation,
+                )
+                .await
+                .map_err(AsyncRuntimeSetupPacketDrainError::PacketRead)?
+                {
+                    match read.status {
+                        AsyncRuntimeIoReadinessStatus::Ready => packet_reads.push(read),
+                        AsyncRuntimeIoReadinessStatus::Cancelled => {
+                            break AsyncRuntimeSetupPacketLoopStatus::Cancelled;
+                        }
+                        AsyncRuntimeIoReadinessStatus::TimedOut => {
+                            break AsyncRuntimeSetupPacketLoopStatus::TimedOut;
+                        }
+                        AsyncRuntimeIoReadinessStatus::Failed => {
+                            break AsyncRuntimeSetupPacketLoopStatus::Failed;
+                        }
+                    }
+                }
+            }
+            AsyncRuntimeIoReadinessStatus::Cancelled => {
+                break AsyncRuntimeSetupPacketLoopStatus::Cancelled;
+            }
+            AsyncRuntimeIoReadinessStatus::TimedOut => {
+                break AsyncRuntimeSetupPacketLoopStatus::TimedOut;
+            }
+            AsyncRuntimeIoReadinessStatus::Failed => {
+                break AsyncRuntimeSetupPacketLoopStatus::Failed;
+            }
+        }
+    };
+    let final_drain = fan_in
+        .drain_to_sink(sink)
+        .map_err(AsyncRuntimeSetupPacketDrainError::Drain)?;
+    Ok(AsyncRuntimeSetupPacketLoopReport {
+        setup_ingest,
+        packet_reads,
+        status,
+        final_drain,
     })
 }
 
@@ -4198,6 +4315,59 @@ mod tests {
                 RuntimeAuditDrainError::SinkWriteFailed { .. }
             )
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_setup_packet_loop_drains_after_packet_limit() {
+        let (tun_fd, mut sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        tun_fd.set_nonblocking(true).unwrap();
+        let async_fd = tokio::io::unix::AsyncFd::new(tun_fd).unwrap();
+        sandbox_peer.write_all(b"runtime-loop-packet").unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let setup_records = vec![
+            AuditRecord::new(AuditKind::SetupPlanCreated, "s1"),
+            AuditRecord::new(AuditKind::TunConfigured, "s1")
+                .with_detail("setup_phase", "host_setup_control_handoff")
+                .with_detail("fd_source", "scm_rights"),
+        ];
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+
+        let report = run_setup_packet_fd_loop_until_cancelled(
+            "host_setup_session",
+            &setup_records,
+            &async_fd,
+            &mut fan_in,
+            &mut sink,
+            AsyncRuntimeSetupPacketLoopConfig {
+                packet_read: AsyncRuntimePacketFdReadBounds {
+                    max_packet_bytes: 64,
+                    max_wait: Duration::from_secs(1),
+                },
+                max_packets: 1,
+            },
+            &cancellation,
+        )
+        .await
+        .expect("setup packet loop drains after packet limit");
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+
+        assert_eq!(report.setup_ingest.accepted_records, 2);
+        assert_eq!(
+            report.status,
+            AsyncRuntimeSetupPacketLoopStatus::PacketLimitReached
+        );
+        assert_eq!(report.packet_reads.len(), 1);
+        assert_eq!(
+            report.packet_reads[0].packet.as_deref(),
+            Some(&b"runtime-loop-packet"[..])
+        );
+        assert_eq!(report.final_drain.drained_records, 2);
+        assert!(output.contains("setup_plan_created"));
+        assert!(output.contains("host_setup_control_handoff"));
+        assert!(output.contains("scm_rights"));
     }
 
     #[cfg(unix)]

@@ -570,3 +570,7 @@ When a host launcher starts `bwrap ... foxproxsetup --execute-setup`, do not blo
 ## 2026-06-23 — Re-sequence raw audit vectors before RuntimeAuditFanIn ingest
 
 `AuditRecord::new(...)` starts with `sequence=0`; `RuntimeAuditFanIn::ingest(...)` treats source records with sequence less than or equal to the last source sequence as already seen. If a component accumulates a raw `Vec<AuditRecord>` outside a `BoundedAuditLedger`, assign source-local monotonic sequence numbers to cloned records before ingesting them into fan-in, then let the fan-in ledger assign its own global drain sequence.
+
+## 2026-06-24 — Packet-fd loops should stop on non-ready read reports after readiness
+
+With stream-like fd test doubles, an `AsyncFd::readable()` wake can be followed by a ready-task read report whose status is `TimedOut`/non-ready (for example after the first read drains the stream state). Packet-loop helpers should only count `AsyncRuntimeIoReadinessStatus::Ready` read reports as consumed packets and should break or surface the non-ready status instead of appending zero-byte/non-ready reads as packets.
