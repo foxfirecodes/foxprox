@@ -4946,7 +4946,7 @@ Commit: 8969bfb
 
 ## 2026-06-24 — Cover setup packet bridge negative paths
 
-Commit: 3b0a6ba
+Commit: 1deff74
 
 ### Review
 - Round-146 correctness and validation found no blocker/high issues. Reviewers confirmed `drain_setup_audits_and_read_packet_fd_once(...)` ingests setup evidence with source-local sequencing, waits on an existing `AsyncFd`, reads one packet through the TUN ready-task path only when ready, drains setup evidence to `JsonLineAuditSink`, and remains scoped as a production seam after fd receipt rather than privileged bwrap/real TUN E2E.
