@@ -5146,3 +5146,23 @@ Commit: b7af40e
 
 ### Remaining blind spots
 - The fd adapter is now safer and better aligned with bounded reads. Remaining production work is still connecting the received nonblocking TUN fd into the long-running broker data-plane/policy/smoltcp/egress runtime and draining setup/runtime/lifecycle evidence as one session.
+
+## 2026-06-24 — Run packet loop from received TUN fd
+
+Commit: 76c601f
+
+### Fix
+- Promoted `foxprox-device` to a Unix runtime dependency of `foxprox-egress` so egress/runtime code can consume the actual `ReceivedTunFd` produced by setup-control SCM_RIGHTS handoff.
+- Added `run_received_tun_fd_setup_packet_loop_until_cancelled(...)`, which ingests setup records, safely marks the received fd nonblocking, owns it as a `File`, wraps it in `AsyncFd`, runs the bounded setup packet loop, and preserves final setup-audit drain semantics.
+- Refactored setup packet loop ingestion into a shared helper so the existing `AsyncFd` path and the new received-fd ownership path share packet-loop/final-drain behavior without duplicate setup ingestion.
+- Added deterministic coverage proving a `ReceivedTunFd` is consumed by the runtime packet loop, reads a packet, stops on packet limit, and drains setup-plan plus SCM_RIGHTS TUN handoff evidence.
+
+### Commands run
+- `cargo test -p foxprox-egress --all-targets --all-features async_runtime_received_tun_fd_packet_loop_sets_nonblocking_and_drains -- --nocapture` — passed.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed, including rootless bwrap prerequisite self-test and the ignored real bwrap/foxproxsetup/TUN handoff integration test.
+- `cargo test --all-targets --all-features` — passed, including 31 CLI unit tests + 1 ignored privileged CLI unit test, 1 ignored bwrap E2E integration test in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 106 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The runtime can now own a real received TUN fd and run the bounded packet-read/final-drain loop. Remaining production work is still full long-running broker data-plane forwarding over that fd: policy/smoltcp/host egress integration, DNS/proxy/listener orchestration, cleanup, CLI session ergonomics, and one production launcher path around the setup session plus runtime.
