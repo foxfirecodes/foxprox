@@ -5215,3 +5215,26 @@ Commit: c5c0491
 
 ### Remaining blind spots
 - A received setup fd can now feed the smoltcp bridge and drain setup+broker evidence together, but this is still a bounded runtime seam rather than the full production launcher. Remaining work: real long-running loop scheduling over the received real TUN fd, host-socket TCP/UDP forwarding from smoltcp flows, DNS/proxy/listener orchestration in one session, cleanup/error handling, CLI ergonomics, and a rerunnable end-to-end launcher command.
+
+## 2026-06-24 — Drain smoltcp setup ingest failures
+
+Commit: 61c5d84
+
+### Review
+- Round-155 correctness found no blocker/high issues, but identified a medium issue: `run_received_tun_fd_smoltcp_bridge_loop_and_drain(...)` returned immediately on setup-ingest backpressure even though `RuntimeAuditFanIn::ingest(...)` may already have accepted setup records and appended `audit_backpressure` evidence.
+- The same review noted a low precision issue: the smoltcp received-fd bridge test only asserted that some response bytes were written, not that the response was the expected TCP SYN-ACK.
+
+### Fix
+- Changed initial setup ingestion in `run_received_tun_fd_smoltcp_bridge_loop_and_drain(...)` to drain accepted setup/backpressure evidence before returning an ingest error.
+- Added deterministic coverage with constrained fan-in capacity proving setup-ingest backpressure drains `audit_backpressure` evidence to the sink before the error is returned.
+- Strengthened the received-fd smoltcp bridge success test to parse the response packet and assert IPv4/TCP, source `10.0.2.1:8080`, destination `10.0.2.15:50000`, ACK `0x01020305`, and SYN-ACK flags.
+
+### Commands run
+- `cargo test -p foxprox-egress --all-targets --all-features received_tun_fd_smoltcp_bridge_loop -- --nocapture` — passed, covering success and setup-ingest backpressure final drain.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed, including rootless bwrap prerequisite self-test and the ignored real bwrap/foxproxsetup/TUN handoff integration test.
+- `cargo test --all-targets --all-features` — passed, including 31 CLI unit tests + 1 ignored privileged CLI unit test, 1 ignored bwrap E2E integration test in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 109 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The received-fd smoltcp bridge now drains setup-ingest failures and verifies SYN-ACK writeback in deterministic coverage. Remaining production work is still real long-running scheduling over the received real TUN fd, host-socket TCP/UDP forwarding from smoltcp flows, DNS/proxy/listener orchestration in one session, cleanup/error handling, CLI ergonomics, and a rerunnable end-to-end launcher command.
