@@ -4636,3 +4636,29 @@ Commit: 4735f46
 
 ### Remaining blind spots
 - This avoids local unsafe fd reconstruction by supporting a socket-path setup-control channel, but the actual `foxproxsetup` binary still defaults to the plan-first path and is not yet switched to execute setup/control handoff in production. Capability drop/close/exec, route/DNS/proxy setup commands, and production runtime/final-drain wiring remain.
+
+## 2026-06-23 — Add foxproxsetup execute mode
+
+Commit: c8379b8
+
+### Review
+- Round-133 correctness and validation found no blocker/high issues. Reviewers confirmed the safe setup-control socket handoff entry is correctly scoped, records implementation commit `4735f46`, and remains honest about production gaps.
+
+### Fix
+- Added `run_foxproxsetup_entry_args(...)` and switched the `foxproxsetup` binary entrypoint to use it.
+- `foxproxsetup` now defaults to the existing plan-first behavior unless invoked with `--execute-setup`.
+- Added Linux execute-mode dispatch from `--execute-setup` to the safe socket-path handoff runner backed by real `LinuxTunSetupOps`.
+- Added a Unix injectable execute-mode entrypoint for deterministic testing with scripted setup ops.
+- When `NetworkSetupConfig::setup_control_socket_path` is configured, `BwrapSetupPlan` now emits `foxproxsetup --execute-setup ... --setup-control-socket <path> ...`, while existing fd/no-socket plans keep their previous plan-first command shape.
+- Added tests proving execute mode connects to the safe control socket path, sends a receivable TUN fd via SCM_RIGHTS, and still preserves plan mode when `--execute-setup` is absent.
+
+### Commands run
+- `cargo test -p foxprox-core --all-targets --all-features` — passed, 161 core tests.
+- `cargo test -p foxprox-cli --all-targets --all-features` — passed, 15 CLI tests and 1 ignored privileged Linux CLI test.
+- `cargo clippy -p foxprox-cli --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 15 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The production `foxproxsetup` binary now has an explicit execute mode for the safe socket-control handoff path, but execute mode still only creates/configures/hands off the TUN fd. Capability drop/close/exec, route/DNS/proxy setup commands, and production runtime/final-drain wiring remain.

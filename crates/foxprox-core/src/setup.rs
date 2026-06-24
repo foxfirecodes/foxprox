@@ -298,8 +298,11 @@ impl BwrapSetupPlan {
             bwrap_args.extend(["--sync-fd".to_string(), fd.to_string()]);
         }
 
-        let mut setup_command = vec![
-            "foxproxsetup".to_string(),
+        let mut setup_command = vec!["foxproxsetup".to_string()];
+        if config.setup_control_socket_path.is_some() {
+            setup_command.push("--execute-setup".to_string());
+        }
+        setup_command.extend([
             "--sandbox-id".to_string(),
             config.sandbox_id.clone(),
             "--tun-name".to_string(),
@@ -316,7 +319,7 @@ impl BwrapSetupPlan {
             format!("{}:{}", config.gateway_ip, config.http_proxy_port),
             "--socks-proxy".to_string(),
             format!("{}:{}", config.gateway_ip, config.socks_proxy_port),
-        ];
+        ]);
         if let Some(fd) = config.setup_control_fd {
             setup_command.extend(["--setup-control-fd".to_string(), fd.to_string()]);
         }
@@ -537,6 +540,8 @@ mod tests {
             .any(|w| w == ["connect-and-send-fd", "/run/foxprox/setup.sock"]));
 
         let bwrap = BwrapSetupPlan::new(config, &["true".to_string()]);
+        assert_eq!(bwrap.setup_command[0], "foxproxsetup");
+        assert_eq!(bwrap.setup_command[1], "--execute-setup");
         assert!(bwrap
             .setup_command
             .windows(2)

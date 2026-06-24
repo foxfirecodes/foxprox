@@ -29,6 +29,45 @@ pub fn run_args(args: &[String]) -> CliOutput {
     }
 }
 
+pub fn run_foxproxsetup_entry_args(args: &[String]) -> CliOutput {
+    if let Some(setup_args) = strip_execute_setup_flag(args) {
+        return run_foxproxsetup_execute_setup_args(&setup_args);
+    }
+    run_foxproxsetup_args(args)
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+fn run_foxproxsetup_execute_setup_args(args: &[String]) -> CliOutput {
+    run_foxproxsetup_linux_handoff_connecting(args)
+}
+
+#[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+fn run_foxproxsetup_execute_setup_args(_args: &[String]) -> CliOutput {
+    error_output(
+        "setup_execute_unsupported_platform",
+        "foxproxsetup --execute-setup requires Linux TUN support".to_string(),
+    )
+}
+
+#[cfg(unix)]
+pub fn run_foxproxsetup_entry_args_with_ops<O: TunSetupDeviceOps>(
+    args: &[String],
+    ops: &mut O,
+) -> CliOutput {
+    if let Some(setup_args) = strip_execute_setup_flag(args) {
+        return run_foxproxsetup_handoff_connecting_with_ops(&setup_args, ops);
+    }
+    run_foxproxsetup_args(args)
+}
+
+fn strip_execute_setup_flag(args: &[String]) -> Option<Vec<String>> {
+    if args.first().is_some_and(|arg| arg == "--execute-setup") {
+        Some(args[1..].to_vec())
+    } else {
+        None
+    }
+}
+
 pub fn run_foxproxsetup_args(args: &[String]) -> CliOutput {
     let (config, target) = match parse_foxproxsetup_invocation(args) {
         Ok(invocation) => invocation,
@@ -626,6 +665,45 @@ mod tests {
         let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
         assert_eq!(value["setup"]["status"], "complete");
         assert_eq!(value["audit"][2]["details"]["fd_source"], "scm_rights");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foxproxsetup_entry_execute_mode_uses_safe_control_socket_path() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-entry-setup-control-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut ops = CliScriptedTunOps {
+            fail_configure: false,
+            fail_handoff: false,
+        };
+        let mut args = vec!["--execute-setup".to_string()];
+        args.extend(setup_args_with_control_socket(&path));
+
+        let output = run_foxproxsetup_entry_args_with_ops(&args, &mut ops);
+        assert_eq!(output.exit_code, 0);
+        let (accepted, _) = listener.accept().unwrap();
+        let received = recv_tun_fd(&accepted, "foxprox0").unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(received.report.tun_name, "foxprox0");
+        let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
+        assert_eq!(value["setup"]["status"], "complete");
+        assert_eq!(value["target_command"][0], "curl");
+    }
+
+    #[test]
+    fn foxproxsetup_entry_defaults_to_plan_mode_without_execute_flag() {
+        let output = run_foxproxsetup_entry_args(&setup_args_with_control_fd());
+
+        assert_eq!(output.exit_code, 0);
+        let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
+        assert_eq!(value["plan"]["steps"][6]["name"], "handoff_tun_fd");
+        assert_eq!(value["audit"]["kind"], "tun_configured");
     }
 
     #[cfg(unix)]
