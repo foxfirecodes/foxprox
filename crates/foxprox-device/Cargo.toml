@@ -12,6 +12,9 @@ foxprox-core = { path = "../foxprox-core" }
 [target.'cfg(unix)'.dependencies]
 unix-ancillary = "0.2"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+tun-rs = "2.8"
+
 [dev-dependencies]
 pretty_assertions = "1"
 

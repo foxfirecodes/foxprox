@@ -381,6 +381,95 @@ pub fn execute_tun_setup_handoff<O: TunSetupDeviceOps>(
     report
 }
 
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[derive(Clone, Debug, Default)]
+pub struct LinuxTunSetupOps;
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl LinuxTunSetupOps {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+impl TunSetupDeviceOps for LinuxTunSetupOps {
+    type TunFd = tun_rs::SyncDevice;
+
+    fn open_tun(
+        &mut self,
+        config: &NetworkSetupConfig,
+    ) -> Result<(Self::TunFd, TunFdHandoffReport), TunFdHandoffReport> {
+        match tun_rs::DeviceBuilder::new()
+            .name(config.tun_name.clone())
+            .mtu(config.mtu)
+            .enable(false)
+            .build_sync()
+        {
+            Ok(device) => Ok((
+                device,
+                TunFdHandoffReport::for_opened_device("/dev/net/tun", config.tun_name.clone()),
+            )),
+            Err(_) => Err(TunFdHandoffReport::failed_open(
+                "/dev/net/tun",
+                config.tun_name.clone(),
+            )),
+        }
+    }
+
+    fn configure_tun(
+        &mut self,
+        config: &NetworkSetupConfig,
+        fd: &Self::TunFd,
+    ) -> Result<AuditRecord, Box<AuditRecord>> {
+        let std::net::IpAddr::V4(sandbox_ip) = config.sandbox_ip else {
+            return Err(Box::new(
+                AuditRecord::new(AuditKind::BrokerError, config.sandbox_id.clone())
+                    .with_frontend(Frontend::Setup)
+                    .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+                    .with_detail("setup_step", "configure_tun")
+                    .with_detail("tun_name", config.tun_name.clone())
+                    .with_detail("configure_error", "unsupported_sandbox_ip"),
+            ));
+        };
+        let prefix_len = 24u8;
+        if fd
+            .set_network_address(sandbox_ip, prefix_len, None::<std::net::Ipv4Addr>)
+            .and_then(|()| fd.enabled(true))
+            .is_err()
+        {
+            return Err(Box::new(
+                AuditRecord::new(AuditKind::BrokerError, config.sandbox_id.clone())
+                    .with_frontend(Frontend::Setup)
+                    .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+                    .with_detail("setup_step", "configure_tun")
+                    .with_detail("tun_name", config.tun_name.clone())
+                    .with_detail("configure_error", "tun_rs_configure_failed"),
+            ));
+        }
+        Ok(
+            AuditRecord::new(AuditKind::TunConfigured, config.sandbox_id.clone())
+                .with_frontend(Frontend::Setup)
+                .with_decision(Decision::Allow, None)
+                .with_detail("setup_step", "configure_tun")
+                .with_detail("configured_by", "tun-rs")
+                .with_detail("tun_name", config.tun_name.clone())
+                .with_detail("sandbox_ip", sandbox_ip.to_string())
+                .with_detail("prefix_len", prefix_len.to_string())
+                .with_detail("mtu", config.mtu.to_string()),
+        )
+    }
+
+    fn send_tun_fd(
+        &mut self,
+        control: &UnixStream,
+        config: &NetworkSetupConfig,
+        fd: &Self::TunFd,
+    ) -> Result<TunFdHandoffReport, TunFdHandoffReport> {
+        send_tun_fd(control, &config.tun_name, fd)
+    }
+}
+
 #[cfg(unix)]
 pub fn open_dev_net_tun_handoff(
     tun_name: impl Into<String>,
@@ -913,6 +1002,34 @@ mod tests {
             records.last().unwrap().details["failed_step"],
             "handoff_tun_fd"
         );
+    }
+
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[test]
+    #[ignore = "requires CAP_NET_ADMIN and /dev/net/tun access"]
+    fn linux_tun_setup_ops_attempts_real_setup_handoff_when_privileged() {
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.tun_name = format!("fpci{}", std::process::id() % 10_000);
+        let (control_tx, control_rx) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut ops = LinuxTunSetupOps::new();
+
+        let report = execute_tun_setup_handoff(&mut ops, &control_tx, &config);
+        if report.status == TunSetupHandoffStatus::Complete {
+            assert_eq!(
+                report.completed_steps,
+                vec!["open_tun", "configure_tun", "handoff_tun_fd"]
+            );
+            assert_eq!(report.audit_records[0].kind, AuditKind::TunFdOpened);
+            assert_eq!(report.audit_records[1].kind, AuditKind::TunConfigured);
+            assert_eq!(report.audit_records[1].details["configured_by"], "tun-rs");
+            assert_eq!(report.audit_records[2].details["fd_source"], "scm_rights");
+            let received = recv_tun_fd(&control_rx, &config.tun_name).unwrap();
+            assert_eq!(received.report.status, TunFdHandoffStatus::Received);
+        } else {
+            let records = report.audit_records_with_summary("s1");
+            assert_eq!(records.last().unwrap().kind, AuditKind::BrokerError);
+            assert_eq!(records.last().unwrap().decision, Some(Decision::FailClosed));
+        }
     }
 
     #[cfg(unix)]

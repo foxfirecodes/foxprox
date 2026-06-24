@@ -542,3 +542,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Do not label plain device opens as configured TUN handoffs
 
 - Opening a path such as `/dev/net/tun` is not the same evidence as receiving a configured TUN fd over SCM_RIGHTS. Plain open success should use distinct `tun_fd_opened`/`fd_source=device_open` evidence, while SCM_RIGHTS handoff can retain configured-handoff evidence. This prevents temp-file/open tests from overclaiming TUN configuration.
+
+## 2026-06-23 — Use tun-rs for real Linux TUN setup without local unsafe
+
+- `tun-rs` exposes a safe public `DeviceBuilder` and `SyncDevice: AsFd` on Unix. This lets foxprox implement a real Linux TUN setup operation under `#![forbid(unsafe_code)]` while still using the existing SCM_RIGHTS handoff helper. Privileged execution still requires CAP_NET_ADMIN and `/dev/net/tun`, so runtime tests should be ignored/privilege-gated unless the environment explicitly supports them.

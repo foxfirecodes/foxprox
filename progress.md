@@ -4557,3 +4557,31 @@ Commit: c51e9e2
 
 ### Remaining blind spots
 - The setup executor now covers open, configure, and handoff-send fail-closed paths with drainable summary evidence, but real privileged Linux implementation is still missing: actual `TUNSETIFF`, route/DNS/proxy commands, real helper process execution, and production runtime wiring outside deterministic harnesses.
+
+## 2026-06-23 — Add tun-rs Linux setup implementation
+
+Commit: f74324c
+
+### Decision
+- User explicitly chose to continue with actual implementation rather than harness-only work. The new path uses the existing setup handoff harness to validate real functionality.
+
+### Review
+- Round-129 correctness and validation found no blocker/high issues. Reviewers confirmed the Round-128 progress hash issue was fixed and the next highest gap remained real privileged Linux TUN setup/configuration, route/DNS/proxy commands, helper execution, and production runtime wiring.
+
+### Fix
+- Added `tun-rs` as a Linux-only `foxprox-device` dependency.
+- Added `LinuxTunSetupOps`, a real Linux `TunSetupDeviceOps` implementation using the safe public `tun_rs::DeviceBuilder` / `SyncDevice` API under `#![forbid(unsafe_code)]`.
+- `LinuxTunSetupOps::open_tun(...)` creates a named disabled TUN device with the configured MTU and returns `tun_fd_opened` evidence.
+- `LinuxTunSetupOps::configure_tun(...)` configures the IPv4 sandbox address/prefix and enables the device, returning `tun_configured` evidence with `configured_by=tun-rs`.
+- `LinuxTunSetupOps::send_tun_fd(...)` hands the real `SyncDevice` fd over the existing SCM_RIGHTS setup-control path.
+- Added an ignored Linux integration test, `linux_tun_setup_ops_attempts_real_setup_handoff_when_privileged`, that can be run in a privileged environment with CAP_NET_ADMIN and `/dev/net/tun` to exercise real create/configure/handoff and receive the fd back through the existing handoff helper.
+
+### Commands run
+- `cargo test -p foxprox-device --all-targets --all-features` — passed, 11 device tests and 1 ignored privileged Linux test.
+- `cargo clippy -p foxprox-device --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Actual Linux TUN create/configure/handoff now has a concrete implementation and an ignored privileged integration test, but unprivileged CI only compiles it. Remaining production gaps are route/DNS/proxy setup commands, real `foxproxsetup` process execution around this implementation, and production runtime wiring/final drain outside deterministic harnesses.
