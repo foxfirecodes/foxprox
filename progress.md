@@ -4901,7 +4901,7 @@ Commit: 56e02dc
 
 ## 2026-06-23 — Cover host setup fan-in duplicate and backpressure paths
 
-Commit: 6265818
+Commit: fd603d1
 
 ### Review
 - Round-144 correctness and validation found no blocker/high issues. Reviewers confirmed host setup session audits are re-sequenced, ingested as `host_setup_session`, drained through `RuntimeAuditFanIn`, and scoped honestly as a final-drain bridge rather than privileged bwrap/real TUN E2E.
