@@ -696,6 +696,7 @@ mod tests {
     #[derive(Debug)]
     struct ScriptedTunSetupOps {
         tun_fd: Option<std::os::unix::net::UnixStream>,
+        fail_open: bool,
         fail_configure: bool,
         fail_handoff: bool,
     }
@@ -708,6 +709,12 @@ mod tests {
             &mut self,
             config: &NetworkSetupConfig,
         ) -> Result<(Self::TunFd, TunFdHandoffReport), TunFdHandoffReport> {
+            if self.fail_open {
+                return Err(TunFdHandoffReport::failed_open(
+                    "/dev/net/tun",
+                    &config.tun_name,
+                ));
+            }
             let fd = self.tun_fd.take().unwrap();
             Ok((
                 fd,
@@ -768,6 +775,7 @@ mod tests {
         let (tun_fd, mut sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut ops = ScriptedTunSetupOps {
             tun_fd: Some(tun_fd),
+            fail_open: false,
             fail_configure: false,
             fail_handoff: false,
         };
@@ -806,12 +814,46 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn tun_setup_handoff_executor_fails_closed_before_configure_on_open_error() {
+        let config = NetworkSetupConfig::alpha_default("s1");
+        let (control_tx, _control_rx) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (tun_fd, _sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut ops = ScriptedTunSetupOps {
+            tun_fd: Some(tun_fd),
+            fail_open: true,
+            fail_configure: false,
+            fail_handoff: false,
+        };
+
+        let report = execute_tun_setup_handoff(&mut ops, &control_tx, &config);
+        assert_eq!(report.status, TunSetupHandoffStatus::Failed);
+        assert!(report.completed_steps.is_empty());
+        assert_eq!(report.failed_step, Some("open_tun"));
+        assert!(report.configure_record.is_none());
+        assert!(report.handoff_report.is_none());
+        assert_eq!(report.audit_records.len(), 1);
+        assert_eq!(report.audit_records[0].kind, AuditKind::BrokerError);
+        assert_eq!(report.audit_records[0].decision, Some(Decision::FailClosed));
+        assert_eq!(report.audit_records[0].details["fd_source"], "device_open");
+        assert_eq!(
+            report.audit_records[0].details["handoff_error"],
+            "open_failed"
+        );
+        let records = report.audit_records_with_summary("s1");
+        assert_eq!(records.len(), 2);
+        assert_eq!(records.last().unwrap().details["setup_status"], "failed");
+        assert_eq!(records.last().unwrap().details["failed_step"], "open_tun");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn tun_setup_handoff_executor_fails_closed_before_handoff_on_configure_error() {
         let config = NetworkSetupConfig::alpha_default("s1");
         let (control_tx, _control_rx) = std::os::unix::net::UnixStream::pair().unwrap();
         let (tun_fd, _sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut ops = ScriptedTunSetupOps {
             tun_fd: Some(tun_fd),
+            fail_open: false,
             fail_configure: true,
             fail_handoff: false,
         };
@@ -845,6 +887,7 @@ mod tests {
         let (tun_fd, _sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
         let mut ops = ScriptedTunSetupOps {
             tun_fd: Some(tun_fd),
+            fail_open: false,
             fail_configure: false,
             fail_handoff: true,
         };

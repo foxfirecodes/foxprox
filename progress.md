@@ -4535,3 +4535,25 @@ Commit: 0a88de3
 
 ### Remaining blind spots
 - The setup executor now covers configure and handoff-send fail-closed paths with drainable summary evidence, but real privileged Linux implementation is still missing: actual `TUNSETIFF`, route/DNS/proxy commands, real helper process execution, and production runtime wiring outside deterministic harnesses.
+
+## 2026-06-23 — Cover TUN setup open failure evidence
+
+Commit: a5c861a
+
+### Review
+- Round-127 correctness and validation found no blocker/high issues. Reviewers confirmed the Round-126 progress hash issue was fixed and that the remaining highest gap is real privileged Linux TUN setup/configuration plus real setup-helper execution and production runtime wiring.
+
+### Fix
+- Extended the scripted setup ops to support an injected open failure.
+- Added `tun_setup_handoff_executor_fails_closed_before_configure_on_open_error`, proving `execute_tun_setup_handoff(...)` stops before configure/handoff when opening the TUN fd fails.
+- The new regression asserts no completed setup steps, `failed_step=open_tun`, no configure or handoff report, fail-closed `broker_error` evidence with `fd_source=device_open` and `handoff_error=open_failed`, and a drainable failed summary audit.
+
+### Commands run
+- `cargo test -p foxprox-device --all-targets --all-features` — passed, 11 device tests.
+- `cargo clippy -p foxprox-device --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 11 device tests, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The setup executor now covers open, configure, and handoff-send fail-closed paths with drainable summary evidence, but real privileged Linux implementation is still missing: actual `TUNSETIFF`, route/DNS/proxy commands, real helper process execution, and production runtime wiring outside deterministic harnesses.
