@@ -4836,7 +4836,7 @@ Commit: 6d0cce9
 
 ## 2026-06-23 — Cover host setup handoff timeout evidence
 
-Commit: fcfa1fb
+Commit: 1ca912e
 
 ### Review
 - Round-141 correctness and validation found no blocker/high issues. Reviewers confirmed the setup-control socket path is now inferred before plan/start, nonblocking accept polls setup-process exit, and early setup-process exit records fail-closed evidence.
