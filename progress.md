@@ -5105,3 +5105,22 @@ Commit: c6f56d9
 
 ### Remaining blind spots
 - Setup-control and post-handoff waits are now bounded/fail-closed at the host session API seam. Remaining production work is still the real long-running broker data-plane over the received TUN fd, including policy/smoltcp/egress forwarding and one-session final drain.
+
+## 2026-06-24 — Make received TUN fd nonblocking safely
+
+Commit: 7b8dbe8
+
+### Fix
+- Added `foxprox_device::set_fd_nonblocking(...)`, backed by safe `rustix` `fcntl_getfl`/`fcntl_setfl`, so host-owned received TUN fds can be prepared for bounded/nonblocking runtime reads without local unsafe fd manipulation.
+- Added device coverage proving a nonblocking fd returns idle (`Ok(None)`) through `TunIoPacketDevice` instead of blocking when no packet is ready.
+- Updated the real bwrap/`foxproxsetup` E2E packet proof to mark the received SCM_RIGHTS TUN fd nonblocking and poll it until the expected target IPv4/UDP packet arrives, removing the background blocking reader thread while retaining the bounded deadline and incidental-packet filtering.
+
+### Commands run
+- `cargo test -p foxprox-device --all-targets --all-features set_fd_nonblocking_makes_received_fd_reads_idle_instead_of_blocking -- --nocapture` — passed.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed, including rootless bwrap prerequisite self-test and the ignored real bwrap/foxproxsetup/TUN handoff integration test over a nonblocking received TUN fd.
+- `cargo test --all-targets --all-features` — passed, including 31 CLI unit tests + 1 ignored privileged CLI unit test, 1 ignored bwrap E2E integration test in normal workspace runs, 161 core tests, 12 device tests + 1 ignored, 105 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The host can now safely prepare the received TUN fd for nonblocking packet loops, and the real bwrap E2E proves nonblocking readback from the transferred fd. Remaining production work is still connecting that owned fd into the long-running broker data-plane/policy/smoltcp/egress runtime and draining setup/runtime/lifecycle evidence as one session.

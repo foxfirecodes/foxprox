@@ -586,3 +586,7 @@ A rootless bwrap namespace with a newly configured TUN can emit incidental IPv6 
 ## 2026-06-24 — Bound post-handoff target waits before TUN packet assertions
 
 A real setup-control fd handoff can complete before the post-setup target exits. Integration tests and production host setup sessions should bound the post-handoff process wait separately from accept/read timeouts; otherwise a hung target can block before packet-read or final-drain evidence has a chance to run.
+
+## 2026-06-24 — Use rustix for safe nonblocking flags on received fds
+
+When foxprox needs to change Unix fd status flags under `#![forbid(unsafe_code)]`, use safe `rustix` wrappers such as `fcntl_getfl`/`fcntl_setfl` with `OFlags::NONBLOCK` instead of local `fcntl`/`ioctl` unsafe code. This is useful for SCM_RIGHTS-received TUN fds before integrating them with bounded packet loops.
