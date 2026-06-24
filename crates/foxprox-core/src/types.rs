@@ -95,6 +95,7 @@ pub enum AuditKind {
     NetworkSessionStart,
     BrokerStarted,
     TunConfigured,
+    TunFdOpened,
     ProxyListenerConfigured,
     RuntimeReadiness,
     ProxyDestinationResolved,

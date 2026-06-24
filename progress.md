@@ -4417,3 +4417,32 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - This closes the safe fd handoff contract and packet-device ownership boundary, but it still does not configure a Linux TUN interface with `TUNSETIFF` or prove privileged namespace setup in CI. The remaining runtime gap is production wiring that runs the setup helper, receives the real `/dev/net/tun` fd, wraps it in async readiness, and drives it in the combined Tokio/LocalSet runtime loop with final shutdown drain.
+
+## 2026-06-23 — Distinguish direct TUN fd open evidence from SCM_RIGHTS handoff
+
+### Review
+- Round-121 validation found no high issues.
+- Round-121 correctness found no blockers but raised a high note: `open_tun_device_path(...)` was reporting successful plain path opens as `tun_configured` with `handoff=scm_rights`, and the test proved that overclaim with a temp regular file.
+
+### Fix
+- Added `AuditKind::TunFdOpened` for direct fd-open evidence.
+- Added `TunFdHandoffSource::{ScmRights, DeviceOpen}` and records `fd_source` in handoff/open audit details.
+- Direct open success now reports:
+  - `kind=tun_fd_opened`,
+  - `fd_source=device_open`,
+  - `handoff_status=opened`,
+  - no `handoff_payload`.
+- SCM_RIGHTS send/receive still reports `tun_configured` with `fd_source=scm_rights` and the versioned handoff payload.
+- Open failure remains fail-closed `broker_error` with `fd_source=device_open` and `handoff_error=open_failed`.
+- Updated tests to assert the distinction and to prevent temp-file path-open evidence from overclaiming configured TUN handoff.
+
+### Commands run
+- `cargo test -p foxprox-device --all-targets --all-features` — passed, 7 device tests.
+- `cargo test -p foxprox-core --all-targets --all-features` — passed, 160 core tests.
+- `cargo clippy -p foxprox-device --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 7 device tests, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Direct open evidence is now scoped accurately and no longer claims TUN configuration. Remaining production gap is still privileged setup/TUNSETIFF, real setup-helper execution and fd handoff, async wrapping of the received TUN fd, and integration into the combined Tokio/LocalSet runtime loop with shutdown final drain.

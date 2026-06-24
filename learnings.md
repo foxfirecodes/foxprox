@@ -538,3 +538,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Safe Unix SCM_RIGHTS handoff can avoid local unsafe fd code
 
 - The `unix-ancillary` crate provides a safe `OwnedFd`/`BorrowedFd` API for SCM_RIGHTS fd passing over Unix sockets. It lets foxprox model setup-helper TUN fd handoff without adding local unsafe code under `#![forbid(unsafe_code)]`; the received `OwnedFd` can be converted into a `File`-backed `TunIoPacketDevice` for packet IO ownership.
+
+## 2026-06-23 — Do not label plain device opens as configured TUN handoffs
+
+- Opening a path such as `/dev/net/tun` is not the same evidence as receiving a configured TUN fd over SCM_RIGHTS. Plain open success should use distinct `tun_fd_opened`/`fd_source=device_open` evidence, while SCM_RIGHTS handoff can retain configured-handoff evidence. This prevents temp-file/open tests from overclaiming TUN configuration.

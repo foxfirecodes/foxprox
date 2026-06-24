@@ -48,6 +48,7 @@ impl<RW> TunIoPacketDevice<RW> {
 pub enum TunFdHandoffStatus {
     Sent,
     Received,
+    Opened,
     Failed,
 }
 
@@ -57,6 +58,7 @@ impl TunFdHandoffStatus {
         match self {
             Self::Sent => "sent",
             Self::Received => "received",
+            Self::Opened => "opened",
             Self::Failed => "failed",
         }
     }
@@ -88,10 +90,28 @@ impl TunFdHandoffErrorKind {
 }
 
 #[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TunFdHandoffSource {
+    ScmRights,
+    DeviceOpen,
+}
+
+#[cfg(unix)]
+impl TunFdHandoffSource {
+    fn as_detail(self) -> &'static str {
+        match self {
+            Self::ScmRights => "scm_rights",
+            Self::DeviceOpen => "device_open",
+        }
+    }
+}
+
+#[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TunFdHandoffReport {
     pub tun_name: String,
     pub status: TunFdHandoffStatus,
+    pub source: TunFdHandoffSource,
     pub payload: String,
     pub fd_count: usize,
     pub device_path: Option<PathBuf>,
@@ -106,6 +126,7 @@ impl TunFdHandoffReport {
             payload: handoff_payload(&tun_name),
             tun_name,
             status: TunFdHandoffStatus::Sent,
+            source: TunFdHandoffSource::ScmRights,
             fd_count,
             device_path: None,
             error: None,
@@ -118,6 +139,7 @@ impl TunFdHandoffReport {
             payload: handoff_payload(&tun_name),
             tun_name,
             status: TunFdHandoffStatus::Received,
+            source: TunFdHandoffSource::ScmRights,
             fd_count,
             device_path: None,
             error: None,
@@ -133,6 +155,7 @@ impl TunFdHandoffReport {
         Self {
             tun_name: tun_name.into(),
             status: TunFdHandoffStatus::Failed,
+            source: TunFdHandoffSource::ScmRights,
             payload: payload.into(),
             fd_count,
             device_path: None,
@@ -143,9 +166,10 @@ impl TunFdHandoffReport {
     pub fn for_opened_device(path: impl Into<PathBuf>, tun_name: impl Into<String>) -> Self {
         let tun_name = tun_name.into();
         Self {
-            payload: handoff_payload(&tun_name),
+            payload: String::new(),
             tun_name,
-            status: TunFdHandoffStatus::Received,
+            status: TunFdHandoffStatus::Opened,
+            source: TunFdHandoffSource::DeviceOpen,
             fd_count: 1,
             device_path: Some(path.into()),
             error: None,
@@ -155,9 +179,10 @@ impl TunFdHandoffReport {
     pub fn failed_open(path: impl Into<PathBuf>, tun_name: impl Into<String>) -> Self {
         let tun_name = tun_name.into();
         Self {
-            payload: handoff_payload(&tun_name),
+            payload: String::new(),
             tun_name,
             status: TunFdHandoffStatus::Failed,
+            source: TunFdHandoffSource::DeviceOpen,
             fd_count: 0,
             device_path: Some(path.into()),
             error: Some(TunFdHandoffErrorKind::OpenFailed),
@@ -169,16 +194,22 @@ impl TunFdHandoffReport {
             AuditRecord::new(AuditKind::BrokerError, sandbox_id.into())
                 .with_frontend(Frontend::Setup)
                 .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+        } else if self.source == TunFdHandoffSource::DeviceOpen {
+            AuditRecord::new(AuditKind::TunFdOpened, sandbox_id.into())
+                .with_frontend(Frontend::Setup)
+                .with_decision(Decision::Allow, None)
         } else {
             AuditRecord::new(AuditKind::TunConfigured, sandbox_id.into())
                 .with_frontend(Frontend::Setup)
                 .with_decision(Decision::Allow, None)
         }
         .with_detail("tun_name", self.tun_name.clone())
-        .with_detail("handoff", "scm_rights")
+        .with_detail("fd_source", self.source.as_detail())
         .with_detail("handoff_status", self.status.as_detail())
-        .with_detail("fd_count", self.fd_count.to_string())
-        .with_detail("handoff_payload", self.payload.clone());
+        .with_detail("fd_count", self.fd_count.to_string());
+        if !self.payload.is_empty() {
+            record = record.with_detail("handoff_payload", self.payload.clone());
+        }
         if let Some(path) = &self.device_path {
             record = record.with_detail("device_path", path.display().to_string());
         }
@@ -480,7 +511,7 @@ mod tests {
         assert_eq!(received.report.fd_count, 1);
         let audit = received.report.audit_record("s1");
         assert_eq!(audit.kind, AuditKind::TunConfigured);
-        assert_eq!(audit.details["handoff"], "scm_rights");
+        assert_eq!(audit.details["fd_source"], "scm_rights");
         assert_eq!(audit.details["handoff_status"], "received");
         assert_eq!(audit.details["tun_name"], "foxprox0");
 
@@ -513,6 +544,7 @@ mod tests {
         let audit = report.audit_record("s1");
         assert_eq!(audit.kind, AuditKind::BrokerError);
         assert_eq!(audit.decision, Some(Decision::FailClosed));
+        assert_eq!(audit.details["fd_source"], "scm_rights");
         assert_eq!(audit.details["handoff_error"], "unexpected_payload");
     }
 
@@ -525,12 +557,15 @@ mod tests {
         ));
         std::fs::write(&path, b"").unwrap();
         let (_file, report) = open_tun_device_path(&path, "foxprox0").unwrap();
-        assert_eq!(report.status, TunFdHandoffStatus::Received);
+        assert_eq!(report.status, TunFdHandoffStatus::Opened);
         assert_eq!(report.fd_count, 1);
         assert_eq!(report.device_path.as_deref(), Some(path.as_path()));
         let audit = report.audit_record("s1");
-        assert_eq!(audit.kind, AuditKind::TunConfigured);
+        assert_eq!(audit.kind, AuditKind::TunFdOpened);
+        assert_eq!(audit.details["fd_source"], "device_open");
+        assert_eq!(audit.details["handoff_status"], "opened");
         assert_eq!(audit.details["device_path"], path.display().to_string());
+        assert!(!audit.details.contains_key("handoff_payload"));
         let _ = std::fs::remove_file(&path);
 
         let missing = std::env::temp_dir().join(format!(
@@ -542,6 +577,7 @@ mod tests {
         assert_eq!(report.error, Some(TunFdHandoffErrorKind::OpenFailed));
         let audit = report.audit_record("s1");
         assert_eq!(audit.kind, AuditKind::BrokerError);
+        assert_eq!(audit.details["fd_source"], "device_open");
         assert_eq!(audit.details["handoff_error"], "open_failed");
         assert_eq!(audit.details["device_path"], missing.display().to_string());
     }
