@@ -4855,3 +4855,24 @@ Commit: 1ca912e
 
 ### Remaining blind spots
 - Host setup session timeout and early-exit paths are now deterministic CI evidence, but privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production runtime/final-drain wiring after the host broker receives the real TUN fd remain open.
+
+## 2026-06-23 — Stabilize no-fd handoff timeout test
+
+Commit: 38c028a
+
+### Review
+- Round-142 correctness and validation found no blocker/high issues. Reviewers confirmed production timeout bounds, deterministic timeout tests, progress hash, and honest scope.
+- Round-142 noted the connected/no-fd timeout test held the peer connection open with a fixed sleep, which had not reproduced flakiness but could be made less scheduler-sensitive.
+
+### Fix
+- Replaced the fixed peer sleep in `CliScriptedHostSetupProcessRunner` with a channel release guard: the no-fd peer connects and stays open until `wait_setup_process()` releases it.
+- This keeps the read-timeout/no-SCM_RIGHTS test deterministic without adding privileged setup claims.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features host_setup_session -- --nocapture` — passed, 6 filtered host setup session tests.
+- `cargo test --all-targets --all-features` — passed, including 26 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Host setup session deterministic timeout coverage is less scheduler-sensitive, but the remaining major gaps are unchanged: privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production runtime/final-drain wiring after the host broker receives the real TUN fd.

@@ -1505,6 +1505,7 @@ mod tests {
         exit_before_handoff: bool,
         skip_handoff_connection: bool,
         connect_without_handoff: bool,
+        release_no_fd_connection: Option<std::sync::mpsc::Sender<()>>,
     }
 
     #[cfg(unix)]
@@ -1522,9 +1523,11 @@ mod tests {
                 return Ok(());
             }
             if self.connect_without_handoff {
+                let (release_tx, release_rx) = std::sync::mpsc::channel();
+                self.release_no_fd_connection = Some(release_tx);
                 self.sender = Some(std::thread::spawn(move || {
                     let _control = UnixStream::connect(path).unwrap();
-                    std::thread::sleep(Duration::from_millis(100));
+                    let _ = release_rx.recv();
                 }));
                 return Ok(());
             }
@@ -1549,6 +1552,9 @@ mod tests {
         }
 
         fn wait_setup_process(&mut self) -> Result<HostSetupProcessExit, String> {
+            if let Some(release) = self.release_no_fd_connection.take() {
+                let _ = release.send(());
+            }
             if let Some(sender) = self.sender.take() {
                 sender.join().unwrap();
             }
@@ -1681,6 +1687,7 @@ mod tests {
             exit_before_handoff: false,
             skip_handoff_connection: false,
             connect_without_handoff: false,
+            release_no_fd_connection: None,
         };
 
         let report = run_host_setup_control_session_with_runner(
@@ -1734,6 +1741,7 @@ mod tests {
             exit_before_handoff: false,
             skip_handoff_connection: false,
             connect_without_handoff: false,
+            release_no_fd_connection: None,
         };
 
         let report = run_host_setup_control_session_with_runner(
@@ -1777,6 +1785,7 @@ mod tests {
             exit_before_handoff: false,
             skip_handoff_connection: false,
             connect_without_handoff: false,
+            release_no_fd_connection: None,
         };
 
         let report = run_host_setup_control_session_with_runner(
@@ -1818,6 +1827,7 @@ mod tests {
             exit_before_handoff: true,
             skip_handoff_connection: false,
             connect_without_handoff: false,
+            release_no_fd_connection: None,
         };
 
         let report = run_host_setup_control_session_with_runner(
@@ -1862,6 +1872,7 @@ mod tests {
             exit_before_handoff: false,
             skip_handoff_connection: true,
             connect_without_handoff: false,
+            release_no_fd_connection: None,
         };
 
         let report = run_host_setup_control_session_with_runner_and_timeouts(
@@ -1908,6 +1919,7 @@ mod tests {
             exit_before_handoff: false,
             skip_handoff_connection: false,
             connect_without_handoff: true,
+            release_no_fd_connection: None,
         };
 
         let report = run_host_setup_control_session_with_runner_and_timeouts(
