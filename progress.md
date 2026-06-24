@@ -5015,7 +5015,7 @@ Commit: 099e82a
 
 ## 2026-06-24 — Add bwrap foxproxsetup real TUN E2E script
 
-Commit: 734ed43
+Commit: 23c7554
 
 ### Review
 - The user corrected the previous assumption that bwrap could not test this path: rootless bwrap is intended to run `foxproxsetup` with temporary `CAP_NET_ADMIN` via `--cap-add CAP_NET_ADMIN`, after which `foxproxsetup` creates/configures TUN, hands the fd to the host, drops the cap, and execs the target. `docs/initial-impl.md` explicitly describes this bwrap-compatible setup backend.
