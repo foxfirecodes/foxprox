@@ -39,7 +39,7 @@ pub fn run_foxproxsetup_entry_args(args: &[String]) -> CliOutput {
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 fn run_foxproxsetup_execute_setup_args(args: &[String]) -> CliOutput {
-    run_foxproxsetup_linux_handoff_connecting(args)
+    run_foxproxsetup_linux_execute_setup_connecting(args)
 }
 
 #[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
@@ -57,6 +57,25 @@ pub fn run_foxproxsetup_entry_args_with_ops<O: TunSetupDeviceOps>(
 ) -> CliOutput {
     if let Some(setup_args) = strip_execute_setup_flag(args) {
         return run_foxproxsetup_handoff_connecting_with_ops(&setup_args, ops);
+    }
+    run_foxproxsetup_args(args)
+}
+
+#[cfg(unix)]
+pub fn run_foxproxsetup_entry_args_with_ops_and_runner<
+    O: TunSetupDeviceOps,
+    R: SandboxSetupCommandRunner,
+>(
+    args: &[String],
+    ops: &mut O,
+    runner: &mut R,
+) -> CliOutput {
+    if let Some(setup_args) = strip_execute_setup_flag(args) {
+        return run_foxproxsetup_execute_setup_connecting_with_ops_and_runner(
+            &setup_args,
+            ops,
+            runner,
+        );
     }
     run_foxproxsetup_args(args)
 }
@@ -173,6 +192,114 @@ pub fn run_foxproxsetup_linux_handoff_with_control(
 pub fn run_foxproxsetup_linux_handoff_connecting(args: &[String]) -> CliOutput {
     let mut ops = foxprox_device::LinuxTunSetupOps::new();
     run_foxproxsetup_handoff_connecting_with_ops(args, &mut ops)
+}
+
+#[cfg(unix)]
+pub fn run_foxproxsetup_execute_setup_connecting_with_ops_and_runner<
+    O: TunSetupDeviceOps,
+    R: SandboxSetupCommandRunner,
+>(
+    args: &[String],
+    ops: &mut O,
+    runner: &mut R,
+) -> CliOutput {
+    let (config, target) = match parse_foxproxsetup_invocation(args) {
+        Ok(invocation) => invocation,
+        Err((code, detail)) => return error_output(code, detail),
+    };
+    let Some(path) = config.setup_control_socket_path.clone() else {
+        return error_output(
+            "setup_missing_control_socket",
+            "expected --setup-control-socket for safe TUN handoff execution".to_string(),
+        );
+    };
+    let control = match UnixStream::connect(&path) {
+        Ok(control) => control,
+        Err(error) => {
+            return error_output(
+                "setup_control_socket_connect_error",
+                format!("{path}: {error}"),
+            )
+        }
+    };
+    run_foxproxsetup_execute_setup_with_config(config, target, &control, ops, runner)
+}
+
+#[cfg(unix)]
+fn run_foxproxsetup_execute_setup_with_config<
+    O: TunSetupDeviceOps,
+    R: SandboxSetupCommandRunner,
+>(
+    config: NetworkSetupConfig,
+    target: Vec<String>,
+    control: &UnixStream,
+    ops: &mut O,
+    runner: &mut R,
+) -> CliOutput {
+    let handoff_report = execute_tun_setup_handoff(ops, control, &config);
+    let mut audit_records = handoff_report.audit_records_with_summary(config.sandbox_id.clone());
+    if handoff_report.status != TunSetupHandoffStatus::Complete {
+        let output = json!({
+            "setup": {
+                "status": "failed",
+                "failed_phase": "tun_handoff",
+            },
+            "tun_handoff": {
+                "status": "failed",
+                "completed_steps": handoff_report.completed_steps,
+                "failed_step": handoff_report.failed_step,
+            },
+            "sandbox_network": {
+                "status": "skipped",
+                "completed_steps": [],
+                "failed_step": null,
+            },
+            "audit": audit_records,
+            "proxy_environment": config.proxy_environment(),
+            "target_command": target,
+        });
+        return json_output(2, "setup_execute_serialize_error", output);
+    }
+
+    let command_report = run_sandbox_network_setup_commands_with_runner(&config, &target, runner);
+    let sandbox_status = if command_report.failed_step.is_none() {
+        "complete"
+    } else {
+        "failed"
+    };
+    let exit_code = if command_report.failed_step.is_none() {
+        0
+    } else {
+        2
+    };
+    audit_records.push(command_report.audit.clone());
+    let output = json!({
+        "setup": {
+            "status": if exit_code == 0 { "complete" } else { "failed" },
+            "failed_phase": if exit_code == 0 { serde_json::Value::Null } else { json!("sandbox_network_commands") },
+        },
+        "tun_handoff": {
+            "status": "complete",
+            "completed_steps": handoff_report.completed_steps,
+            "failed_step": handoff_report.failed_step,
+        },
+        "sandbox_network": {
+            "status": sandbox_status,
+            "completed_steps": command_report.completed_steps,
+            "failed_step": command_report.failed_step,
+        },
+        "audit": audit_records,
+        "proxy_environment": config.proxy_environment(),
+        "target_command": target,
+    });
+    json_output(exit_code, "setup_execute_serialize_error", output)
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+pub fn run_foxproxsetup_linux_execute_setup_connecting(args: &[String]) -> CliOutput {
+    let mut ops = foxprox_device::LinuxTunSetupOps::new();
+    let mut runner = CommandSandboxSetupRunner::default();
+    run_foxproxsetup_execute_setup_connecting_with_ops_and_runner(args, &mut ops, &mut runner)
 }
 
 #[cfg(unix)]
@@ -903,19 +1030,77 @@ mod tests {
             fail_configure: false,
             fail_handoff: false,
         };
+        let mut runner = CliScriptedSetupCommandRunner::default();
         let mut args = vec!["--execute-setup".to_string()];
         args.extend(setup_args_with_control_socket(&path));
 
-        let output = run_foxproxsetup_entry_args_with_ops(&args, &mut ops);
+        let output = run_foxproxsetup_entry_args_with_ops_and_runner(&args, &mut ops, &mut runner);
         assert_eq!(output.exit_code, 0);
         let (accepted, _) = listener.accept().unwrap();
         let received = recv_tun_fd(&accepted, "foxprox0").unwrap();
         let _ = std::fs::remove_file(&path);
 
         assert_eq!(received.report.tun_name, "foxprox0");
+        assert_eq!(
+            runner.ran_steps,
+            vec![
+                "configure_default_route".to_string(),
+                "configure_dns".to_string(),
+                "configure_proxy_reachability".to_string(),
+            ]
+        );
         let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
         assert_eq!(value["setup"]["status"], "complete");
+        assert_eq!(value["tun_handoff"]["status"], "complete");
+        assert_eq!(value["sandbox_network"]["status"], "complete");
+        assert_eq!(value["audit"].as_array().unwrap().len(), 5);
+        assert_eq!(
+            value["audit"][4]["details"]["setup_phase"],
+            "sandbox_network_commands"
+        );
         assert_eq!(value["target_command"][0], "curl");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foxproxsetup_entry_execute_mode_fails_closed_on_sandbox_command_failure() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-entry-fail-setup-control-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut ops = CliScriptedTunOps {
+            fail_configure: false,
+            fail_handoff: false,
+        };
+        let mut runner = CliScriptedSetupCommandRunner {
+            fail_step: Some("configure_dns".to_string()),
+            ..CliScriptedSetupCommandRunner::default()
+        };
+        let mut args = vec!["--execute-setup".to_string()];
+        args.extend(setup_args_with_control_socket(&path));
+
+        let output = run_foxproxsetup_entry_args_with_ops_and_runner(&args, &mut ops, &mut runner);
+        assert_eq!(output.exit_code, 2);
+        let (accepted, _) = listener.accept().unwrap();
+        let received = recv_tun_fd(&accepted, "foxprox0").unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(received.report.tun_name, "foxprox0");
+        assert_eq!(
+            runner.ran_steps,
+            vec!["configure_default_route".to_string()]
+        );
+        let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
+        assert_eq!(value["setup"]["status"], "failed");
+        assert_eq!(value["setup"]["failed_phase"], "sandbox_network_commands");
+        assert_eq!(value["tun_handoff"]["status"], "complete");
+        assert_eq!(value["sandbox_network"]["status"], "failed");
+        assert_eq!(value["sandbox_network"]["failed_step"], "configure_dns");
+        assert_eq!(value["audit"][4]["kind"], "broker_error");
+        assert_eq!(value["audit"][4]["decision"], "fail_closed");
     }
 
     #[test]

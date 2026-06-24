@@ -4688,3 +4688,25 @@ Commit: ababf07
 
 ### Remaining blind spots
 - Route/DNS/proxy setup now has a concrete safe command-runner boundary and fail-closed evidence, but it is not yet wired into `foxproxsetup --execute-setup` after TUN handoff. Capability drop/close/exec and production runtime/final-drain wiring remain.
+
+## 2026-06-23 — Run sandbox commands in foxproxsetup execute mode
+
+Commit: b1cac46
+
+### Review
+- Round-135 correctness and validation found no blocker/high issues. Reviewers confirmed the sandbox network command executor is correctly scoped and records implementation commit `ababf07`, and identified the next gap as wiring that command phase into `foxproxsetup --execute-setup` after successful TUN handoff.
+
+### Fix
+- Added `run_foxproxsetup_execute_setup_connecting_with_ops_and_runner(...)`, which connects to the safe setup-control socket, runs TUN open/configure/SCM_RIGHTS handoff, then runs sandbox route/DNS/proxy setup commands only if the TUN handoff phase completed.
+- Updated the Linux `foxproxsetup --execute-setup` dispatch to use real `LinuxTunSetupOps` plus `CommandSandboxSetupRunner`, so execute mode now covers TUN create/configure/handoff and the route/DNS/proxy command phase.
+- Execute-mode JSON now separates `tun_handoff` and `sandbox_network` phase status, keeps ordered audit records, and reports `failed_phase` when sandbox command setup fails after a successful TUN handoff.
+- Added deterministic tests proving execute mode runs the sandbox command phase after a successful SCM_RIGHTS handoff and fails closed if a sandbox command fails, while preserving the already-handed-off fd evidence.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features` — passed, 18 CLI tests and 1 ignored privileged Linux CLI test.
+- `cargo test --all-targets --all-features` — passed, including 18 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- `foxproxsetup --execute-setup` now wires real TUN setup/handoff and the sandbox route/DNS/proxy command phase, but capability drop, setup-fd close, target `exec`, privileged end-to-end test execution, and production runtime/final-drain wiring remain.
