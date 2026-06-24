@@ -4786,3 +4786,25 @@ Commit: 7fe14cd
 
 ### Remaining blind spots
 - The combined local runtime now drains host setup-control handoff evidence through `RuntimeAuditFanIn` while using the received fd for Tokio packet readiness, but the sender is still deterministic. Remaining gaps are privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production runtime/final-drain wiring outside the test harness.
+
+## 2026-06-23 — Add host setup process session evidence
+
+Commit: 9fdf166
+
+### Review
+- Round-139 correctness and validation found no blocker/high issues. Reviewers confirmed the combined local runtime drains host setup-control handoff evidence through `RuntimeAuditFanIn` while using the received fd for Tokio packet readiness, with the remaining gap being privileged bwrap/foxproxsetup E2E and production runtime/final-drain wiring.
+
+### Fix
+- Added `HostSetupProcessRunner`, `CommandHostSetupProcessRunner`, `HostSetupProcessExit`, and `HostSetupSessionReport` for the host launcher side of setup.
+- Added `run_host_setup_control_session_with_runner(...)`, which starts a setup process from `BwrapSetupPlan`, accepts and retains the setup-control TUN fd handoff, waits for setup/target process exit status, and records ordered setup-plan, host handoff, and host setup-process audit evidence.
+- The production runner starts the plan's `bwrap ... foxproxsetup --execute-setup ...` command and waits for the child/target process status; deterministic tests use an injected runner that sends a TUN-like fd over SCM_RIGHTS.
+- Added deterministic coverage proving a successful setup session records setup-plan, host handoff, retained fd ownership, and clean process-exit evidence, plus fail-closed coverage for a nonzero setup/target process exit after fd handoff.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features` — passed, 22 CLI tests and 1 ignored privileged Linux CLI test.
+- `cargo test --all-targets --all-features` — passed, including 22 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Host setup process orchestration now has a concrete production runner boundary and fail-closed evidence, but CI still uses an injected deterministic process/sender. Remaining gaps are privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production runtime/final-drain wiring after the host broker receives the real TUN fd.

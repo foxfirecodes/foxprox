@@ -267,6 +267,178 @@ pub fn accept_setup_control_tun_handoff(
     }
 }
 
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostSetupProcessExit {
+    pub exit_code: Option<i32>,
+    pub success: bool,
+}
+
+#[cfg(unix)]
+pub trait HostSetupProcessRunner {
+    fn start_setup_process(&mut self, plan: &BwrapSetupPlan) -> Result<(), String>;
+    fn wait_setup_process(&mut self) -> Result<HostSetupProcessExit, String>;
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct CommandHostSetupProcessRunner {
+    child: Option<std::process::Child>,
+}
+
+#[cfg(unix)]
+impl CommandHostSetupProcessRunner {
+    pub fn new() -> Self {
+        Self { child: None }
+    }
+}
+
+#[cfg(unix)]
+impl Default for CommandHostSetupProcessRunner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(unix)]
+impl HostSetupProcessRunner for CommandHostSetupProcessRunner {
+    fn start_setup_process(&mut self, plan: &BwrapSetupPlan) -> Result<(), String> {
+        if self.child.is_some() {
+            return Err("setup process already started".to_string());
+        }
+        let command = plan.full_command();
+        let Some((program, args)) = command.split_first() else {
+            return Err("empty setup command".to_string());
+        };
+        let child = Command::new(program)
+            .args(args)
+            .spawn()
+            .map_err(|error| error.to_string())?;
+        self.child = Some(child);
+        Ok(())
+    }
+
+    fn wait_setup_process(&mut self) -> Result<HostSetupProcessExit, String> {
+        let child = self
+            .child
+            .as_mut()
+            .ok_or_else(|| "setup process was not started".to_string())?;
+        let status = child.wait().map_err(|error| error.to_string())?;
+        Ok(HostSetupProcessExit {
+            exit_code: status.code(),
+            success: status.success(),
+        })
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct HostSetupSessionReport {
+    pub status: HostSetupControlHandoffStatus,
+    pub handoff: HostSetupControlHandoffReport,
+    pub process_exit: Option<HostSetupProcessExit>,
+    pub audit_records: Vec<AuditRecord>,
+}
+
+#[cfg(unix)]
+pub fn run_host_setup_control_session_with_runner<R: HostSetupProcessRunner>(
+    listener: &UnixListener,
+    config: NetworkSetupConfig,
+    target: &[String],
+    runner: &mut R,
+) -> HostSetupSessionReport {
+    let plan = BwrapSetupPlan::new(config.clone(), target);
+    if let Err(error) = runner.start_setup_process(&plan) {
+        let mut handoff = HostSetupControlHandoffReport {
+            status: HostSetupControlHandoffStatus::Failed,
+            plan,
+            received: None,
+            failed_report: None,
+            audit_records: Vec::new(),
+        };
+        handoff.audit_records.push(
+            AuditRecord::new(AuditKind::SetupPlanCreated, config.sandbox_id.clone())
+                .with_frontend(Frontend::Setup)
+                .with_decision(Decision::Allow, None)
+                .with_detail("setup_helper", "foxproxsetup")
+                .with_detail("tun_name", config.tun_name.clone()),
+        );
+        handoff.audit_records.push(host_setup_process_failure_audit(
+            &config,
+            "start_setup_process",
+            error,
+        ));
+        return HostSetupSessionReport {
+            status: HostSetupControlHandoffStatus::Failed,
+            audit_records: handoff.audit_records.clone(),
+            handoff,
+            process_exit: None,
+        };
+    }
+
+    let handoff = accept_setup_control_tun_handoff(listener, config.clone(), target);
+    let process_exit = runner.wait_setup_process();
+    let mut audit_records = handoff.audit_records.clone();
+    let mut status = handoff.status;
+    let process_exit = match process_exit {
+        Ok(exit) => {
+            if exit.success {
+                audit_records.push(
+                    AuditRecord::new(AuditKind::TunConfigured, config.sandbox_id.clone())
+                        .with_frontend(Frontend::Setup)
+                        .with_decision(Decision::Allow, None)
+                        .with_detail("setup_phase", "host_setup_process")
+                        .with_detail("setup_status", "complete")
+                        .with_detail(
+                            "exit_code",
+                            exit.exit_code
+                                .map(|code| code.to_string())
+                                .unwrap_or_else(|| "signal_or_unknown".to_string()),
+                        ),
+                );
+            } else {
+                status = HostSetupControlHandoffStatus::Failed;
+                audit_records.push(host_setup_process_failure_audit(
+                    &config,
+                    "wait_setup_process",
+                    format!("nonzero exit {:?}", exit.exit_code),
+                ));
+            }
+            Some(exit)
+        }
+        Err(error) => {
+            status = HostSetupControlHandoffStatus::Failed;
+            audit_records.push(host_setup_process_failure_audit(
+                &config,
+                "wait_setup_process",
+                error,
+            ));
+            None
+        }
+    };
+    HostSetupSessionReport {
+        status,
+        handoff,
+        process_exit,
+        audit_records,
+    }
+}
+
+#[cfg(unix)]
+fn host_setup_process_failure_audit(
+    config: &NetworkSetupConfig,
+    step: &str,
+    error: String,
+) -> AuditRecord {
+    AuditRecord::new(AuditKind::BrokerError, config.sandbox_id.clone())
+        .with_frontend(Frontend::Setup)
+        .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+        .with_detail("setup_phase", "host_setup_process")
+        .with_detail("setup_status", "failed")
+        .with_detail("setup_step", step)
+        .with_detail("setup_error", error)
+}
+
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 pub fn run_foxproxsetup_linux_handoff_with_control(
     args: &[String],
@@ -1119,6 +1291,45 @@ mod tests {
     }
 
     #[cfg(unix)]
+    struct CliScriptedHostSetupProcessRunner {
+        tun_fd: Option<UnixStream>,
+        sender: Option<std::thread::JoinHandle<()>>,
+        exit: HostSetupProcessExit,
+        fail_start: bool,
+    }
+
+    #[cfg(unix)]
+    impl HostSetupProcessRunner for CliScriptedHostSetupProcessRunner {
+        fn start_setup_process(&mut self, plan: &BwrapSetupPlan) -> Result<(), String> {
+            if self.fail_start {
+                return Err("scripted start failure".to_string());
+            }
+            let path = plan
+                .config
+                .setup_control_socket_path
+                .clone()
+                .ok_or_else(|| "missing setup control socket path".to_string())?;
+            let tun_fd = self
+                .tun_fd
+                .take()
+                .ok_or_else(|| "missing scripted tun fd".to_string())?;
+            let tun_name = plan.config.tun_name.clone();
+            self.sender = Some(std::thread::spawn(move || {
+                let control = UnixStream::connect(path).unwrap();
+                send_tun_fd(&control, &tun_name, &tun_fd).unwrap();
+            }));
+            Ok(())
+        }
+
+        fn wait_setup_process(&mut self) -> Result<HostSetupProcessExit, String> {
+            if let Some(sender) = self.sender.take() {
+                sender.join().unwrap();
+            }
+            Ok(self.exit.clone())
+        }
+    }
+
+    #[cfg(unix)]
     struct CliScriptedTunOps {
         fail_configure: bool,
         fail_handoff: bool,
@@ -1217,6 +1428,97 @@ mod tests {
             report.audit_records[2].details["setup_phase"],
             "host_setup_control_handoff"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_setup_session_starts_process_receives_fd_and_records_exit() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-host-session-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.setup_control_socket_path = Some(path.to_string_lossy().to_string());
+        let (tun_fd, _sandbox_peer) = UnixStream::pair().unwrap();
+        let mut runner = CliScriptedHostSetupProcessRunner {
+            tun_fd: Some(tun_fd),
+            sender: None,
+            exit: HostSetupProcessExit {
+                exit_code: Some(0),
+                success: true,
+            },
+            fail_start: false,
+        };
+
+        let report = run_host_setup_control_session_with_runner(
+            &listener,
+            config,
+            &["true".to_string()],
+            &mut runner,
+        );
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(report.status, HostSetupControlHandoffStatus::Complete);
+        assert!(report.handoff.received.is_some());
+        assert_eq!(report.process_exit.unwrap().exit_code, Some(0));
+        assert_eq!(report.audit_records[0].kind, AuditKind::SetupPlanCreated);
+        assert!(report.audit_records.iter().any(|record| record
+            .details
+            .get("setup_phase")
+            .map(String::as_str)
+            == Some("host_setup_control_handoff")));
+        assert_eq!(
+            report.audit_records.last().unwrap().details["setup_phase"],
+            "host_setup_process"
+        );
+        assert_eq!(
+            report.audit_records.last().unwrap().details["setup_status"],
+            "complete"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_setup_session_fails_closed_on_nonzero_setup_process_exit() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-host-session-fail-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.setup_control_socket_path = Some(path.to_string_lossy().to_string());
+        let (tun_fd, _sandbox_peer) = UnixStream::pair().unwrap();
+        let mut runner = CliScriptedHostSetupProcessRunner {
+            tun_fd: Some(tun_fd),
+            sender: None,
+            exit: HostSetupProcessExit {
+                exit_code: Some(42),
+                success: false,
+            },
+            fail_start: false,
+        };
+
+        let report = run_host_setup_control_session_with_runner(
+            &listener,
+            config,
+            &["false".to_string()],
+            &mut runner,
+        );
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(report.status, HostSetupControlHandoffStatus::Failed);
+        assert!(report.handoff.received.is_some());
+        assert_eq!(report.process_exit.unwrap().exit_code, Some(42));
+        let audit = report.audit_records.last().unwrap();
+        assert_eq!(audit.kind, AuditKind::BrokerError);
+        assert_eq!(audit.decision, Some(Decision::FailClosed));
+        assert_eq!(audit.details["setup_phase"], "host_setup_process");
+        assert_eq!(audit.details["setup_step"], "wait_setup_process");
     }
 
     #[cfg(unix)]
