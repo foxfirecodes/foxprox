@@ -1,10 +1,11 @@
 use foxprox_core::{
     AuditKind, AuditRecord, BrokerRuntimeConfig, BwrapSetupPlan, Decision, DenialReason, Frontend,
-    NetworkSetupConfig, SetupHelperPlan,
+    NetworkSetupConfig, SetupHelperPlan, SetupHelperStep,
 };
 use serde_json::json;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[cfg(unix)]
 use foxprox_device::{execute_tun_setup_handoff, TunSetupDeviceOps, TunSetupHandoffStatus};
@@ -172,6 +173,148 @@ pub fn run_foxproxsetup_linux_handoff_with_control(
 pub fn run_foxproxsetup_linux_handoff_connecting(args: &[String]) -> CliOutput {
     let mut ops = foxprox_device::LinuxTunSetupOps::new();
     run_foxproxsetup_handoff_connecting_with_ops(args, &mut ops)
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SandboxSetupCommandReport {
+    pub completed_steps: Vec<String>,
+    pub failed_step: Option<String>,
+    pub audit: AuditRecord,
+}
+
+#[cfg(unix)]
+pub trait SandboxSetupCommandRunner {
+    fn run_setup_command(&mut self, step: &SetupHelperStep) -> Result<(), String>;
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug)]
+pub struct CommandSandboxSetupRunner {
+    resolv_conf_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Default for CommandSandboxSetupRunner {
+    fn default() -> Self {
+        Self {
+            resolv_conf_path: PathBuf::from("/etc/resolv.conf"),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl CommandSandboxSetupRunner {
+    pub fn with_resolv_conf_path(path: impl Into<PathBuf>) -> Self {
+        Self {
+            resolv_conf_path: path.into(),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl SandboxSetupCommandRunner for CommandSandboxSetupRunner {
+    fn run_setup_command(&mut self, step: &SetupHelperStep) -> Result<(), String> {
+        match step.name.as_str() {
+            "configure_default_route" => {
+                let (program, args) = step
+                    .command
+                    .split_first()
+                    .ok_or_else(|| "empty route command".to_string())?;
+                let status = Command::new(program)
+                    .args(args)
+                    .status()
+                    .map_err(|error| error.to_string())?;
+                if status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("route command exited with {status}"))
+                }
+            }
+            "configure_dns" => {
+                let nameserver = step
+                    .command
+                    .get(1)
+                    .ok_or_else(|| "missing DNS nameserver line".to_string())?;
+                fs::write(&self.resolv_conf_path, format!("{nameserver}\n"))
+                    .map_err(|error| error.to_string())
+            }
+            "configure_proxy_reachability" => Ok(()),
+            other => Err(format!("unsupported sandbox setup command {other}")),
+        }
+    }
+}
+
+#[cfg(unix)]
+pub fn run_sandbox_network_setup_commands_with_runner<R: SandboxSetupCommandRunner>(
+    config: &NetworkSetupConfig,
+    target: &[String],
+    runner: &mut R,
+) -> SandboxSetupCommandReport {
+    let plan = SetupHelperPlan::new(config.clone(), target);
+    let mut completed_steps = Vec::new();
+    for step_name in [
+        "configure_default_route",
+        "configure_dns",
+        "configure_proxy_reachability",
+    ] {
+        let Some(step) = plan.steps.iter().find(|step| step.name == step_name) else {
+            let audit = setup_command_failure_audit(
+                config,
+                step_name,
+                "missing setup step".to_string(),
+                &completed_steps,
+            );
+            return SandboxSetupCommandReport {
+                completed_steps,
+                failed_step: Some(step_name.to_string()),
+                audit,
+            };
+        };
+        if let Err(error) = runner.run_setup_command(step) {
+            let audit = setup_command_failure_audit(config, step_name, error, &completed_steps);
+            return SandboxSetupCommandReport {
+                completed_steps,
+                failed_step: Some(step_name.to_string()),
+                audit,
+            };
+        }
+        completed_steps.push(step_name.to_string());
+    }
+
+    let audit = AuditRecord::new(AuditKind::TunConfigured, config.sandbox_id.clone())
+        .with_frontend(Frontend::Setup)
+        .with_decision(Decision::Allow, None)
+        .with_detail("setup_phase", "sandbox_network_commands")
+        .with_detail("setup_status", "complete")
+        .with_detail("completed_steps", completed_steps.join(","))
+        .with_detail("tun_name", config.tun_name.clone())
+        .with_detail("default_route_via", config.gateway_ip.to_string())
+        .with_detail("broker_dns_ip", config.broker_dns_ip.to_string())
+        .with_detail("http_proxy", config.proxy_environment().http_proxy)
+        .with_detail("all_proxy", config.proxy_environment().all_proxy);
+    SandboxSetupCommandReport {
+        completed_steps,
+        failed_step: None,
+        audit,
+    }
+}
+
+#[cfg(unix)]
+fn setup_command_failure_audit(
+    config: &NetworkSetupConfig,
+    step_name: &str,
+    error: String,
+    completed_steps: &[String],
+) -> AuditRecord {
+    AuditRecord::new(AuditKind::BrokerError, config.sandbox_id.clone())
+        .with_frontend(Frontend::Setup)
+        .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+        .with_detail("setup_phase", "sandbox_network_commands")
+        .with_detail("setup_status", "failed")
+        .with_detail("setup_step", step_name)
+        .with_detail("setup_error", error)
+        .with_detail("completed_steps", completed_steps.join(","))
 }
 
 fn parse_foxproxsetup_invocation(
@@ -544,6 +687,24 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[derive(Default)]
+    struct CliScriptedSetupCommandRunner {
+        ran_steps: Vec<String>,
+        fail_step: Option<String>,
+    }
+
+    #[cfg(unix)]
+    impl SandboxSetupCommandRunner for CliScriptedSetupCommandRunner {
+        fn run_setup_command(&mut self, step: &SetupHelperStep) -> Result<(), String> {
+            if self.fail_step.as_deref() == Some(step.name.as_str()) {
+                return Err(format!("{} failed", step.name));
+            }
+            self.ran_steps.push(step.name.clone());
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
     struct CliScriptedTunOps {
         fail_configure: bool,
         fail_handoff: bool,
@@ -603,6 +764,67 @@ mod tests {
             }
             send_tun_fd(control, &config.tun_name, fd)
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_network_setup_commands_run_route_dns_and_proxy_steps() {
+        let config = NetworkSetupConfig::alpha_default("s1");
+        let mut runner = CliScriptedSetupCommandRunner::default();
+        let report = run_sandbox_network_setup_commands_with_runner(
+            &config,
+            &["curl".to_string(), "http://example.com".to_string()],
+            &mut runner,
+        );
+
+        assert_eq!(
+            report.completed_steps,
+            vec![
+                "configure_default_route".to_string(),
+                "configure_dns".to_string(),
+                "configure_proxy_reachability".to_string(),
+            ]
+        );
+        assert_eq!(runner.ran_steps, report.completed_steps);
+        assert!(report.failed_step.is_none());
+        assert_eq!(report.audit.kind, AuditKind::TunConfigured);
+        assert_eq!(report.audit.decision, Some(Decision::Allow));
+        assert_eq!(
+            report.audit.details["setup_phase"],
+            "sandbox_network_commands"
+        );
+        assert_eq!(report.audit.details["default_route_via"], "10.0.2.2");
+        assert_eq!(report.audit.details["broker_dns_ip"], "10.0.2.3");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_network_setup_commands_fail_closed_before_later_steps() {
+        let config = NetworkSetupConfig::alpha_default("s1");
+        let mut runner = CliScriptedSetupCommandRunner {
+            fail_step: Some("configure_dns".to_string()),
+            ..CliScriptedSetupCommandRunner::default()
+        };
+        let report = run_sandbox_network_setup_commands_with_runner(
+            &config,
+            &["curl".to_string()],
+            &mut runner,
+        );
+
+        assert_eq!(report.failed_step.as_deref(), Some("configure_dns"));
+        assert_eq!(
+            runner.ran_steps,
+            vec!["configure_default_route".to_string()]
+        );
+        assert_eq!(report.completed_steps, runner.ran_steps);
+        assert_eq!(report.audit.kind, AuditKind::BrokerError);
+        assert_eq!(report.audit.decision, Some(Decision::FailClosed));
+        assert_eq!(report.audit.reason, Some(DenialReason::SetupFailed));
+        assert_eq!(report.audit.details["setup_step"], "configure_dns");
+        assert_eq!(
+            report.audit.details["completed_steps"],
+            "configure_default_route"
+        );
     }
 
     #[cfg(unix)]

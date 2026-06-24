@@ -4662,3 +4662,29 @@ Commit: 31e3e99
 
 ### Remaining blind spots
 - The production `foxproxsetup` binary now has an explicit execute mode for the safe socket-control handoff path, but execute mode still only creates/configures/hands off the TUN fd. Capability drop/close/exec, route/DNS/proxy setup commands, and production runtime/final-drain wiring remain.
+
+## 2026-06-23 — Add sandbox network command executor
+
+Commit: 23554b7
+
+### Review
+- Round-134 correctness and validation found no blocker/high issues. Reviewers confirmed `foxproxsetup --execute-setup` dispatch is correctly scoped and that the next highest gaps are privileged integration coverage plus route/DNS/proxy setup, capability drop/close/exec, and runtime final drain.
+
+### Fix
+- Added `SandboxSetupCommandRunner` and `SandboxSetupCommandReport` in `foxprox-cli` for the sandbox-side post-TUN network setup command phase.
+- Added `CommandSandboxSetupRunner`, which maps setup steps to concrete actions:
+  - runs the configured `ip route ...` command for default-route setup;
+  - writes the broker DNS nameserver line to a configurable resolv.conf path;
+  - treats proxy reachability as environment evidence supplied with the target command.
+- Added `run_sandbox_network_setup_commands_with_runner(...)`, which runs route, DNS, and proxy setup steps from `SetupHelperPlan` in order, emits structured `tun_configured` success evidence, and fails closed with `broker_error` containing `setup_phase=sandbox_network_commands`, `setup_step`, `setup_error`, and completed-step evidence.
+- Added deterministic tests proving route/DNS/proxy setup command ordering and fail-closed stop-before-later-steps behavior.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features` — passed, 17 CLI tests and 1 ignored privileged Linux CLI test.
+- `cargo clippy -p foxprox-cli --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 17 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Route/DNS/proxy setup now has a concrete safe command-runner boundary and fail-closed evidence, but it is not yet wired into `foxproxsetup --execute-setup` after TUN handoff. Capability drop/close/exec and production runtime/final-drain wiring remain.
