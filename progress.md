@@ -4969,7 +4969,7 @@ Commit: 1deff74
 
 ## 2026-06-24 — Add bounded setup packet loop final drain
 
-Commit: d687bd5
+Commit: c64d1ee
 
 ### Review
 - Round-147 correctness and validation found no blocker/high issues. Reviewers confirmed setup packet bridge negative paths cover not-ready, packet-read failure, and sink-drain failure without overclaiming privileged bwrap/real TUN E2E.
