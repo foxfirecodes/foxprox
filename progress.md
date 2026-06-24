@@ -4989,3 +4989,26 @@ Commit: c64d1ee
 
 ### Remaining blind spots
 - A bounded async setup packet loop now ties setup evidence, packet fd reads, and final drain together after fd receipt, but privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production integration around this loop remain open.
+
+## 2026-06-24 — Final-drain setup packet loop read failures
+
+Commit: 68a42a8
+
+### Review
+- Round-148 correctness found a high issue: `run_setup_packet_fd_loop_until_cancelled(...)` propagated packet-read I/O errors before reaching the final `RuntimeAuditFanIn` drain, contradicting the loop's final-drain guarantee after setup evidence had been ingested.
+- Round-148 validation found no blocker/high issues in progress/validation metadata.
+
+### Fix
+- Changed the setup packet loop so packet-read I/O errors first drain setup evidence through `RuntimeAuditFanIn` to the provided `JsonLineAuditSink`, then return `AsyncRuntimeSetupPacketDrainError::PacketRead`.
+- Added deterministic coverage using `ErrorReadFd` proving a packet-read failure still leaves setup-plan/TUN setup evidence in the sink.
+- Kept packet accounting limited to `Ready` read reports and retained existing packet-limit final-drain coverage.
+
+### Commands run
+- `cargo test -p foxprox-egress --all-targets --all-features async_runtime_setup_packet_loop -- --nocapture` — passed, 2 filtered setup packet loop tests.
+- `cargo clippy -p foxprox-egress --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 29 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 105 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The loop now final-drains setup evidence on packet-read failures. Remaining gaps are still privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production integration around the bounded/long-running packet loop.

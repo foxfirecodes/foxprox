@@ -2983,7 +2983,7 @@ where
         .await;
         match readiness.status {
             AsyncRuntimeIoReadinessStatus::Ready => {
-                if let Some(read) = read_async_packet_fd_ready_task(
+                let read = match read_async_packet_fd_ready_task(
                     packet_fd,
                     &[RuntimeTaskExpectation::new(
                         RuntimeComponent::TunDevice,
@@ -2994,8 +2994,16 @@ where
                     cancellation,
                 )
                 .await
-                .map_err(AsyncRuntimeSetupPacketDrainError::PacketRead)?
                 {
+                    Ok(read) => read,
+                    Err(error) => {
+                        fan_in
+                            .drain_to_sink(sink)
+                            .map_err(AsyncRuntimeSetupPacketDrainError::Drain)?;
+                        return Err(AsyncRuntimeSetupPacketDrainError::PacketRead(error));
+                    }
+                };
+                if let Some(read) = read {
                     match read.status {
                         AsyncRuntimeIoReadinessStatus::Ready => packet_reads.push(read),
                         AsyncRuntimeIoReadinessStatus::Cancelled => {
@@ -4367,6 +4375,54 @@ mod tests {
         assert_eq!(report.final_drain.drained_records, 2);
         assert!(output.contains("setup_plan_created"));
         assert!(output.contains("host_setup_control_handoff"));
+        assert!(output.contains("scm_rights"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_setup_packet_loop_final_drains_on_packet_read_failure() {
+        let (tun_fd, mut sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        tun_fd.set_nonblocking(true).unwrap();
+        let async_fd = tokio::io::unix::AsyncFd::new(ErrorReadFd(tun_fd)).unwrap();
+        sandbox_peer
+            .write_all(b"loop-read-failure-trigger")
+            .unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let setup_records = vec![
+            AuditRecord::new(AuditKind::SetupPlanCreated, "s1"),
+            AuditRecord::new(AuditKind::TunConfigured, "s1").with_detail("fd_source", "scm_rights"),
+        ];
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+
+        let error = run_setup_packet_fd_loop_until_cancelled(
+            "host_setup_session",
+            &setup_records,
+            &async_fd,
+            &mut fan_in,
+            &mut sink,
+            AsyncRuntimeSetupPacketLoopConfig {
+                packet_read: AsyncRuntimePacketFdReadBounds {
+                    max_packet_bytes: 64,
+                    max_wait: Duration::from_secs(1),
+                },
+                max_packets: 8,
+            },
+            &cancellation,
+        )
+        .await
+        .expect_err("packet read failure is surfaced after final drain");
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+
+        match error {
+            AsyncRuntimeSetupPacketDrainError::PacketRead(error) => {
+                assert_eq!(error.kind(), ErrorKind::BrokenPipe);
+            }
+            other => panic!("unexpected setup packet loop error: {other:?}"),
+        }
+        assert!(output.contains("setup_plan_created"));
+        assert!(output.contains("tun_configured"));
         assert!(output.contains("scm_rights"));
     }
 
