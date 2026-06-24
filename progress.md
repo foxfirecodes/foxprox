@@ -5188,3 +5188,30 @@ Commit: 104a491
 
 ### Remaining blind spots
 - The received-fd wrapper now drains setup evidence on both success and pre-loop async-fd registration failure. Remaining production work is still full long-running broker data-plane forwarding over that fd, with policy/smoltcp/host egress, DNS/proxy/listener orchestration, cleanup, CLI ergonomics, and one production launcher path.
+
+## 2026-06-24 — Bridge received TUN fd through smoltcp
+
+Commit: c5c0491
+
+### Fix
+- Promoted `foxprox-stack` to a runtime dependency of `foxprox-egress` so runtime orchestration can connect received setup fds to the smoltcp TUN bridge rather than only reading raw packets.
+- Added `AsyncRuntimeReceivedTunSmoltcpBridgeSession` and `run_received_tun_fd_smoltcp_bridge_loop_and_drain(...)`, which:
+  - ingests setup records from the host setup session;
+  - safely marks the SCM_RIGHTS-received TUN fd nonblocking;
+  - owns the fd as a `TunIoPacketDevice<File>` with the stack MTU;
+  - runs a bounded `SmoltcpTunBridge` loop with cancellation observation;
+  - ingests broker/smoltcp audit records as a separate fan-in source;
+  - drains setup and broker evidence to one JSON audit sink.
+- Added deterministic coverage that sends a TCP SYN through a received fd, has smoltcp emit a response packet back to the peer fd, and verifies setup-plan, SCM_RIGHTS TUN handoff, packet-observed, and `smoltcp` audit evidence all drain together.
+- Preserved setup-evidence final-drain behavior on bridge broker-ingest failures by draining accepted setup records before returning an ingest error.
+
+### Commands run
+- `cargo test -p foxprox-egress --all-targets --all-features received_tun_fd_smoltcp_bridge_loop_drains_setup_and_broker_audits -- --nocapture` — passed.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed, including rootless bwrap prerequisite self-test and the ignored real bwrap/foxproxsetup/TUN handoff integration test.
+- `cargo test --all-targets --all-features` — passed, including 31 CLI unit tests + 1 ignored privileged CLI unit test, 1 ignored bwrap E2E integration test in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 108 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — initially failed on `too_many_arguments`; fixed by grouping inputs into `AsyncRuntimeReceivedTunSmoltcpBridgeSession`.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed after the session struct fix.
+
+### Remaining blind spots
+- A received setup fd can now feed the smoltcp bridge and drain setup+broker evidence together, but this is still a bounded runtime seam rather than the full production launcher. Remaining work: real long-running loop scheduling over the received real TUN fd, host-socket TCP/UDP forwarding from smoltcp flows, DNS/proxy/listener orchestration in one session, cleanup/error handling, CLI ergonomics, and a rerunnable end-to-end launcher command.
