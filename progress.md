@@ -4691,7 +4691,7 @@ Commit: ababf07
 
 ## 2026-06-23 — Run sandbox commands in foxproxsetup execute mode
 
-Commit: b1cac46
+Commit: a9ec120
 
 ### Review
 - Round-135 correctness and validation found no blocker/high issues. Reviewers confirmed the sandbox network command executor is correctly scoped and records implementation commit `ababf07`, and identified the next gap as wiring that command phase into `foxproxsetup --execute-setup` after successful TUN handoff.
