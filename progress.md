@@ -4639,7 +4639,7 @@ Commit: 4735f46
 
 ## 2026-06-23 — Add foxproxsetup execute mode
 
-Commit: c8379b8
+Commit: 31e3e99
 
 ### Review
 - Round-133 correctness and validation found no blocker/high issues. Reviewers confirmed the safe setup-control socket handoff entry is correctly scoped, records implementation commit `4735f46`, and remains honest about production gaps.
