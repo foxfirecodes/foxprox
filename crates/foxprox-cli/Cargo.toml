@@ -13,6 +13,9 @@ serde_json = "1"
 [target.'cfg(unix)'.dependencies]
 foxprox-device = { path = "../foxprox-device" }
 
+[target.'cfg(all(target_os = "linux", not(target_env = "ohos")))'.dependencies]
+caps = "0.5"
+
 [dev-dependencies]
 pretty_assertions = "1"
 

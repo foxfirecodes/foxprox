@@ -64,7 +64,7 @@ pub fn run_foxproxsetup_entry_args_with_ops<O: TunSetupDeviceOps>(
 #[cfg(unix)]
 pub fn run_foxproxsetup_entry_args_with_ops_and_runner<
     O: TunSetupDeviceOps,
-    R: SandboxSetupCommandRunner,
+    R: SandboxSetupCommandRunner + PostSetupLifecycleRunner,
 >(
     args: &[String],
     ops: &mut O,
@@ -197,7 +197,7 @@ pub fn run_foxproxsetup_linux_handoff_connecting(args: &[String]) -> CliOutput {
 #[cfg(unix)]
 pub fn run_foxproxsetup_execute_setup_connecting_with_ops_and_runner<
     O: TunSetupDeviceOps,
-    R: SandboxSetupCommandRunner,
+    R: SandboxSetupCommandRunner + PostSetupLifecycleRunner,
 >(
     args: &[String],
     ops: &mut O,
@@ -222,21 +222,21 @@ pub fn run_foxproxsetup_execute_setup_connecting_with_ops_and_runner<
             )
         }
     };
-    run_foxproxsetup_execute_setup_with_config(config, target, &control, ops, runner)
+    run_foxproxsetup_execute_setup_with_config(config, target, control, ops, runner)
 }
 
 #[cfg(unix)]
 fn run_foxproxsetup_execute_setup_with_config<
     O: TunSetupDeviceOps,
-    R: SandboxSetupCommandRunner,
+    R: SandboxSetupCommandRunner + PostSetupLifecycleRunner,
 >(
     config: NetworkSetupConfig,
     target: Vec<String>,
-    control: &UnixStream,
+    control: UnixStream,
     ops: &mut O,
     runner: &mut R,
 ) -> CliOutput {
-    let handoff_report = execute_tun_setup_handoff(ops, control, &config);
+    let handoff_report = execute_tun_setup_handoff(ops, &control, &config);
     let mut audit_records = handoff_report.audit_records_with_summary(config.sandbox_id.clone());
     if handoff_report.status != TunSetupHandoffStatus::Complete {
         let output = json!({
@@ -267,16 +267,53 @@ fn run_foxproxsetup_execute_setup_with_config<
     } else {
         "failed"
     };
-    let exit_code = if command_report.failed_step.is_none() {
+    if command_report.failed_step.is_some() {
+        audit_records.push(command_report.audit.clone());
+        let output = json!({
+            "setup": {
+                "status": "failed",
+                "failed_phase": "sandbox_network_commands",
+            },
+            "tun_handoff": {
+                "status": "complete",
+                "completed_steps": handoff_report.completed_steps,
+                "failed_step": handoff_report.failed_step,
+            },
+            "sandbox_network": {
+                "status": sandbox_status,
+                "completed_steps": command_report.completed_steps,
+                "failed_step": command_report.failed_step,
+            },
+            "post_setup_lifecycle": {
+                "status": "skipped",
+                "completed_steps": [],
+                "failed_step": null,
+            },
+            "audit": audit_records,
+            "proxy_environment": config.proxy_environment(),
+            "target_command": target,
+        });
+        return json_output(2, "setup_execute_serialize_error", output);
+    }
+    audit_records.push(command_report.audit.clone());
+
+    drop(control);
+    let lifecycle_report = run_post_setup_lifecycle_with_runner(&config, &target, runner);
+    let lifecycle_status = if lifecycle_report.failed_step.is_none() {
+        "complete"
+    } else {
+        "failed"
+    };
+    let exit_code = if lifecycle_report.failed_step.is_none() {
         0
     } else {
         2
     };
-    audit_records.push(command_report.audit.clone());
+    audit_records.push(lifecycle_report.audit.clone());
     let output = json!({
         "setup": {
             "status": if exit_code == 0 { "complete" } else { "failed" },
-            "failed_phase": if exit_code == 0 { serde_json::Value::Null } else { json!("sandbox_network_commands") },
+            "failed_phase": if exit_code == 0 { serde_json::Value::Null } else { json!("post_setup_lifecycle") },
         },
         "tun_handoff": {
             "status": "complete",
@@ -287,6 +324,11 @@ fn run_foxproxsetup_execute_setup_with_config<
             "status": sandbox_status,
             "completed_steps": command_report.completed_steps,
             "failed_step": command_report.failed_step,
+        },
+        "post_setup_lifecycle": {
+            "status": lifecycle_status,
+            "completed_steps": lifecycle_report.completed_steps,
+            "failed_step": lifecycle_report.failed_step,
         },
         "audit": audit_records,
         "proxy_environment": config.proxy_environment(),
@@ -311,8 +353,23 @@ pub struct SandboxSetupCommandReport {
 }
 
 #[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PostSetupLifecycleReport {
+    pub completed_steps: Vec<String>,
+    pub failed_step: Option<String>,
+    pub audit: AuditRecord,
+}
+
+#[cfg(unix)]
 pub trait SandboxSetupCommandRunner {
     fn run_setup_command(&mut self, step: &SetupHelperStep) -> Result<(), String>;
+}
+
+#[cfg(unix)]
+pub trait PostSetupLifecycleRunner {
+    fn close_setup_fds(&mut self, config: &NetworkSetupConfig) -> Result<(), String>;
+    fn drop_setup_capability(&mut self, config: &NetworkSetupConfig) -> Result<(), String>;
+    fn exec_target(&mut self, target: &[String]) -> Result<(), String>;
 }
 
 #[cfg(unix)]
@@ -370,6 +427,49 @@ impl SandboxSetupCommandRunner for CommandSandboxSetupRunner {
             other => Err(format!("unsupported sandbox setup command {other}")),
         }
     }
+}
+
+#[cfg(unix)]
+impl PostSetupLifecycleRunner for CommandSandboxSetupRunner {
+    fn close_setup_fds(&mut self, _config: &NetworkSetupConfig) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn drop_setup_capability(&mut self, _config: &NetworkSetupConfig) -> Result<(), String> {
+        drop_cap_net_admin()
+    }
+
+    fn exec_target(&mut self, target: &[String]) -> Result<(), String> {
+        let Some((program, args)) = target.split_first() else {
+            return Err("missing target command".to_string());
+        };
+        use std::os::unix::process::CommandExt;
+        Err(Command::new(program).args(args).exec().to_string())
+    }
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+fn drop_cap_net_admin() -> Result<(), String> {
+    for set in [
+        caps::CapSet::Ambient,
+        caps::CapSet::Effective,
+        caps::CapSet::Inheritable,
+        caps::CapSet::Permitted,
+        caps::CapSet::Bounding,
+    ] {
+        if caps::has_cap(None, set, caps::Capability::CAP_NET_ADMIN)
+            .map_err(|error| format!("read CAP_NET_ADMIN from {set:?}: {error}"))?
+        {
+            caps::drop(None, set, caps::Capability::CAP_NET_ADMIN)
+                .map_err(|error| format!("drop CAP_NET_ADMIN from {set:?}: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+fn drop_cap_net_admin() -> Result<(), String> {
+    Err("CAP_NET_ADMIN drop requires Linux capability support".to_string())
 }
 
 #[cfg(unix)]
@@ -438,6 +538,75 @@ fn setup_command_failure_audit(
         .with_frontend(Frontend::Setup)
         .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
         .with_detail("setup_phase", "sandbox_network_commands")
+        .with_detail("setup_status", "failed")
+        .with_detail("setup_step", step_name)
+        .with_detail("setup_error", error)
+        .with_detail("completed_steps", completed_steps.join(","))
+}
+
+#[cfg(unix)]
+pub fn run_post_setup_lifecycle_with_runner<R: PostSetupLifecycleRunner>(
+    config: &NetworkSetupConfig,
+    target: &[String],
+    runner: &mut R,
+) -> PostSetupLifecycleReport {
+    let mut completed_steps = Vec::new();
+    for step_name in ["close_setup_fds", "drop_setup_capability"] {
+        let result = match step_name {
+            "close_setup_fds" => runner.close_setup_fds(config),
+            "drop_setup_capability" => runner.drop_setup_capability(config),
+            _ => unreachable!("known post-setup lifecycle step"),
+        };
+        if let Err(error) = result {
+            let audit =
+                post_setup_lifecycle_failure_audit(config, step_name, error, &completed_steps);
+            return PostSetupLifecycleReport {
+                completed_steps,
+                failed_step: Some(step_name.to_string()),
+                audit,
+            };
+        }
+        completed_steps.push(step_name.to_string());
+    }
+
+    if let Err(error) = runner.exec_target(target) {
+        let audit =
+            post_setup_lifecycle_failure_audit(config, "exec_target", error, &completed_steps);
+        return PostSetupLifecycleReport {
+            completed_steps,
+            failed_step: Some("exec_target".to_string()),
+            audit,
+        };
+    }
+    completed_steps.push("exec_target".to_string());
+
+    let audit = AuditRecord::new(AuditKind::TunConfigured, config.sandbox_id.clone())
+        .with_frontend(Frontend::Setup)
+        .with_decision(Decision::Allow, None)
+        .with_detail("setup_phase", "post_setup_lifecycle")
+        .with_detail("setup_status", "complete")
+        .with_detail("completed_steps", completed_steps.join(","))
+        .with_detail("dropped_capability", "CAP_NET_ADMIN")
+        .with_detail("target_exec_ready", "true")
+        .with_detail("target_argc", target.len().to_string());
+    PostSetupLifecycleReport {
+        completed_steps,
+        failed_step: None,
+        audit,
+    }
+}
+
+#[cfg(unix)]
+fn post_setup_lifecycle_failure_audit(
+    config: &NetworkSetupConfig,
+    step_name: &str,
+    error: String,
+    completed_steps: &[String],
+) -> AuditRecord {
+    AuditRecord::new(AuditKind::BrokerError, config.sandbox_id.clone())
+        .with_frontend(Frontend::Setup)
+        .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+        .with_detail("setup_phase", "post_setup_lifecycle")
         .with_detail("setup_status", "failed")
         .with_detail("setup_step", step_name)
         .with_detail("setup_error", error)
@@ -817,7 +986,9 @@ mod tests {
     #[derive(Default)]
     struct CliScriptedSetupCommandRunner {
         ran_steps: Vec<String>,
+        lifecycle_steps: Vec<String>,
         fail_step: Option<String>,
+        fail_lifecycle_step: Option<String>,
     }
 
     #[cfg(unix)]
@@ -827,6 +998,34 @@ mod tests {
                 return Err(format!("{} failed", step.name));
             }
             self.ran_steps.push(step.name.clone());
+            Ok(())
+        }
+    }
+
+    #[cfg(unix)]
+    impl PostSetupLifecycleRunner for CliScriptedSetupCommandRunner {
+        fn close_setup_fds(&mut self, _config: &NetworkSetupConfig) -> Result<(), String> {
+            if self.fail_lifecycle_step.as_deref() == Some("close_setup_fds") {
+                return Err("close_setup_fds failed".to_string());
+            }
+            self.lifecycle_steps.push("close_setup_fds".to_string());
+            Ok(())
+        }
+
+        fn drop_setup_capability(&mut self, _config: &NetworkSetupConfig) -> Result<(), String> {
+            if self.fail_lifecycle_step.as_deref() == Some("drop_setup_capability") {
+                return Err("drop_setup_capability failed".to_string());
+            }
+            self.lifecycle_steps
+                .push("drop_setup_capability".to_string());
+            Ok(())
+        }
+
+        fn exec_target(&mut self, _target: &[String]) -> Result<(), String> {
+            if self.fail_lifecycle_step.as_deref() == Some("exec_target") {
+                return Err("exec_target failed".to_string());
+            }
+            self.lifecycle_steps.push("exec_target".to_string());
             Ok(())
         }
     }
@@ -1049,14 +1248,27 @@ mod tests {
                 "configure_proxy_reachability".to_string(),
             ]
         );
+        assert_eq!(
+            runner.lifecycle_steps,
+            vec![
+                "close_setup_fds".to_string(),
+                "drop_setup_capability".to_string(),
+                "exec_target".to_string(),
+            ]
+        );
         let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
         assert_eq!(value["setup"]["status"], "complete");
         assert_eq!(value["tun_handoff"]["status"], "complete");
         assert_eq!(value["sandbox_network"]["status"], "complete");
-        assert_eq!(value["audit"].as_array().unwrap().len(), 5);
+        assert_eq!(value["post_setup_lifecycle"]["status"], "complete");
+        assert_eq!(value["audit"].as_array().unwrap().len(), 6);
         assert_eq!(
             value["audit"][4]["details"]["setup_phase"],
             "sandbox_network_commands"
+        );
+        assert_eq!(
+            value["audit"][5]["details"]["setup_phase"],
+            "post_setup_lifecycle"
         );
         assert_eq!(value["target_command"][0], "curl");
     }
@@ -1099,8 +1311,51 @@ mod tests {
         assert_eq!(value["tun_handoff"]["status"], "complete");
         assert_eq!(value["sandbox_network"]["status"], "failed");
         assert_eq!(value["sandbox_network"]["failed_step"], "configure_dns");
+        assert_eq!(value["post_setup_lifecycle"]["status"], "skipped");
         assert_eq!(value["audit"][4]["kind"], "broker_error");
         assert_eq!(value["audit"][4]["decision"], "fail_closed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foxproxsetup_entry_execute_mode_fails_closed_on_lifecycle_failure() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-entry-lifecycle-fail-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut ops = CliScriptedTunOps {
+            fail_configure: false,
+            fail_handoff: false,
+        };
+        let mut runner = CliScriptedSetupCommandRunner {
+            fail_lifecycle_step: Some("drop_setup_capability".to_string()),
+            ..CliScriptedSetupCommandRunner::default()
+        };
+        let mut args = vec!["--execute-setup".to_string()];
+        args.extend(setup_args_with_control_socket(&path));
+
+        let output = run_foxproxsetup_entry_args_with_ops_and_runner(&args, &mut ops, &mut runner);
+        assert_eq!(output.exit_code, 2);
+        let (accepted, _) = listener.accept().unwrap();
+        let received = recv_tun_fd(&accepted, "foxprox0").unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(received.report.tun_name, "foxprox0");
+        assert_eq!(runner.lifecycle_steps, vec!["close_setup_fds".to_string()]);
+        let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
+        assert_eq!(value["setup"]["status"], "failed");
+        assert_eq!(value["setup"]["failed_phase"], "post_setup_lifecycle");
+        assert_eq!(value["sandbox_network"]["status"], "complete");
+        assert_eq!(value["post_setup_lifecycle"]["status"], "failed");
+        assert_eq!(
+            value["post_setup_lifecycle"]["failed_step"],
+            "drop_setup_capability"
+        );
+        assert_eq!(value["audit"][5]["kind"], "broker_error");
+        assert_eq!(value["audit"][5]["decision"], "fail_closed");
     }
 
     #[test]

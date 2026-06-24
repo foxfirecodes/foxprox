@@ -558,3 +558,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Quote progress heredocs containing backticks
 
 - Always use a quoted heredoc delimiter (`<<'EOF'`) or a non-shell writer when appending markdown with backticked symbols or commands to `progress.md`. An unquoted heredoc executed command substitutions from entries like `foxproxsetup` and `cargo test ...`, corrupting the progress section with shell output before it was repaired.
+
+## 2026-06-23 — Model post-setup lifecycle before replacing the process
+
+- The `foxproxsetup` post-setup lifecycle can be tested by injecting a runner for close-setup-fds, drop-capability, and exec-target steps. The production runner may use `std::os::unix::process::CommandExt::exec`, which never returns on success, so deterministic tests should use a scripted runner that returns success and asserts structured audit evidence before the real process replacement boundary.

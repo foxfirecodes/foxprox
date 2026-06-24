@@ -4710,3 +4710,31 @@ Commit: a9ec120
 
 ### Remaining blind spots
 - `foxproxsetup --execute-setup` now wires real TUN setup/handoff and the sandbox route/DNS/proxy command phase, but capability drop, setup-fd close, target `exec`, privileged end-to-end test execution, and production runtime/final-drain wiring remain.
+
+## 2026-06-23 — Add foxproxsetup post-setup lifecycle
+
+Commit: a73e5d5
+
+### Review
+- Round-136 correctness and validation found no blocker/high issues. Reviewers confirmed execute mode wires real TUN setup/handoff plus sandbox route/DNS/proxy command phase and identified the next gap as close setup-only fds, drop `CAP_NET_ADMIN`, and `exec` the target.
+
+### Fix
+- Added `PostSetupLifecycleRunner` and `PostSetupLifecycleReport` for the post-network setup lifecycle.
+- Added `run_post_setup_lifecycle_with_runner(...)`, which runs `close_setup_fds`, `drop_setup_capability`, and `exec_target` in order, emits structured `tun_configured` success evidence in deterministic tests, and fails closed with `broker_error` on the first lifecycle failure.
+- Extended `CommandSandboxSetupRunner` to implement the production lifecycle runner:
+  - setup-control socket ownership is dropped before lifecycle execution;
+  - `CAP_NET_ADMIN` is removed from Linux Ambient, Effective, Inheritable, Permitted, and Bounding capability sets via the safe `caps` crate;
+  - target execution uses safe `std::os::unix::process::CommandExt::exec`, which only returns on failure.
+- Integrated the post-setup lifecycle into `foxproxsetup --execute-setup` after successful TUN handoff and sandbox route/DNS/proxy setup.
+- Execute-mode JSON now includes a `post_setup_lifecycle` phase and preserves ordered audit records across TUN handoff, sandbox networking, and lifecycle phases.
+- Added deterministic tests proving successful lifecycle ordering and fail-closed lifecycle failure after successful TUN handoff and sandbox networking.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features` — passed, 19 CLI tests and 1 ignored privileged Linux CLI test.
+- `cargo clippy -p foxprox-cli --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 19 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- `foxproxsetup --execute-setup` now covers TUN setup/handoff, sandbox route/DNS/proxy commands, setup-control close, `CAP_NET_ADMIN` drop, and target exec boundary. Remaining gaps are privileged end-to-end execution in a real bwrap/TUN environment and production runtime/final-drain wiring after the host broker receives the real TUN fd.
