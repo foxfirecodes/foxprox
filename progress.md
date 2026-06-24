@@ -4741,7 +4741,7 @@ Commit: 7d1416d
 
 ## 2026-06-23 — Add host setup-control handoff evidence
 
-Commit: bc3c1cf
+Commit: 7e7ec11
 
 ### Review
 - Round-137 correctness and validation found no blocker/high issues. Reviewers confirmed `foxproxsetup --execute-setup` now covers TUN setup/handoff, sandbox route/DNS/proxy commands, setup-control close, `CAP_NET_ADMIN` drop, and target exec boundary while leaving privileged bwrap/TUN E2E and production runtime/final-drain wiring open.
