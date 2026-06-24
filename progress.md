@@ -4898,3 +4898,25 @@ Commit: 56e02dc
 
 ### Remaining blind spots
 - Host setup session evidence can now drain through the runtime fan-in/sink path, but the runtime still needs privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production packet-loop wiring after the host broker receives the real TUN fd.
+
+## 2026-06-23 — Cover host setup fan-in duplicate and backpressure paths
+
+Commit: 6265818
+
+### Review
+- Round-144 correctness and validation found no blocker/high issues. Reviewers confirmed host setup session audits are re-sequenced, ingested as `host_setup_session`, drained through `RuntimeAuditFanIn`, and scoped honestly as a final-drain bridge rather than privileged bwrap/real TUN E2E.
+- The noted remaining bridge-specific gap was direct regression coverage for duplicate re-drain and bridge-level backpressure.
+
+### Fix
+- Added deterministic coverage proving repeated `drain_host_setup_session_audits_to_sink(...)` calls skip already-ingested `host_setup_session` records and do not duplicate sink output.
+- Added deterministic coverage proving bounded `RuntimeAuditFanIn` backpressure is surfaced as `HostSetupSessionAuditDrainError::Ingest(RuntimeAuditFanInError::AuditBackpressure)` with the expected source and attempted audit kind.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features host_setup_session_fan_in_bridge -- --nocapture` — passed, 2 filtered host setup fan-in bridge tests.
+- `cargo test -p foxprox-cli --all-targets --all-features host_setup_session -- --nocapture` — passed, 9 filtered host setup session tests.
+- `cargo test --all-targets --all-features` — passed, including 29 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Host setup session fan-in duplicate and backpressure behavior is now covered, but privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production packet-loop/final-drain wiring after the host broker receives the real TUN fd remain open.

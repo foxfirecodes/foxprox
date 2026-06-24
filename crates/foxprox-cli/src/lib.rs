@@ -1817,6 +1817,92 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn host_setup_session_fan_in_bridge_skips_duplicate_redrain() {
+        let session = HostSetupSessionReport {
+            status: HostSetupControlHandoffStatus::Complete,
+            handoff: HostSetupControlHandoffReport {
+                status: HostSetupControlHandoffStatus::Complete,
+                plan: BwrapSetupPlan::new(
+                    NetworkSetupConfig::alpha_default("s1"),
+                    &["true".to_string()],
+                ),
+                received: None,
+                failed_report: None,
+                audit_records: Vec::new(),
+            },
+            process_exit: Some(HostSetupProcessExit {
+                exit_code: Some(0),
+                success: true,
+            }),
+            audit_records: vec![
+                AuditRecord::new(AuditKind::SetupPlanCreated, "s1"),
+                AuditRecord::new(AuditKind::TunConfigured, "s1")
+                    .with_detail("setup_phase", "host_setup_control_handoff"),
+            ],
+        };
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+        let mut sink = foxprox_core::JsonLineAuditSink::new(Vec::new());
+
+        let first = drain_host_setup_session_audits_to_sink(&session, &mut fan_in, &mut sink)
+            .expect("first drain succeeds");
+        let second = drain_host_setup_session_audits_to_sink(&session, &mut fan_in, &mut sink)
+            .expect("duplicate drain succeeds without new records");
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+
+        assert_eq!(first.ingest.accepted_records, 2);
+        assert_eq!(first.drain.drained_records, 2);
+        assert_eq!(second.ingest.accepted_records, 0);
+        assert_eq!(second.drain.drained_records, 0);
+        assert_eq!(output.lines().count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_setup_session_fan_in_bridge_surfaces_backpressure() {
+        let session = HostSetupSessionReport {
+            status: HostSetupControlHandoffStatus::Complete,
+            handoff: HostSetupControlHandoffReport {
+                status: HostSetupControlHandoffStatus::Complete,
+                plan: BwrapSetupPlan::new(
+                    NetworkSetupConfig::alpha_default("s1"),
+                    &["true".to_string()],
+                ),
+                received: None,
+                failed_report: None,
+                audit_records: Vec::new(),
+            },
+            process_exit: Some(HostSetupProcessExit {
+                exit_code: Some(0),
+                success: true,
+            }),
+            audit_records: vec![
+                AuditRecord::new(AuditKind::SetupPlanCreated, "s1"),
+                AuditRecord::new(AuditKind::TunConfigured, "s1")
+                    .with_detail("setup_phase", "host_setup_control_handoff"),
+            ],
+        };
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 1);
+        let mut sink = foxprox_core::JsonLineAuditSink::new(Vec::new());
+
+        let error = drain_host_setup_session_audits_to_sink(&session, &mut fan_in, &mut sink)
+            .expect_err("bounded fan-in backpressure is surfaced");
+
+        match error {
+            HostSetupSessionAuditDrainError::Ingest(
+                RuntimeAuditFanInError::AuditBackpressure {
+                    source,
+                    attempted_kind,
+                },
+            ) => {
+                assert_eq!(source, "host_setup_session");
+                assert_eq!(attempted_kind, AuditKind::TunConfigured);
+            }
+            other => panic!("unexpected host setup drain error: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn host_setup_session_fails_closed_on_nonzero_setup_process_exit() {
         let path = std::env::temp_dir().join(format!(
             "foxprox-host-session-fail-{}-{}.sock",
