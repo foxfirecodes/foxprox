@@ -4611,3 +4611,28 @@ Commit: d38d41a
 
 ### Remaining blind spots
 - This wires a safe, testable `foxproxsetup` handoff execution path around the real Linux TUN setup ops, but the production binary still does not reconstruct the setup-control `UnixStream` from an inherited raw fd, drop capabilities, close setup-only fds, or `exec` the target app. Route/DNS/proxy setup commands and production runtime/final-drain wiring also remain.
+
+## 2026-06-23 — Add safe setup control socket handoff
+
+Commit: 4735f46
+
+### Review
+- Round-132 correctness and validation found no blocker/high issues. Reviewers confirmed the `foxproxsetup` handoff execution path is accurately scoped, the progress ledger records implementation commit `d38d41a`, and the remaining gaps are production setup-control ownership, capability drop/close/exec, route/DNS/proxy commands, and runtime final-drain wiring.
+
+### Fix
+- Added optional `NetworkSetupConfig::setup_control_socket_path` with serde defaults so existing configs remain compatible.
+- Added validation for empty setup-control socket paths and ambiguous fd+socket control configuration.
+- Extended `SetupHelperPlan` and `BwrapSetupPlan` to carry a `--setup-control-socket` handoff path as a safe alternative to inherited raw-fd reconstruction.
+- Added `run_foxproxsetup_handoff_connecting_with_ops(...)`, which parses normal `foxproxsetup` flags, safely connects to the configured Unix socket path with `UnixStream::connect`, then executes the existing handoff runner and emits the same structured setup/audit JSON.
+- Added Linux `run_foxproxsetup_linux_handoff_connecting(...)` wrapper backed by real `LinuxTunSetupOps`.
+- Added deterministic coverage proving the socket-path handoff can connect, send an fd over SCM_RIGHTS, and be received by the listening side, plus fail-closed coverage for missing/unreachable setup-control sockets.
+
+### Commands run
+- `cargo test -p foxprox-core --all-targets --all-features` — passed, 161 core tests.
+- `cargo test -p foxprox-cli --all-targets --all-features` — passed, 13 CLI tests and 1 ignored privileged Linux CLI test.
+- `cargo test --all-targets --all-features` — passed, including 13 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- This avoids local unsafe fd reconstruction by supporting a socket-path setup-control channel, but the actual `foxproxsetup` binary still defaults to the plan-first path and is not yet switched to execute setup/control handoff in production. Capability drop/close/exec, route/DNS/proxy setup commands, and production runtime/final-drain wiring remain.

@@ -554,3 +554,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Prefer setup-control socket paths when avoiding raw-fd ownership
 
 - Linux `/proc/self/fd/<n>` cannot be relied on to duplicate Unix sockets (`ENXIO` in local checks), so safe production setup-control wiring should not assume procfs can convert an inherited integer fd into a `UnixStream`. A Unix socket path (`--setup-control-socket`) gives `foxproxsetup` a safe `UnixStream::connect` ownership boundary and still exercises SCM_RIGHTS handoff without local unsafe code. Inherited-fd support remains separate unless a safe crate/API owns the raw-fd conversion.
+
+## 2026-06-23 — Quote progress heredocs containing backticks
+
+- Always use a quoted heredoc delimiter (`<<'EOF'`) or a non-shell writer when appending markdown with backticked symbols or commands to `progress.md`. An unquoted heredoc executed command substitutions from entries like `foxproxsetup` and `cargo test ...`, corrupting the progress section with shell output before it was repaired.
