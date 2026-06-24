@@ -578,3 +578,7 @@ With stream-like fd test doubles, an `AsyncFd::readable()` wake can be followed 
 ## 2026-06-24 — Rootless bwrap TUN setup needs bwrap-owned /dev plus late TUN dev-bind
 
 For foxprox's bwrap-compatible setup, rootless bwrap can provide `CAP_NET_ADMIN` inside a user+network namespace with `--cap-add CAP_NET_ADMIN`, but `/dev/net/tun` must be made available carefully. Binding the host TUN node directly under a read-only root produced `EACCES` on open locally. The working shape is `--ro-bind / /`, writable setup overlays such as `--tmpfs /etc`, `--dev /dev`, then `--dev-bind /dev/net/tun /dev/net/tun`, plus `--proc /proc` and `--uid 0 --gid 0`. In this rootless user namespace, dropping `CAP_NET_ADMIN` from the bounding set may return `EPERM`; dropping effective/permitted/inheritable/ambient and tolerating bounding-set `EPERM` still lets the target exec without effective `CAP_NET_ADMIN`.
+
+## 2026-06-24 — Real bwrap TUN tests may see incidental IPv6 packets before target IPv4 traffic
+
+A rootless bwrap namespace with a newly configured TUN can emit incidental IPv6 control traffic (for example multicast/router-related packets) before the target application's intentional IPv4 packet reaches the TUN fd. Real TUN data-plane integration tests should read/filter until the expected packet metadata and payload are observed rather than assuming the first packet read is the test packet.

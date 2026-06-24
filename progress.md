@@ -5039,3 +5039,22 @@ Commit: 23c7554
 
 ### Remaining blind spots
 - The bwrap-compatible setup path now has rerunnable real TUN creation/configuration, SCM_RIGHTS fd handoff, post-setup capability drop, and target exec evidence. Remaining production work is wiring the received real TUN fd into the long-running broker packet loop/final-drain path beyond the bounded helper/test seams.
+
+## 2026-06-24 — Prove bwrap handoff TUN carries target packets
+
+Commit: 5070920
+
+### Fix
+- Extended the ignored real bwrap/`foxproxsetup` E2E test so the post-setup target still verifies `CAP_NET_ADMIN` is dropped, then sends an IPv4 UDP datagram through the sandbox default route.
+- After the host receives the configured TUN fd over SCM_RIGHTS, the test now owns the received fd as a `File`, reads TUN packets, filters incidental non-target packets, and asserts the matching IPv4/UDP packet has source `10.0.2.15`, destination `198.51.100.1`, and the expected payload.
+- This adds rerunnable evidence that the bwrap setup/handoff path is not only creating and transferring a fd, but that the transferred real TUN fd carries target data-plane packets.
+
+### Commands run
+- `scripts/integration/bwrap-setup-e2e.sh` — passed, including rootless bwrap prerequisite self-test and the ignored real bwrap/foxproxsetup/TUN handoff integration test with target packet readback.
+- `cargo clippy --all-targets --all-features -- -D warnings` — initially failed on two `clippy::op_ref` diagnostics in the packet matcher; fixed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed after the matcher fix.
+- `cargo test --all-targets --all-features` — passed, including 29 CLI unit tests + 1 ignored privileged CLI unit test, 1 ignored bwrap E2E integration test in normal workspace runs, 161 core tests, 11 device tests + 1 ignored, 105 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+
+### Remaining blind spots
+- The real received TUN fd now has packet-read evidence from the sandbox target, but the production host broker still needs to own that fd inside the long-running runtime packet loop, route packets through policy/smoltcp/egress forwarding, and final-drain setup/runtime/lifecycle evidence as one production session.
