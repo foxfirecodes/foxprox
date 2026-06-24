@@ -5,7 +5,7 @@ use foxprox_cli::{
     HostSetupProcessExit, HostSetupProcessRunner,
 };
 use foxprox_core::{AuditKind, BwrapSetupPlan, Decision, NetworkSetupConfig};
-use std::io::Read;
+use std::io::{ErrorKind, Read};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -163,28 +163,27 @@ fn bwrap_foxproxsetup_creates_tun_hands_fd_drops_cap_and_execs_target() {
             && record.details.get("setup_status").map(String::as_str) == Some("complete")
     }));
 
+    foxprox_device::set_fd_nonblocking(&received.fd, true).unwrap();
     let mut tun_file = std::fs::File::from(received.fd);
-    let (packet_tx, packet_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || loop {
-        let mut packet = vec![0u8; 2048];
-        let result = tun_file.read(&mut packet).map(|len| {
-            packet.truncate(len);
-            packet
-        });
-        let should_continue = result.is_ok();
-        if packet_tx.send(result).is_err() || !should_continue {
-            break;
-        }
-    });
 
     let deadline = std::time::Instant::now() + Duration::from_secs(2);
     let mut observed_packets = Vec::new();
     let packet = loop {
-        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-        let packet = packet_rx
-            .recv_timeout(remaining)
-            .expect("target UDP send produces a matching TUN packet")
-            .expect("TUN packet read succeeds");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "target UDP send produces a matching TUN packet; observed {} other packets",
+            observed_packets.len()
+        );
+        let mut packet = vec![0u8; 2048];
+        let len = match tun_file.read(&mut packet) {
+            Ok(len) => len,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            Err(error) => panic!("TUN packet read succeeds: {error}"),
+        };
+        packet.truncate(len);
         let ipv4_header_len = packet
             .first()
             .map(|first| ((first & 0x0f) as usize) * 4)

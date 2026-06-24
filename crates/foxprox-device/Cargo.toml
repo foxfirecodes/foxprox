@@ -10,6 +10,7 @@ rust-version.workspace = true
 foxprox-core = { path = "../foxprox-core" }
 
 [target.'cfg(unix)'.dependencies]
+rustix = { version = "1", features = ["fs"] }
 unix-ancillary = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]

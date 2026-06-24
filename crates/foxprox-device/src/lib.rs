@@ -13,6 +13,8 @@ use foxprox_core::{
 use std::io::{Read, Write};
 
 #[cfg(unix)]
+use rustix::fs::{fcntl_getfl, fcntl_setfl, OFlags};
+#[cfg(unix)]
 use std::fs::{File, OpenOptions};
 #[cfg(unix)]
 use std::os::fd::{AsFd, OwnedFd};
@@ -23,6 +25,18 @@ use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 const TUN_FD_HANDOFF_VERSION: &str = "foxprox-tun-fd-v1";
+
+#[cfg(unix)]
+pub fn set_fd_nonblocking(fd: impl AsFd, nonblocking: bool) -> std::io::Result<()> {
+    let flags = fcntl_getfl(fd.as_fd())?;
+    let flags = if nonblocking {
+        flags | OFlags::NONBLOCK
+    } else {
+        flags & !OFlags::NONBLOCK
+    };
+    fcntl_setfl(fd.as_fd(), flags)?;
+    Ok(())
+}
 
 #[derive(Debug)]
 pub struct TunIoPacketDevice<RW> {
@@ -697,6 +711,16 @@ mod tests {
             "no packet ready",
         )));
         let mut device = TunIoPacketDevice::new(io, 1500);
+
+        assert_eq!(device.read_packet().unwrap(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_fd_nonblocking_makes_received_fd_reads_idle_instead_of_blocking() {
+        let (tun_fd, _sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        set_fd_nonblocking(&tun_fd, true).unwrap();
+        let mut device = TunIoPacketDevice::new(tun_fd, 1500);
 
         assert_eq!(device.read_packet().unwrap(), None);
     }
