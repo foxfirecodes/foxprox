@@ -5124,3 +5124,25 @@ Commit: 7b8dbe8
 
 ### Remaining blind spots
 - The host can now safely prepare the received TUN fd for nonblocking packet loops, and the real bwrap E2E proves nonblocking readback from the transferred fd. Remaining production work is still connecting that owned fd into the long-running broker data-plane/policy/smoltcp/egress runtime and draining setup/runtime/lifecycle evidence as one session.
+
+## 2026-06-24 — Tighten nonblocking fd adapter semantics
+
+Commit: b7af40e
+
+### Review
+- Round-153 found no blocker/high/medium issues, but noted two low-risk API/adapter issues: `set_fd_nonblocking(fd: impl AsFd, ...)` accepted owned fd values by value, and `TunIoPacketDevice` only mapped `WouldBlock` to idle even though the `PacketDevice` contract allows nonblocking or time-bounded reads.
+
+### Fix
+- Changed `set_fd_nonblocking(...)` to take a borrowed `&F where F: AsFd + ?Sized`, encoding that the helper toggles flags without taking fd ownership.
+- Updated `TunIoPacketDevice` to map both `ErrorKind::WouldBlock` and `ErrorKind::TimedOut` to `Ok(None)`, preserving the packet-device contract that nonblocking or time-bounded idle reads are not fail-closed device errors.
+- Added deterministic coverage for `TimedOut` idle reads while keeping the nonblocking fd idle-read coverage.
+
+### Commands run
+- `cargo test -p foxprox-device --all-targets --all-features idle_read -- --nocapture` — passed, covering both `WouldBlock` and `TimedOut` idle-read mappings.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed, including rootless bwrap prerequisite self-test and the ignored real bwrap/foxproxsetup/TUN handoff integration test.
+- `cargo test --all-targets --all-features` — passed, including 31 CLI unit tests + 1 ignored privileged CLI unit test, 1 ignored bwrap E2E integration test in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 105 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The fd adapter is now safer and better aligned with bounded reads. Remaining production work is still connecting the received nonblocking TUN fd into the long-running broker data-plane/policy/smoltcp/egress runtime and draining setup/runtime/lifecycle evidence as one session.
