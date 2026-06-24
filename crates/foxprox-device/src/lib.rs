@@ -305,6 +305,12 @@ impl TunSetupHandoffReport {
         }
         record
     }
+
+    pub fn audit_records_with_summary(&self, sandbox_id: impl Into<String>) -> Vec<AuditRecord> {
+        let mut records = self.audit_records.clone();
+        records.push(self.summary_audit(sandbox_id));
+        records
+    }
 }
 
 #[cfg(unix)]
@@ -784,6 +790,9 @@ mod tests {
         let summary = report.summary_audit("s1");
         assert_eq!(summary.kind, AuditKind::TunConfigured);
         assert_eq!(summary.details["setup_status"], "complete");
+        let records = report.audit_records_with_summary("s1");
+        assert_eq!(records.len(), 4);
+        assert_eq!(records.last().unwrap().details["setup_status"], "complete");
 
         let received = recv_tun_fd(&control_rx, "foxprox0").unwrap();
         let received_tun = std::os::unix::net::UnixStream::from(received.fd);
@@ -823,6 +832,44 @@ mod tests {
         assert_eq!(summary.kind, AuditKind::BrokerError);
         assert_eq!(summary.details["setup_status"], "failed");
         assert_eq!(summary.details["failed_step"], "configure_tun");
+        let records = report.audit_records_with_summary("s1");
+        assert_eq!(records.len(), 3);
+        assert_eq!(records.last().unwrap().details["setup_status"], "failed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tun_setup_handoff_executor_fails_closed_when_fd_send_fails() {
+        let config = NetworkSetupConfig::alpha_default("s1");
+        let (control_tx, _control_rx) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (tun_fd, _sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut ops = ScriptedTunSetupOps {
+            tun_fd: Some(tun_fd),
+            fail_configure: false,
+            fail_handoff: true,
+        };
+
+        let report = execute_tun_setup_handoff(&mut ops, &control_tx, &config);
+        assert_eq!(report.status, TunSetupHandoffStatus::Failed);
+        assert_eq!(report.completed_steps, vec!["open_tun", "configure_tun"]);
+        assert_eq!(report.failed_step, Some("handoff_tun_fd"));
+        assert_eq!(report.audit_records[0].kind, AuditKind::TunFdOpened);
+        assert_eq!(report.audit_records[1].kind, AuditKind::TunConfigured);
+        assert_eq!(report.audit_records[2].kind, AuditKind::BrokerError);
+        assert_eq!(report.audit_records[2].decision, Some(Decision::FailClosed));
+        assert_eq!(report.audit_records[2].details["fd_source"], "scm_rights");
+        assert_eq!(
+            report.audit_records[2].details["handoff_error"],
+            "send_failed"
+        );
+        let records = report.audit_records_with_summary("s1");
+        assert_eq!(records.len(), 4);
+        assert_eq!(records.last().unwrap().kind, AuditKind::BrokerError);
+        assert_eq!(records.last().unwrap().details["setup_status"], "failed");
+        assert_eq!(
+            records.last().unwrap().details["failed_step"],
+            "handoff_tun_fd"
+        );
     }
 
     #[cfg(unix)]

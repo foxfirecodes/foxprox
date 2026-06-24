@@ -4513,3 +4513,25 @@ Commit: c96d3d5
 
 ### Remaining blind spots
 - The setup-helper sequence is now executable through injected operations with structured success/failure evidence, but the real privileged Linux implementation is still missing: actual `TUNSETIFF`, route/DNS/proxy configuration commands, real helper process execution, and production runtime wiring outside the deterministic harness.
+
+## 2026-06-23 — Complete TUN setup handoff failure evidence
+
+Commit: d5f5f2c
+
+### Review
+- Round-125 correctness and validation found no blocker/high issues. Reviewers confirmed `execute_tun_setup_handoff(...)` is ordered, fail-closed before handoff on configure failure, and accurately scoped as deterministic injected operations rather than real privileged TUN setup.
+
+### Fix
+- Added `TunSetupHandoffReport::audit_records_with_summary(...)` so callers can drain ordered setup evidence plus the terminal setup summary audit together.
+- Added handoff-send failure coverage: after successful open/configure, a failed `send_tun_fd` records fail-closed `broker_error` evidence with `fd_source=scm_rights` and `handoff_error=send_failed`, reports `failed_step=handoff_tun_fd`, and appends a summary failure audit.
+- Extended success and configure-failure tests to assert the summary audit is included in the drainable setup record set.
+
+### Commands run
+- `cargo test -p foxprox-device --all-targets --all-features` — passed, 10 device tests.
+- `cargo clippy -p foxprox-device --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 10 device tests, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The setup executor now covers configure and handoff-send fail-closed paths with drainable summary evidence, but real privileged Linux implementation is still missing: actual `TUNSETIFF`, route/DNS/proxy commands, real helper process execution, and production runtime wiring outside deterministic harnesses.
