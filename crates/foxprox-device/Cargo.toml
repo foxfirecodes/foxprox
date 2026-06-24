@@ -9,6 +9,9 @@ rust-version.workspace = true
 [dependencies]
 foxprox-core = { path = "../foxprox-core" }
 
+[target.'cfg(unix)'.dependencies]
+unix-ancillary = "0.2"
+
 [dev-dependencies]
 pretty_assertions = "1"
 

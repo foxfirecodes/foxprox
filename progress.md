@@ -4388,3 +4388,32 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - This is the strongest local runtime proof so far: live UDP/TCP/packet-fd readiness, local smoltcp dispatch, cancellation/join, lifecycle exit, and fan-in final drain share one lifecycle. Remaining final gap is converting this proof into production runtime wiring and replacing the deterministic packet-fd stand-in with actual `/dev/net/tun` setup/handoff.
+
+## 2026-06-23 — Add safe Unix TUN fd handoff evidence
+
+### Review
+- Round-120 correctness found no blockers or high issues for `37ee711`.
+- Validation output artifact contained only `(image?)`, but the correctness review confirmed validation evidence and the next highest gap remained production runtime wiring plus replacing the packet-fd stand-in with actual `/dev/net/tun` setup/handoff.
+
+### Fix
+- Added `unix-ancillary` to `foxprox-device` for safe SCM_RIGHTS fd passing without local unsafe code.
+- Added Unix-only TUN fd handoff helpers:
+  - `send_tun_fd(...)` sends a borrowed fd with a versioned `foxprox-tun-fd-v1:<tun_name>` payload.
+  - `recv_tun_fd(...)` receives exactly one `OwnedFd`, validates the versioned tun-name payload, and returns structured success or fail-closed handoff evidence.
+  - `ReceivedTunFd::into_file_device(...)` converts a received fd into a `TunIoPacketDevice<File>` ownership boundary.
+  - `open_dev_net_tun_handoff(...)` / `open_tun_device_path(...)` provide the safe open/handoff evidence boundary for `/dev/net/tun` or an injected path.
+- Added `TunFdHandoffReport`, `TunFdHandoffStatus`, and `TunFdHandoffErrorKind` with `tun_configured` success audit and fail-closed `broker_error` audit details including `handoff=scm_rights`, `handoff_status`, `fd_count`, `handoff_payload`, `device_path`, and `handoff_error`.
+- Added tests proving:
+  - a Unix fd sent over a control socket is received as packet-device ownership, can read sandbox-side bytes, can write replies, and emits `tun_configured` handoff audit evidence;
+  - mismatched handoff payload fails closed with `broker_error` and `handoff_error=unexpected_payload`;
+  - device-open success and missing-path failure emit structured success/fail-closed evidence.
+
+### Commands run
+- `cargo test -p foxprox-device --all-targets --all-features` — passed, 7 device tests.
+- `cargo clippy -p foxprox-device --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 7 device tests, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- This closes the safe fd handoff contract and packet-device ownership boundary, but it still does not configure a Linux TUN interface with `TUNSETIFF` or prove privileged namespace setup in CI. The remaining runtime gap is production wiring that runs the setup helper, receives the real `/dev/net/tun` fd, wraps it in async readiness, and drives it in the combined Tokio/LocalSet runtime loop with final shutdown drain.

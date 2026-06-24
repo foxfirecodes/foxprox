@@ -534,3 +534,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — A LocalSet can combine live IO and non-Send smoltcp with one lifecycle/fan-in drain
 
 - To avoid `RefCell` borrows across awaits when sharing lifecycle state with a local task, store `Option<RuntimeLifecycleHarness>` in the `RefCell`, `take()` ownership before awaited scheduler calls, then put it back after the await. This satisfies clippy while preserving one lifecycle for readiness, join, exit, and fan-in drain evidence.
+
+## 2026-06-23 — Safe Unix SCM_RIGHTS handoff can avoid local unsafe fd code
+
+- The `unix-ancillary` crate provides a safe `OwnedFd`/`BorrowedFd` API for SCM_RIGHTS fd passing over Unix sockets. It lets foxprox model setup-helper TUN fd handoff without adding local unsafe code under `#![forbid(unsafe_code)]`; the received `OwnedFd` can be converted into a `File`-backed `TunIoPacketDevice` for packet IO ownership.

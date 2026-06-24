@@ -6,8 +6,22 @@
 
 #![forbid(unsafe_code)]
 
-use foxprox_core::{DeviceIoError, PacketDevice};
+use foxprox_core::{
+    AuditKind, AuditRecord, Decision, DenialReason, DeviceIoError, Frontend, PacketDevice,
+};
 use std::io::{Read, Write};
+
+#[cfg(unix)]
+use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::os::fd::OwnedFd;
+#[cfg(unix)]
+use std::os::unix::net::UnixStream;
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
+
+#[cfg(unix)]
+const TUN_FD_HANDOFF_VERSION: &str = "foxprox-tun-fd-v1";
 
 #[derive(Debug)]
 pub struct TunIoPacketDevice<RW> {
@@ -27,6 +41,266 @@ impl<RW> TunIoPacketDevice<RW> {
     pub fn into_inner(self) -> RW {
         self.io
     }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TunFdHandoffStatus {
+    Sent,
+    Received,
+    Failed,
+}
+
+#[cfg(unix)]
+impl TunFdHandoffStatus {
+    fn as_detail(self) -> &'static str {
+        match self {
+            Self::Sent => "sent",
+            Self::Received => "received",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TunFdHandoffErrorKind {
+    SendFailed,
+    ReceiveFailed,
+    MissingFd,
+    UnexpectedPayload,
+    MultipleFds,
+    OpenFailed,
+}
+
+#[cfg(unix)]
+impl TunFdHandoffErrorKind {
+    fn as_detail(self) -> &'static str {
+        match self {
+            Self::SendFailed => "send_failed",
+            Self::ReceiveFailed => "receive_failed",
+            Self::MissingFd => "missing_fd",
+            Self::UnexpectedPayload => "unexpected_payload",
+            Self::MultipleFds => "multiple_fds",
+            Self::OpenFailed => "open_failed",
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TunFdHandoffReport {
+    pub tun_name: String,
+    pub status: TunFdHandoffStatus,
+    pub payload: String,
+    pub fd_count: usize,
+    pub device_path: Option<PathBuf>,
+    pub error: Option<TunFdHandoffErrorKind>,
+}
+
+#[cfg(unix)]
+impl TunFdHandoffReport {
+    pub fn sent(tun_name: impl Into<String>, fd_count: usize) -> Self {
+        let tun_name = tun_name.into();
+        Self {
+            payload: handoff_payload(&tun_name),
+            tun_name,
+            status: TunFdHandoffStatus::Sent,
+            fd_count,
+            device_path: None,
+            error: None,
+        }
+    }
+
+    pub fn received(tun_name: impl Into<String>, fd_count: usize) -> Self {
+        let tun_name = tun_name.into();
+        Self {
+            payload: handoff_payload(&tun_name),
+            tun_name,
+            status: TunFdHandoffStatus::Received,
+            fd_count,
+            device_path: None,
+            error: None,
+        }
+    }
+
+    pub fn failed(
+        tun_name: impl Into<String>,
+        payload: impl Into<String>,
+        fd_count: usize,
+        error: TunFdHandoffErrorKind,
+    ) -> Self {
+        Self {
+            tun_name: tun_name.into(),
+            status: TunFdHandoffStatus::Failed,
+            payload: payload.into(),
+            fd_count,
+            device_path: None,
+            error: Some(error),
+        }
+    }
+
+    pub fn for_opened_device(path: impl Into<PathBuf>, tun_name: impl Into<String>) -> Self {
+        let tun_name = tun_name.into();
+        Self {
+            payload: handoff_payload(&tun_name),
+            tun_name,
+            status: TunFdHandoffStatus::Received,
+            fd_count: 1,
+            device_path: Some(path.into()),
+            error: None,
+        }
+    }
+
+    pub fn failed_open(path: impl Into<PathBuf>, tun_name: impl Into<String>) -> Self {
+        let tun_name = tun_name.into();
+        Self {
+            payload: handoff_payload(&tun_name),
+            tun_name,
+            status: TunFdHandoffStatus::Failed,
+            fd_count: 0,
+            device_path: Some(path.into()),
+            error: Some(TunFdHandoffErrorKind::OpenFailed),
+        }
+    }
+
+    pub fn audit_record(&self, sandbox_id: impl Into<String>) -> AuditRecord {
+        let mut record = if self.status == TunFdHandoffStatus::Failed {
+            AuditRecord::new(AuditKind::BrokerError, sandbox_id.into())
+                .with_frontend(Frontend::Setup)
+                .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+        } else {
+            AuditRecord::new(AuditKind::TunConfigured, sandbox_id.into())
+                .with_frontend(Frontend::Setup)
+                .with_decision(Decision::Allow, None)
+        }
+        .with_detail("tun_name", self.tun_name.clone())
+        .with_detail("handoff", "scm_rights")
+        .with_detail("handoff_status", self.status.as_detail())
+        .with_detail("fd_count", self.fd_count.to_string())
+        .with_detail("handoff_payload", self.payload.clone());
+        if let Some(path) = &self.device_path {
+            record = record.with_detail("device_path", path.display().to_string());
+        }
+        if let Some(error) = self.error {
+            record = record.with_detail("handoff_error", error.as_detail());
+        }
+        record
+    }
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct ReceivedTunFd {
+    pub fd: OwnedFd,
+    pub report: TunFdHandoffReport,
+}
+
+#[cfg(unix)]
+impl ReceivedTunFd {
+    pub fn into_file_device(self, mtu: usize) -> (TunIoPacketDevice<File>, TunFdHandoffReport) {
+        (
+            TunIoPacketDevice::new(File::from(self.fd), mtu),
+            self.report,
+        )
+    }
+}
+
+#[cfg(unix)]
+pub fn open_dev_net_tun_handoff(
+    tun_name: impl Into<String>,
+) -> Result<(File, TunFdHandoffReport), TunFdHandoffReport> {
+    open_tun_device_path("/dev/net/tun", tun_name)
+}
+
+#[cfg(unix)]
+pub fn open_tun_device_path(
+    path: impl AsRef<Path>,
+    tun_name: impl Into<String>,
+) -> Result<(File, TunFdHandoffReport), TunFdHandoffReport> {
+    let path = path.as_ref().to_path_buf();
+    let tun_name = tun_name.into();
+    match OpenOptions::new().read(true).write(true).open(&path) {
+        Ok(file) => Ok((file, TunFdHandoffReport::for_opened_device(path, tun_name))),
+        Err(_) => Err(TunFdHandoffReport::failed_open(path, tun_name)),
+    }
+}
+
+#[cfg(unix)]
+pub fn send_tun_fd(
+    control: &UnixStream,
+    tun_name: impl AsRef<str>,
+    fd: &impl std::os::fd::AsFd,
+) -> Result<TunFdHandoffReport, TunFdHandoffReport> {
+    use unix_ancillary::UnixStreamExt;
+
+    let tun_name = tun_name.as_ref();
+    let payload = handoff_payload(tun_name);
+    match control.send_fds(payload.as_bytes(), &[fd]) {
+        Ok(_) => Ok(TunFdHandoffReport::sent(tun_name, 1)),
+        Err(_) => Err(TunFdHandoffReport::failed(
+            tun_name,
+            payload,
+            0,
+            TunFdHandoffErrorKind::SendFailed,
+        )),
+    }
+}
+
+#[cfg(unix)]
+pub fn recv_tun_fd(
+    control: &UnixStream,
+    expected_tun_name: impl AsRef<str>,
+) -> Result<ReceivedTunFd, TunFdHandoffReport> {
+    use unix_ancillary::UnixStreamExt;
+
+    let expected_tun_name = expected_tun_name.as_ref();
+    let received = match control.recv_fds::<2>() {
+        Ok(received) => received,
+        Err(_) => {
+            return Err(TunFdHandoffReport::failed(
+                expected_tun_name,
+                "",
+                0,
+                TunFdHandoffErrorKind::ReceiveFailed,
+            ));
+        }
+    };
+    let payload = String::from_utf8_lossy(&received.data).to_string();
+    if payload != handoff_payload(expected_tun_name) {
+        return Err(TunFdHandoffReport::failed(
+            expected_tun_name,
+            payload,
+            received.fds.len(),
+            TunFdHandoffErrorKind::UnexpectedPayload,
+        ));
+    }
+    if received.fds.is_empty() {
+        return Err(TunFdHandoffReport::failed(
+            expected_tun_name,
+            payload,
+            0,
+            TunFdHandoffErrorKind::MissingFd,
+        ));
+    }
+    if received.fds.len() != 1 {
+        return Err(TunFdHandoffReport::failed(
+            expected_tun_name,
+            payload,
+            received.fds.len(),
+            TunFdHandoffErrorKind::MultipleFds,
+        ));
+    }
+    let mut fds = received.fds;
+    Ok(ReceivedTunFd {
+        fd: fds.pop().unwrap(),
+        report: TunFdHandoffReport::received(expected_tun_name, 1),
+    })
+}
+
+#[cfg(unix)]
+fn handoff_payload(tun_name: &str) -> String {
+    format!("{TUN_FD_HANDOFF_VERSION}:{tun_name}")
 }
 
 impl<RW: Read + Write> PacketDevice for TunIoPacketDevice<RW> {
@@ -185,6 +459,91 @@ mod tests {
             device.write_packet(&vec![0; 1501]).unwrap_err(),
             DeviceIoError::WriteFailed
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tun_fd_handoff_receives_packet_device_and_audits_success() {
+        let (control_tx, control_rx) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (tun_fd, mut sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+
+        let send_report = send_tun_fd(&control_tx, "foxprox0", &tun_fd).unwrap();
+        assert_eq!(send_report.status, TunFdHandoffStatus::Sent);
+        assert_eq!(send_report.fd_count, 1);
+        assert_eq!(
+            send_report.audit_record("s1").kind,
+            AuditKind::TunConfigured
+        );
+
+        let received = recv_tun_fd(&control_rx, "foxprox0").unwrap();
+        assert_eq!(received.report.status, TunFdHandoffStatus::Received);
+        assert_eq!(received.report.fd_count, 1);
+        let audit = received.report.audit_record("s1");
+        assert_eq!(audit.kind, AuditKind::TunConfigured);
+        assert_eq!(audit.details["handoff"], "scm_rights");
+        assert_eq!(audit.details["handoff_status"], "received");
+        assert_eq!(audit.details["tun_name"], "foxprox0");
+
+        let received_tun = std::os::unix::net::UnixStream::from(received.fd);
+        let mut device = TunIoPacketDevice::new(received_tun, 1500);
+        sandbox_peer.write_all(b"handoff-packet").unwrap();
+        assert_eq!(
+            device.read_packet().unwrap(),
+            Some(b"handoff-packet".to_vec())
+        );
+        device.write_packet(b"handoff-reply").unwrap();
+        let mut reply = [0u8; 13];
+        sandbox_peer.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"handoff-reply");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tun_fd_handoff_fails_closed_for_wrong_payload() {
+        use unix_ancillary::UnixStreamExt;
+
+        let (control_tx, control_rx) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (tun_fd, _sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        control_tx.send_fds(b"wrong-payload", &[&tun_fd]).unwrap();
+
+        let report = recv_tun_fd(&control_rx, "foxprox0").unwrap_err();
+        assert_eq!(report.status, TunFdHandoffStatus::Failed);
+        assert_eq!(report.error, Some(TunFdHandoffErrorKind::UnexpectedPayload));
+        assert_eq!(report.fd_count, 1);
+        let audit = report.audit_record("s1");
+        assert_eq!(audit.kind, AuditKind::BrokerError);
+        assert_eq!(audit.decision, Some(Decision::FailClosed));
+        assert_eq!(audit.details["handoff_error"], "unexpected_payload");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tun_device_open_reports_success_or_fail_closed_evidence() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-dev-net-tun-{}-open-test",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"").unwrap();
+        let (_file, report) = open_tun_device_path(&path, "foxprox0").unwrap();
+        assert_eq!(report.status, TunFdHandoffStatus::Received);
+        assert_eq!(report.fd_count, 1);
+        assert_eq!(report.device_path.as_deref(), Some(path.as_path()));
+        let audit = report.audit_record("s1");
+        assert_eq!(audit.kind, AuditKind::TunConfigured);
+        assert_eq!(audit.details["device_path"], path.display().to_string());
+        let _ = std::fs::remove_file(&path);
+
+        let missing = std::env::temp_dir().join(format!(
+            "foxprox-dev-net-tun-{}-missing",
+            std::process::id()
+        ));
+        let report = open_tun_device_path(&missing, "foxprox0").unwrap_err();
+        assert_eq!(report.status, TunFdHandoffStatus::Failed);
+        assert_eq!(report.error, Some(TunFdHandoffErrorKind::OpenFailed));
+        let audit = report.audit_record("s1");
+        assert_eq!(audit.kind, AuditKind::BrokerError);
+        assert_eq!(audit.details["handoff_error"], "open_failed");
+        assert_eq!(audit.details["device_path"], missing.display().to_string());
     }
 
     fn ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
