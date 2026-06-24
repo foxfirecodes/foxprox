@@ -3062,8 +3062,17 @@ where
         now_ms,
         max_packets,
     } = session;
-    let setup_ingest = ingest_resequenced_records(setup_source, setup_records, fan_in)
-        .map_err(AsyncRuntimeReceivedTunSmoltcpBridgeDrainError::Ingest)?;
+    let setup_ingest = match ingest_resequenced_records(setup_source, setup_records, fan_in) {
+        Ok(report) => report,
+        Err(error) => {
+            fan_in
+                .drain_to_sink(sink)
+                .map_err(AsyncRuntimeReceivedTunSmoltcpBridgeDrainError::Drain)?;
+            return Err(AsyncRuntimeReceivedTunSmoltcpBridgeDrainError::Ingest(
+                error,
+            ));
+        }
+    };
     if let Err(error) = foxprox_device::set_fd_nonblocking(&received.fd, true) {
         fan_in
             .drain_to_sink(sink)
@@ -4622,15 +4631,73 @@ mod tests {
             report.final_drain.drained_records,
             report.setup_ingest.accepted_records + report.broker_ingest.accepted_records
         );
-        assert!(
-            response_len > 0,
-            "smoltcp wrote a response packet to the fd"
+        assert!(response_len >= 40, "smoltcp TCP response too short");
+        let response = &response[..response_len];
+        let ip_header_len = ((response[0] & 0x0f) as usize) * 4;
+        assert_eq!(response[0] >> 4, 4, "expected IPv4 response");
+        assert_eq!(response[9], 6, "expected TCP response");
+        assert_eq!(&response[12..16], &[10, 0, 2, 1]);
+        assert_eq!(&response[16..20], &[10, 0, 2, 15]);
+        let tcp = &response[ip_header_len..];
+        assert_eq!(u16::from_be_bytes([tcp[0], tcp[1]]), 8080);
+        assert_eq!(u16::from_be_bytes([tcp[2], tcp[3]]), 50_000);
+        assert_eq!(
+            u32::from_be_bytes([tcp[8], tcp[9], tcp[10], tcp[11]]),
+            0x0102_0305
         );
+        assert_eq!(tcp[13], 0x12, "expected SYN-ACK TCP flags");
         assert!(output.contains("setup_plan_created"));
         assert!(output.contains("tun_configured"));
         assert!(output.contains("scm_rights"));
         assert!(output.contains("packet_observed"));
         assert!(output.contains("smoltcp"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn received_tun_fd_smoltcp_bridge_loop_drains_setup_ingest_backpressure() {
+        let (tun_fd, _sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let received = foxprox_device::ReceivedTunFd {
+            fd: tun_fd.into(),
+            report: foxprox_device::TunFdHandoffReport::received("foxprox0", 1),
+        };
+        let stack = foxprox_stack::SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16);
+        let setup_records = vec![
+            AuditRecord::new(AuditKind::SetupPlanCreated, "s1"),
+            received.report.audit_record("s1"),
+        ];
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 1);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+
+        let error = run_received_tun_fd_smoltcp_bridge_loop_and_drain(
+            AsyncRuntimeReceivedTunSmoltcpBridgeSession {
+                setup_source: "host_setup_session".to_string(),
+                setup_records: &setup_records,
+                received,
+                sandbox_id: "s1".to_string(),
+                broker,
+                stack,
+                now_ms: 9_000,
+                max_packets: 1,
+            },
+            &mut fan_in,
+            &mut sink,
+            &cancellation,
+        )
+        .expect_err("setup ingest backpressure is surfaced after drain");
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+
+        assert!(matches!(
+            error,
+            AsyncRuntimeReceivedTunSmoltcpBridgeDrainError::Ingest(
+                RuntimeAuditFanInError::AuditBackpressure { .. }
+            )
+        ));
+        assert!(output.contains("audit_backpressure"));
+        assert!(output.contains("host_setup_session"));
     }
 
     #[cfg(unix)]
