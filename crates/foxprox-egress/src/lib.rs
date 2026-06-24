@@ -8,17 +8,17 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    malformed_proxy_request, AuditKind, AuditRecord, AuditSinkError, BrokerRuntimeConfig, Decision,
-    DenialReason, DnsBrokerHandler, DnsQueryMetadata, DnsUpstream, DnsUpstreamError,
-    ExplicitProxyEgress, ExplicitProxyFrontend, Frontend, HttpProxyRequestMetadata,
-    JsonLineAuditSink, NetworkEndpoint, PolicyRequest, Protocol, ProxyEgressError, ProxyParseError,
-    RuntimeAuditDrainError, RuntimeAuditDrainReport, RuntimeAuditFanIn, RuntimeAuditFanInError,
-    RuntimeAuditIngestReport, RuntimeChildExit, RuntimeCleanupAction, RuntimeCleanupReport,
-    RuntimeComponent, RuntimeExitStatus, RuntimeLifecycleError, RuntimeLifecycleHarness,
-    RuntimeListenerConfig, RuntimeReadinessPlan, RuntimeSchedulerAction, RuntimeTaskExpectation,
-    RuntimeTaskHandle, RuntimeTaskJoinReport, RuntimeTaskReadiness, RuntimeTaskStatus,
-    RuntimeTaskSupervisor, RuntimeTaskSupervisorError, SharedDnsCache, SocksConnectMetadata,
-    TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
+    malformed_proxy_request, AuditKind, AuditRecord, AuditSinkError, BrokerCore,
+    BrokerRuntimeConfig, Decision, DenialReason, DnsBrokerHandler, DnsQueryMetadata, DnsUpstream,
+    DnsUpstreamError, ExplicitProxyEgress, ExplicitProxyFrontend, Frontend,
+    HttpProxyRequestMetadata, JsonLineAuditSink, NetworkEndpoint, PolicyRequest, Protocol,
+    ProxyEgressError, ProxyParseError, RuntimeAuditDrainError, RuntimeAuditDrainReport,
+    RuntimeAuditFanIn, RuntimeAuditFanInError, RuntimeAuditIngestReport, RuntimeChildExit,
+    RuntimeCleanupAction, RuntimeCleanupReport, RuntimeComponent, RuntimeExitStatus,
+    RuntimeLifecycleError, RuntimeLifecycleHarness, RuntimeListenerConfig, RuntimeReadinessPlan,
+    RuntimeSchedulerAction, RuntimeTaskExpectation, RuntimeTaskHandle, RuntimeTaskJoinReport,
+    RuntimeTaskReadiness, RuntimeTaskStatus, RuntimeTaskSupervisor, RuntimeTaskSupervisorError,
+    SharedDnsCache, SocksConnectMetadata, TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
 };
 use std::ffi::OsStr;
 #[cfg(unix)]
@@ -2887,6 +2887,35 @@ pub struct AsyncRuntimeSetupPacketLoopReport {
 }
 
 #[cfg(unix)]
+pub struct AsyncRuntimeReceivedTunSmoltcpBridgeSession<'a> {
+    pub setup_source: String,
+    pub setup_records: &'a [AuditRecord],
+    pub received: foxprox_device::ReceivedTunFd,
+    pub sandbox_id: String,
+    pub broker: BrokerCore,
+    pub stack: foxprox_stack::SmoltcpIpStack,
+    pub now_ms: i64,
+    pub max_packets: usize,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct AsyncRuntimeReceivedTunSmoltcpBridgeDrainReport {
+    pub setup_ingest: RuntimeAuditIngestReport,
+    pub bridge_report: foxprox_stack::SmoltcpBridgeLoopReport,
+    pub broker_ingest: RuntimeAuditIngestReport,
+    pub final_drain: RuntimeAuditDrainReport,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum AsyncRuntimeReceivedTunSmoltcpBridgeDrainError {
+    Ingest(RuntimeAuditFanInError),
+    Fd(std::io::Error),
+    Drain(RuntimeAuditDrainError),
+}
+
+#[cfg(unix)]
 pub async fn drain_setup_audits_and_read_packet_fd_once<F, W>(
     setup_source: impl Into<String>,
     setup_records: &[AuditRecord],
@@ -3011,12 +3040,82 @@ where
 }
 
 #[cfg(unix)]
+pub fn run_received_tun_fd_smoltcp_bridge_loop_and_drain<W>(
+    session: AsyncRuntimeReceivedTunSmoltcpBridgeSession<'_>,
+    fan_in: &mut RuntimeAuditFanIn,
+    sink: &mut JsonLineAuditSink<W>,
+    cancellation: &AsyncRuntimeCancellationToken,
+) -> Result<
+    AsyncRuntimeReceivedTunSmoltcpBridgeDrainReport,
+    AsyncRuntimeReceivedTunSmoltcpBridgeDrainError,
+>
+where
+    W: Write,
+{
+    let AsyncRuntimeReceivedTunSmoltcpBridgeSession {
+        setup_source,
+        setup_records,
+        received,
+        sandbox_id,
+        broker,
+        stack,
+        now_ms,
+        max_packets,
+    } = session;
+    let setup_ingest = ingest_resequenced_records(setup_source, setup_records, fan_in)
+        .map_err(AsyncRuntimeReceivedTunSmoltcpBridgeDrainError::Ingest)?;
+    if let Err(error) = foxprox_device::set_fd_nonblocking(&received.fd, true) {
+        fan_in
+            .drain_to_sink(sink)
+            .map_err(AsyncRuntimeReceivedTunSmoltcpBridgeDrainError::Drain)?;
+        return Err(AsyncRuntimeReceivedTunSmoltcpBridgeDrainError::Fd(error));
+    }
+    let mtu = stack.mtu();
+    let (device, _handoff) = received.into_file_device(mtu);
+    let mut bridge = foxprox_stack::SmoltcpTunBridge::new(sandbox_id, broker, stack, device);
+    let bridge_report =
+        bridge.process_packet_loop_until(now_ms, max_packets, || cancellation.is_cancelled());
+    let broker_records: Vec<_> = bridge.broker().audit().records().cloned().collect();
+    let broker_ingest = match ingest_resequenced_records("smoltcp_bridge", &broker_records, fan_in)
+    {
+        Ok(report) => report,
+        Err(error) => {
+            fan_in
+                .drain_to_sink(sink)
+                .map_err(AsyncRuntimeReceivedTunSmoltcpBridgeDrainError::Drain)?;
+            return Err(AsyncRuntimeReceivedTunSmoltcpBridgeDrainError::Ingest(
+                error,
+            ));
+        }
+    };
+    let final_drain = fan_in
+        .drain_to_sink(sink)
+        .map_err(AsyncRuntimeReceivedTunSmoltcpBridgeDrainError::Drain)?;
+    Ok(AsyncRuntimeReceivedTunSmoltcpBridgeDrainReport {
+        setup_ingest,
+        bridge_report,
+        broker_ingest,
+        final_drain,
+    })
+}
+
+#[cfg(unix)]
 fn ingest_setup_records(
     setup_source: impl Into<String>,
     setup_records: &[AuditRecord],
     fan_in: &mut RuntimeAuditFanIn,
 ) -> Result<RuntimeAuditIngestReport, AsyncRuntimeSetupPacketDrainError> {
-    let source_records: Vec<_> = setup_records
+    ingest_resequenced_records(setup_source, setup_records, fan_in)
+        .map_err(AsyncRuntimeSetupPacketDrainError::Ingest)
+}
+
+#[cfg(unix)]
+fn ingest_resequenced_records(
+    source: impl Into<String>,
+    records: &[AuditRecord],
+    fan_in: &mut RuntimeAuditFanIn,
+) -> Result<RuntimeAuditIngestReport, RuntimeAuditFanInError> {
+    let source_records: Vec<_> = records
         .iter()
         .cloned()
         .enumerate()
@@ -3025,9 +3124,7 @@ fn ingest_setup_records(
             record
         })
         .collect();
-    fan_in
-        .ingest(setup_source, &source_records)
-        .map_err(AsyncRuntimeSetupPacketDrainError::Ingest)
+    fan_in.ingest(source, &source_records)
 }
 
 #[cfg(unix)]
@@ -4453,6 +4550,87 @@ mod tests {
         assert!(output.contains("setup_plan_created"));
         assert!(output.contains("host_setup_control_handoff"));
         assert!(output.contains("scm_rights"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn received_tun_fd_smoltcp_bridge_loop_drains_setup_and_broker_audits() {
+        let (tun_fd, mut sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let received = foxprox_device::ReceivedTunFd {
+            fd: tun_fd.into(),
+            report: foxprox_device::TunFdHandoffReport::received("foxprox0", 1),
+        };
+        let mut stack = foxprox_stack::SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
+        stack.listen_tcp(8080, 1024, 1024);
+        sandbox_peer
+            .write_all(&egress_ipv4_tcp_packet(EgressTcpPacketSpec {
+                source: [10, 0, 2, 15],
+                destination: [10, 0, 2, 1],
+                source_port: 50_000,
+                destination_port: 8080,
+                sequence: 0x0102_0304,
+                acknowledgment: 0,
+                flags: EGRESS_TCP_SYN,
+                payload: &[],
+            }))
+            .unwrap();
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 16);
+        let setup_records = vec![
+            AuditRecord::new(AuditKind::SetupPlanCreated, "s1"),
+            received.report.audit_record("s1"),
+        ];
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 32);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+
+        let report = run_received_tun_fd_smoltcp_bridge_loop_and_drain(
+            AsyncRuntimeReceivedTunSmoltcpBridgeSession {
+                setup_source: "host_setup_session".to_string(),
+                setup_records: &setup_records,
+                received,
+                sandbox_id: "s1".to_string(),
+                broker,
+                stack,
+                now_ms: 9_000,
+                max_packets: 1,
+            },
+            &mut fan_in,
+            &mut sink,
+            &cancellation,
+        )
+        .expect("received TUN fd smoltcp bridge drains setup and broker evidence");
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+        sandbox_peer
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut response = [0u8; 256];
+        let response_len = sandbox_peer.read(&mut response).unwrap();
+
+        assert_eq!(report.setup_ingest.accepted_records, 2);
+        assert_eq!(report.bridge_report.processed_packets, 1);
+        assert_eq!(
+            report.bridge_report.task_outcome.status,
+            RuntimeTaskStatus::TimedOut
+        );
+        assert!(report.broker_ingest.accepted_records >= 3);
+        assert_eq!(
+            report.final_drain.drained_records,
+            report.setup_ingest.accepted_records + report.broker_ingest.accepted_records
+        );
+        assert!(
+            response_len > 0,
+            "smoltcp wrote a response packet to the fd"
+        );
+        assert!(output.contains("setup_plan_created"));
+        assert!(output.contains("tun_configured"));
+        assert!(output.contains("scm_rights"));
+        assert!(output.contains("packet_observed"));
+        assert!(output.contains("smoltcp"));
     }
 
     #[cfg(unix)]
