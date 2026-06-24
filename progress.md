@@ -4713,7 +4713,7 @@ Commit: a9ec120
 
 ## 2026-06-23 — Add foxproxsetup post-setup lifecycle
 
-Commit: a73e5d5
+Commit: 7d1416d
 
 ### Review
 - Round-136 correctness and validation found no blocker/high issues. Reviewers confirmed execute mode wires real TUN setup/handoff plus sandbox route/DNS/proxy command phase and identified the next gap as close setup-only fds, drop `CAP_NET_ADMIN`, and `exec` the target.
