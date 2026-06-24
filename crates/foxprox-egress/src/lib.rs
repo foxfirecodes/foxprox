@@ -2990,8 +2990,15 @@ where
         return Err(AsyncRuntimeSetupPacketDrainError::PacketRead(error));
     }
     let packet_fd = File::from(received.fd);
-    let packet_fd = tokio::io::unix::AsyncFd::new(packet_fd)
-        .map_err(AsyncRuntimeSetupPacketDrainError::PacketRead)?;
+    let packet_fd = match tokio::io::unix::AsyncFd::new(packet_fd) {
+        Ok(packet_fd) => packet_fd,
+        Err(error) => {
+            fan_in
+                .drain_to_sink(sink)
+                .map_err(AsyncRuntimeSetupPacketDrainError::Drain)?;
+            return Err(AsyncRuntimeSetupPacketDrainError::PacketRead(error));
+        }
+    };
     run_ingested_setup_packet_fd_loop_until_cancelled(
         setup_ingest,
         &packet_fd,
@@ -4445,6 +4452,58 @@ mod tests {
         assert_eq!(report.final_drain.drained_records, 2);
         assert!(output.contains("setup_plan_created"));
         assert!(output.contains("host_setup_control_handoff"));
+        assert!(output.contains("scm_rights"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_received_tun_fd_packet_loop_drains_if_asyncfd_registration_fails() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-asyncfd-registration-fail-{}-{}.tmp",
+            std::process::id(),
+            "egress"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let file = std::fs::File::create(&path).unwrap();
+        let received = foxprox_device::ReceivedTunFd {
+            fd: file.into(),
+            report: foxprox_device::TunFdHandoffReport::received("foxprox0", 1),
+        };
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let setup_records = vec![
+            AuditRecord::new(AuditKind::SetupPlanCreated, "s1"),
+            received.report.audit_record("s1"),
+        ];
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+
+        let error = run_received_tun_fd_setup_packet_loop_until_cancelled(
+            "host_setup_session",
+            &setup_records,
+            received,
+            &mut fan_in,
+            &mut sink,
+            AsyncRuntimeSetupPacketLoopConfig {
+                packet_read: AsyncRuntimePacketFdReadBounds {
+                    max_packet_bytes: 64,
+                    max_wait: Duration::from_millis(1),
+                },
+                max_packets: 1,
+            },
+            &cancellation,
+        )
+        .await
+        .expect_err("regular file cannot be registered as an async packet fd");
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(matches!(
+            error,
+            AsyncRuntimeSetupPacketDrainError::PacketRead(_)
+        ));
+        assert!(output.contains("setup_plan_created"));
+        assert!(output.contains("tun_configured"));
         assert!(output.contains("scm_rights"));
     }
 
