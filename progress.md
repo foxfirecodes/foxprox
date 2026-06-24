@@ -4789,7 +4789,7 @@ Commit: 7fe14cd
 
 ## 2026-06-23 — Add host setup process session evidence
 
-Commit: 9fdf166
+Commit: 247825a
 
 ### Review
 - Round-139 correctness and validation found no blocker/high issues. Reviewers confirmed the combined local runtime drains host setup-control handoff evidence through `RuntimeAuditFanIn` while using the received fd for Tokio packet readiness, with the remaining gap being privileged bwrap/foxproxsetup E2E and production runtime/final-drain wiring.
