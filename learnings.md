@@ -566,3 +566,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Host setup-control sessions must poll process exit while accepting handoff
 
 When a host launcher starts `bwrap ... foxproxsetup --execute-setup`, do not block indefinitely on `UnixListener::accept()` before checking the child process. Infer the setup-control socket path before building/starting the plan, put the listener in nonblocking mode, poll child exit during the accept loop, and record fail-closed evidence if the process exits before SCM_RIGHTS handoff. Deterministic tests should cover both missing pre-populated socket path and pre-handoff process exit.
+
+## 2026-06-23 — Re-sequence raw audit vectors before RuntimeAuditFanIn ingest
+
+`AuditRecord::new(...)` starts with `sequence=0`; `RuntimeAuditFanIn::ingest(...)` treats source records with sequence less than or equal to the last source sequence as already seen. If a component accumulates a raw `Vec<AuditRecord>` outside a `BoundedAuditLedger`, assign source-local monotonic sequence numbers to cloned records before ingesting them into fan-in, then let the fan-in ledger assign its own global drain sequence.

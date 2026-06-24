@@ -4876,3 +4876,25 @@ Commit: 06a93fd
 
 ### Remaining blind spots
 - Host setup session deterministic timeout coverage is less scheduler-sensitive, but the remaining major gaps are unchanged: privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production runtime/final-drain wiring after the host broker receives the real TUN fd.
+
+## 2026-06-23 — Drain host setup session audits through fan-in
+
+Commit: 0604527
+
+### Review
+- Round-143 correctness and validation found no blocker/high issues. Reviewers confirmed the no-fd timeout test no longer relies on a fixed sleep, validation passed, and the remaining highest gap is privileged bwrap/real TUN E2E plus production runtime/final-drain wiring.
+
+### Fix
+- Added `HostSetupSessionAuditDrainReport` and `HostSetupSessionAuditDrainError`.
+- Added `drain_host_setup_session_audits_to_sink(...)`, a host-side bridge that ingests `HostSetupSessionReport` audit records into `RuntimeAuditFanIn` under a named `host_setup_session` source and drains them to a `JsonLineAuditSink`.
+- The helper re-sequences cloned session audit records before fan-in ingestion because host setup session records are accumulated outside a `BoundedAuditLedger` and therefore otherwise carry sequence zero.
+- Added deterministic coverage proving host setup session setup-plan, setup-control handoff, and host setup-process exit evidence drain through `RuntimeAuditFanIn` to JSON sink output.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features host_setup_session -- --nocapture` — passed, 7 filtered host setup session tests.
+- `cargo test --all-targets --all-features` — passed, including 27 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Host setup session evidence can now drain through the runtime fan-in/sink path, but the runtime still needs privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production packet-loop wiring after the host broker receives the real TUN fd.

@@ -1,10 +1,11 @@
 use foxprox_core::{
     AuditKind, AuditRecord, BrokerRuntimeConfig, BwrapSetupPlan, Decision, DenialReason, Frontend,
-    NetworkSetupConfig, SetupHelperPlan, SetupHelperStep,
+    NetworkSetupConfig, RuntimeAuditDrainError, RuntimeAuditDrainReport, RuntimeAuditFanIn,
+    RuntimeAuditFanInError, RuntimeAuditIngestReport, SetupHelperPlan, SetupHelperStep,
 };
 use serde_json::json;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -358,6 +359,45 @@ pub struct HostSetupSessionReport {
     pub handoff: HostSetupControlHandoffReport,
     pub process_exit: Option<HostSetupProcessExit>,
     pub audit_records: Vec<AuditRecord>,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct HostSetupSessionAuditDrainReport {
+    pub ingest: RuntimeAuditIngestReport,
+    pub drain: RuntimeAuditDrainReport,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum HostSetupSessionAuditDrainError {
+    Ingest(RuntimeAuditFanInError),
+    Drain(RuntimeAuditDrainError),
+}
+
+#[cfg(unix)]
+pub fn drain_host_setup_session_audits_to_sink<W: Write>(
+    session: &HostSetupSessionReport,
+    fan_in: &mut RuntimeAuditFanIn,
+    sink: &mut foxprox_core::JsonLineAuditSink<W>,
+) -> Result<HostSetupSessionAuditDrainReport, HostSetupSessionAuditDrainError> {
+    let source_records: Vec<_> = session
+        .audit_records
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, mut record)| {
+            record.sequence = (index + 1) as u64;
+            record
+        })
+        .collect();
+    let ingest = fan_in
+        .ingest("host_setup_session", &source_records)
+        .map_err(HostSetupSessionAuditDrainError::Ingest)?;
+    let drain = fan_in
+        .drain_to_sink(sink)
+        .map_err(HostSetupSessionAuditDrainError::Drain)?;
+    Ok(HostSetupSessionAuditDrainReport { ingest, drain })
 }
 
 #[cfg(unix)]
@@ -1715,6 +1755,64 @@ mod tests {
             report.audit_records.last().unwrap().details["setup_status"],
             "complete"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_setup_session_audits_drain_through_runtime_fan_in() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-host-session-drain-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.setup_control_socket_path = Some(path.to_string_lossy().to_string());
+        let (tun_fd, _sandbox_peer) = UnixStream::pair().unwrap();
+        let mut runner = CliScriptedHostSetupProcessRunner {
+            tun_fd: Some(tun_fd),
+            sender: None,
+            exit: HostSetupProcessExit {
+                exit_code: Some(0),
+                success: true,
+            },
+            fail_start: false,
+            exit_before_handoff: false,
+            skip_handoff_connection: false,
+            connect_without_handoff: false,
+            release_no_fd_connection: None,
+        };
+        let session = run_host_setup_control_session_with_runner(
+            &listener,
+            config,
+            &["true".to_string()],
+            &mut runner,
+        );
+        let _ = std::fs::remove_file(&path);
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 16);
+        let mut sink = foxprox_core::JsonLineAuditSink::new(Vec::new());
+
+        let drain = drain_host_setup_session_audits_to_sink(&session, &mut fan_in, &mut sink)
+            .expect("host setup session audit drain succeeds");
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+        let records: Vec<Value> = output
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+
+        assert_eq!(drain.ingest.source, "host_setup_session");
+        assert_eq!(drain.ingest.accepted_records, session.audit_records.len());
+        assert_eq!(drain.drain.drained_records, session.audit_records.len());
+        assert!(records
+            .iter()
+            .any(|record| record["kind"] == "setup_plan_created"));
+        assert!(records
+            .iter()
+            .any(|record| record["details"]["setup_phase"] == "host_setup_control_handoff"));
+        assert!(records.iter().any(|record| record["details"]["setup_phase"]
+            == "host_setup_process"
+            && record["details"]["setup_status"] == "complete"));
     }
 
     #[cfg(unix)]
