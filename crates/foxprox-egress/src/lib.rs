@@ -4852,25 +4852,60 @@ mod tests {
                             .await;
                             let tcp_client_addr = client.await.unwrap();
 
-                            let (control_tx, control_rx) =
-                                std::os::unix::net::UnixStream::pair().unwrap();
+                            let setup_control_path = std::env::temp_dir().join(format!(
+                                "foxprox-local-combined-{}-{}.sock",
+                                std::process::id(),
+                                "runtime"
+                            ));
+                            let _ = std::fs::remove_file(&setup_control_path);
+                            let setup_listener =
+                                std::os::unix::net::UnixListener::bind(&setup_control_path)
+                                    .unwrap();
                             let (setup_tun_fd, mut sandbox_peer) =
                                 std::os::unix::net::UnixStream::pair().unwrap();
-                            foxprox_device::send_tun_fd(&control_tx, "foxprox0", &setup_tun_fd)
-                                .unwrap();
-                            drop(setup_tun_fd);
-                            let received_tun =
-                                foxprox_device::recv_tun_fd(&control_rx, "foxprox0").unwrap();
-                            let handoff_audit =
-                                received_tun.report.audit_record("local-combined-runtime");
-                            assert_eq!(handoff_audit.kind, AuditKind::TunConfigured);
-                            assert_eq!(handoff_audit.details["fd_source"], "scm_rights");
-                            assert_eq!(handoff_audit.details["handoff_status"], "received");
-                            assert_eq!(handoff_audit.details["tun_name"], "foxprox0");
-                            setup_audit_for_task
-                                .borrow_mut()
-                                .append(handoff_audit)
-                                .unwrap();
+                            let sender_path = setup_control_path.clone();
+                            let sender = std::thread::spawn(move || {
+                                let control =
+                                    std::os::unix::net::UnixStream::connect(sender_path).unwrap();
+                                foxprox_device::send_tun_fd(&control, "foxprox0", &setup_tun_fd)
+                                    .unwrap();
+                            });
+                            let mut setup_config = foxprox_core::NetworkSetupConfig::alpha_default(
+                                "local-combined-runtime",
+                            );
+                            setup_config.setup_control_socket_path =
+                                Some(setup_control_path.to_string_lossy().to_string());
+                            let mut host_handoff = foxprox_cli::accept_setup_control_tun_handoff(
+                                &setup_listener,
+                                setup_config,
+                                &["true".to_string()],
+                            );
+                            sender.join().unwrap();
+                            let _ = std::fs::remove_file(&setup_control_path);
+                            assert_eq!(
+                                host_handoff.status,
+                                foxprox_cli::HostSetupControlHandoffStatus::Complete
+                            );
+                            assert_eq!(
+                                host_handoff.audit_records[0].kind,
+                                AuditKind::SetupPlanCreated
+                            );
+                            assert_eq!(
+                                host_handoff.audit_records[1].kind,
+                                AuditKind::TunConfigured
+                            );
+                            assert_eq!(
+                                host_handoff.audit_records[1].details["fd_source"],
+                                "scm_rights"
+                            );
+                            assert_eq!(
+                                host_handoff.audit_records[2].details["setup_phase"],
+                                "host_setup_control_handoff"
+                            );
+                            let received_tun = host_handoff.received.take().unwrap();
+                            for audit in host_handoff.audit_records {
+                                setup_audit_for_task.borrow_mut().append(audit).unwrap();
+                            }
                             let packet_fd = std::os::unix::net::UnixStream::from(received_tun.fd);
                             packet_fd.set_nonblocking(true).unwrap();
                             let async_packet_fd = tokio::io::unix::AsyncFd::new(packet_fd).unwrap();
@@ -5043,8 +5078,10 @@ mod tests {
                 let drain = fan_in.drain_to_sink(&mut sink).unwrap();
                 assert!(drain.drained_records >= 4);
                 let output = String::from_utf8(sink.into_inner()).unwrap();
+                assert!(output.contains("setup_plan_created"));
                 assert!(output.contains("tun_configured"));
                 assert!(output.contains("\"fd_source\":\"scm_rights\""));
+                assert!(output.contains("host_setup_control_handoff"));
                 assert!(output.contains("runtime_readiness"));
                 assert!(output.contains("network_session_exit"));
                 assert!(output.contains("dns_listener:dns_accept_loop:cancelled"));

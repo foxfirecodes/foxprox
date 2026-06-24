@@ -4760,3 +4760,29 @@ Commit: 7e7ec11
 
 ### Remaining blind spots
 - Host setup-control fd receipt is now represented with retained fd ownership and structured evidence, but it still uses a deterministic sender in CI rather than launching privileged bwrap/foxproxsetup end-to-end. Remaining gaps are privileged bwrap/TUN E2E execution and production runtime/final-drain wiring after the host broker receives the real TUN fd.
+
+## 2026-06-23 — Drain host handoff evidence in local runtime
+
+Commit: 09a9bf7
+
+### Review
+- Round-138 correctness and validation found no blocker/high issues. Reviewers confirmed host setup-control fd receipt retains `OwnedFd` ownership and structured audit evidence, while CI still uses a deterministic sender rather than privileged bwrap/foxproxsetup E2E.
+
+### Fix
+- Added `foxprox-cli` as an egress dev-dependency so the combined local Tokio runtime proof can exercise the host setup-control handoff helper instead of directly calling `send_tun_fd` / `recv_tun_fd` inside the runtime task.
+- Updated `async_local_scheduler_combines_live_io_smoltcp_and_final_drain` so setup-control evidence now flows through `accept_setup_control_tun_handoff(...)`:
+  - builds the bwrap/setup plan;
+  - accepts a setup-control socket connection;
+  - receives the TUN fd through SCM_RIGHTS;
+  - retains fd ownership for AsyncFd packet readiness/read dispatch;
+  - appends setup-plan, received-handoff, and host handoff summary audits to the setup ledger.
+- Extended final JSON drain assertions to require `setup_plan_created`, `fd_source=scm_rights`, and `host_setup_control_handoff` alongside runtime readiness, task cancellation, lifecycle exit, and cleanup evidence.
+
+### Commands run
+- `cargo test -p foxprox-egress --all-targets --all-features async_local_scheduler_combines_live_io_smoltcp_and_final_drain` — passed.
+- `cargo test --all-targets --all-features` — passed, including 20 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The combined local runtime now drains host setup-control handoff evidence through `RuntimeAuditFanIn` while using the received fd for Tokio packet readiness, but the sender is still deterministic. Remaining gaps are privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production runtime/final-drain wiring outside the test harness.
