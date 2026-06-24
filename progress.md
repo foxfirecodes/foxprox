@@ -4923,7 +4923,7 @@ Commit: fd603d1
 
 ## 2026-06-23 — Bridge setup audits with packet-fd runtime read
 
-Commit: 202fe10
+Commit: 8969bfb
 
 ### Review
 - Round-145 correctness and validation found no blocker/high issues. Reviewers confirmed host setup fan-in duplicate/backpressure edge coverage is clean and the remaining highest gap is privileged runtime/E2E coverage with real bwrap + TUN fd handoff and production final-drain wiring.
