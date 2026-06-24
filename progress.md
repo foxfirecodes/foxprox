@@ -5012,3 +5012,30 @@ Commit: 099e82a
 
 ### Remaining blind spots
 - The loop now final-drains setup evidence on packet-read failures. Remaining gaps are still privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production integration around the bounded/long-running packet loop.
+
+## 2026-06-24 — Add bwrap foxproxsetup real TUN E2E script
+
+Commit: 734ed43
+
+### Review
+- The user corrected the previous assumption that bwrap could not test this path: rootless bwrap is intended to run `foxproxsetup` with temporary `CAP_NET_ADMIN` via `--cap-add CAP_NET_ADMIN`, after which `foxproxsetup` creates/configures TUN, hands the fd to the host, drops the cap, and execs the target. `docs/initial-impl.md` explicitly describes this bwrap-compatible setup backend.
+
+### Fix
+- Updated `BwrapSetupPlan` to construct a runnable rootless bwrap setup command:
+  - maps the setup process to root inside the user namespace with `--uid 0 --gid 0`;
+  - mounts the host filesystem read-only with `--ro-bind / /`;
+  - overlays `/etc` with tmpfs so `foxproxsetup` can write sandbox DNS without touching the host;
+  - creates a bwrap-managed `/dev`, then dev-binds `/dev/net/tun` so the setup helper can open the TUN device;
+  - mounts `/proc` for target capability checks and normal proc visibility.
+- Adjusted `drop_cap_net_admin()` to tolerate `EPERM` when dropping `CAP_NET_ADMIN` from the bounding set in a rootless user namespace, after attempting the other cap sets. The integration target verifies effective caps are gone after `foxproxsetup` execs it.
+- Added ignored integration test `crates/foxprox-cli/tests/bwrap_setup_e2e.rs`, which launches real bwrap, runs the real `foxproxsetup` binary, creates/configures a real Linux TUN inside the bwrap netns, receives the TUN fd via SCM_RIGHTS on the host side, drops `CAP_NET_ADMIN`, and execs a target command that asserts `CapEff=0`.
+- Added rerunnable script `scripts/integration/bwrap-setup-e2e.sh`, which checks bwrap `/dev/net/tun` prerequisites and runs the ignored integration test.
+
+### Commands run
+- `scripts/integration/bwrap-setup-e2e.sh` — passed, including prerequisite self-test for `CAP_NET_ADMIN` and `/dev/net/tun` open inside rootless bwrap, plus the ignored real bwrap/foxproxsetup/TUN handoff integration test.
+- `cargo test --all-targets --all-features` — passed, including 29 CLI unit tests + 1 ignored privileged CLI unit test, 1 ignored bwrap E2E integration test in normal workspace runs, 161 core tests, 11 device tests + 1 ignored, 105 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The bwrap-compatible setup path now has rerunnable real TUN creation/configuration, SCM_RIGHTS fd handoff, post-setup capability drop, and target exec evidence. Remaining production work is wiring the received real TUN fd into the long-running broker packet loop/final-drain path beyond the bounded helper/test seams.

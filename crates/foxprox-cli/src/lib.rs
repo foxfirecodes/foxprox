@@ -966,8 +966,14 @@ fn drop_cap_net_admin() -> Result<(), String> {
         if caps::has_cap(None, set, caps::Capability::CAP_NET_ADMIN)
             .map_err(|error| format!("read CAP_NET_ADMIN from {set:?}: {error}"))?
         {
-            caps::drop(None, set, caps::Capability::CAP_NET_ADMIN)
-                .map_err(|error| format!("drop CAP_NET_ADMIN from {set:?}: {error}"))?;
+            if let Err(error) = caps::drop(None, set, caps::Capability::CAP_NET_ADMIN) {
+                if matches!(set, caps::CapSet::Bounding)
+                    && error.to_string().contains("Operation not permitted")
+                {
+                    continue;
+                }
+                return Err(format!("drop CAP_NET_ADMIN from {set:?}: {error}"));
+            }
         }
     }
     Ok(())

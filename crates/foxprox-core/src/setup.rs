@@ -287,12 +287,25 @@ impl BwrapSetupPlan {
     pub fn new(config: NetworkSetupConfig, target_command: &[String]) -> Self {
         let mut bwrap_args = vec![
             "--unshare-user".to_string(),
+            "--uid".to_string(),
+            "0".to_string(),
+            "--gid".to_string(),
+            "0".to_string(),
             "--unshare-net".to_string(),
             "--cap-add".to_string(),
             "CAP_NET_ADMIN".to_string(),
+            "--ro-bind".to_string(),
+            "/".to_string(),
+            "/".to_string(),
+            "--tmpfs".to_string(),
+            "/etc".to_string(),
+            "--dev".to_string(),
+            "/dev".to_string(),
             "--dev-bind".to_string(),
             "/dev/net/tun".to_string(),
             "/dev/net/tun".to_string(),
+            "--proc".to_string(),
+            "/proc".to_string(),
         ];
         if let Some(fd) = config.setup_control_fd {
             bwrap_args.extend(["--sync-fd".to_string(), fd.to_string()]);
@@ -374,11 +387,17 @@ mod tests {
         let full = plan.full_command();
 
         assert!(full.contains(&"--unshare-user".to_string()));
+        assert!(full.windows(2).any(|w| w == ["--uid", "0"]));
+        assert!(full.windows(2).any(|w| w == ["--gid", "0"]));
         assert!(full.contains(&"--unshare-net".to_string()));
         assert!(full.windows(2).any(|w| w == ["--cap-add", "CAP_NET_ADMIN"]));
+        assert!(full.windows(3).any(|w| w == ["--ro-bind", "/", "/"]));
+        assert!(full.windows(2).any(|w| w == ["--tmpfs", "/etc"]));
+        assert!(full.windows(2).any(|w| w == ["--dev", "/dev"]));
         assert!(full
             .windows(3)
             .any(|w| w == ["--dev-bind", "/dev/net/tun", "/dev/net/tun"]));
+        assert!(full.windows(2).any(|w| w == ["--proc", "/proc"]));
         assert!(full.contains(&"foxproxsetup".to_string()));
         assert!(full
             .windows(2)
