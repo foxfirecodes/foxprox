@@ -5058,3 +5058,28 @@ Commit: 5070920
 
 ### Remaining blind spots
 - The real received TUN fd now has packet-read evidence from the sandbox target, but the production host broker still needs to own that fd inside the long-running runtime packet loop, route packets through policy/smoltcp/egress forwarding, and final-drain setup/runtime/lifecycle evidence as one production session.
+
+## 2026-06-24 — Bound host setup post-handoff waits
+
+Commit: 8867ff4
+
+### Review
+- Round-151 correctness found no blocker/high issues, but raised a medium risk that after successful fd handoff the host setup session still used an unbounded setup/target process wait; if the post-handoff target hung, the real bwrap integration script could hang before the bounded TUN packet read loop.
+- The same review raised a low precision issue that the packet proof asserted IPv4/UDP/source/destination/payload but not UDP destination port `443`.
+
+### Fix
+- Added `HostSetupProcessRunner::wait_setup_process_with_timeout(...)` and wired the host setup session to use it after successful fd handoff.
+- Implemented bounded post-handoff waiting for `CommandHostSetupProcessRunner`; timeout kills/waits the setup process and returns fail-closed structured evidence through the existing `wait_setup_process` audit path.
+- Updated the real bwrap E2E runner to use the same bounded post-handoff wait behavior, so the integration test cannot hang indefinitely before packet readback if the target process stalls.
+- Added deterministic unit coverage proving a post-handoff process-exit timeout still keeps the received fd evidence but fails the session closed with `setup_step=wait_setup_process` and a timeout error.
+- Strengthened the real TUN packet matcher/assertions to verify UDP destination port `443` in addition to IPv4/UDP/source/destination/payload.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features host_setup_session_fails_closed_on_process_exit_timeout_after_handoff -- --nocapture` — passed.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed, including rootless bwrap prerequisite self-test and the ignored real bwrap/foxproxsetup/TUN handoff integration test with destination-port packet assertion.
+- `cargo test --all-targets --all-features` — passed, including 30 CLI unit tests + 1 ignored privileged CLI unit test, 1 ignored bwrap E2E integration test in normal workspace runs, 161 core tests, 11 device tests + 1 ignored, 105 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Host setup waits are now bounded through fd handoff, target exit, and packet readback. Remaining production work is still wiring the received TUN fd into the long-running broker data-plane/policy/smoltcp/egress runtime and draining setup/runtime/lifecycle evidence as one production session.

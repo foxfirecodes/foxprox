@@ -582,3 +582,7 @@ For foxprox's bwrap-compatible setup, rootless bwrap can provide `CAP_NET_ADMIN`
 ## 2026-06-24 — Real bwrap TUN tests may see incidental IPv6 packets before target IPv4 traffic
 
 A rootless bwrap namespace with a newly configured TUN can emit incidental IPv6 control traffic (for example multicast/router-related packets) before the target application's intentional IPv4 packet reaches the TUN fd. Real TUN data-plane integration tests should read/filter until the expected packet metadata and payload are observed rather than assuming the first packet read is the test packet.
+
+## 2026-06-24 — Bound post-handoff target waits before TUN packet assertions
+
+A real setup-control fd handoff can complete before the post-setup target exits. Integration tests and production host setup sessions should bound the post-handoff process wait separately from accept/read timeouts; otherwise a hung target can block before packet-read or final-drain evidence has a chance to run.
