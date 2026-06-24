@@ -4811,7 +4811,7 @@ Commit: 247825a
 
 ## 2026-06-23 — Fail closed host setup session accept races
 
-Commit: 3ddf329
+Commit: 6d0cce9
 
 ### Review
 - Round-140 correctness found a blocker/high issue: `run_host_setup_control_session_with_runner(...)` built and started the setup process before inferring `setup_control_socket_path`, so a default config could start plan-mode `foxproxsetup` and then block forever waiting for a connection.
