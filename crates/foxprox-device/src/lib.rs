@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 const TUN_FD_HANDOFF_VERSION: &str = "foxprox-tun-fd-v1";
 
 #[cfg(unix)]
-pub fn set_fd_nonblocking(fd: impl AsFd, nonblocking: bool) -> std::io::Result<()> {
+pub fn set_fd_nonblocking<F: AsFd + ?Sized>(fd: &F, nonblocking: bool) -> std::io::Result<()> {
     let flags = fcntl_getfl(fd.as_fd())?;
     let flags = if nonblocking {
         flags | OFlags::NONBLOCK
@@ -590,7 +590,14 @@ impl<RW: Read + Write> PacketDevice for TunIoPacketDevice<RW> {
                 packet.truncate(len);
                 Ok(Some(packet))
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                Ok(None)
+            }
             Err(_) => Err(DeviceIoError::ReadFailed),
         }
     }
@@ -709,6 +716,18 @@ mod tests {
         io.reads.push_back(Err(io::Error::new(
             io::ErrorKind::WouldBlock,
             "no packet ready",
+        )));
+        let mut device = TunIoPacketDevice::new(io, 1500);
+
+        assert_eq!(device.read_packet().unwrap(), None);
+    }
+
+    #[test]
+    fn tun_io_device_maps_timed_out_to_idle_read() {
+        let mut io = ScriptedTunIo::default();
+        io.reads.push_back(Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "bounded read timed out",
         )));
         let mut device = TunIoPacketDevice::new(io, 1500);
 
