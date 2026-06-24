@@ -5083,3 +5083,25 @@ Commit: 8867ff4
 
 ### Remaining blind spots
 - Host setup waits are now bounded through fd handoff, target exit, and packet readback. Remaining production work is still wiring the received TUN fd into the long-running broker data-plane/policy/smoltcp/egress runtime and draining setup/runtime/lifecycle evidence as one production session.
+
+## 2026-06-24 — Fail closed missing bounded setup wait
+
+Commit: c6f56d9
+
+### Review
+- Round-152 correctness found no blocker/high issues, but identified that the new `HostSetupProcessRunner::wait_setup_process_with_timeout(...)` default still called unbounded `wait_setup_process()`. Production and E2E runners overrode it, but a future/custom runner could weaken the bounded-wait guarantee.
+
+### Fix
+- Changed the trait default for `wait_setup_process_with_timeout(...)` to fail closed with a structured "timeout-aware setup process wait is not implemented" error instead of falling back to an unbounded wait.
+- Added an explicit timeout-aware implementation for the deterministic scripted host setup runner used by existing success/nonzero-exit tests.
+- Added regression coverage proving a runner that does not implement timeout-aware waiting does not call unbounded `wait_setup_process()`: after successful fd handoff, the host setup session fails closed via the existing `wait_setup_process` audit path and preserves received-fd evidence.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features timeout -- --nocapture` — passed, covering accept timeout, read timeout, post-handoff process timeout, and missing timeout-aware runner fallback.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed, including rootless bwrap prerequisite self-test and the ignored real bwrap/foxproxsetup/TUN handoff integration test.
+- `cargo test --all-targets --all-features` — passed, including 31 CLI unit tests + 1 ignored privileged CLI unit test, 1 ignored bwrap E2E integration test in normal workspace runs, 161 core tests, 11 device tests + 1 ignored, 105 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Setup-control and post-handoff waits are now bounded/fail-closed at the host session API seam. Remaining production work is still the real long-running broker data-plane over the received TUN fd, including policy/smoltcp/egress forwarding and one-session final drain.
