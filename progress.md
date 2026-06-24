@@ -4808,3 +4808,28 @@ Commit: 247825a
 
 ### Remaining blind spots
 - Host setup process orchestration now has a concrete production runner boundary and fail-closed evidence, but CI still uses an injected deterministic process/sender. Remaining gaps are privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production runtime/final-drain wiring after the host broker receives the real TUN fd.
+
+## 2026-06-23 — Fail closed host setup session accept races
+
+Commit: 3ddf329
+
+### Review
+- Round-140 correctness found a blocker/high issue: `run_host_setup_control_session_with_runner(...)` built and started the setup process before inferring `setup_control_socket_path`, so a default config could start plan-mode `foxproxsetup` and then block forever waiting for a connection.
+- Round-140 correctness and validation also found a high issue: the session blocked in `listener.accept()` before checking setup-process exit, so an early setup process failure could hang without fail-closed process-exit evidence.
+
+### Fix
+- `run_host_setup_control_session_with_runner(...)` now infers the listener's socket path before building `BwrapSetupPlan`, so the spawned command includes `--execute-setup` and `--setup-control-socket` even when the caller supplies a default config.
+- Added `HostSetupProcessRunner::poll_setup_process(...)` and implemented it with `Child::try_wait()` in `CommandHostSetupProcessRunner`.
+- Changed host setup session accept to use nonblocking `UnixListener::accept()`, poll setup-process exit while waiting, restore listener blocking mode on exit paths, and emit fail-closed `host_setup_process` evidence if the process exits before fd handoff.
+- Added a bounded accept wait and read timeout for the setup-control fd receive so missing/invalid handoff paths fail closed instead of hanging in the host session helper.
+- Added deterministic regression tests for missing pre-populated socket path and setup process exit before fd handoff.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features host_setup_session -- --nocapture` — passed, 4 filtered host setup session tests.
+- `cargo clippy -p foxprox-cli --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 24 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The host setup session now avoids the reviewed setup-control accept races and records fail-closed evidence for early setup-process exit, but CI still uses injected deterministic process/sender coverage. Remaining gaps are privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production runtime/final-drain wiring after the host broker receives the real TUN fd.

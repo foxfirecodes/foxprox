@@ -562,3 +562,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Model post-setup lifecycle before replacing the process
 
 - The `foxproxsetup` post-setup lifecycle can be tested by injecting a runner for close-setup-fds, drop-capability, and exec-target steps. The production runner may use `std::os::unix::process::CommandExt::exec`, which never returns on success, so deterministic tests should use a scripted runner that returns success and asserts structured audit evidence before the real process replacement boundary.
+
+## 2026-06-23 — Host setup-control sessions must poll process exit while accepting handoff
+
+When a host launcher starts `bwrap ... foxproxsetup --execute-setup`, do not block indefinitely on `UnixListener::accept()` before checking the child process. Infer the setup-control socket path before building/starting the plan, put the listener in nonblocking mode, poll child exit during the accept loop, and record fail-closed evidence if the process exits before SCM_RIGHTS handoff. Deterministic tests should cover both missing pre-populated socket path and pre-handoff process exit.
