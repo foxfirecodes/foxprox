@@ -15,6 +15,8 @@ pub struct NetworkSetupConfig {
     pub http_proxy_port: u16,
     pub socks_proxy_port: u16,
     pub setup_control_fd: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_control_socket_path: Option<String>,
 }
 
 impl NetworkSetupConfig {
@@ -29,6 +31,7 @@ impl NetworkSetupConfig {
             http_proxy_port: 3128,
             socks_proxy_port: 1080,
             setup_control_fd: None,
+            setup_control_socket_path: None,
         }
     }
 
@@ -173,6 +176,18 @@ impl SetupHelperPlan {
                 )
                 .with_evidence("setup_control_fd", fd.to_string()),
             );
+        } else if let Some(path) = &config.setup_control_socket_path {
+            steps.push(
+                SetupHelperStep::new(
+                    "handoff_tun_fd",
+                    vec![
+                        "connect-and-send-fd".to_string(),
+                        path.clone(),
+                        config.tun_name.clone(),
+                    ],
+                )
+                .with_evidence("setup_control_socket", path.clone()),
+            );
         }
         steps.extend([
             SetupHelperStep::new("close_setup_fds", vec!["close-setup-fds".to_string()])
@@ -304,6 +319,9 @@ impl BwrapSetupPlan {
         ];
         if let Some(fd) = config.setup_control_fd {
             setup_command.extend(["--setup-control-fd".to_string(), fd.to_string()]);
+        }
+        if let Some(path) = &config.setup_control_socket_path {
+            setup_command.extend(["--setup-control-socket".to_string(), path.clone()]);
         }
         setup_command.extend([
             "--drop-cap".to_string(),
@@ -497,6 +515,32 @@ mod tests {
             .setup_command
             .windows(2)
             .any(|w| w == ["--setup-control-fd", "9"]));
+    }
+
+    #[test]
+    fn setup_plan_can_use_socket_path_for_safe_control_handoff() {
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.setup_control_socket_path = Some("/run/foxprox/setup.sock".to_string());
+        let helper = SetupHelperPlan::new(config.clone(), &["true".to_string()]);
+        let handoff = helper
+            .steps
+            .iter()
+            .find(|step| step.name == "handoff_tun_fd")
+            .unwrap();
+        assert_eq!(
+            handoff.evidence["setup_control_socket"],
+            "/run/foxprox/setup.sock"
+        );
+        assert!(handoff
+            .command
+            .windows(2)
+            .any(|w| w == ["connect-and-send-fd", "/run/foxprox/setup.sock"]));
+
+        let bwrap = BwrapSetupPlan::new(config, &["true".to_string()]);
+        assert!(bwrap
+            .setup_command
+            .windows(2)
+            .any(|w| w == ["--setup-control-socket", "/run/foxprox/setup.sock"]));
     }
 
     #[test]

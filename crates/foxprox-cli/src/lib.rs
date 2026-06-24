@@ -52,13 +52,51 @@ pub fn run_foxproxsetup_handoff_with_ops<O: TunSetupDeviceOps>(
         Ok(invocation) => invocation,
         Err((code, detail)) => return error_output(code, detail),
     };
-    if config.setup_control_fd.is_none() {
+    if config.setup_control_fd.is_none() && config.setup_control_socket_path.is_none() {
         return error_output(
-            "setup_missing_control_fd",
-            "expected --setup-control-fd for TUN handoff execution".to_string(),
+            "setup_missing_control_channel",
+            "expected --setup-control-fd or --setup-control-socket for TUN handoff execution"
+                .to_string(),
         );
     }
 
+    run_foxproxsetup_handoff_with_config(config, target, control, ops)
+}
+
+#[cfg(unix)]
+pub fn run_foxproxsetup_handoff_connecting_with_ops<O: TunSetupDeviceOps>(
+    args: &[String],
+    ops: &mut O,
+) -> CliOutput {
+    let (config, target) = match parse_foxproxsetup_invocation(args) {
+        Ok(invocation) => invocation,
+        Err((code, detail)) => return error_output(code, detail),
+    };
+    let Some(path) = config.setup_control_socket_path.clone() else {
+        return error_output(
+            "setup_missing_control_socket",
+            "expected --setup-control-socket for safe TUN handoff execution".to_string(),
+        );
+    };
+    let control = match UnixStream::connect(&path) {
+        Ok(control) => control,
+        Err(error) => {
+            return error_output(
+                "setup_control_socket_connect_error",
+                format!("{path}: {error}"),
+            )
+        }
+    };
+    run_foxproxsetup_handoff_with_config(config, target, &control, ops)
+}
+
+#[cfg(unix)]
+fn run_foxproxsetup_handoff_with_config<O: TunSetupDeviceOps>(
+    config: NetworkSetupConfig,
+    target: Vec<String>,
+    control: &UnixStream,
+    ops: &mut O,
+) -> CliOutput {
     let report = execute_tun_setup_handoff(ops, control, &config);
     let audit_records = report.audit_records_with_summary(config.sandbox_id.clone());
     let exit_code = if report.status == TunSetupHandoffStatus::Complete {
@@ -89,6 +127,12 @@ pub fn run_foxproxsetup_linux_handoff_with_control(
 ) -> CliOutput {
     let mut ops = foxprox_device::LinuxTunSetupOps::new();
     run_foxproxsetup_handoff_with_ops(args, control, &mut ops)
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+pub fn run_foxproxsetup_linux_handoff_connecting(args: &[String]) -> CliOutput {
+    let mut ops = foxprox_device::LinuxTunSetupOps::new();
+    run_foxproxsetup_handoff_connecting_with_ops(args, &mut ops)
 }
 
 fn parse_foxproxsetup_invocation(
@@ -122,6 +166,7 @@ fn parse_setup_config(args: &[String]) -> Result<NetworkSetupConfig, String> {
     let mut http_proxy_port = None;
     let mut socks_proxy_port = None;
     let mut setup_control_fd = None;
+    let mut setup_control_socket_path = None;
     let mut index = 0usize;
     while index < args.len() {
         let flag = args[index].as_str();
@@ -140,6 +185,7 @@ fn parse_setup_config(args: &[String]) -> Result<NetworkSetupConfig, String> {
             "--setup-control-fd" => {
                 setup_control_fd = Some(value.parse().map_err(|_| "invalid setup control fd")?)
             }
+            "--setup-control-socket" => setup_control_socket_path = Some(value.clone()),
             "--drop-cap" if value == "CAP_NET_ADMIN" => {}
             other => return Err(format!("unsupported setup flag {other}")),
         }
@@ -155,6 +201,7 @@ fn parse_setup_config(args: &[String]) -> Result<NetworkSetupConfig, String> {
         http_proxy_port: http_proxy_port.ok_or("missing --http-proxy")?,
         socks_proxy_port: socks_proxy_port.ok_or("missing --socks-proxy")?,
         setup_control_fd,
+        setup_control_socket_path,
     })
 }
 
@@ -286,7 +333,7 @@ mod tests {
     #[cfg(unix)]
     use foxprox_device::{recv_tun_fd, send_tun_fd, TunFdHandoffReport};
     #[cfg(unix)]
-    use std::os::unix::net::UnixStream;
+    use std::os::unix::net::{UnixListener, UnixStream};
 
     fn setup_args_with_control_fd() -> Vec<String> {
         vec![
@@ -314,6 +361,23 @@ mod tests {
             "curl".to_string(),
             "http://example.com".to_string(),
         ]
+    }
+
+    #[cfg(unix)]
+    fn setup_args_with_control_socket(path: &std::path::Path) -> Vec<String> {
+        let mut args = setup_args_with_control_fd();
+        let control_flag = args
+            .iter()
+            .position(|arg| arg == "--setup-control-fd")
+            .unwrap();
+        args.splice(
+            control_flag..control_flag + 2,
+            [
+                "--setup-control-socket".to_string(),
+                path.to_string_lossy().to_string(),
+            ],
+        );
+        args
     }
 
     #[test]
@@ -536,6 +600,64 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn foxproxsetup_can_connect_to_safe_setup_control_socket_path() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-setup-control-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut ops = CliScriptedTunOps {
+            fail_configure: false,
+            fail_handoff: false,
+        };
+
+        let output = run_foxproxsetup_handoff_connecting_with_ops(
+            &setup_args_with_control_socket(&path),
+            &mut ops,
+        );
+        assert_eq!(output.exit_code, 0);
+        let (accepted, _) = listener.accept().unwrap();
+        let received = recv_tun_fd(&accepted, "foxprox0").unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(received.report.tun_name, "foxprox0");
+        let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
+        assert_eq!(value["setup"]["status"], "complete");
+        assert_eq!(value["audit"][2]["details"]["fd_source"], "scm_rights");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foxproxsetup_control_socket_connect_error_fails_closed_before_setup() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-missing-setup-control-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut ops = CliScriptedTunOps {
+            fail_configure: false,
+            fail_handoff: false,
+        };
+
+        let output = run_foxproxsetup_handoff_connecting_with_ops(
+            &setup_args_with_control_socket(&path),
+            &mut ops,
+        );
+
+        assert_eq!(output.exit_code, 1);
+        let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
+        assert_eq!(value["kind"], "broker_error");
+        assert_eq!(
+            value["details"]["error_codes"],
+            "setup_control_socket_connect_error"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn foxproxsetup_handoff_with_ops_fails_closed_before_handoff_on_configure_error() {
         let (control_tx, _control_rx) = UnixStream::pair().unwrap();
         let mut ops = CliScriptedTunOps {
@@ -574,7 +696,10 @@ mod tests {
         assert_eq!(output.exit_code, 1);
         let value: Value = serde_json::from_str(output.stdout.trim()).unwrap();
         assert_eq!(value["kind"], "broker_error");
-        assert_eq!(value["details"]["error_codes"], "setup_missing_control_fd");
+        assert_eq!(
+            value["details"]["error_codes"],
+            "setup_missing_control_channel"
+        );
     }
 
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]

@@ -550,3 +550,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Keep foxproxsetup handoff execution safe by injecting the control stream
 
 - The executable setup path can be advanced without raw-fd unsafe by exposing a `foxproxsetup` handoff runner that accepts an already-owned `UnixStream` plus injected TUN setup ops. This exercises parse → setup handoff → audit JSON with real SCM_RIGHTS in tests and can be backed by `LinuxTunSetupOps` in privileged integration tests. Reconstructing a `UnixStream` from an inherited integer fd remains a separate production wiring gap unless a safe ownership boundary is introduced.
+
+## 2026-06-23 — Prefer setup-control socket paths when avoiding raw-fd ownership
+
+- Linux `/proc/self/fd/<n>` cannot be relied on to duplicate Unix sockets (`ENXIO` in local checks), so safe production setup-control wiring should not assume procfs can convert an inherited integer fd into a `UnixStream`. A Unix socket path (`--setup-control-socket`) gives `foxproxsetup` a safe `UnixStream::connect` ownership boundary and still exercises SCM_RIGHTS handoff without local unsafe code. Inherited-fd support remains separate unless a safe crate/API owns the raw-fd conversion.

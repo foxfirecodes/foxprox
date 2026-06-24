@@ -71,6 +71,25 @@ impl BrokerRuntimeConfig {
                 "setup control fd must be a non-negative inherited descriptor",
             ));
         }
+        if self
+            .setup
+            .setup_control_socket_path
+            .as_deref()
+            .is_some_and(|path| path.trim().is_empty())
+        {
+            errors.push(RuntimeConfigError::new(
+                "setup_control_socket_empty",
+                "setup.setup_control_socket_path",
+                "setup control socket path must be non-empty when configured",
+            ));
+        }
+        if self.setup.setup_control_fd.is_some() && self.setup.setup_control_socket_path.is_some() {
+            errors.push(RuntimeConfigError::new(
+                "setup_control_ambiguous",
+                "setup.setup_control_fd",
+                "configure either an inherited setup control fd or a setup control socket path, not both",
+            ));
+        }
         if self.audit_capacity == 0 {
             errors.push(RuntimeConfigError::new(
                 "audit_capacity_zero",
@@ -237,6 +256,7 @@ mod tests {
         config.setup.http_proxy_port = 1080;
         config.setup.socks_proxy_port = 1080;
         config.setup.setup_control_fd = Some(-1);
+        config.setup.setup_control_socket_path = Some(" ".to_string());
         config.audit_capacity = 0;
         config.dns_upstream = "1.1.1.1:0".parse().unwrap();
         config.resource_limits.udp_max_active_flows = Some(0);
@@ -249,6 +269,8 @@ mod tests {
         assert!(codes.contains(&"mtu_too_small"));
         assert!(codes.contains(&"proxy_port_conflict"));
         assert!(codes.contains(&"setup_control_fd_negative"));
+        assert!(codes.contains(&"setup_control_socket_empty"));
+        assert!(codes.contains(&"setup_control_ambiguous"));
         assert!(codes.contains(&"audit_capacity_zero"));
         assert!(codes.contains(&"dns_upstream_port_zero"));
         assert!(codes.contains(&"udp_flow_limit_zero"));
