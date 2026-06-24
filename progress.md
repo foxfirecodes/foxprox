@@ -4516,7 +4516,7 @@ Commit: c96d3d5
 
 ## 2026-06-23 — Complete TUN setup handoff failure evidence
 
-Commit: d5f5f2c
+Commit: 0a88de3
 
 ### Review
 - Round-125 correctness and validation found no blocker/high issues. Reviewers confirmed `execute_tun_setup_handoff(...)` is ordered, fail-closed before handoff on configure failure, and accurately scoped as deterministic injected operations rather than real privileged TUN setup.
