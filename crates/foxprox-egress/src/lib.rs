@@ -4784,6 +4784,9 @@ mod tests {
                     )
                     .unwrap();
                 let lifecycle = std::rc::Rc::new(std::cell::RefCell::new(Some(combined_lifecycle)));
+                let setup_audit = std::rc::Rc::new(std::cell::RefCell::new(
+                    foxprox_core::BoundedAuditLedger::new(4),
+                ));
                 let live_dispatch_done = Arc::new(AtomicBool::new(false));
                 let wait_requested = Arc::new(AtomicBool::new(false));
                 let wait_notify = Arc::new(tokio::sync::Notify::new());
@@ -4806,6 +4809,7 @@ mod tests {
                         .unwrap();
                 }
                 let lifecycle_for_task = std::rc::Rc::clone(&lifecycle);
+                let setup_audit_for_task = std::rc::Rc::clone(&setup_audit);
                 let dispatch_done = live_dispatch_done.clone();
                 let wait_observed = wait_requested.clone();
                 let wait_notification = wait_notify.clone();
@@ -4863,6 +4867,10 @@ mod tests {
                             assert_eq!(handoff_audit.details["fd_source"], "scm_rights");
                             assert_eq!(handoff_audit.details["handoff_status"], "received");
                             assert_eq!(handoff_audit.details["tun_name"], "foxprox0");
+                            setup_audit_for_task
+                                .borrow_mut()
+                                .append(handoff_audit)
+                                .unwrap();
                             let packet_fd = std::os::unix::net::UnixStream::from(received_tun.fd);
                             packet_fd.set_nonblocking(true).unwrap();
                             let async_packet_fd = tokio::io::unix::AsyncFd::new(packet_fd).unwrap();
@@ -5026,12 +5034,17 @@ mod tests {
                     .unwrap();
                 let mut fan_in = RuntimeAuditFanIn::new("local-combined-runtime", 16);
                 fan_in
+                    .ingest("setup", setup_audit.borrow().records())
+                    .unwrap();
+                fan_in
                     .ingest("lifecycle", lifecycle.audit().records())
                     .unwrap();
                 let mut sink = JsonLineAuditSink::new(Vec::new());
                 let drain = fan_in.drain_to_sink(&mut sink).unwrap();
                 assert!(drain.drained_records >= 4);
                 let output = String::from_utf8(sink.into_inner()).unwrap();
+                assert!(output.contains("tun_configured"));
+                assert!(output.contains("\"fd_source\":\"scm_rights\""));
                 assert!(output.contains("runtime_readiness"));
                 assert!(output.contains("network_session_exit"));
                 assert!(output.contains("dns_listener:dns_accept_loop:cancelled"));

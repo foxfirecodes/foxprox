@@ -4467,3 +4467,25 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - The combined proof now includes safe setup-control fd handoff before async packet readiness, but it still does not create/configure a Linux TUN interface with `TUNSETIFF`, execute the real privileged setup helper, or run production wiring outside the deterministic test harness.
+
+## 2026-06-23 — Drain TUN handoff evidence in combined local runtime proof
+
+Commit: 5f90c57
+
+### Review
+- Round-123 correctness and validation found no blocker/high issues. The only note was that the next highest gap remains real privileged `/dev/net/tun` setup/TUNSETIFF, setup-helper execution, and production runtime wiring beyond the deterministic local proof.
+
+### Fix
+- Extended `async_local_scheduler_combines_live_io_smoltcp_and_final_drain` so setup-control SCM_RIGHTS `tun_configured` evidence is not only asserted before `AsyncFd` wrapping, but also appended to a setup audit ledger.
+- The final `RuntimeAuditFanIn` drain now ingests both the setup handoff ledger and lifecycle records, and the JSON sink assertions prove final drain output includes `tun_configured` and `fd_source=scm_rights` alongside runtime readiness, task cancellation, lifecycle exit, and cleanup evidence.
+- This narrows the final-drain gap for setup handoff evidence while keeping scope bounded to a deterministic UnixStream-backed fd in CI.
+
+### Commands run
+- `cargo test -p foxprox-egress async_local_scheduler_combines_live_io_smoltcp_and_final_drain --all-targets --all-features` — passed.
+- `cargo clippy -p foxprox-egress --all-targets --all-features -- -D warnings` — passed after fixing a test-only import warning.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 7 device tests, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Final drain now includes the safe setup-control handoff record, but the proof still does not create/configure a Linux TUN interface with `TUNSETIFF`, execute the real privileged setup helper, or run production runtime wiring outside the deterministic harness.
