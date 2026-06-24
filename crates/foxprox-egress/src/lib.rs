@@ -3475,6 +3475,26 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    struct ErrorReadFd(std::os::unix::net::UnixStream);
+
+    #[cfg(unix)]
+    impl std::os::fd::AsRawFd for ErrorReadFd {
+        fn as_raw_fd(&self) -> std::os::fd::RawFd {
+            std::os::fd::AsRawFd::as_raw_fd(&self.0)
+        }
+    }
+
+    #[cfg(unix)]
+    impl Read for &ErrorReadFd {
+        fn read(&mut self, _buf: &mut [u8]) -> IoResult<usize> {
+            Err(std::io::Error::new(
+                ErrorKind::BrokenPipe,
+                "deterministic packet read failure",
+            ))
+        }
+    }
+
     #[derive(Debug)]
     struct FailingAfterRecordsWriter {
         completed_records: usize,
@@ -4064,6 +4084,120 @@ mod tests {
         assert!(output.contains("tun_configured"));
         assert!(output.contains("host_setup_control_handoff"));
         assert!(output.contains("scm_rights"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_setup_packet_bridge_drains_when_packet_not_ready() {
+        let (tun_fd, _sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        tun_fd.set_nonblocking(true).unwrap();
+        let async_fd = tokio::io::unix::AsyncFd::new(tun_fd).unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let setup_records = vec![
+            AuditRecord::new(AuditKind::SetupPlanCreated, "s1"),
+            AuditRecord::new(AuditKind::TunConfigured, "s1").with_detail("fd_source", "scm_rights"),
+        ];
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+
+        let report = drain_setup_audits_and_read_packet_fd_once(
+            "host_setup_session",
+            &setup_records,
+            &async_fd,
+            &mut fan_in,
+            &mut sink,
+            AsyncRuntimePacketFdReadBounds {
+                max_packet_bytes: 64,
+                max_wait: Duration::from_millis(1),
+            },
+            &cancellation,
+        )
+        .await
+        .expect("setup audit drain succeeds without packet readiness");
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+
+        assert_eq!(report.setup_ingest.accepted_records, 2);
+        assert_eq!(
+            report.packet_readiness.status,
+            AsyncRuntimeIoReadinessStatus::TimedOut
+        );
+        assert!(report.packet_read.is_none());
+        assert_eq!(report.setup_drain.drained_records, 2);
+        assert!(output.contains("setup_plan_created"));
+        assert!(output.contains("tun_configured"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_setup_packet_bridge_surfaces_packet_read_failure() {
+        let (tun_fd, mut sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        tun_fd.set_nonblocking(true).unwrap();
+        let async_fd = tokio::io::unix::AsyncFd::new(ErrorReadFd(tun_fd)).unwrap();
+        sandbox_peer.write_all(b"read-failure-trigger").unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let setup_records = vec![AuditRecord::new(AuditKind::SetupPlanCreated, "s1")];
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+
+        let error = drain_setup_audits_and_read_packet_fd_once(
+            "host_setup_session",
+            &setup_records,
+            &async_fd,
+            &mut fan_in,
+            &mut sink,
+            AsyncRuntimePacketFdReadBounds {
+                max_packet_bytes: 64,
+                max_wait: Duration::from_secs(1),
+            },
+            &cancellation,
+        )
+        .await
+        .expect_err("packet read failure is surfaced");
+
+        match error {
+            AsyncRuntimeSetupPacketDrainError::PacketRead(error) => {
+                assert_eq!(error.kind(), ErrorKind::BrokenPipe);
+            }
+            other => panic!("unexpected setup packet bridge error: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_setup_packet_bridge_surfaces_drain_failure() {
+        let (tun_fd, mut sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        tun_fd.set_nonblocking(true).unwrap();
+        let async_fd = tokio::io::unix::AsyncFd::new(tun_fd).unwrap();
+        sandbox_peer.write_all(b"runtime-handoff-packet").unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let setup_records = vec![AuditRecord::new(AuditKind::SetupPlanCreated, "s1")];
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+        let mut sink = JsonLineAuditSink::new(FailingWriter);
+
+        let error = drain_setup_audits_and_read_packet_fd_once(
+            "host_setup_session",
+            &setup_records,
+            &async_fd,
+            &mut fan_in,
+            &mut sink,
+            AsyncRuntimePacketFdReadBounds {
+                max_packet_bytes: 64,
+                max_wait: Duration::from_secs(1),
+            },
+            &cancellation,
+        )
+        .await
+        .expect_err("sink drain failure is surfaced");
+
+        assert!(matches!(
+            error,
+            AsyncRuntimeSetupPacketDrainError::Drain(
+                RuntimeAuditDrainError::SinkWriteFailed { .. }
+            )
+        ));
     }
 
     #[cfg(unix)]

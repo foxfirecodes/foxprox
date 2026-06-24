@@ -4943,3 +4943,26 @@ Commit: 8969bfb
 
 ### Remaining blind spots
 - Setup audit fan-in and packet-fd readiness/read can now be driven together by a production-style async helper after fd receipt, but privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and long-running production packet-loop/final-drain wiring remain open.
+
+## 2026-06-24 — Cover setup packet bridge negative paths
+
+Commit: 3b0a6ba
+
+### Review
+- Round-146 correctness and validation found no blocker/high issues. Reviewers confirmed `drain_setup_audits_and_read_packet_fd_once(...)` ingests setup evidence with source-local sequencing, waits on an existing `AsyncFd`, reads one packet through the TUN ready-task path only when ready, drains setup evidence to `JsonLineAuditSink`, and remains scoped as a production seam after fd receipt rather than privileged bwrap/real TUN E2E.
+- The noted helper-specific gap was direct negative-path coverage for packet-not-ready, packet-read failure, and drain-failure paths.
+
+### Fix
+- Added deterministic coverage proving setup evidence still drains when the packet fd is not ready and no packet read is attempted.
+- Added deterministic coverage proving packet read I/O errors are surfaced as `AsyncRuntimeSetupPacketDrainError::PacketRead`.
+- Added deterministic coverage proving sink failures are surfaced as `AsyncRuntimeSetupPacketDrainError::Drain(RuntimeAuditDrainError::SinkWriteFailed { .. })`.
+
+### Commands run
+- `cargo test -p foxprox-egress --all-targets --all-features async_runtime_setup_packet_bridge -- --nocapture` — passed, 3 filtered setup packet bridge tests.
+- `cargo clippy -p foxprox-egress --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 29 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 103 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The setup-audit plus packet-fd helper now covers success and key fail-closed local paths. Remaining gaps are still privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and long-running production packet-loop/final-drain wiring.
