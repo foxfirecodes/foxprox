@@ -4879,7 +4879,7 @@ Commit: 06a93fd
 
 ## 2026-06-23 — Drain host setup session audits through fan-in
 
-Commit: 0604527
+Commit: 56e02dc
 
 ### Review
 - Round-143 correctness and validation found no blocker/high issues. Reviewers confirmed the no-fd timeout test no longer relies on a fixed sleep, validation passed, and the remaining highest gap is privileged bwrap/real TUN E2E plus production runtime/final-drain wiring.
