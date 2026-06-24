@@ -4446,3 +4446,24 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ### Remaining blind spots
 - Direct open evidence is now scoped accurately and no longer claims TUN configuration. Remaining production gap is still privileged setup/TUNSETIFF, real setup-helper execution and fd handoff, async wrapping of the received TUN fd, and integration into the combined Tokio/LocalSet runtime loop with shutdown final drain.
+
+## 2026-06-23 — Feed SCM_RIGHTS TUN handoff into combined local runtime proof
+
+### Review
+- Round-122 correctness and validation found no blocker/high issues. Reviewers confirmed direct fd-open evidence is now scoped separately from SCM_RIGHTS configured handoff and the next gap remains privileged setup/TUNSETIFF plus production runtime wiring.
+
+### Fix
+- Added `foxprox-device` as a dev-dependency of `foxprox-egress`.
+- Updated `async_local_scheduler_combines_live_io_smoltcp_and_final_drain` so the packet-fd readiness path now receives its TUN-side fd through the safe SCM_RIGHTS setup-control helper before wrapping it in Tokio `AsyncFd`.
+- The combined local runtime proof now validates `tun_configured` handoff evidence (`fd_source=scm_rights`, `handoff_status=received`, `tun_name=foxprox0`) before using the received fd for packet readiness/read dispatch.
+- This narrows the previous packet-fd stand-in: the fd is still a deterministic UnixStream pair for CI, but the ownership path now exercises the same safe handoff boundary the setup helper will use for a real TUN fd.
+
+### Commands run
+- `cargo test -p foxprox-egress async_local_scheduler_combines_live_io_smoltcp_and_final_drain --all-targets --all-features` — passed.
+- `cargo clippy -p foxprox-egress --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 7 device tests, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The combined proof now includes safe setup-control fd handoff before async packet readiness, but it still does not create/configure a Linux TUN interface with `TUNSETIFF`, execute the real privileged setup helper, or run production wiring outside the deterministic test harness.

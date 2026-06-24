@@ -4848,8 +4848,22 @@ mod tests {
                             .await;
                             let tcp_client_addr = client.await.unwrap();
 
-                            let (packet_fd, mut sandbox_peer) =
+                            let (control_tx, control_rx) =
                                 std::os::unix::net::UnixStream::pair().unwrap();
+                            let (setup_tun_fd, mut sandbox_peer) =
+                                std::os::unix::net::UnixStream::pair().unwrap();
+                            foxprox_device::send_tun_fd(&control_tx, "foxprox0", &setup_tun_fd)
+                                .unwrap();
+                            drop(setup_tun_fd);
+                            let received_tun =
+                                foxprox_device::recv_tun_fd(&control_rx, "foxprox0").unwrap();
+                            let handoff_audit =
+                                received_tun.report.audit_record("local-combined-runtime");
+                            assert_eq!(handoff_audit.kind, AuditKind::TunConfigured);
+                            assert_eq!(handoff_audit.details["fd_source"], "scm_rights");
+                            assert_eq!(handoff_audit.details["handoff_status"], "received");
+                            assert_eq!(handoff_audit.details["tun_name"], "foxprox0");
+                            let packet_fd = std::os::unix::net::UnixStream::from(received_tun.fd);
                             packet_fd.set_nonblocking(true).unwrap();
                             let async_packet_fd = tokio::io::unix::AsyncFd::new(packet_fd).unwrap();
                             sandbox_peer.write_all(b"local-combined-tun").unwrap();
