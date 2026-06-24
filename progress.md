@@ -4763,7 +4763,7 @@ Commit: 7e7ec11
 
 ## 2026-06-23 — Drain host handoff evidence in local runtime
 
-Commit: 09a9bf7
+Commit: 7fe14cd
 
 ### Review
 - Round-138 correctness and validation found no blocker/high issues. Reviewers confirmed host setup-control fd receipt retains `OwnedFd` ownership and structured audit evidence, while CI still uses a deterministic sender rather than privileged bwrap/foxproxsetup E2E.
