@@ -4538,7 +4538,7 @@ Commit: 0a88de3
 
 ## 2026-06-23 — Cover TUN setup open failure evidence
 
-Commit: a5c861a
+Commit: c51e9e2
 
 ### Review
 - Round-127 correctness and validation found no blocker/high issues. Reviewers confirmed the Round-126 progress hash issue was fixed and that the remaining highest gap is real privileged Linux TUN setup/configuration plus real setup-helper execution and production runtime wiring.
