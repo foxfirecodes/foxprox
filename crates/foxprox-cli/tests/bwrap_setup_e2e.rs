@@ -74,6 +74,31 @@ impl HostSetupProcessRunner for RewritingBwrapRunner {
             success: status.success(),
         })
     }
+
+    fn wait_setup_process_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<HostSetupProcessExit>, String> {
+        let started = std::time::Instant::now();
+        loop {
+            if let Some(exit) = self.poll_setup_process()? {
+                return Ok(Some(exit));
+            }
+            if started.elapsed() >= timeout {
+                let child = self
+                    .child
+                    .as_mut()
+                    .ok_or_else(|| "setup process was not started".to_string())?;
+                let _ = child.kill();
+                let status = child.wait().map_err(|error| error.to_string())?;
+                return Err(format!(
+                    "timed out waiting for setup process exit after fd handoff; terminated with code {:?}",
+                    status.code()
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 #[test]
@@ -160,11 +185,18 @@ fn bwrap_foxproxsetup_creates_tun_hands_fd_drops_cap_and_execs_target() {
             .recv_timeout(remaining)
             .expect("target UDP send produces a matching TUN packet")
             .expect("TUN packet read succeeds");
-        let is_target_packet = packet.len() >= 28
+        let ipv4_header_len = packet
+            .first()
+            .map(|first| ((first & 0x0f) as usize) * 4)
+            .unwrap_or(0);
+        let is_target_packet = packet.len() >= 20
+            && packet.len() >= ipv4_header_len + 8
             && packet[0] >> 4 == 4
             && packet[9] == 17
             && packet[12..16] == [10, 0, 2, 15]
             && packet[16..20] == [198, 51, 100, 1]
+            && u16::from_be_bytes([packet[ipv4_header_len + 2], packet[ipv4_header_len + 3]])
+                == 443
             && packet
                 .windows(b"foxprox-bwrap-e2e".len())
                 .any(|window| window == b"foxprox-bwrap-e2e");
@@ -179,6 +211,11 @@ fn bwrap_foxproxsetup_creates_tun_hands_fd_drops_cap_and_execs_target() {
     assert_eq!(packet[9], 17, "expected UDP packet: {packet:02x?}");
     assert_eq!(&packet[12..16], &[10, 0, 2, 15]);
     assert_eq!(&packet[16..20], &[198, 51, 100, 1]);
+    let ipv4_header_len = ((packet[0] & 0x0f) as usize) * 4;
+    assert_eq!(
+        u16::from_be_bytes([packet[ipv4_header_len + 2], packet[ipv4_header_len + 3]]),
+        443
+    );
     assert!(packet
         .windows(b"foxprox-bwrap-e2e".len())
         .any(|window| window == b"foxprox-bwrap-e2e"));

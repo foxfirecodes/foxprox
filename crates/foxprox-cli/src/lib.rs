@@ -284,6 +284,12 @@ pub trait HostSetupProcessRunner {
         Ok(None)
     }
     fn wait_setup_process(&mut self) -> Result<HostSetupProcessExit, String>;
+    fn wait_setup_process_with_timeout(
+        &mut self,
+        _timeout: Duration,
+    ) -> Result<Option<HostSetupProcessExit>, String> {
+        self.wait_setup_process().map(Some)
+    }
 }
 
 #[cfg(unix)]
@@ -350,6 +356,31 @@ impl HostSetupProcessRunner for CommandHostSetupProcessRunner {
             success: status.success(),
         })
     }
+
+    fn wait_setup_process_with_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<HostSetupProcessExit>, String> {
+        let started = Instant::now();
+        loop {
+            if let Some(exit) = self.poll_setup_process()? {
+                return Ok(Some(exit));
+            }
+            if started.elapsed() >= timeout {
+                let child = self
+                    .child
+                    .as_mut()
+                    .ok_or_else(|| "setup process was not started".to_string())?;
+                let _ = child.kill();
+                let status = child.wait().map_err(|error| error.to_string())?;
+                return Err(format!(
+                    "timed out waiting for setup process exit after fd handoff; terminated with code {:?}",
+                    status.code()
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -414,6 +445,7 @@ pub fn run_host_setup_control_session_with_runner<R: HostSetupProcessRunner>(
         runner,
         Duration::from_secs(5),
         Duration::from_secs(5),
+        Duration::from_secs(5),
     )
 }
 
@@ -425,6 +457,7 @@ fn run_host_setup_control_session_with_runner_and_timeouts<R: HostSetupProcessRu
     runner: &mut R,
     accept_timeout: Duration,
     read_timeout: Duration,
+    process_exit_timeout: Duration,
 ) -> HostSetupSessionReport {
     if config.setup_control_socket_path.is_none() {
         config.setup_control_socket_path = listener
@@ -618,7 +651,7 @@ fn run_host_setup_control_session_with_runner_and_timeouts<R: HostSetupProcessRu
     };
 
     let process_exit = if handoff.status == HostSetupControlHandoffStatus::Complete {
-        runner.wait_setup_process().map(Some)
+        runner.wait_setup_process_with_timeout(process_exit_timeout)
     } else {
         runner.poll_setup_process()
     };
@@ -1909,6 +1942,85 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn host_setup_session_fails_closed_on_process_exit_timeout_after_handoff() {
+        struct TimeoutAfterHandoffRunner {
+            tun_fd: Option<UnixStream>,
+            sender: Option<std::thread::JoinHandle<()>>,
+        }
+
+        impl HostSetupProcessRunner for TimeoutAfterHandoffRunner {
+            fn start_setup_process(&mut self, plan: &BwrapSetupPlan) -> Result<(), String> {
+                let path = plan
+                    .config
+                    .setup_control_socket_path
+                    .clone()
+                    .ok_or_else(|| "missing setup control socket path".to_string())?;
+                let tun_fd = self
+                    .tun_fd
+                    .take()
+                    .ok_or_else(|| "missing scripted tun fd".to_string())?;
+                let tun_name = plan.config.tun_name.clone();
+                self.sender = Some(std::thread::spawn(move || {
+                    let control = UnixStream::connect(path).unwrap();
+                    send_tun_fd(&control, &tun_name, &tun_fd).unwrap();
+                }));
+                Ok(())
+            }
+
+            fn wait_setup_process(&mut self) -> Result<HostSetupProcessExit, String> {
+                panic!("bounded host setup session should not call unbounded wait")
+            }
+
+            fn wait_setup_process_with_timeout(
+                &mut self,
+                _timeout: Duration,
+            ) -> Result<Option<HostSetupProcessExit>, String> {
+                if let Some(sender) = self.sender.take() {
+                    sender.join().unwrap();
+                }
+                Err("timed out waiting for setup process exit after fd handoff".to_string())
+            }
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-host-session-process-timeout-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.setup_control_socket_path = Some(path.to_string_lossy().to_string());
+        let (tun_fd, _sandbox_peer) = UnixStream::pair().unwrap();
+        let mut runner = TimeoutAfterHandoffRunner {
+            tun_fd: Some(tun_fd),
+            sender: None,
+        };
+
+        let report = run_host_setup_control_session_with_runner_and_timeouts(
+            &listener,
+            config,
+            &["sleep".to_string(), "forever".to_string()],
+            &mut runner,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        );
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(report.status, HostSetupControlHandoffStatus::Failed);
+        assert!(report.handoff.received.is_some());
+        assert!(report.process_exit.is_none());
+        let audit = report.audit_records.last().unwrap();
+        assert_eq!(audit.kind, AuditKind::BrokerError);
+        assert_eq!(audit.decision, Some(Decision::FailClosed));
+        assert_eq!(audit.details["setup_phase"], "host_setup_process");
+        assert_eq!(audit.details["setup_step"], "wait_setup_process");
+        assert!(audit.details["setup_error"].contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn host_setup_session_fails_closed_on_nonzero_setup_process_exit() {
         let path = std::env::temp_dir().join(format!(
             "foxprox-host-session-fail-{}-{}.sock",
@@ -2072,6 +2184,7 @@ mod tests {
             &mut runner,
             Duration::from_millis(10),
             Duration::from_millis(10),
+            Duration::from_millis(10),
         );
         let _ = std::fs::remove_file(&path);
 
@@ -2118,6 +2231,7 @@ mod tests {
             &["true".to_string()],
             &mut runner,
             Duration::from_secs(1),
+            Duration::from_millis(10),
             Duration::from_millis(10),
         );
         let _ = runner.wait_setup_process();
