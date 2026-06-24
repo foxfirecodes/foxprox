@@ -4992,7 +4992,7 @@ Commit: c64d1ee
 
 ## 2026-06-24 — Final-drain setup packet loop read failures
 
-Commit: 68a42a8
+Commit: 099e82a
 
 ### Review
 - Round-148 correctness found a high issue: `run_setup_packet_fd_loop_until_cancelled(...)` propagated packet-read I/O errors before reaching the final `RuntimeAuditFanIn` drain, contradicting the loop's final-drain guarantee after setup evidence had been ingested.
