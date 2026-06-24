@@ -4858,7 +4858,7 @@ Commit: 1ca912e
 
 ## 2026-06-23 — Stabilize no-fd handoff timeout test
 
-Commit: 38c028a
+Commit: 06a93fd
 
 ### Review
 - Round-142 correctness and validation found no blocker/high issues. Reviewers confirmed production timeout bounds, deterministic timeout tests, progress hash, and honest scope.
