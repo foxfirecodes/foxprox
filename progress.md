@@ -4560,7 +4560,7 @@ Commit: c51e9e2
 
 ## 2026-06-23 — Add tun-rs Linux setup implementation
 
-Commit: f74324c
+Commit: e6638d2
 
 ### Decision
 - User explicitly chose to continue with actual implementation rather than harness-only work. The new path uses the existing setup handoff harness to validate real functionality.
