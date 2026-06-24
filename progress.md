@@ -4489,3 +4489,27 @@ Commit: 68d6282
 
 ### Remaining blind spots
 - Final drain now includes the safe setup-control handoff record, but the proof still does not create/configure a Linux TUN interface with `TUNSETIFF`, execute the real privileged setup helper, or run production runtime wiring outside the deterministic harness.
+
+## 2026-06-23 — Add setup-helper TUN handoff executor evidence
+
+Commit: 52f59af
+
+### Review
+- Round-124 correctness and validation found no blocker/high issues. Reviewers confirmed the combined local runtime proof now drains setup-control SCM_RIGHTS handoff evidence through `RuntimeAuditFanIn` and that the next highest gap is real privileged `/dev/net/tun` creation/configuration with `TUNSETIFF`, setup-helper execution, and production runtime wiring beyond the deterministic harness.
+
+### Fix
+- Added a Unix-only `TunSetupDeviceOps` abstraction in `foxprox-device` for the setup-helper sequence: open TUN fd, configure the TUN, and send the fd over setup control.
+- Added `execute_tun_setup_handoff(...)`, which runs that sequence, records ordered open/configure/handoff evidence, stops before handoff on configure failure, and emits a setup summary audit with `setup_status`, `completed_steps`, and `failed_step` details.
+- Added tests proving:
+  - successful setup execution records `tun_fd_opened`, `tun_configured` configure evidence, SCM_RIGHTS `tun_configured` handoff evidence, and hands off a packet-capable fd;
+  - configure failure is fail-closed, records only completed pre-failure steps, and does not send the fd.
+
+### Commands run
+- `cargo test -p foxprox-device --all-targets --all-features` — passed, 9 device tests.
+- `cargo clippy -p foxprox-device --all-targets --all-features -- -D warnings` — passed after boxing the configure-error audit record to satisfy `clippy::result-large-err`.
+- `cargo test --all-targets --all-features` — passed, including 160 core tests, 9 device tests, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The setup-helper sequence is now executable through injected operations with structured success/failure evidence, but the real privileged Linux implementation is still missing: actual `TUNSETIFF`, route/DNS/proxy configuration commands, real helper process execution, and production runtime wiring outside the deterministic harness.

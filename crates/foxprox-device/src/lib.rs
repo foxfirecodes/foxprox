@@ -7,14 +7,15 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    AuditKind, AuditRecord, Decision, DenialReason, DeviceIoError, Frontend, PacketDevice,
+    AuditKind, AuditRecord, Decision, DenialReason, DeviceIoError, Frontend, NetworkSetupConfig,
+    PacketDevice,
 };
 use std::io::{Read, Write};
 
 #[cfg(unix)]
 use std::fs::{File, OpenOptions};
 #[cfg(unix)]
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 #[cfg(unix)]
@@ -235,6 +236,143 @@ impl ReceivedTunFd {
             self.report,
         )
     }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TunSetupHandoffStatus {
+    Complete,
+    Failed,
+}
+
+#[cfg(unix)]
+impl TunSetupHandoffStatus {
+    fn as_detail(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug)]
+pub struct TunSetupHandoffReport {
+    pub status: TunSetupHandoffStatus,
+    pub completed_steps: Vec<&'static str>,
+    pub failed_step: Option<&'static str>,
+    pub open_report: Option<TunFdHandoffReport>,
+    pub configure_record: Option<AuditRecord>,
+    pub handoff_report: Option<TunFdHandoffReport>,
+    pub audit_records: Vec<AuditRecord>,
+}
+
+#[cfg(unix)]
+impl TunSetupHandoffReport {
+    fn new() -> Self {
+        Self {
+            status: TunSetupHandoffStatus::Complete,
+            completed_steps: Vec::new(),
+            failed_step: None,
+            open_report: None,
+            configure_record: None,
+            handoff_report: None,
+            audit_records: Vec::new(),
+        }
+    }
+
+    fn fail(mut self, failed_step: &'static str, audit: AuditRecord) -> Self {
+        self.status = TunSetupHandoffStatus::Failed;
+        self.failed_step = Some(failed_step);
+        self.audit_records.push(audit);
+        self
+    }
+
+    pub fn summary_audit(&self, sandbox_id: impl Into<String>) -> AuditRecord {
+        let mut record = if self.status == TunSetupHandoffStatus::Failed {
+            AuditRecord::new(AuditKind::BrokerError, sandbox_id.into())
+                .with_frontend(Frontend::Setup)
+                .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+        } else {
+            AuditRecord::new(AuditKind::TunConfigured, sandbox_id.into())
+                .with_frontend(Frontend::Setup)
+                .with_decision(Decision::Allow, None)
+        }
+        .with_detail("setup_status", self.status.as_detail())
+        .with_detail("completed_steps", self.completed_steps.join(","));
+        if let Some(step) = self.failed_step {
+            record = record.with_detail("failed_step", step);
+        }
+        record
+    }
+}
+
+#[cfg(unix)]
+pub trait TunSetupDeviceOps {
+    type TunFd: AsFd;
+
+    fn open_tun(
+        &mut self,
+        config: &NetworkSetupConfig,
+    ) -> Result<(Self::TunFd, TunFdHandoffReport), TunFdHandoffReport>;
+
+    fn configure_tun(
+        &mut self,
+        config: &NetworkSetupConfig,
+        fd: &Self::TunFd,
+    ) -> Result<AuditRecord, Box<AuditRecord>>;
+
+    fn send_tun_fd(
+        &mut self,
+        control: &UnixStream,
+        config: &NetworkSetupConfig,
+        fd: &Self::TunFd,
+    ) -> Result<TunFdHandoffReport, TunFdHandoffReport>;
+}
+
+#[cfg(unix)]
+pub fn execute_tun_setup_handoff<O: TunSetupDeviceOps>(
+    ops: &mut O,
+    control: &UnixStream,
+    config: &NetworkSetupConfig,
+) -> TunSetupHandoffReport {
+    let mut report = TunSetupHandoffReport::new();
+    let (tun_fd, open_report) = match ops.open_tun(config) {
+        Ok(result) => result,
+        Err(open_report) => {
+            let audit = open_report.audit_record(config.sandbox_id.clone());
+            report.open_report = Some(open_report);
+            return report.fail("open_tun", audit);
+        }
+    };
+    report
+        .audit_records
+        .push(open_report.audit_record(config.sandbox_id.clone()));
+    report.open_report = Some(open_report);
+    report.completed_steps.push("open_tun");
+
+    let configure_record = match ops.configure_tun(config, &tun_fd) {
+        Ok(record) => record,
+        Err(record) => return report.fail("configure_tun", *record),
+    };
+    report.audit_records.push(configure_record.clone());
+    report.configure_record = Some(configure_record);
+    report.completed_steps.push("configure_tun");
+
+    let handoff_report = match ops.send_tun_fd(control, config, &tun_fd) {
+        Ok(report) => report,
+        Err(handoff_report) => {
+            let audit = handoff_report.audit_record(config.sandbox_id.clone());
+            report.handoff_report = Some(handoff_report);
+            return report.fail("handoff_tun_fd", audit);
+        }
+    };
+    report
+        .audit_records
+        .push(handoff_report.audit_record(config.sandbox_id.clone()));
+    report.handoff_report = Some(handoff_report);
+    report.completed_steps.push("handoff_tun_fd");
+    report
 }
 
 #[cfg(unix)]
@@ -546,6 +684,145 @@ mod tests {
         assert_eq!(audit.decision, Some(Decision::FailClosed));
         assert_eq!(audit.details["fd_source"], "scm_rights");
         assert_eq!(audit.details["handoff_error"], "unexpected_payload");
+    }
+
+    #[cfg(unix)]
+    #[derive(Debug)]
+    struct ScriptedTunSetupOps {
+        tun_fd: Option<std::os::unix::net::UnixStream>,
+        fail_configure: bool,
+        fail_handoff: bool,
+    }
+
+    #[cfg(unix)]
+    impl TunSetupDeviceOps for ScriptedTunSetupOps {
+        type TunFd = std::os::unix::net::UnixStream;
+
+        fn open_tun(
+            &mut self,
+            config: &NetworkSetupConfig,
+        ) -> Result<(Self::TunFd, TunFdHandoffReport), TunFdHandoffReport> {
+            let fd = self.tun_fd.take().unwrap();
+            Ok((
+                fd,
+                TunFdHandoffReport::for_opened_device("/dev/net/tun", &config.tun_name),
+            ))
+        }
+
+        fn configure_tun(
+            &mut self,
+            config: &NetworkSetupConfig,
+            _fd: &Self::TunFd,
+        ) -> Result<AuditRecord, Box<AuditRecord>> {
+            let record = if self.fail_configure {
+                AuditRecord::new(AuditKind::BrokerError, config.sandbox_id.clone())
+                    .with_frontend(Frontend::Setup)
+                    .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+                    .with_detail("setup_step", "configure_tun")
+                    .with_detail("tun_name", config.tun_name.clone())
+                    .with_detail("configure_error", "scripted")
+            } else {
+                AuditRecord::new(AuditKind::TunConfigured, config.sandbox_id.clone())
+                    .with_frontend(Frontend::Setup)
+                    .with_decision(Decision::Allow, None)
+                    .with_detail("setup_step", "configure_tun")
+                    .with_detail("tun_name", config.tun_name.clone())
+                    .with_detail("mtu", config.mtu.to_string())
+            };
+            if self.fail_configure {
+                Err(Box::new(record))
+            } else {
+                Ok(record)
+            }
+        }
+
+        fn send_tun_fd(
+            &mut self,
+            control: &std::os::unix::net::UnixStream,
+            config: &NetworkSetupConfig,
+            fd: &Self::TunFd,
+        ) -> Result<TunFdHandoffReport, TunFdHandoffReport> {
+            if self.fail_handoff {
+                return Err(TunFdHandoffReport::failed(
+                    &config.tun_name,
+                    "",
+                    0,
+                    TunFdHandoffErrorKind::SendFailed,
+                ));
+            }
+            send_tun_fd(control, &config.tun_name, fd)
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tun_setup_handoff_executor_orders_open_configure_and_handoff_evidence() {
+        let config = NetworkSetupConfig::alpha_default("s1");
+        let (control_tx, control_rx) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (tun_fd, mut sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut ops = ScriptedTunSetupOps {
+            tun_fd: Some(tun_fd),
+            fail_configure: false,
+            fail_handoff: false,
+        };
+
+        let report = execute_tun_setup_handoff(&mut ops, &control_tx, &config);
+        assert_eq!(report.status, TunSetupHandoffStatus::Complete);
+        assert_eq!(
+            report.completed_steps,
+            vec!["open_tun", "configure_tun", "handoff_tun_fd"]
+        );
+        assert_eq!(report.failed_step, None);
+        assert_eq!(report.audit_records[0].kind, AuditKind::TunFdOpened);
+        assert_eq!(report.audit_records[1].kind, AuditKind::TunConfigured);
+        assert_eq!(
+            report.audit_records[1].details["setup_step"],
+            "configure_tun"
+        );
+        assert_eq!(report.audit_records[2].kind, AuditKind::TunConfigured);
+        assert_eq!(report.audit_records[2].details["fd_source"], "scm_rights");
+        let summary = report.summary_audit("s1");
+        assert_eq!(summary.kind, AuditKind::TunConfigured);
+        assert_eq!(summary.details["setup_status"], "complete");
+
+        let received = recv_tun_fd(&control_rx, "foxprox0").unwrap();
+        let received_tun = std::os::unix::net::UnixStream::from(received.fd);
+        let mut device = TunIoPacketDevice::new(received_tun, config.mtu as usize);
+        sandbox_peer.write_all(b"setup-handoff-packet").unwrap();
+        assert_eq!(
+            device.read_packet().unwrap(),
+            Some(b"setup-handoff-packet".to_vec())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tun_setup_handoff_executor_fails_closed_before_handoff_on_configure_error() {
+        let config = NetworkSetupConfig::alpha_default("s1");
+        let (control_tx, _control_rx) = std::os::unix::net::UnixStream::pair().unwrap();
+        let (tun_fd, _sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let mut ops = ScriptedTunSetupOps {
+            tun_fd: Some(tun_fd),
+            fail_configure: true,
+            fail_handoff: false,
+        };
+
+        let report = execute_tun_setup_handoff(&mut ops, &control_tx, &config);
+        assert_eq!(report.status, TunSetupHandoffStatus::Failed);
+        assert_eq!(report.completed_steps, vec!["open_tun"]);
+        assert_eq!(report.failed_step, Some("configure_tun"));
+        assert!(report.handoff_report.is_none());
+        assert_eq!(report.audit_records[0].kind, AuditKind::TunFdOpened);
+        assert_eq!(report.audit_records[1].kind, AuditKind::BrokerError);
+        assert_eq!(report.audit_records[1].decision, Some(Decision::FailClosed));
+        assert_eq!(
+            report.audit_records[1].details["setup_step"],
+            "configure_tun"
+        );
+        let summary = report.summary_audit("s1");
+        assert_eq!(summary.kind, AuditKind::BrokerError);
+        assert_eq!(summary.details["setup_status"], "failed");
+        assert_eq!(summary.details["failed_step"], "configure_tun");
     }
 
     #[cfg(unix)]
