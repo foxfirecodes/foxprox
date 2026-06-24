@@ -169,6 +169,7 @@ name = "foxprox-cli"
 version = "0.1.0"
 dependencies = [
  "foxprox-core",
+ "foxprox-device",
  "pretty_assertions",
  "serde_json",
 ]

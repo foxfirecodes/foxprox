@@ -546,3 +546,7 @@ Policy allow and lifecycle creation are not enough when a host egress operation 
 ## 2026-06-23 — Use tun-rs for real Linux TUN setup without local unsafe
 
 - `tun-rs` exposes a safe public `DeviceBuilder` and `SyncDevice: AsFd` on Unix. This lets foxprox implement a real Linux TUN setup operation under `#![forbid(unsafe_code)]` while still using the existing SCM_RIGHTS handoff helper. Privileged execution still requires CAP_NET_ADMIN and `/dev/net/tun`, so runtime tests should be ignored/privilege-gated unless the environment explicitly supports them.
+
+## 2026-06-23 — Keep foxproxsetup handoff execution safe by injecting the control stream
+
+- The executable setup path can be advanced without raw-fd unsafe by exposing a `foxproxsetup` handoff runner that accepts an already-owned `UnixStream` plus injected TUN setup ops. This exercises parse → setup handoff → audit JSON with real SCM_RIGHTS in tests and can be backed by `LinuxTunSetupOps` in privileged integration tests. Reconstructing a `UnixStream` from an inherited integer fd remains a separate production wiring gap unless a safe ownership boundary is introduced.

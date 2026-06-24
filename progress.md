@@ -4585,3 +4585,29 @@ Commit: e6638d2
 
 ### Remaining blind spots
 - Actual Linux TUN create/configure/handoff now has a concrete implementation and an ignored privileged integration test, but unprivileged CI only compiles it. Remaining production gaps are route/DNS/proxy setup commands, real `foxproxsetup` process execution around this implementation, and production runtime wiring/final drain outside deterministic harnesses.
+
+## 2026-06-23 — Wire foxproxsetup handoff execution path
+
+Commit: 2ff18ea
+
+### Review
+- Round-131 correctness and validation found no blocker/high issues. Reviewers confirmed the Round-130 stale progress hash was fixed: the tun-rs Linux setup implementation section now records `Commit: e6638d2`, and the follow-up `141e469` only corrected that ledger entry.
+
+### Fix
+- Added a Unix `foxproxsetup` handoff execution path in `foxprox-cli` that reuses the existing setup flag parser, requires `--setup-control-fd`, executes `execute_tun_setup_handoff(...)` through injected `TunSetupDeviceOps`, and emits structured JSON containing setup status, ordered audit records plus summary, proxy environment, and target command.
+- Added Linux `run_foxproxsetup_linux_handoff_with_control(...)` that backs the same CLI handoff execution path with real `LinuxTunSetupOps` from `foxprox-device`.
+- Preserved the existing plan-first `run_foxproxsetup_args(...)` behavior so current bwrap plan/audit output remains stable.
+- Added deterministic Unix tests proving successful setup handoff output includes `tun_fd_opened`, configure evidence, SCM_RIGHTS `tun_configured`, summary evidence, target/proxy context, and an actually receivable fd over the setup-control socket.
+- Added fail-closed CLI execution coverage proving configure failure exits before handoff, returns exit code 2, and emits `broker_error` plus failed setup summary evidence.
+- Added missing-control-fd coverage proving handoff execution fails closed before setup work when `--setup-control-fd` is absent.
+- Added an ignored privileged Linux test for the real `LinuxTunSetupOps`-backed CLI handoff path.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features` — passed, 11 CLI tests and 1 ignored privileged Linux CLI test.
+- `cargo clippy -p foxprox-cli --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 11 CLI tests + 1 ignored, 160 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- This wires a safe, testable `foxproxsetup` handoff execution path around the real Linux TUN setup ops, but the production binary still does not reconstruct the setup-control `UnixStream` from an inherited raw fd, drop capabilities, close setup-only fds, or `exec` the target app. Route/DNS/proxy setup commands and production runtime/final-drain wiring also remain.

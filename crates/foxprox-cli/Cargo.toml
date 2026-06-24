@@ -10,6 +10,9 @@ rust-version.workspace = true
 foxprox-core = { path = "../foxprox-core" }
 serde_json = "1"
 
+[target.'cfg(unix)'.dependencies]
+foxprox-device = { path = "../foxprox-device" }
+
 [dev-dependencies]
 pretty_assertions = "1"
 
