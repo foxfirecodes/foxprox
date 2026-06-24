@@ -4470,7 +4470,7 @@ Round-77 review found no blocker/high issues and left final async readiness orch
 
 ## 2026-06-23 — Drain TUN handoff evidence in combined local runtime proof
 
-Commit: 5f90c57
+Commit: 68d6282
 
 ### Review
 - Round-123 correctness and validation found no blocker/high issues. The only note was that the next highest gap remains real privileged `/dev/net/tun` setup/TUNSETIFF, setup-helper execution, and production runtime wiring beyond the deterministic local proof.
