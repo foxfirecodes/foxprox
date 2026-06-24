@@ -4588,7 +4588,7 @@ Commit: e6638d2
 
 ## 2026-06-23 — Wire foxproxsetup handoff execution path
 
-Commit: 2ff18ea
+Commit: d38d41a
 
 ### Review
 - Round-131 correctness and validation found no blocker/high issues. Reviewers confirmed the Round-130 stale progress hash was fixed: the tun-rs Linux setup implementation section now records `Commit: e6638d2`, and the follow-up `141e469` only corrected that ledger entry.
