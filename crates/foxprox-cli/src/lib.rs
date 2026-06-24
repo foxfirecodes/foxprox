@@ -286,9 +286,11 @@ pub trait HostSetupProcessRunner {
     fn wait_setup_process(&mut self) -> Result<HostSetupProcessExit, String>;
     fn wait_setup_process_with_timeout(
         &mut self,
-        _timeout: Duration,
+        timeout: Duration,
     ) -> Result<Option<HostSetupProcessExit>, String> {
-        self.wait_setup_process().map(Some)
+        Err(format!(
+            "timeout-aware setup process wait is not implemented for this runner; requested timeout {timeout:?}"
+        ))
     }
 }
 
@@ -1639,6 +1641,13 @@ mod tests {
             }
             Ok(self.exit.clone())
         }
+
+        fn wait_setup_process_with_timeout(
+            &mut self,
+            _timeout: Duration,
+        ) -> Result<Option<HostSetupProcessExit>, String> {
+            self.wait_setup_process().map(Some)
+        }
     }
 
     #[cfg(unix)]
@@ -1938,6 +1947,76 @@ mod tests {
             }
             other => panic!("unexpected host setup drain error: {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_setup_session_fails_closed_when_runner_lacks_timeout_wait() {
+        struct TimeoutUnsupportedRunner {
+            tun_fd: Option<UnixStream>,
+            sender: Option<std::thread::JoinHandle<()>>,
+        }
+
+        impl HostSetupProcessRunner for TimeoutUnsupportedRunner {
+            fn start_setup_process(&mut self, plan: &BwrapSetupPlan) -> Result<(), String> {
+                let path = plan
+                    .config
+                    .setup_control_socket_path
+                    .clone()
+                    .ok_or_else(|| "missing setup control socket path".to_string())?;
+                let tun_fd = self
+                    .tun_fd
+                    .take()
+                    .ok_or_else(|| "missing scripted tun fd".to_string())?;
+                let tun_name = plan.config.tun_name.clone();
+                self.sender = Some(std::thread::spawn(move || {
+                    let control = UnixStream::connect(path).unwrap();
+                    send_tun_fd(&control, &tun_name, &tun_fd).unwrap();
+                }));
+                Ok(())
+            }
+
+            fn wait_setup_process(&mut self) -> Result<HostSetupProcessExit, String> {
+                panic!("default timeout-aware wait must not fall back to unbounded wait")
+            }
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-host-session-missing-timeout-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.setup_control_socket_path = Some(path.to_string_lossy().to_string());
+        let (tun_fd, _sandbox_peer) = UnixStream::pair().unwrap();
+        let mut runner = TimeoutUnsupportedRunner {
+            tun_fd: Some(tun_fd),
+            sender: None,
+        };
+
+        let report = run_host_setup_control_session_with_runner_and_timeouts(
+            &listener,
+            config,
+            &["true".to_string()],
+            &mut runner,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+            Duration::from_millis(1),
+        );
+        if let Some(sender) = runner.sender.take() {
+            sender.join().unwrap();
+        }
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(report.status, HostSetupControlHandoffStatus::Failed);
+        assert!(report.handoff.received.is_some());
+        let audit = report.audit_records.last().unwrap();
+        assert_eq!(audit.kind, AuditKind::BrokerError);
+        assert_eq!(audit.decision, Some(Decision::FailClosed));
+        assert_eq!(audit.details["setup_step"], "wait_setup_process");
+        assert!(audit.details["setup_error"].contains("not implemented"));
     }
 
     #[cfg(unix)]
