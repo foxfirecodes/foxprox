@@ -10,9 +10,11 @@ rust-version.workspace = true
 foxprox-core = { path = "../foxprox-core" }
 tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
 
+[target.'cfg(unix)'.dependencies]
+foxprox-device = { path = "../foxprox-device" }
+
 [dev-dependencies]
 foxprox-cli = { path = "../foxprox-cli" }
-foxprox-device = { path = "../foxprox-device" }
 foxprox-stack = { path = "../foxprox-stack" }
 
 [lib]

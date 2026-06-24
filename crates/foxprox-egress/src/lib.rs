@@ -21,6 +21,8 @@ use foxprox_core::{
     TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
 };
 use std::ffi::OsStr;
+#[cfg(unix)]
+use std::fs::File;
 use std::future::Future;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -2955,6 +2957,58 @@ where
     for<'a> &'a F: Read,
     W: Write,
 {
+    let setup_ingest = ingest_setup_records(setup_source, setup_records, fan_in)?;
+    run_ingested_setup_packet_fd_loop_until_cancelled(
+        setup_ingest,
+        packet_fd,
+        fan_in,
+        sink,
+        config,
+        cancellation,
+    )
+    .await
+}
+
+#[cfg(unix)]
+pub async fn run_received_tun_fd_setup_packet_loop_until_cancelled<W>(
+    setup_source: impl Into<String>,
+    setup_records: &[AuditRecord],
+    received: foxprox_device::ReceivedTunFd,
+    fan_in: &mut RuntimeAuditFanIn,
+    sink: &mut JsonLineAuditSink<W>,
+    config: AsyncRuntimeSetupPacketLoopConfig,
+    cancellation: &AsyncRuntimeCancellationToken,
+) -> Result<AsyncRuntimeSetupPacketLoopReport, AsyncRuntimeSetupPacketDrainError>
+where
+    W: Write,
+{
+    let setup_ingest = ingest_setup_records(setup_source, setup_records, fan_in)?;
+    if let Err(error) = foxprox_device::set_fd_nonblocking(&received.fd, true) {
+        fan_in
+            .drain_to_sink(sink)
+            .map_err(AsyncRuntimeSetupPacketDrainError::Drain)?;
+        return Err(AsyncRuntimeSetupPacketDrainError::PacketRead(error));
+    }
+    let packet_fd = File::from(received.fd);
+    let packet_fd = tokio::io::unix::AsyncFd::new(packet_fd)
+        .map_err(AsyncRuntimeSetupPacketDrainError::PacketRead)?;
+    run_ingested_setup_packet_fd_loop_until_cancelled(
+        setup_ingest,
+        &packet_fd,
+        fan_in,
+        sink,
+        config,
+        cancellation,
+    )
+    .await
+}
+
+#[cfg(unix)]
+fn ingest_setup_records(
+    setup_source: impl Into<String>,
+    setup_records: &[AuditRecord],
+    fan_in: &mut RuntimeAuditFanIn,
+) -> Result<RuntimeAuditIngestReport, AsyncRuntimeSetupPacketDrainError> {
     let source_records: Vec<_> = setup_records
         .iter()
         .cloned()
@@ -2964,9 +3018,25 @@ where
             record
         })
         .collect();
-    let setup_ingest = fan_in
+    fan_in
         .ingest(setup_source, &source_records)
-        .map_err(AsyncRuntimeSetupPacketDrainError::Ingest)?;
+        .map_err(AsyncRuntimeSetupPacketDrainError::Ingest)
+}
+
+#[cfg(unix)]
+async fn run_ingested_setup_packet_fd_loop_until_cancelled<F, W>(
+    setup_ingest: RuntimeAuditIngestReport,
+    packet_fd: &tokio::io::unix::AsyncFd<F>,
+    fan_in: &mut RuntimeAuditFanIn,
+    sink: &mut JsonLineAuditSink<W>,
+    config: AsyncRuntimeSetupPacketLoopConfig,
+    cancellation: &AsyncRuntimeCancellationToken,
+) -> Result<AsyncRuntimeSetupPacketLoopReport, AsyncRuntimeSetupPacketDrainError>
+where
+    F: std::os::fd::AsRawFd,
+    for<'a> &'a F: Read,
+    W: Write,
+{
     let mut packet_reads = Vec::new();
     let status = loop {
         if cancellation.is_cancelled() {
@@ -4375,6 +4445,59 @@ mod tests {
         assert_eq!(report.final_drain.drained_records, 2);
         assert!(output.contains("setup_plan_created"));
         assert!(output.contains("host_setup_control_handoff"));
+        assert!(output.contains("scm_rights"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_received_tun_fd_packet_loop_sets_nonblocking_and_drains() {
+        let (tun_fd, mut sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let received = foxprox_device::ReceivedTunFd {
+            fd: tun_fd.into(),
+            report: foxprox_device::TunFdHandoffReport::received("foxprox0", 1),
+        };
+        sandbox_peer.write_all(b"received-runtime-packet").unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let setup_records = vec![
+            AuditRecord::new(AuditKind::SetupPlanCreated, "s1"),
+            received.report.audit_record("s1"),
+        ];
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+
+        let report = run_received_tun_fd_setup_packet_loop_until_cancelled(
+            "host_setup_session",
+            &setup_records,
+            received,
+            &mut fan_in,
+            &mut sink,
+            AsyncRuntimeSetupPacketLoopConfig {
+                packet_read: AsyncRuntimePacketFdReadBounds {
+                    max_packet_bytes: 64,
+                    max_wait: Duration::from_secs(1),
+                },
+                max_packets: 1,
+            },
+            &cancellation,
+        )
+        .await
+        .expect("received TUN fd packet loop drains after packet limit");
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+
+        assert_eq!(report.setup_ingest.accepted_records, 2);
+        assert_eq!(
+            report.status,
+            AsyncRuntimeSetupPacketLoopStatus::PacketLimitReached
+        );
+        assert_eq!(report.packet_reads.len(), 1);
+        assert_eq!(
+            report.packet_reads[0].packet.as_deref(),
+            Some(&b"received-runtime-packet"[..])
+        );
+        assert_eq!(report.final_drain.drained_records, 2);
+        assert!(output.contains("setup_plan_created"));
+        assert!(output.contains("tun_configured"));
         assert!(output.contains("scm_rights"));
     }
 
