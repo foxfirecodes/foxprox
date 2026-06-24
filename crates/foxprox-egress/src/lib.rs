@@ -2835,6 +2835,86 @@ where
     }))
 }
 
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct AsyncRuntimeSetupPacketDrainReport {
+    pub setup_ingest: RuntimeAuditIngestReport,
+    pub packet_readiness: AsyncRuntimeIoReadinessReport,
+    pub packet_read: Option<AsyncRuntimePacketFdReadReport>,
+    pub setup_drain: RuntimeAuditDrainReport,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum AsyncRuntimeSetupPacketDrainError {
+    Ingest(RuntimeAuditFanInError),
+    PacketRead(std::io::Error),
+    Drain(RuntimeAuditDrainError),
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AsyncRuntimePacketFdReadBounds {
+    pub max_packet_bytes: usize,
+    pub max_wait: Duration,
+}
+
+#[cfg(unix)]
+pub async fn drain_setup_audits_and_read_packet_fd_once<F, W>(
+    setup_source: impl Into<String>,
+    setup_records: &[AuditRecord],
+    packet_fd: &tokio::io::unix::AsyncFd<F>,
+    fan_in: &mut RuntimeAuditFanIn,
+    sink: &mut JsonLineAuditSink<W>,
+    bounds: AsyncRuntimePacketFdReadBounds,
+    cancellation: &AsyncRuntimeCancellationToken,
+) -> Result<AsyncRuntimeSetupPacketDrainReport, AsyncRuntimeSetupPacketDrainError>
+where
+    F: std::os::fd::AsRawFd,
+    for<'a> &'a F: Read,
+    W: Write,
+{
+    let source_records: Vec<_> = setup_records
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, mut record)| {
+            record.sequence = (index + 1) as u64;
+            record
+        })
+        .collect();
+    let setup_ingest = fan_in
+        .ingest(setup_source, &source_records)
+        .map_err(AsyncRuntimeSetupPacketDrainError::Ingest)?;
+    let packet_readiness =
+        wait_for_async_packet_fd_readiness(packet_fd, bounds.max_wait, cancellation).await;
+    let packet_read = if packet_readiness.status == AsyncRuntimeIoReadinessStatus::Ready {
+        read_async_packet_fd_ready_task(
+            packet_fd,
+            &[RuntimeTaskExpectation::new(
+                RuntimeComponent::TunDevice,
+                "tun_packet_loop",
+            )],
+            bounds.max_packet_bytes,
+            bounds.max_wait,
+            cancellation,
+        )
+        .await
+        .map_err(AsyncRuntimeSetupPacketDrainError::PacketRead)?
+    } else {
+        None
+    };
+    let setup_drain = fan_in
+        .drain_to_sink(sink)
+        .map_err(AsyncRuntimeSetupPacketDrainError::Drain)?;
+    Ok(AsyncRuntimeSetupPacketDrainReport {
+        setup_ingest,
+        packet_readiness,
+        packet_read,
+        setup_drain,
+    })
+}
+
 pub fn collect_async_runtime_readiness_from_reports(
     io_reports: &[AsyncRuntimeIoReadinessReport],
     tcp_accept_reports: &[AsyncRuntimeTcpAcceptReport],
@@ -3934,6 +4014,56 @@ mod tests {
             records[1].details["ready_runtime_tasks"],
             "tun_device:tun_packet_loop"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_runtime_setup_audits_drain_while_reading_packet_fd_once() {
+        let (tun_fd, mut sandbox_peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        tun_fd.set_nonblocking(true).unwrap();
+        let async_fd = tokio::io::unix::AsyncFd::new(tun_fd).unwrap();
+        sandbox_peer.write_all(b"runtime-handoff-packet").unwrap();
+        let cancellation =
+            AsyncRuntimeCancellationToken::new(Arc::new(AsyncRuntimeCancellationState::new()));
+        let setup_records = vec![
+            AuditRecord::new(AuditKind::SetupPlanCreated, "s1"),
+            AuditRecord::new(AuditKind::TunConfigured, "s1")
+                .with_detail("fd_source", "scm_rights")
+                .with_detail("setup_phase", "host_setup_control_handoff"),
+        ];
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 8);
+        let mut sink = JsonLineAuditSink::new(Vec::new());
+
+        let report = drain_setup_audits_and_read_packet_fd_once(
+            "host_setup_session",
+            &setup_records,
+            &async_fd,
+            &mut fan_in,
+            &mut sink,
+            AsyncRuntimePacketFdReadBounds {
+                max_packet_bytes: 64,
+                max_wait: Duration::from_secs(1),
+            },
+            &cancellation,
+        )
+        .await
+        .expect("setup audit drain and packet read succeeds");
+        let output = String::from_utf8(sink.into_inner()).unwrap();
+
+        assert_eq!(report.setup_ingest.accepted_records, 2);
+        assert_eq!(
+            report.packet_readiness.status,
+            AsyncRuntimeIoReadinessStatus::Ready
+        );
+        assert_eq!(
+            report.packet_read.unwrap().packet.as_deref(),
+            Some(&b"runtime-handoff-packet"[..])
+        );
+        assert_eq!(report.setup_drain.drained_records, 2);
+        assert!(output.contains("setup_plan_created"));
+        assert!(output.contains("tun_configured"));
+        assert!(output.contains("host_setup_control_handoff"));
+        assert!(output.contains("scm_rights"));
     }
 
     #[cfg(unix)]

@@ -4920,3 +4920,26 @@ Commit: fd603d1
 
 ### Remaining blind spots
 - Host setup session fan-in duplicate and backpressure behavior is now covered, but privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production packet-loop/final-drain wiring after the host broker receives the real TUN fd remain open.
+
+## 2026-06-23 — Bridge setup audits with packet-fd runtime read
+
+Commit: 202fe10
+
+### Review
+- Round-145 correctness and validation found no blocker/high issues. Reviewers confirmed host setup fan-in duplicate/backpressure edge coverage is clean and the remaining highest gap is privileged runtime/E2E coverage with real bwrap + TUN fd handoff and production final-drain wiring.
+
+### Fix
+- Added `AsyncRuntimeSetupPacketDrainReport`, `AsyncRuntimeSetupPacketDrainError`, and `AsyncRuntimePacketFdReadBounds`.
+- Added `drain_setup_audits_and_read_packet_fd_once(...)`, a Unix async runtime bridge that ingests setup evidence into `RuntimeAuditFanIn`, waits for packet-fd readiness on an existing `AsyncFd`, reads one ready packet through the existing TUN ready-task path, and drains setup evidence to a `JsonLineAuditSink`.
+- The helper is generic over packet fd type and does not depend on test-only device setup; it is intended as a production-side ownership seam after the host broker has received a real configured TUN fd and wrapped it in `AsyncFd`.
+- Added deterministic coverage with a UnixStream-backed packet fd proving setup-plan/TUN handoff evidence drains while packet readiness/read dispatch consumes the received packet. This remains a local fd proof, not privileged bwrap/real TUN E2E.
+
+### Commands run
+- `cargo test -p foxprox-egress --all-targets --all-features async_runtime_setup_audits_drain_while_reading_packet_fd_once -- --nocapture` — passed.
+- `cargo clippy -p foxprox-egress --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 29 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 100 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Setup audit fan-in and packet-fd readiness/read can now be driven together by a production-style async helper after fd receipt, but privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and long-running production packet-loop/final-drain wiring remain open.
