@@ -10,7 +10,7 @@ use std::process::Command;
 #[cfg(unix)]
 use foxprox_device::{execute_tun_setup_handoff, TunSetupDeviceOps, TunSetupHandoffStatus};
 #[cfg(unix)]
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CliOutput {
@@ -177,6 +177,94 @@ fn run_foxproxsetup_handoff_with_config<O: TunSetupDeviceOps>(
         "target_command": target,
     });
     json_output(exit_code, "setup_execute_serialize_error", output)
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostSetupControlHandoffStatus {
+    Complete,
+    Failed,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct HostSetupControlHandoffReport {
+    pub status: HostSetupControlHandoffStatus,
+    pub plan: BwrapSetupPlan,
+    pub received: Option<foxprox_device::ReceivedTunFd>,
+    pub failed_report: Option<foxprox_device::TunFdHandoffReport>,
+    pub audit_records: Vec<AuditRecord>,
+}
+
+#[cfg(unix)]
+pub fn accept_setup_control_tun_handoff(
+    listener: &UnixListener,
+    mut config: NetworkSetupConfig,
+    target: &[String],
+) -> HostSetupControlHandoffReport {
+    if config.setup_control_socket_path.is_none() {
+        let local_path = listener
+            .local_addr()
+            .ok()
+            .and_then(|addr| addr.as_pathname().map(|path| path.display().to_string()));
+        config.setup_control_socket_path = local_path;
+    }
+    let plan = BwrapSetupPlan::new(config.clone(), target);
+    let mut audit_records = vec![plan.audit_record()];
+    let (stream, _) = match listener.accept() {
+        Ok(accepted) => accepted,
+        Err(error) => {
+            audit_records.push(
+                AuditRecord::new(AuditKind::BrokerError, config.sandbox_id.clone())
+                    .with_frontend(Frontend::Setup)
+                    .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+                    .with_detail("setup_phase", "host_setup_control_handoff")
+                    .with_detail("setup_status", "failed")
+                    .with_detail("setup_error", error.to_string()),
+            );
+            return HostSetupControlHandoffReport {
+                status: HostSetupControlHandoffStatus::Failed,
+                plan,
+                received: None,
+                failed_report: None,
+                audit_records,
+            };
+        }
+    };
+    match foxprox_device::recv_tun_fd(&stream, &config.tun_name) {
+        Ok(received) => {
+            audit_records.push(received.report.audit_record(config.sandbox_id.clone()));
+            audit_records.push(
+                AuditRecord::new(AuditKind::TunConfigured, config.sandbox_id.clone())
+                    .with_frontend(Frontend::Setup)
+                    .with_decision(Decision::Allow, None)
+                    .with_detail("setup_phase", "host_setup_control_handoff")
+                    .with_detail("setup_status", "complete")
+                    .with_detail("tun_name", config.tun_name.clone())
+                    .with_detail(
+                        "setup_control_socket",
+                        config.setup_control_socket_path.unwrap_or_default(),
+                    ),
+            );
+            HostSetupControlHandoffReport {
+                status: HostSetupControlHandoffStatus::Complete,
+                plan,
+                received: Some(received),
+                failed_report: None,
+                audit_records,
+            }
+        }
+        Err(report) => {
+            audit_records.push(report.audit_record(config.sandbox_id.clone()));
+            HostSetupControlHandoffReport {
+                status: HostSetupControlHandoffStatus::Failed,
+                plan,
+                received: None,
+                failed_report: Some(report),
+                audit_records,
+            }
+        }
+    }
 }
 
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
@@ -1090,6 +1178,45 @@ mod tests {
             }
             send_tun_fd(control, &config.tun_name, fd)
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_setup_control_accepts_tun_fd_and_records_handoff_audit() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-host-setup-control-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.setup_control_socket_path = Some(path.to_string_lossy().to_string());
+        let (tun_fd, _sandbox_peer) = UnixStream::pair().unwrap();
+        let sender_path = path.clone();
+        let sender = std::thread::spawn(move || {
+            let control = UnixStream::connect(sender_path).unwrap();
+            send_tun_fd(&control, "foxprox0", &tun_fd).unwrap();
+        });
+
+        let report = accept_setup_control_tun_handoff(
+            &listener,
+            config,
+            &["curl".to_string(), "http://example.com".to_string()],
+        );
+        sender.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(report.status, HostSetupControlHandoffStatus::Complete);
+        assert!(report.received.is_some());
+        assert_eq!(report.plan.setup_command[1], "--execute-setup");
+        assert_eq!(report.audit_records[0].kind, AuditKind::SetupPlanCreated);
+        assert_eq!(report.audit_records[1].kind, AuditKind::TunConfigured);
+        assert_eq!(report.audit_records[1].details["fd_source"], "scm_rights");
+        assert_eq!(
+            report.audit_records[2].details["setup_phase"],
+            "host_setup_control_handoff"
+        );
     }
 
     #[cfg(unix)]

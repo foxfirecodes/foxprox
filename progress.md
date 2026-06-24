@@ -4738,3 +4738,25 @@ Commit: 7d1416d
 
 ### Remaining blind spots
 - `foxproxsetup --execute-setup` now covers TUN setup/handoff, sandbox route/DNS/proxy commands, setup-control close, `CAP_NET_ADMIN` drop, and target exec boundary. Remaining gaps are privileged end-to-end execution in a real bwrap/TUN environment and production runtime/final-drain wiring after the host broker receives the real TUN fd.
+
+## 2026-06-23 — Add host setup-control handoff evidence
+
+Commit: bc3c1cf
+
+### Review
+- Round-137 correctness and validation found no blocker/high issues. Reviewers confirmed `foxproxsetup --execute-setup` now covers TUN setup/handoff, sandbox route/DNS/proxy commands, setup-control close, `CAP_NET_ADMIN` drop, and target exec boundary while leaving privileged bwrap/TUN E2E and production runtime/final-drain wiring open.
+
+### Fix
+- Added `accept_setup_control_tun_handoff(...)`, a host-side setup-control listener helper that builds a `BwrapSetupPlan`, accepts one setup-control Unix socket connection, receives the TUN fd through the existing SCM_RIGHTS helper, retains ownership of the received fd, and emits ordered setup-plan, received-handoff, and host-handoff summary audit evidence.
+- Added `HostSetupControlHandoffReport` and `HostSetupControlHandoffStatus` to distinguish successful host receipt from fail-closed accept/receive failures.
+- Added deterministic coverage proving the host setup-control listener accepts a TUN-like fd, receives ownership, records `setup_plan_created`, records `tun_configured` with `fd_source=scm_rights`, and includes host `setup_phase=host_setup_control_handoff` summary evidence.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features` — passed, 20 CLI tests and 1 ignored privileged Linux CLI test.
+- `cargo clippy -p foxprox-cli --all-targets --all-features -- -D warnings` — passed.
+- `cargo test --all-targets --all-features` — passed, including 20 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Host setup-control fd receipt is now represented with retained fd ownership and structured evidence, but it still uses a deterministic sender in CI rather than launching privileged bwrap/foxproxsetup end-to-end. Remaining gaps are privileged bwrap/TUN E2E execution and production runtime/final-drain wiring after the host broker receives the real TUN fd.
