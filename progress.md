@@ -4665,7 +4665,7 @@ Commit: 31e3e99
 
 ## 2026-06-23 — Add sandbox network command executor
 
-Commit: 23554b7
+Commit: ababf07
 
 ### Review
 - Round-134 correctness and validation found no blocker/high issues. Reviewers confirmed `foxproxsetup --execute-setup` dispatch is correctly scoped and that the next highest gaps are privileged integration coverage plus route/DNS/proxy setup, capability drop/close/exec, and runtime final drain.
