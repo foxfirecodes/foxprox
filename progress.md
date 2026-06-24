@@ -4833,3 +4833,25 @@ Commit: 6d0cce9
 
 ### Remaining blind spots
 - The host setup session now avoids the reviewed setup-control accept races and records fail-closed evidence for early setup-process exit, but CI still uses injected deterministic process/sender coverage. Remaining gaps are privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production runtime/final-drain wiring after the host broker receives the real TUN fd.
+
+## 2026-06-23 — Cover host setup handoff timeout evidence
+
+Commit: fcfa1fb
+
+### Review
+- Round-141 correctness and validation found no blocker/high issues. Reviewers confirmed the setup-control socket path is now inferred before plan/start, nonblocking accept polls setup-process exit, and early setup-process exit records fail-closed evidence.
+- The next noted gap was that timeout behavior existed but was not directly regression-tested for accept timeout or read-timeout/no-SCM_RIGHTS cases.
+
+### Fix
+- Split the host setup session helper through an internal timeout-parameterized path so tests can prove timeout behavior quickly while production retains five-second accept/read bounds.
+- Added deterministic regression coverage for no setup-control connection: the host session times out waiting for fd handoff and records fail-closed `host_setup_process` evidence.
+- Added deterministic regression coverage for a setup-control connection that never sends SCM_RIGHTS data: the host session read timeout produces fail-closed `receive_failed` handoff evidence instead of hanging.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features host_setup_session -- --nocapture` — passed, 6 filtered host setup session tests.
+- `cargo test --all-targets --all-features` — passed, including 26 CLI tests + 1 ignored, 161 core tests, 11 device tests + 1 ignored, 99 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Host setup session timeout and early-exit paths are now deterministic CI evidence, but privileged bwrap/foxproxsetup E2E execution with a real Linux TUN device and production runtime/final-drain wiring after the host broker receives the real TUN fd remain open.

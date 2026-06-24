@@ -363,9 +363,28 @@ pub struct HostSetupSessionReport {
 #[cfg(unix)]
 pub fn run_host_setup_control_session_with_runner<R: HostSetupProcessRunner>(
     listener: &UnixListener,
+    config: NetworkSetupConfig,
+    target: &[String],
+    runner: &mut R,
+) -> HostSetupSessionReport {
+    run_host_setup_control_session_with_runner_and_timeouts(
+        listener,
+        config,
+        target,
+        runner,
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+    )
+}
+
+#[cfg(unix)]
+fn run_host_setup_control_session_with_runner_and_timeouts<R: HostSetupProcessRunner>(
+    listener: &UnixListener,
     mut config: NetworkSetupConfig,
     target: &[String],
     runner: &mut R,
+    accept_timeout: Duration,
+    read_timeout: Duration,
 ) -> HostSetupSessionReport {
     if config.setup_control_socket_path.is_none() {
         config.setup_control_socket_path = listener
@@ -418,7 +437,6 @@ pub fn run_host_setup_control_session_with_runner<R: HostSetupProcessRunner>(
     }
 
     let accept_started = Instant::now();
-    let accept_timeout = Duration::from_secs(5);
     let stream = loop {
         match listener.accept() {
             Ok((stream, _)) => break stream,
@@ -522,7 +540,7 @@ pub fn run_host_setup_control_session_with_runner<R: HostSetupProcessRunner>(
         }
     };
     let _ = listener.set_nonblocking(false);
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = stream.set_read_timeout(Some(read_timeout));
 
     let mut handoff = match foxprox_device::recv_tun_fd(&stream, &config.tun_name) {
         Ok(received) => {
@@ -1485,6 +1503,8 @@ mod tests {
         exit: HostSetupProcessExit,
         fail_start: bool,
         exit_before_handoff: bool,
+        skip_handoff_connection: bool,
+        connect_without_handoff: bool,
     }
 
     #[cfg(unix)]
@@ -1498,7 +1518,14 @@ mod tests {
                 .setup_control_socket_path
                 .clone()
                 .ok_or_else(|| "missing setup control socket path".to_string())?;
-            if self.exit_before_handoff {
+            if self.exit_before_handoff || self.skip_handoff_connection {
+                return Ok(());
+            }
+            if self.connect_without_handoff {
+                self.sender = Some(std::thread::spawn(move || {
+                    let _control = UnixStream::connect(path).unwrap();
+                    std::thread::sleep(Duration::from_millis(100));
+                }));
                 return Ok(());
             }
             let tun_fd = self
@@ -1652,6 +1679,8 @@ mod tests {
             },
             fail_start: false,
             exit_before_handoff: false,
+            skip_handoff_connection: false,
+            connect_without_handoff: false,
         };
 
         let report = run_host_setup_control_session_with_runner(
@@ -1703,6 +1732,8 @@ mod tests {
             },
             fail_start: false,
             exit_before_handoff: false,
+            skip_handoff_connection: false,
+            connect_without_handoff: false,
         };
 
         let report = run_host_setup_control_session_with_runner(
@@ -1744,6 +1775,8 @@ mod tests {
             },
             fail_start: false,
             exit_before_handoff: false,
+            skip_handoff_connection: false,
+            connect_without_handoff: false,
         };
 
         let report = run_host_setup_control_session_with_runner(
@@ -1783,6 +1816,8 @@ mod tests {
             },
             fail_start: false,
             exit_before_handoff: true,
+            skip_handoff_connection: false,
+            connect_without_handoff: false,
         };
 
         let report = run_host_setup_control_session_with_runner(
@@ -1802,6 +1837,101 @@ mod tests {
         assert_eq!(audit.details["setup_phase"], "host_setup_process");
         assert_eq!(audit.details["setup_step"], "setup_control_handoff");
         assert!(audit.details["setup_error"].contains("before fd handoff"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_setup_session_fails_closed_on_accept_timeout_without_connection() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-host-session-timeout-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.setup_control_socket_path = Some(path.to_string_lossy().to_string());
+        let mut runner = CliScriptedHostSetupProcessRunner {
+            tun_fd: None,
+            sender: None,
+            exit: HostSetupProcessExit {
+                exit_code: Some(0),
+                success: true,
+            },
+            fail_start: false,
+            exit_before_handoff: false,
+            skip_handoff_connection: true,
+            connect_without_handoff: false,
+        };
+
+        let report = run_host_setup_control_session_with_runner_and_timeouts(
+            &listener,
+            config,
+            &["true".to_string()],
+            &mut runner,
+            Duration::from_millis(10),
+            Duration::from_millis(10),
+        );
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(report.status, HostSetupControlHandoffStatus::Failed);
+        assert!(report.handoff.received.is_none());
+        assert!(report.process_exit.is_none());
+        let audit = report.audit_records.last().unwrap();
+        assert_eq!(audit.kind, AuditKind::BrokerError);
+        assert_eq!(audit.decision, Some(Decision::FailClosed));
+        assert_eq!(audit.details["setup_phase"], "host_setup_process");
+        assert_eq!(audit.details["setup_step"], "setup_control_handoff");
+        assert!(audit.details["setup_error"].contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn host_setup_session_fails_closed_on_read_timeout_without_fd_handoff() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-host-session-read-timeout-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.setup_control_socket_path = Some(path.to_string_lossy().to_string());
+        let mut runner = CliScriptedHostSetupProcessRunner {
+            tun_fd: None,
+            sender: None,
+            exit: HostSetupProcessExit {
+                exit_code: Some(0),
+                success: true,
+            },
+            fail_start: false,
+            exit_before_handoff: false,
+            skip_handoff_connection: false,
+            connect_without_handoff: true,
+        };
+
+        let report = run_host_setup_control_session_with_runner_and_timeouts(
+            &listener,
+            config,
+            &["true".to_string()],
+            &mut runner,
+            Duration::from_secs(1),
+            Duration::from_millis(10),
+        );
+        let _ = runner.wait_setup_process();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(report.status, HostSetupControlHandoffStatus::Failed);
+        assert!(report.handoff.received.is_none());
+        let audit = report
+            .audit_records
+            .iter()
+            .find(|record| {
+                record.details.get("handoff_error").map(String::as_str) == Some("receive_failed")
+            })
+            .unwrap();
+        assert_eq!(audit.kind, AuditKind::BrokerError);
+        assert_eq!(audit.decision, Some(Decision::FailClosed));
     }
 
     #[cfg(unix)]
