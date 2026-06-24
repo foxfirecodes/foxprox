@@ -4492,7 +4492,7 @@ Commit: 68d6282
 
 ## 2026-06-23 — Add setup-helper TUN handoff executor evidence
 
-Commit: 52f59af
+Commit: c96d3d5
 
 ### Review
 - Round-124 correctness and validation found no blocker/high issues. Reviewers confirmed the combined local runtime proof now drains setup-control SCM_RIGHTS handoff evidence through `RuntimeAuditFanIn` and that the next highest gap is real privileged `/dev/net/tun` creation/configuration with `TUNSETIFF`, setup-helper execution, and production runtime wiring beyond the deterministic harness.
