@@ -337,6 +337,10 @@ pub trait UdpDatagramExchange {
         destination: NetworkEndpoint,
         payload: &[u8],
     ) -> Result<Vec<u8>, UdpExchangeError>;
+
+    fn audit_records(&self) -> Vec<AuditRecord> {
+        Vec::new()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

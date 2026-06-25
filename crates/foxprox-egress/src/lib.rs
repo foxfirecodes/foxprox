@@ -111,6 +111,48 @@ impl foxprox_stack::UdpDatagramExchange for BlockingMappedUdpExchange {
     }
 }
 
+pub struct DnsUdpExchange<U> {
+    sandbox_id: String,
+    handler: DnsBrokerHandler<U>,
+    now_ms: u64,
+}
+
+impl<U: DnsUpstream> DnsUdpExchange<U> {
+    pub fn new(sandbox_id: impl Into<String>, handler: DnsBrokerHandler<U>, now_ms: u64) -> Self {
+        Self {
+            sandbox_id: sandbox_id.into(),
+            handler,
+            now_ms,
+        }
+    }
+
+    pub fn handler(&self) -> &DnsBrokerHandler<U> {
+        &self.handler
+    }
+}
+
+impl<U: DnsUpstream> foxprox_stack::UdpDatagramExchange for DnsUdpExchange<U> {
+    fn exchange_datagram(
+        &mut self,
+        _destination: NetworkEndpoint,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, foxprox_stack::UdpExchangeError> {
+        let result = self
+            .handler
+            .handle_query(self.sandbox_id.clone(), payload, self.now_ms);
+        if let Some(observation) = result.observation.clone() {
+            self.handler.commit_observation(observation);
+        }
+        result
+            .response
+            .ok_or(foxprox_stack::UdpExchangeError::ReceiveFailed)
+    }
+
+    fn audit_records(&self) -> Vec<AuditRecord> {
+        self.handler.broker().audit().records().cloned().collect()
+    }
+}
+
 impl foxprox_stack::UdpDatagramExchange for BlockingUdpExchange {
     fn exchange_datagram(
         &mut self,
@@ -3474,7 +3516,8 @@ where
             std::thread::sleep(attempt_sleep);
         }
     }
-    let broker_records: Vec<_> = bridge.broker().audit().records().cloned().collect();
+    let mut broker_records: Vec<_> = bridge.broker().audit().records().cloned().collect();
+    broker_records.extend(egress.audit_records());
     let broker_ingest = match ingest_resequenced_records("udp_exchange", &broker_records, fan_in) {
         Ok(report) => report,
         Err(error) => {

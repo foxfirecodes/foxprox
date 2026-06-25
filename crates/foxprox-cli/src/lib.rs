@@ -1,8 +1,9 @@
 use foxprox_core::{
     AuditKind, AuditRecord, BrokerCore, BrokerRuntimeConfig, BwrapSetupPlan, Decision,
-    DenialReason, Frontend, JsonLineAuditSink, NetworkEndpoint, NetworkSetupConfig, PolicyEngine,
-    RuntimeAuditDrainError, RuntimeAuditDrainReport, RuntimeAuditFanIn, RuntimeAuditFanInError,
-    RuntimeAuditIngestReport, SetupHelperPlan, SetupHelperStep,
+    DenialReason, DnsBrokerHandler, Frontend, JsonLineAuditSink, NetworkEndpoint,
+    NetworkSetupConfig, PolicyEngine, RuntimeAuditDrainError, RuntimeAuditDrainReport,
+    RuntimeAuditFanIn, RuntimeAuditFanInError, RuntimeAuditIngestReport, SetupHelperPlan,
+    SetupHelperStep,
 };
 use serde_json::json;
 use std::fs;
@@ -38,6 +39,12 @@ pub fn run_args(args: &[String]) -> CliOutput {
         .is_some_and(|command| command == "run-bwrap-udp-egress")
     {
         return run_bwrap_udp_egress_args(&args[1..]);
+    }
+    if args
+        .first()
+        .is_some_and(|command| command == "run-bwrap-dns-egress")
+    {
+        return run_bwrap_dns_egress_args(&args[1..]);
     }
     match args {
         [command, path] if command == "validate-config" => validate_config_path(path),
@@ -1744,6 +1751,164 @@ fn run_bwrap_udp_egress_args(_args: &[String]) -> CliOutput {
     )
 }
 
+#[cfg(unix)]
+fn run_bwrap_dns_egress_args(args: &[String]) -> CliOutput {
+    let Some(separator) = args.iter().position(|arg| arg == "--") else {
+        return error_output(
+            "run_bwrap_dns_egress_missing_separator",
+            "expected: run-bwrap-dns-egress <config> -- <target...>".to_string(),
+        );
+    };
+    if separator != 1 || args.len() <= separator + 1 {
+        return error_output(
+            "run_bwrap_dns_egress_bad_args",
+            "expected non-empty target command after <config> --".to_string(),
+        );
+    }
+    let config_path = &args[0];
+    let target = &args[separator + 1..];
+    let text = match fs::read_to_string(config_path) {
+        Ok(text) => text,
+        Err(error) => return error_output("config_io_error", error.to_string()),
+    };
+    let mut config = match serde_json::from_str::<BrokerRuntimeConfig>(&text) {
+        Ok(config) => config,
+        Err(error) => return error_output("config_parse_error", error.to_string()),
+    };
+    let validation = config.validation_audit();
+    if validation.decision != Some(Decision::Allow) {
+        return audit_output(2, validation);
+    }
+    let socket_path = config
+        .setup
+        .setup_control_socket_path
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            std::env::temp_dir().join(format!(
+                "foxprox-run-bwrap-dns-egress-{}-{unique}.sock",
+                std::process::id()
+            ))
+        });
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = match UnixListener::bind(&socket_path) {
+        Ok(listener) => listener,
+        Err(error) => return error_output("setup_control_bind_error", error.to_string()),
+    };
+    config.setup.setup_control_socket_path = Some(socket_path.to_string_lossy().to_string());
+    let plan = BwrapSetupPlan::new(config.setup.clone(), target);
+    let mut runner = CommandHostSetupProcessRunner::new();
+    if let Err(error) = runner.start_setup_process(&plan) {
+        let _ = std::fs::remove_file(&socket_path);
+        return error_output("setup_process_start_error", error);
+    }
+    let mut handoff = accept_setup_control_tun_handoff_with_timeouts(
+        &listener,
+        config.setup.clone(),
+        target,
+        Some(Duration::from_secs(5)),
+        Some(Duration::from_secs(5)),
+    );
+    let _ = std::fs::remove_file(&socket_path);
+    if handoff.status != HostSetupControlHandoffStatus::Complete {
+        let stdout = audit_records_to_json_lines(&handoff.audit_records);
+        let _ = runner.wait_setup_process_with_timeout(Duration::from_millis(100));
+        return CliOutput {
+            exit_code: 1,
+            stdout,
+            stderr: String::new(),
+        };
+    }
+    let Some(received) = handoff.received.take() else {
+        let stdout = audit_records_to_json_lines(&handoff.audit_records);
+        let _ = runner.wait_setup_process_with_timeout(Duration::from_millis(100));
+        return CliOutput {
+            exit_code: 1,
+            stdout,
+            stderr: String::new(),
+        };
+    };
+    let broker = BrokerCore::new(
+        PolicyEngine::new(config.policy.clone()),
+        config.audit_capacity.max(1),
+    );
+    let dns_upstream = foxprox_egress::BlockingDnsUpstream::from_runtime_config(
+        &config,
+        "0.0.0.0:0".parse().expect("valid bind addr"),
+        Duration::from_secs(5),
+        64 * 1024,
+    );
+    let dns_handler = DnsBrokerHandler::new(broker, dns_upstream, config.setup.broker_dns_ip);
+    let egress =
+        foxprox_egress::DnsUdpExchange::new(config.setup.sandbox_id.clone(), dns_handler, 30_000);
+    let stack =
+        foxprox_stack::SmoltcpIpStack::new_ipv4([198, 51, 100, 1], 24, config.setup.mtu as usize);
+    let mut fan_in = RuntimeAuditFanIn::new(
+        config.setup.sandbox_id.clone(),
+        config.audit_capacity.max(1),
+    );
+    let mut audit_output = Vec::new();
+    let cancellation = foxprox_egress::AsyncRuntimeCancellationToken::uncancelled();
+    let runtime = {
+        let mut sink = JsonLineAuditSink::new(&mut audit_output);
+        foxprox_egress::run_received_tun_fd_udp_exchange_and_drain(
+            foxprox_egress::ReceivedTunUdpExchangeSession {
+                setup_source: "host_setup_session".to_string(),
+                setup_records: &handoff.audit_records,
+                received,
+                sandbox_id: config.setup.sandbox_id.clone(),
+                broker: BrokerCore::new(
+                    PolicyEngine::new(config.policy.clone()),
+                    config.audit_capacity.max(1),
+                ),
+                stack,
+                egress,
+                now_ms: 30_000,
+                max_attempts: 500,
+                attempt_sleep: Duration::from_millis(10),
+            },
+            &mut fan_in,
+            &mut sink,
+            &cancellation,
+        )
+    };
+    let stdout = String::from_utf8(audit_output).unwrap_or_default();
+    let runtime_report = match runtime {
+        Ok(report) => report,
+        Err(_) => {
+            let _ = runner.wait_setup_process_with_timeout(Duration::from_millis(100));
+            return CliOutput {
+                exit_code: 1,
+                stdout,
+                stderr: String::new(),
+            };
+        }
+    };
+    let process_exit = runner.wait_setup_process_with_timeout(Duration::from_secs(5));
+    let success = runtime_report.udp_bridge.exchanged
+        && matches!(
+            process_exit,
+            Ok(Some(HostSetupProcessExit { success: true, .. }))
+        );
+    CliOutput {
+        exit_code: if success { 0 } else { 1 },
+        stdout,
+        stderr: String::new(),
+    }
+}
+
+#[cfg(not(unix))]
+fn run_bwrap_dns_egress_args(_args: &[String]) -> CliOutput {
+    error_output(
+        "run_bwrap_dns_egress_unsupported_platform",
+        "run-bwrap-dns-egress requires Unix setup-control sockets".to_string(),
+    )
+}
+
 fn audit_records_to_json_lines(records: &[AuditRecord]) -> String {
     records
         .iter()
@@ -1768,7 +1933,7 @@ fn usage_output() -> CliOutput {
     CliOutput {
         exit_code: 64,
         stdout: String::new(),
-        stderr: "usage: foxprox validate-config <path> | default-config <sandbox-id> | plan-bwrap <config> -- <target...> | run-bwrap-tcp-egress <config> <stack-ip:port> <host-ip:port> -- <target...> | run-bwrap-udp-egress <config> <host-ip:port> -- <target...>\n".to_string(),
+        stderr: "usage: foxprox validate-config <path> | default-config <sandbox-id> | plan-bwrap <config> -- <target...> | run-bwrap-tcp-egress <config> <stack-ip:port> <host-ip:port> -- <target...> | run-bwrap-udp-egress <config> <host-ip:port> -- <target...> | run-bwrap-dns-egress <config> -- <target...>\n".to_string(),
     }
 }
 

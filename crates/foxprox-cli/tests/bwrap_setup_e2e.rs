@@ -734,3 +734,104 @@ fn foxprox_run_bwrap_udp_egress_command_bridges_target_datagram() {
     assert!(stdout.contains("host_setup_control_handoff"), "{stdout}");
     assert!(stdout.contains("to_sandbox"), "{stdout}");
 }
+
+#[test]
+#[ignore = "requires rootless bwrap, /dev/net/tun, CAP_NET_ADMIN inside bwrap, and foxprox launcher DNS egress"]
+fn foxprox_run_bwrap_dns_egress_command_answers_target_query() {
+    let foxprox = env!("CARGO_BIN_EXE_foxprox");
+    let setup_helper = env!("CARGO_BIN_EXE_foxproxsetup");
+    assert!(std::path::Path::new(foxprox).exists());
+    assert!(std::path::Path::new(setup_helper).exists());
+    assert!(std::path::Path::new("/dev/net/tun").exists());
+
+    let upstream = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let (server_tx, server_rx) = std::sync::mpsc::channel();
+    let upstream_server = std::thread::spawn(move || {
+        let mut query = [0u8; 512];
+        let (len, peer) = upstream.recv_from(&mut query).unwrap();
+        let query = query[..len].to_vec();
+        let response = dns_a_response(&query, [203, 0, 113, 7]);
+        upstream.send_to(&response, peer).unwrap();
+        server_tx.send(query).unwrap();
+    });
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_path =
+        std::env::temp_dir().join(format!("foxprox-run-bwrap-dns-egress-{unique}.json"));
+    let mut config = BrokerRuntimeConfig::alpha_default(format!("foxprox-dns-cli-e2e-{unique}"));
+    config.setup.tun_name = format!("fxn{:x}", std::process::id() % 0x00ff_ffff);
+    config.dns_upstream = upstream_addr;
+    config.policy = PolicyConfig {
+        default_decision: Decision::Allow,
+        ..PolicyConfig::default()
+    };
+    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+
+    let target = [
+        "python3",
+        "-c",
+        concat!(
+            "import socket; ",
+            "q=b'\\x12\\x34\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00' + b'\\x07example\\x04test\\x00' + b'\\x00\\x01\\x00\\x01'; ",
+            "s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); ",
+            "s.settimeout(3.0); ",
+            "s.sendto(q, (\"10.0.2.3\", 53)); ",
+            "data,_=s.recvfrom(512); ",
+            "assert b'\\xcb\\x00\\x71\\x07' in data, data.hex(); ",
+            "s.close()"
+        ),
+    ];
+    let setup_dir = std::path::Path::new(setup_helper).parent().unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!("{}:{}", setup_dir.display(), path.to_string_lossy());
+    let output = Command::new(foxprox)
+        .env("PATH", path)
+        .arg("run-bwrap-dns-egress")
+        .arg(&config_path)
+        .arg("--")
+        .args(target)
+        .output()
+        .expect("foxprox DNS launcher command runs");
+    let _ = std::fs::remove_file(&config_path);
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let upstream_query = server_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("upstream receives DNS query through launcher");
+    assert!(upstream_query
+        .windows(b"example".len())
+        .any(|w| w == b"example"));
+    upstream_server.join().unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("dns_query"), "{stdout}");
+    assert!(stdout.contains("returned_addresses"), "{stdout}");
+    assert!(stdout.contains("to_sandbox"), "{stdout}");
+}
+
+fn dns_a_response(query: &[u8], ip: [u8; 4]) -> Vec<u8> {
+    assert!(query.len() >= 12);
+    let mut question_end = 12;
+    while question_end < query.len() && query[question_end] != 0 {
+        question_end += query[question_end] as usize + 1;
+    }
+    question_end += 5;
+    let mut response = Vec::new();
+    response.extend_from_slice(&query[0..2]);
+    response.extend_from_slice(&[0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
+    response.extend_from_slice(&query[12..question_end]);
+    response.extend_from_slice(&[0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01]);
+    response.extend_from_slice(&60u32.to_be_bytes());
+    response.extend_from_slice(&[0x00, 0x04]);
+    response.extend_from_slice(&ip);
+    response
+}
