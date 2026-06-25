@@ -1404,5 +1404,5 @@
   - `cargo tree -p foxprox-runtime` — runtime uses packet crate for ICMP bytes.
   - `cargo tree -p foxprox-packet` — packet crate remains core-only.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 0443a31.
 - Remaining boundary risks: TCP reset/error signaling and ICMPv6 errors remain.
