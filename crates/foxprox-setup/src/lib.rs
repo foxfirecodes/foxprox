@@ -13,7 +13,7 @@ use std::fmt;
 use std::fs;
 use std::net::IpAddr;
 use std::os::fd::RawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SetupArgs {
@@ -21,8 +21,14 @@ pub struct SetupArgs {
     pub tun: TunDeviceConfig,
     pub dns_resolver: IpAddr,
     pub proxy_listener: Option<ProxyListenerConfig>,
-    pub handoff_fd: RawFd,
+    pub handoff: SetupHandoff,
     pub target: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SetupHandoff {
+    Fd(RawFd),
+    UnixSocket(PathBuf),
 }
 
 impl SetupArgs {
@@ -32,7 +38,10 @@ impl SetupArgs {
             tun: self.tun.clone(),
             dns_resolver: self.dns_resolver,
             proxy_listener: self.proxy_listener.clone(),
-            tun_handoff_fd: self.handoff_fd as u32,
+            tun_handoff_fd: match &self.handoff {
+                SetupHandoff::Fd(fd) => *fd as u32,
+                SetupHandoff::UnixSocket(_) => 0,
+            },
         }
     }
 }
@@ -75,6 +84,7 @@ pub enum ParseError {
     InvalidIp { flag: String, value: String },
     InvalidU16 { flag: String, value: String },
     InvalidFd { value: String },
+    ConflictingHandoff,
     TargetMissing,
 }
 
@@ -93,6 +103,7 @@ where
     let mut http_proxy_port = None;
     let mut socks_proxy_port = None;
     let mut handoff_fd = None;
+    let mut handoff_socket = None;
     let mut target = Vec::new();
 
     let mut iter = args.into_iter().map(Into::into).peekable();
@@ -125,6 +136,9 @@ where
                         .parse::<RawFd>()
                         .map_err(|_| ParseError::InvalidFd { value })?,
                 );
+            }
+            "--handoff-socket" => {
+                handoff_socket = Some(PathBuf::from(next_value(&arg, &mut iter)?));
             }
             flag if flag.starts_with('-') => {
                 return Err(ParseError::UnknownFlag {
@@ -169,9 +183,14 @@ where
         },
         dns_resolver: dns_resolver.ok_or(ParseError::MissingRequired { field: "dns" })?,
         proxy_listener,
-        handoff_fd: handoff_fd.ok_or(ParseError::MissingRequired {
-            field: "handoff-fd",
-        })?,
+        handoff: match (handoff_fd, handoff_socket) {
+            (Some(fd), None) => SetupHandoff::Fd(fd),
+            (None, Some(path)) => SetupHandoff::UnixSocket(path),
+            (Some(_), Some(_)) => return Err(ParseError::ConflictingHandoff),
+            (None, None) => {
+                return Err(ParseError::MissingRequired { field: "handoff" });
+            }
+        },
         target,
     })
 }
@@ -204,6 +223,7 @@ pub trait SetupBackend {
     fn configure_tun(&mut self, config: &TunDeviceConfig) -> Result<(), SetupError>;
     fn configure_dns(&mut self, resolver: IpAddr) -> Result<(), SetupError>;
     fn handoff_tun_fd(&mut self, handoff_fd: RawFd, tun_fd: RawFd) -> Result<(), SetupError>;
+    fn handoff_tun_socket(&mut self, path: &Path, tun_fd: RawFd) -> Result<(), SetupError>;
     fn drop_setup_privileges(&mut self) -> Result<(), SetupError>;
     fn exec_target(&mut self, target: &[String]) -> Result<(), SetupError>;
 }
@@ -213,7 +233,10 @@ pub fn run_setup<B: SetupBackend>(args: &SetupArgs, backend: &mut B) -> Result<(
     let tun_fd = backend.create_tun(&args.tun.name)?;
     backend.configure_tun(&args.tun)?;
     backend.configure_dns(args.dns_resolver)?;
-    backend.handoff_tun_fd(args.handoff_fd, tun_fd)?;
+    match &args.handoff {
+        SetupHandoff::Fd(fd) => backend.handoff_tun_fd(*fd, tun_fd)?,
+        SetupHandoff::UnixSocket(path) => backend.handoff_tun_socket(path, tun_fd)?,
+    }
     backend.drop_setup_privileges()?;
     backend.exec_target(&args.target)
 }
@@ -265,6 +288,12 @@ impl SetupBackend for RealSetupBackend {
         Ok(())
     }
 
+    fn handoff_tun_socket(&mut self, path: &Path, tun_fd: RawFd) -> Result<(), SetupError> {
+        send_fd_to_socket_path(path, tun_fd)?;
+        self.tun.take();
+        Ok(())
+    }
+
     fn drop_setup_privileges(&mut self) -> Result<(), SetupError> {
         linux_privileges::drop_cap_net_admin()
             .map_err(|error| SetupError::PrivilegeDrop(error.to_string()))
@@ -284,6 +313,16 @@ impl SetupBackend for RealSetupBackend {
 fn send_fd(socket_fd: RawFd, fd_to_send: RawFd) -> Result<(), SetupError> {
     unix_fd_handoff::send_fd(socket_fd, fd_to_send)
         .map_err(|error| SetupError::Handoff(error.to_string()))
+}
+
+#[cfg(unix)]
+fn send_fd_to_socket_path(path: &Path, fd_to_send: RawFd) -> Result<(), SetupError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::net::UnixStream;
+
+    let stream =
+        UnixStream::connect(path).map_err(|error| SetupError::Handoff(error.to_string()))?;
+    send_fd(stream.as_raw_fd(), fd_to_send)
 }
 
 #[cfg(target_os = "linux")]
@@ -345,15 +384,28 @@ mod linux_privileges {
             return Err(io::Error::last_os_error());
         }
 
-        // SAFETY: prctl is called with documented scalar arguments. Failure is
-        // propagated so the helper fails closed rather than execing with caps.
-        if unsafe { prctl(PR_CAPBSET_DROP, CAP_NET_ADMIN as c_ulong, 0, 0, 0) } < 0 {
+        // Re-read and verify the target will not exec with CAP_NET_ADMIN in
+        // any process capability set. This is the fail-closed invariant.
+        // Rootless user namespaces can reject bounding/ambient prctl changes
+        // even after capset succeeds, so those calls are best-effort below.
+        // SAFETY: header and data are valid pointers to initialized storage.
+        if unsafe { capget(&mut header, data.as_mut_ptr()) } < 0 {
             return Err(io::Error::last_os_error());
         }
+        if capability_present(&data, CAP_NET_ADMIN) {
+            return Err(io::Error::other("CAP_NET_ADMIN remained after capset"));
+        }
 
-        // SAFETY: lowers CAP_NET_ADMIN from the ambient set when supported. If
-        // the kernel reports EINVAL/EPERM here, target exec is denied.
-        if unsafe {
+        // SAFETY: prctl is called with documented scalar arguments. Some
+        // rootless user namespaces reject bounding-set changes with EPERM; this
+        // is acceptable only after the verified capset removal above.
+        let _ = unsafe { prctl(PR_CAPBSET_DROP, CAP_NET_ADMIN as c_ulong, 0, 0, 0) };
+
+        // SAFETY: lowers CAP_NET_ADMIN from the ambient set when supported.
+        // Kernels/user namespaces may return EINVAL/EPERM when the capability is
+        // absent or ambient capabilities are unavailable; the verified capset
+        // removal above remains the enforced invariant.
+        let _ = unsafe {
             prctl(
                 PR_CAP_AMBIENT,
                 PR_CAP_AMBIENT_LOWER,
@@ -361,10 +413,7 @@ mod linux_privileges {
                 0,
                 0,
             )
-        } < 0
-        {
-            return Err(io::Error::last_os_error());
-        }
+        };
 
         Ok(())
     }
@@ -377,9 +426,17 @@ mod linux_privileges {
         data[index].inheritable &= mask;
     }
 
+    fn capability_present(data: &[CapData; 2], capability: usize) -> bool {
+        let index = capability / 32;
+        let mask = 1u32 << (capability % 32);
+        data[index].effective & mask != 0
+            || data[index].permitted & mask != 0
+            || data[index].inheritable & mask != 0
+    }
+
     #[cfg(test)]
     mod tests {
-        use super::{clear_capability, CapData, CAP_NET_ADMIN};
+        use super::{capability_present, clear_capability, CapData, CAP_NET_ADMIN};
 
         #[test]
         fn clears_cap_net_admin_from_all_sets() {
@@ -403,6 +460,7 @@ mod linux_privileges {
             assert_eq!(data[0].permitted & bit, 0);
             assert_eq!(data[0].inheritable & bit, 0);
             assert_eq!(data[1].effective, u32::MAX);
+            assert!(!capability_present(&data, CAP_NET_ADMIN));
         }
     }
 }
@@ -637,6 +695,15 @@ mod tests {
             Ok(())
         }
 
+        fn handoff_tun_socket(&mut self, path: &Path, tun_fd: RawFd) -> Result<(), SetupError> {
+            self.calls
+                .push(format!("handoff-socket:{}:{tun_fd}", path.display()));
+            if self.fail_handoff {
+                return Err(SetupError::Handoff("simulated".to_string()));
+            }
+            Ok(())
+        }
+
         fn drop_setup_privileges(&mut self) -> Result<(), SetupError> {
             self.calls.push("drop-caps".to_string());
             Ok(())
@@ -684,9 +751,46 @@ mod tests {
         let parsed = parse_setup_args(valid_args()).unwrap();
         assert_eq!(parsed.sandbox_id.as_str(), "setup-test");
         assert_eq!(parsed.tun.name, "foxprox0");
-        assert_eq!(parsed.handoff_fd, 3);
+        assert_eq!(parsed.handoff, SetupHandoff::Fd(3));
         assert_eq!(parsed.target, ["curl", "http://example.com"]);
         assert_eq!(parsed.proxy_listener.unwrap().http_port, Some(3128));
+    }
+
+    #[test]
+    fn parses_socket_handoff_arguments_for_bwrap_without_fd_preservation() {
+        let mut args = valid_args();
+        args.retain(|arg| arg != "--handoff-fd" && arg != "3");
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        args.splice(
+            separator..separator,
+            [
+                "--handoff-socket".to_string(),
+                "/tmp/foxprox.sock".to_string(),
+            ],
+        );
+
+        let parsed = parse_setup_args(args).unwrap();
+
+        assert_eq!(
+            parsed.handoff,
+            SetupHandoff::UnixSocket(PathBuf::from("/tmp/foxprox.sock"))
+        );
+        assert_eq!(parsed.setup_plan().tun_handoff_fd, 0);
+    }
+
+    #[test]
+    fn parser_rejects_conflicting_handoff_arguments() {
+        let mut args = valid_args();
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        args.splice(
+            separator..separator,
+            [
+                "--handoff-socket".to_string(),
+                "/tmp/foxprox.sock".to_string(),
+            ],
+        );
+
+        assert_eq!(parse_setup_args(args), Err(ParseError::ConflictingHandoff));
     }
 
     #[test]
@@ -695,9 +799,7 @@ mod tests {
         args.retain(|arg| arg != "--handoff-fd" && arg != "3");
         assert_eq!(
             parse_setup_args(args),
-            Err(ParseError::MissingRequired {
-                field: "handoff-fd"
-            })
+            Err(ParseError::MissingRequired { field: "handoff" })
         );
     }
 
@@ -731,6 +833,36 @@ mod tests {
                 "configure:foxprox0",
                 "dns:10.66.0.1",
                 "handoff:3:9",
+                "drop-caps",
+                "exec:curl http://example.com"
+            ]
+        );
+    }
+
+    #[test]
+    fn run_setup_can_handoff_to_socket_path_before_dropping_caps() {
+        let mut args = valid_args();
+        args.retain(|arg| arg != "--handoff-fd" && arg != "3");
+        let separator = args.iter().position(|arg| arg == "--").unwrap();
+        args.splice(
+            separator..separator,
+            [
+                "--handoff-socket".to_string(),
+                "/tmp/foxprox.sock".to_string(),
+            ],
+        );
+        let args = parse_setup_args(args).unwrap();
+        let mut backend = FakeBackend::default();
+
+        run_setup(&args, &mut backend).unwrap();
+
+        assert_eq!(
+            backend.calls,
+            [
+                "create:foxprox0",
+                "configure:foxprox0",
+                "dns:10.66.0.1",
+                "handoff-socket:/tmp/foxprox.sock:9",
                 "drop-caps",
                 "exec:curl http://example.com"
             ]

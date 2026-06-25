@@ -62,3 +62,11 @@
 
 ## 2026-06-25T03:13:05Z
 - Real host TCP streams opened for transparent smoltcp sessions should be nonblocking; bidirectional tick tests must treat `WouldBlock` as a normal scheduling outcome and retry rather than assuming an immediate host reply.
+
+## 2026-06-25T04:05:00Z
+- Correction: rootless bwrap is available for live testing in this environment; do not treat lack of effective host `CAP_NET_ADMIN` as a hard blocker without trying the bwrap setup-helper path.
+
+## 2026-06-25T14:45:00Z
+- Rootless bwrap TUN setup requires running the setup helper as uid/gid 0 inside the user namespace and mounting a writable `/dev` (`--dev /dev`) before binding `/dev/net/tun`; `--dev-bind /dev/net/tun` alone lets the node appear but `open`/`TUNSETIFF` can fail.
+- bwrap does not preserve arbitrary helper fds for the target command path used here, so a filesystem Unix socket handoff is a practical rootless live-test path for transferring the TUN fd back to the host broker.
+- In rootless user namespaces, dropping CAP_NET_ADMIN with `capset` can succeed while bounding/ambient `prctl` drops return EPERM; verify effective/permitted/inheritable removal as the hard invariant and treat those prctls as best-effort.

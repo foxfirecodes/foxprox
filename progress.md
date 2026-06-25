@@ -2017,3 +2017,33 @@
 - Commit hash when committed: amended into `88a500e`.
 - Remaining risks: same as previous entry: full async listener/relay loops and privileged end-to-end TUN/bwrap smoke are outside what this unprivileged deterministic harness can execute.
 - Exact next step: amend the prior checkpoint with this verification, then run final git status and scope audit.
+
+## 2026-06-25T04:05:00Z
+- Current objective: run rootless bwrap live tests and patch gaps until the alpha prototype works end-to-end.
+- Git status summary: clean worktree at start of live-test cycle.
+- User correction: bwrap is rootless here and should be used for live tests; missing host effective CAP_NET_ADMIN is not by itself a blocker for bwrap-based setup.
+- Intended slice: inspect launcher/setup/device paths, run the smallest live bwrap/TUN smoke, capture failures, and patch the repo toward a full working alpha prototype.
+- Verification plan: use deterministic cargo checks plus focused live bwrap commands; record any environment-specific skip/failure precisely.
+- Files expected to change: likely setup/launcher/device/runtime integration plus `progress.md` and `learnings.md` for the corrected bwrap assumption.
+- Exact next step: inspect bwrap/setup command paths and run rootless bwrap capability/TUN probes.
+
+## 2026-06-25T14:45:00Z
+- Current objective: make rootless bwrap live TUN setup work and patch setup gaps.
+- Files changed: `crates/foxprox-device/src/lib.rs`, `crates/foxprox-integrations/src/lib.rs`, `crates/foxprox-setup/src/lib.rs`, `progress.md`, `learnings.md`.
+- Live failures observed and fixed:
+  - Initial bwrap live setup with `--dev-bind /dev/net/tun` only failed opening `/dev/net/tun` with `Permission denied`; rootless bwrap needs `--dev /dev` plus the TUN bind.
+  - Running as uid 1000 in the user namespace failed `TUNSETIFF` with `Operation not permitted`; adding bwrap `--uid 0 --gid 0` gives namespace-scoped CAP_NET_ADMIN for setup.
+  - Inherited fd handoff is not viable through the current bwrap command shape; added `--handoff-socket` and Unix socket fd transfer for rootless bwrap.
+  - Capability drop failed on rootless bounding/ambient `prctl`; patched setup to enforce and verify CAP_NET_ADMIN removal from effective/permitted/inheritable sets after `capset`, while treating rootless-only bounding/ambient prctl failures as best-effort.
+- Verification commands run:
+  - `cargo fmt`
+  - `cargo clippy -p foxprox-device -p foxprox-integrations -p foxprox-setup --all-targets --all-features -- -D warnings`
+  - `cargo test -p foxprox-device -p foxprox-integrations -p foxprox-setup --all-targets --all-features`
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+  - Manual live bwrap smoke with `foxproxsetup --handoff-socket`: passed with one TUN fd received over SCM_RIGHTS; sandbox target saw `fpxlive1` configured with `10.66.0.2 peer 10.66.0.1`, default route via `fpxlive1`, generated resolver config, and `CapEff: 0000000000000000` after setup exec.
+- Observed result: final deterministic verification passed; 55 core tests, 8 device tests, 4 integration tests, 6 launcher tests, 95 runtime tests, 10 setup tests, and 40 smoltcp adapter tests passed. Rootless bwrap live setup now creates/configures TUN, hands its fd to the host over a Unix socket, drops CAP_NET_ADMIN before target exec, and proves the target namespace sees the configured interface while the host holds the fd.
+- Commit hash when committed: pending.
+- Remaining risks: launcher still lacks a high-level socket-handoff execution helper; live setup smoke proves TUN setup but does not yet run the broker loop against the handed-off fd.
+- Exact next step: commit rootless bwrap setup fixes, then add launcher support for socket-handoff bwrap execution and a live smoke that receives the TUN fd via launcher-owned path.

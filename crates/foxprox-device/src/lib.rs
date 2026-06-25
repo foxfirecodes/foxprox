@@ -17,7 +17,9 @@ use std::fs::File;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, RawFd};
 #[cfg(unix)]
-use std::os::unix::net::UnixStream;
+use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DeviceError {
@@ -44,6 +46,13 @@ pub struct SetupControlSocket {
 }
 
 #[cfg(unix)]
+#[derive(Debug)]
+pub struct SetupControlSocketListener {
+    listener: UnixListener,
+    path: PathBuf,
+}
+
+#[cfg(unix)]
 impl SetupControlSocket {
     pub fn pair() -> Result<Self, DeviceError> {
         let (broker, helper) = UnixStream::pair()
@@ -56,11 +65,45 @@ impl SetupControlSocket {
     }
 
     pub fn receive_file(&self) -> Result<File, DeviceError> {
-        let fd = unix_fd_receive::recv_fd(self.broker.as_raw_fd())
-            .map_err(|error| io_error("receive TUN fd over setup control socket", error))?;
-        // SAFETY: `recv_fd` returns a new descriptor owned by this process.
-        Ok(unsafe { File::from_raw_fd(fd) })
+        receive_file_from_socket_fd(self.broker.as_raw_fd())
     }
+}
+
+#[cfg(unix)]
+impl SetupControlSocketListener {
+    pub fn bind(path: impl AsRef<Path>) -> Result<Self, DeviceError> {
+        let path = path.as_ref().to_path_buf();
+        let listener = UnixListener::bind(&path)
+            .map_err(|error| io_error("bind setup control socket path", error))?;
+        Ok(Self { listener, path })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn receive_file(&self) -> Result<File, DeviceError> {
+        let (stream, _) = self
+            .listener
+            .accept()
+            .map_err(|error| io_error("accept setup control socket path", error))?;
+        receive_file_from_socket_fd(stream.as_raw_fd())
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SetupControlSocketListener {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(unix)]
+fn receive_file_from_socket_fd(socket_fd: RawFd) -> Result<File, DeviceError> {
+    let fd = unix_fd_receive::recv_fd(socket_fd)
+        .map_err(|error| io_error("receive TUN fd over setup control socket", error))?;
+    // SAFETY: `recv_fd` returns a new descriptor owned by this process.
+    Ok(unsafe { File::from_raw_fd(fd) })
 }
 
 impl From<IntegrationError> for DeviceError {
@@ -511,6 +554,31 @@ mod tests {
 
         unix_fd_receive::send_fd_for_test(control.helper_fd(), payload_tx.as_raw_fd()).unwrap();
         let mut received = control.receive_file().unwrap();
+        received.write_all(b"ok").unwrap();
+
+        let mut buf = [0u8; 2];
+        payload_rx.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"ok");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_control_socket_path_receives_handed_off_fd() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-handoff-{}-{}.sock",
+            std::process::id(),
+            "device-test"
+        ));
+        let control = SetupControlSocketListener::bind(&path).unwrap();
+        let (payload_tx, mut payload_rx) = UnixStream::pair().unwrap();
+        let sender_path = path.clone();
+        let sender = std::thread::spawn(move || {
+            let stream = UnixStream::connect(sender_path).unwrap();
+            unix_fd_receive::send_fd_for_test(stream.as_raw_fd(), payload_tx.as_raw_fd()).unwrap();
+        });
+
+        let mut received = control.receive_file().unwrap();
+        sender.join().unwrap();
         received.write_all(b"ok").unwrap();
 
         let mut buf = [0u8; 2];

@@ -8,6 +8,7 @@
 
 use foxprox_core::SandboxId;
 use std::net::IpAddr;
+use std::path::Path;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TunDeviceConfig {
@@ -82,6 +83,22 @@ pub struct BwrapSetupCommand {
 
 impl BwrapSetupCommand {
     pub fn build(plan: &SetupPlan, target: &[String]) -> Result<Self, IntegrationError> {
+        Self::build_with_handoff(plan, target, BwrapHandoff::Fd(plan.tun_handoff_fd))
+    }
+
+    pub fn build_with_handoff_socket(
+        plan: &SetupPlan,
+        target: &[String],
+        socket_path: &Path,
+    ) -> Result<Self, IntegrationError> {
+        Self::build_with_handoff(plan, target, BwrapHandoff::Socket(socket_path))
+    }
+
+    fn build_with_handoff(
+        plan: &SetupPlan,
+        target: &[String],
+        handoff: BwrapHandoff<'_>,
+    ) -> Result<Self, IntegrationError> {
         plan.validate()?;
         if target.is_empty() {
             return Err(IntegrationError::MissingTarget);
@@ -89,11 +106,30 @@ impl BwrapSetupCommand {
         let mut args = vec![
             "--unshare-user".to_string(),
             "--unshare-net".to_string(),
+            "--uid".to_string(),
+            "0".to_string(),
+            "--gid".to_string(),
+            "0".to_string(),
             "--cap-add".to_string(),
             "CAP_NET_ADMIN".to_string(),
+            "--dev".to_string(),
+            "/dev".to_string(),
             "--dev-bind".to_string(),
             "/dev/net/tun".to_string(),
             "/dev/net/tun".to_string(),
+        ];
+        if let BwrapHandoff::Socket(path) = handoff {
+            let parent = path
+                .parent()
+                .ok_or(IntegrationError::InvalidHandoffSocketPath)?;
+            let parent = parent
+                .to_str()
+                .ok_or(IntegrationError::InvalidHandoffSocketPath)?;
+            args.push("--bind".to_string());
+            args.push(parent.to_string());
+            args.push(parent.to_string());
+        }
+        args.extend([
             "foxproxsetup".to_string(),
             "--sandbox-id".to_string(),
             plan.sandbox_id.to_string(),
@@ -107,9 +143,17 @@ impl BwrapSetupCommand {
             plan.tun.mtu.to_string(),
             "--dns".to_string(),
             plan.dns_resolver.to_string(),
-            "--handoff-fd".to_string(),
-            plan.tun_handoff_fd.to_string(),
-        ];
+        ]);
+        match handoff {
+            BwrapHandoff::Fd(fd) => {
+                args.push("--handoff-fd".to_string());
+                args.push(fd.to_string());
+            }
+            BwrapHandoff::Socket(path) => {
+                args.push("--handoff-socket".to_string());
+                args.push(path.to_string_lossy().into_owned());
+            }
+        }
         if let Some(proxy) = &plan.proxy_listener {
             args.push("--proxy-ip".to_string());
             args.push(proxy.ip.to_string());
@@ -132,10 +176,13 @@ impl BwrapSetupCommand {
 
     pub fn contains_required_network_isolation(&self) -> bool {
         self.args.iter().any(|arg| arg == "--unshare-net")
+            && self.args.windows(2).any(|pair| pair == ["--uid", "0"])
+            && self.args.windows(2).any(|pair| pair == ["--gid", "0"])
             && self
                 .args
                 .windows(2)
                 .any(|pair| pair == ["--cap-add", "CAP_NET_ADMIN"])
+            && self.args.windows(2).any(|pair| pair == ["--dev", "/dev"])
             && self
                 .args
                 .windows(3)
@@ -151,6 +198,13 @@ pub enum IntegrationError {
     InvalidProxyPort,
     NoProxyPorts,
     MissingTarget,
+    InvalidHandoffSocketPath,
+}
+
+#[derive(Clone, Copy)]
+enum BwrapHandoff<'a> {
+    Fd(u32),
+    Socket(&'a Path),
 }
 
 #[cfg(test)]
@@ -188,6 +242,27 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--handoff-fd", "3"]));
         assert_eq!(command.args.last().map(String::as_str), Some("curl"));
+    }
+
+    #[test]
+    fn bwrap_command_can_use_socket_handoff_for_rootless_setup() {
+        let command = BwrapSetupCommand::build_with_handoff_socket(
+            &plan(),
+            &["true".to_string()],
+            std::path::Path::new("/tmp/foxprox/handoff.sock"),
+        )
+        .unwrap();
+
+        assert!(command.contains_required_network_isolation());
+        assert!(command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--bind", "/tmp/foxprox"]));
+        assert!(command
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--handoff-socket", "/tmp/foxprox/handoff.sock"]));
+        assert!(!command.args.iter().any(|arg| arg == "--handoff-fd"));
     }
 
     #[test]
