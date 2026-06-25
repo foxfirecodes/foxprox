@@ -137,6 +137,18 @@ impl FlowTable {
             .collect()
     }
 
+    pub fn record_udp_host_datagram(
+        &mut self,
+        key: &FlowKey,
+        now_millis: u128,
+        bytes: u64,
+    ) -> Option<&UdpFlow> {
+        self.udp.get_mut(key).map(|flow| {
+            flow.record_host_datagram(now_millis, bytes);
+            flow as &UdpFlow
+        })
+    }
+
     pub fn udp_flows(&self) -> &HashMap<FlowKey, UdpFlow> {
         &self.udp
     }

@@ -15,7 +15,7 @@ use foxprox_core::{
     FlowTable, FrontendKind, HostnameAttribution, HttpProxyRequestLine, HttpRequestMetadata,
     InspectError, NormalizedEvent, PacketError, ParsedIpPacket, PolicyEngine, Protocol,
     ProxyParseError, QuicStatus, SandboxId, SniStatus, SocksDestination, StaticDnsRecord,
-    StaticDnsResolver, Tcpv4Segment, UdpFlow, Udpv4Packet, UnsupportedIpv4Protocol,
+    StaticDnsResolver, Tcpv4Segment, UdpFlow, UdpTimeouts, Udpv4Packet, UnsupportedIpv4Protocol,
     VerificationKernel,
 };
 use std::collections::HashMap;
@@ -1218,6 +1218,16 @@ impl<T, S> TunUdpHostSession<T, S> {
         self.flows.len()
     }
 
+    pub fn expire_idle_flows(&mut self, now_millis: u128, timeouts: &UdpTimeouts) -> Vec<FlowKey> {
+        let expired_flows = self.flow_table.expire_udp(now_millis, timeouts);
+        let mut expired_keys = Vec::with_capacity(expired_flows.len());
+        for flow in expired_flows {
+            self.flows.remove(&flow.key);
+            expired_keys.push(flow.key);
+        }
+        expired_keys
+    }
+
     pub fn into_parts(
         self,
     ) -> (
@@ -1237,7 +1247,7 @@ impl<T: Read + Write, S: AuditSink> TunUdpHostSession<T, S> {
         max_host_reply_bytes: usize,
     ) -> io::Result<TunUdpHostSessionTick> {
         let ingress = self.handle_next_udp_packet(timestamp_millis)?;
-        let host_replies = self.poll_host_replies(max_host_reply_bytes)?;
+        let host_replies = self.poll_host_replies(timestamp_millis, max_host_reply_bytes)?;
         Ok(TunUdpHostSessionTick {
             ingress,
             host_replies,
@@ -1310,6 +1320,7 @@ impl<T: Read + Write, S: AuditSink> TunUdpHostSession<T, S> {
 
     fn poll_host_replies(
         &mut self,
+        timestamp_millis: u128,
         max_host_reply_bytes: usize,
     ) -> io::Result<Vec<TunUdpHostReplyOutcome>> {
         let mut replies = Vec::new();
@@ -1317,6 +1328,8 @@ impl<T: Read + Write, S: AuditSink> TunUdpHostSession<T, S> {
             match session.recv_host_reply_packet(max_host_reply_bytes) {
                 Ok(UdpHostReplyOutcome::WouldBlock) => {}
                 Ok(UdpHostReplyOutcome::Packet { bytes, packet }) => {
+                    self.flow_table
+                        .record_udp_host_datagram(flow, timestamp_millis, bytes as u64);
                     self.device.write_all(&packet)?;
                     replies.push(TunUdpHostReplyOutcome::PacketWritten {
                         flow: flow.clone(),
@@ -5227,7 +5240,11 @@ mod tests {
         assert_eq!(bytes, b"tun-udp-live".len());
         assert_eq!(flow.destination.ip, server_addr.ip());
         assert_eq!(flow.destination.port, server_addr.port());
-        assert!(flow_table.udp_flows().contains_key(flow));
+        let recorded_flow = flow_table.udp_flows().get(flow).unwrap();
+        assert_eq!(
+            recorded_flow.bytes_to_sandbox,
+            b"tun-udp-reply".len() as u64
+        );
         assert_eq!(flows.len(), 1);
         assert!(saw_reply);
         let ParsedIpPacket::Udpv4Packet(response) = parse_ip_packet(&fake.output).unwrap() else {
@@ -5238,6 +5255,63 @@ mod tests {
         assert_eq!(response.source_port, server_addr.port());
         assert_eq!(response.destination_port, 53000);
         assert_eq!(response.payload, b"tun-udp-reply");
+    }
+
+    #[test]
+    fn tun_udp_host_session_expires_flow_table_and_live_socket_together() {
+        let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let server_thread = std::thread::spawn(move || {
+            let mut buffer = [0u8; 64];
+            let (count, _) = server.recv_from(&mut buffer).unwrap();
+            assert_eq!(&buffer[..count], b"expire-me");
+        });
+        let request = build_udp_ipv4_packet_with_addrs(
+            Ipv4Addr::new(10, 66, 0, 2),
+            Ipv4Addr::LOCALHOST,
+            53000,
+            server_addr.port(),
+            b"expire-me",
+        );
+        let fake = FakeTunIo {
+            input: std::io::Cursor::new(request),
+            output: Vec::new(),
+        };
+        let mut rules = RuleSet::default();
+        let mut rule = PolicyRule::allow("allow-expiring-udp-session");
+        rule.protocol = Some(Protocol::Udp);
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut session = TunUdpHostSession::new(
+            fake,
+            kernel,
+            SandboxId::new("udp-host-expire").unwrap(),
+            Vec::new(),
+            1500,
+        );
+
+        let tick = session.run_once(100, 64).unwrap();
+        server_thread.join().unwrap();
+        let TunUdpHostIngressOutcome::EgressSent { ref flow, .. } = tick.ingress else {
+            panic!("expected UDP egress before expiry");
+        };
+        assert_eq!(session.open_flow_count(), 1);
+        assert!(session.flow_table().udp_flows().contains_key(flow));
+
+        assert!(session
+            .expire_idle_flows(60_100, &UdpTimeouts::default())
+            .is_empty());
+        let expired = session.expire_idle_flows(60_101, &UdpTimeouts::default());
+
+        assert_eq!(expired, vec![flow.clone()]);
+        assert_eq!(session.open_flow_count(), 0);
+        assert!(session.flow_table().udp_flows().is_empty());
     }
 
     #[test]

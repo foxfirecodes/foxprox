@@ -1886,3 +1886,26 @@
 - Commit hash when committed: pending.
 - Remaining risks: UDP flow expiry/cleanup is not wired to close live sockets; live TUN fd smoke remains unavailable without CAP_NET_ADMIN; DNS hostname attribution for real host dialing still needs a cohesive path.
 - Exact next step: commit policy-gated UDP host session, then add deterministic cleanup/expiry for owned UDP host sessions keyed to `FlowTable::expire_udp` so long-running sessions do not leak host sockets.
+
+## 2026-06-25T03:34:20Z
+- Current objective: add deterministic UDP host session accounting and cleanup.
+- Git status summary: clean worktree after commit `cecdcf8`.
+- Intended slice: record host-to-sandbox UDP bytes in flow state when replies are written, and add an explicit `expire_idle_flows` method that removes expired flow-table entries and closes matching live `StdUdpFlowSession`s.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-core/src/flow.rs`, `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: live TUN fd smoke remains unavailable without CAP_NET_ADMIN.
+- Exact next step: implement flow host-byte accounting and expiration regression.
+
+## 2026-06-25T03:37:35Z
+- Current objective: complete deterministic UDP host session accounting and cleanup.
+- Files changed: `crates/foxprox-core/src/flow.rs`, `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially reported formatting drift in new runtime accounting/test code)
+  - `cargo fmt`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+  - `cargo fmt --check`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 90 runtime tests, 7 setup tests, and 39 smoltcp adapter tests passed. Added `FlowTable::record_udp_host_datagram`, made `TunUdpHostSession` account host-to-sandbox bytes on reply writes, and added `expire_idle_flows` to remove expired flow-table entries and close matching live UDP sockets; regression proves socket count and flow table drop together at the configured timeout boundary.
+- Commit hash when committed: pending.
+- Remaining risks: live TUN fd smoke remains unavailable without CAP_NET_ADMIN; DNS hostname attribution for real host dialing is still socket-address only for TCP and IP-only for UDP.
+- Exact next step: commit UDP cleanup/accounting, then assess remaining alpha scope against docs and add an explicit live-TUN capability-gated smoke/skip path if no code path already records the CAP_NET_ADMIN blocker.
