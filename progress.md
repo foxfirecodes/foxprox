@@ -1735,3 +1735,18 @@
 - What failed or surprised the agent: no behavior failures; adding the field at the core audit record boundary kept all downstream audit sinks consistent.
 - What remains unproven: live HTTPS/SNI and DNS-correlated transparent TCP audit in the bwrap path; static event/audit coverage exists and the schema can now distinguish the source when those live events are emitted.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — live transparent TLS SNI audit in TCP launcher
+
+- Slice attempted: wire transparent TLS ClientHello/SNI inspection into the live TUN/smoltcp TCP launcher and prove it with a live bwrap target.
+- Why next: review flagged that transparent HTTPS/SNI was only covered by static parser/policy tests; `docs/initial-impl.md` requires transparent HTTPS to be audited by SNI where visible.
+- What changed: `run_bwrap_tcp_once` now detects TLS ClientHello payloads after smoltcp receive, parses SNI with `parse_tls_client_hello`, evaluates the event through the shared policy engine, emits a `tls_client_hello` audit JSON line with `hostname_attribution_source="tls_sni"`, and enforces denial before host egress if policy rejects it. Added a live ignored bwrap test that sends a handcrafted ClientHello with SNI `secure.example.com` through the TUN/smoltcp path, verifies the host upstream receives the exact ClientHello bytes, and asserts the audit output includes the SNI/source evidence.
+- Verification:
+  - Focused live TLS check passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_bwrap_tls -- --ignored --nocapture`.
+  - All explicit live smokes passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, now 8/8 including TLS SNI audit.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; a synthetic ClientHello over a normal TCP socket is enough to prove SNI inspection/audit in the live TUN path without needing a full TLS server handshake.
+- What remains unproven: live DNS/SNI mismatch denial in the bwrap TCP launcher; static core/inspect tests already cover mismatch policy.
+- Commit: this commit.

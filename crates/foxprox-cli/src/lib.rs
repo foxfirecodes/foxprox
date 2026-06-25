@@ -33,7 +33,7 @@ use foxprox_device::{TunIoError, TunPacketIo};
 use foxprox_egress::{EgressError, UdpEgress, UdpTarget};
 use foxprox_flow::ClosedTcpFlow;
 #[cfg(unix)]
-use foxprox_inspect::parse_plaintext_http_request;
+use foxprox_inspect::{parse_plaintext_http_request, parse_tls_client_hello};
 use foxprox_packet::{
     parse_ipv4_packet, parse_ipv4_udp_datagram, synthesize_ipv4_udp_response, PacketContext,
 };
@@ -471,6 +471,38 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                         });
                     }
                 }
+            } else if looks_like_tls_client_hello(&sandbox_payload) {
+                if let (Some(source), Some(destination)) = (tcp_source, tcp_destination) {
+                    let tls = parse_tls_client_hello(
+                        sandbox_id.clone(),
+                        FrontendKind::Tun,
+                        Some(source),
+                        destination,
+                        None,
+                        &sandbox_payload,
+                    )
+                    .map_err(|error| {
+                        CliError::Core(format!("transparent-tls-inspect-error: {error}"))
+                    })?;
+                    let evaluation = policy.evaluate(&tls);
+                    let allowed = evaluation.decision.is_allowed();
+                    audit_json_lines.push(audit_record_to_json_line(&evaluation.audit)?);
+                    if !allowed {
+                        let _ = child.kill();
+                        let status = child.wait().map_err(|error| CliError::Io {
+                            context: "wait-bwrap-target-after-tls-policy-deny".to_owned(),
+                            error,
+                        })?;
+                        return Ok(BwrapTcpOnceSummary {
+                            packets_read,
+                            sandbox_to_host_bytes: 0,
+                            host_to_sandbox_bytes: 0,
+                            audit_json_lines,
+                            target_status_code: status.code(),
+                            target_status_success: status.success(),
+                        });
+                    }
+                }
             }
             let mut host =
                 TcpStream::connect(config.upstream_addr).map_err(|error| CliError::Io {
@@ -549,6 +581,11 @@ fn looks_like_http_request(payload: &[u8]) -> bool {
     ]
     .iter()
     .any(|prefix| payload.starts_with(prefix))
+}
+
+#[cfg(unix)]
+fn looks_like_tls_client_hello(payload: &[u8]) -> bool {
+    payload.len() >= 6 && payload[0] == 22 && payload[5] == 1
 }
 
 /// Run setup command work with an already-created TUN-like fd.

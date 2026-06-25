@@ -332,3 +332,7 @@ When a live policy denial occurs inside `run_bwrap_tcp_once`, return a summary c
 ## 2026-06-22 — audit source belongs in core records
 
 To distinguish DNS-cache, HTTP Host, TLS SNI, explicit proxy host, and QUIC metadata in audit JSON, add `hostname_attribution_source` to the core `AuditRecord` rather than only to serialization code. Flow helpers can then preserve the source for lifecycle records.
+
+## 2026-06-22 — TLS SNI live evidence does not need a full TLS handshake
+
+For transparent HTTPS metadata proof, send a handcrafted TLS ClientHello over the live bwrap TCP path, inspect SNI before forwarding, and have a fake host TCP server acknowledge the raw bytes. This proves SNI audit without building a real TLS endpoint.

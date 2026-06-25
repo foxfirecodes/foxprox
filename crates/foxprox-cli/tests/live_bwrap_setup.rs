@@ -417,6 +417,84 @@ fn live_bwrap_tcp_connection_uses_smoltcp_and_host_stream() {
 
 #[test]
 #[ignore = "requires bwrap, /dev/net/tun, user namespaces, curl, and Python in the sandbox"]
+fn live_bwrap_tls_client_hello_emits_sni_audit() {
+    let Some(bwrap) = existing_path("/usr/bin/bwrap") else {
+        eprintln!("skipping live TLS smoke: /usr/bin/bwrap missing");
+        return;
+    };
+    if !Path::new("/dev/net/tun").exists() {
+        eprintln!("skipping live TLS smoke: /dev/net/tun missing");
+        return;
+    }
+    let Some(python) = existing_path("/usr/bin/python3") else {
+        eprintln!("skipping live TLS smoke: /usr/bin/python3 missing");
+        return;
+    };
+    let setup = foxproxsetup_path();
+    let dir = unique_test_dir("live-bwrap-tls");
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket_path = dir.join("broker.sock");
+    let resolv_conf = dir.join("resolv.conf");
+    let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let hello = tls_client_hello("secure.example.com");
+    let expected_hello = hello.clone();
+    let upstream_thread = std::thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        let mut buffer = vec![0_u8; 512];
+        let length = stream.read(&mut buffer).unwrap();
+        assert_eq!(&buffer[..length], expected_hello.as_slice());
+        stream.write_all(b"ok").unwrap();
+    });
+
+    let summary = run_bwrap_tcp_once(&BwrapTcpOnceConfig {
+        bwrap_program: bwrap,
+        setup_program: setup,
+        broker_socket: socket_path,
+        tun_name: "fpxtls0".to_owned(),
+        address_cidr: "10.134.0.2/24".to_owned(),
+        mtu: 1400,
+        resolv_conf,
+        broker_dns: IpAddr::V4(Ipv4Addr::new(10, 134, 0, 1)),
+        ip_program: PathBuf::from("/usr/bin/ip"),
+        extra_bwrap_args: vec!["--dev-bind".to_owned(), "/".to_owned(), "/".to_owned()],
+        target_argv: vec![
+            python.display().to_string(),
+            "-c".to_owned(),
+            format!(
+                "import socket; payload={}; s=socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(5); s.connect(('10.134.0.1', 443)); s.sendall(payload); data=s.recv(16); assert data == b'ok', data",
+                python_bytes_literal(&hello)
+            ),
+        ],
+        sandbox_id: "live-bwrap-tls".to_owned(),
+        policy: PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        },
+        smoltcp_ip: Ipv4Addr::new(10, 134, 0, 1),
+        smoltcp_prefix_len: 24,
+        listen_port: 443,
+        upstream_addr,
+        max_packet_len: 4096,
+        max_packets: 32,
+        sandbox_buffer_len: 512,
+        host_buffer_len: 64,
+    })
+    .unwrap();
+    upstream_thread.join().unwrap();
+
+    assert!(summary.target_status_success);
+    assert!(summary
+        .audit_json_lines
+        .iter()
+        .any(|line| line.contains("\"kind\":\"tls_client_hello\"")
+            && line.contains("secure.example.com")
+            && line.contains("\"hostname_attribution_source\":\"tls_sni\"")));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "requires bwrap, /dev/net/tun, user namespaces, curl, and Python in the sandbox"]
 fn live_bwrap_curl_fetches_http_through_smoltcp_launcher() {
     let Some(bwrap) = existing_path("/usr/bin/bwrap") else {
         eprintln!("skipping live curl smoke: /usr/bin/bwrap missing");
@@ -700,6 +778,48 @@ fn live_cli_bwrap_tcp_once_denies_http_policy_before_upstream() {
     assert!(stdout.contains("\"decision\":\"denied\""));
     assert!(stdout.contains("deny-root-http"));
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn tls_client_hello(server_name: &str) -> Vec<u8> {
+    let mut body = Vec::new();
+    body.extend_from_slice(&[0x03, 0x03]);
+    body.extend_from_slice(&[0_u8; 32]);
+    body.push(0);
+    body.extend_from_slice(&2_u16.to_be_bytes());
+    body.extend_from_slice(&[0x13, 0x01]);
+    body.push(1);
+    body.push(0);
+
+    let name = server_name.as_bytes();
+    let mut sni = Vec::new();
+    let list_len = 3 + name.len();
+    sni.extend_from_slice(&(list_len as u16).to_be_bytes());
+    sni.push(0);
+    sni.extend_from_slice(&(name.len() as u16).to_be_bytes());
+    sni.extend_from_slice(name);
+    let mut extensions = Vec::new();
+    extensions.extend_from_slice(&0_u16.to_be_bytes());
+    extensions.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+    extensions.extend_from_slice(&sni);
+    body.extend_from_slice(&(extensions.len() as u16).to_be_bytes());
+    body.extend_from_slice(&extensions);
+
+    let mut handshake = Vec::new();
+    handshake.push(1);
+    let len = body.len();
+    handshake.extend_from_slice(&[
+        ((len >> 16) & 0xff) as u8,
+        ((len >> 8) & 0xff) as u8,
+        (len & 0xff) as u8,
+    ]);
+    handshake.extend_from_slice(&body);
+
+    let mut record = Vec::new();
+    record.push(22);
+    record.extend_from_slice(&[0x03, 0x03]);
+    record.extend_from_slice(&(handshake.len() as u16).to_be_bytes());
+    record.extend_from_slice(&handshake);
+    record
 }
 
 fn dns_a_query(hostname: &str) -> Vec<u8> {
