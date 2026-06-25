@@ -59,3 +59,6 @@
 
 ## 2026-06-22T22:29:05Z
 - Packet-pumped TUN-style smoltcp tests must disable device self-loopback; internal loopback is useful for adapter-only proofs, but TUN ingress should only re-enter packets explicitly supplied by the sandbox side.
+
+## 2026-06-25T03:13:05Z
+- Real host TCP streams opened for transparent smoltcp sessions should be nonblocking; bidirectional tick tests must treat `WouldBlock` as a normal scheduling outcome and retry rather than assuming an immediate host reply.

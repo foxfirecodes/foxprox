@@ -244,6 +244,9 @@ impl SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>> {
     ) -> Result<(Self, FlowKey), SmoltcpTcpBridgeSessionError> {
         let host_stream = std::net::TcpStream::connect(host_address)
             .map_err(|_| SmoltcpTcpBridgeSessionError::HostConnectFailed)?;
+        host_stream
+            .set_nonblocking(true)
+            .map_err(|_| SmoltcpTcpBridgeSessionError::HostConnectFailed)?;
         Self::from_allowed_connect(adapter, components, attempt, host_stream)
             .map_err(SmoltcpTcpBridgeSessionError::Bridge)
     }
@@ -280,6 +283,10 @@ impl SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>> {
                 return Err(SmoltcpTcpBridgeSessionError::HostConnectFailed);
             }
         };
+        if host_stream.set_nonblocking(true).is_err() {
+            adapter.reset_connect(&attempt);
+            return Err(SmoltcpTcpBridgeSessionError::HostConnectFailed);
+        }
         adapter.mark_connect_opened(&attempt);
         let (session, flow) =
             Self::from_allowed_connect(adapter, components, &attempt, host_stream)
@@ -1937,7 +1944,7 @@ mod tests {
         );
         let mut recording_writer = RecordingWriter::default();
 
-        let outcome = session
+        let mut outcome = session
             .pump_bidirectional_once(
                 &mut Cursor::new(data),
                 &mut recording_writer,
@@ -1949,21 +1956,40 @@ mod tests {
                 3,
             )
             .unwrap();
+        let initial_forwarded = outcome.sandbox.forwarded.clone();
+        for millis in 4..40 {
+            if matches!(outcome.host.host_read, TcpHostReadOutcome::Bytes { .. }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+            outcome = session
+                .pump_bidirectional_once(
+                    &mut Cursor::new(Vec::new()),
+                    &mut recording_writer,
+                    &mut buffer,
+                    8080,
+                    64,
+                    &flow,
+                    64,
+                    millis,
+                )
+                .unwrap();
+        }
 
         assert_eq!(server.join().unwrap(), b"tick-data".to_vec());
         assert_eq!(
-            outcome.sandbox.forwarded,
+            initial_forwarded,
             Some(SmoltcpTcpBridgeSessionOutcome {
                 flow,
                 bytes_forwarded: b"tick-data".len()
             })
         );
-        assert_eq!(
+        assert!(matches!(
             outcome.host.host_read,
             TcpHostReadOutcome::Bytes {
-                count: b"tick-reply".len()
-            }
-        );
+                count
+            } if count == b"tick-reply".len()
+        ));
         assert!(recording_writer.writes.iter().any(|packet| {
             matches!(
                 parse_ip_packet(packet),

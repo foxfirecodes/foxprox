@@ -1778,3 +1778,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: host streams are still blocking by default when created via `connect_next_allowed_host_session`; production loop should use nonblocking host streams to avoid stalls.
 - Exact next step: commit bidirectional tick, then make real host dialing set host streams nonblocking and update tick tests to handle `WouldBlock` explicitly.
+
+## 2026-06-25T03:11:20Z
+- Current objective: continue after bidirectional bridge tick by making real host dialing nonblocking.
+- Git status summary: clean worktree after commit `a18cef9`.
+- Intended slice: set real host `TcpStream`s created by smoltcp session helpers to nonblocking mode and make bidirectional tick verification explicitly tolerate `WouldBlock` before host bytes arrive.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`, `learnings.md`.
+- Remaining risks: one-tick scheduling is still test-driven; production needs repeated polling around `WouldBlock`.
+- Exact next step: update host dialing and retry the bidirectional host-read assertion deterministically.
+
+## 2026-06-25T03:13:05Z
+- Current objective: make real host dialing nonblocking and verify bidirectional ticks tolerate `WouldBlock`.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features` (initially failed because the bidirectional tick test assumed the nonblocking host socket would return reply bytes immediately; fixed by bounded retry on `WouldBlock`)
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 37 smoltcp adapter tests passed. Real host streams created by smoltcp session helpers are now set nonblocking, and the bidirectional regression explicitly retries until host bytes are available while still proving the host reply is emitted as a sandbox-bound TCP/IP packet.
+- Commit hash when committed: pending.
+- Remaining risks: repeated polling is still test-local rather than an owned production event loop; live TUN fd smoke remains blocked by missing `CAP_NET_ADMIN` in this environment.
+- Exact next step: commit nonblocking host dialing, then introduce a small session-loop state type that can repeat bidirectional ticks and report `WouldBlock`/progress outcomes without blocking.
