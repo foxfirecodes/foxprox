@@ -1863,3 +1863,26 @@
 - Commit hash when committed: pending.
 - Remaining risks: the real UDP primitive is not yet wired to policy-gated TUN packet handling; live TUN fd smoke remains unavailable without CAP_NET_ADMIN.
 - Exact next step: commit real UDP flow primitive, then add a policy-gated TUN UDP host session wrapper that owns TUN-like IO, records allowed flow state, sends allowed datagrams with `StdUdpFlowSession`, polls for replies, and writes synthesized packets back to TUN-like IO.
+
+## 2026-06-25T03:28:25Z
+- Current objective: wire the real UDP primitive into a policy-gated TUN-like UDP host session.
+- Git status summary: clean worktree after commit `4f0099f`.
+- Intended slice: add a deterministic `TunUdpHostSession` that owns TUN-like IO, kernel, flow table, live UDP sessions, and an MTU buffer; a tick should read at most one TUN packet, fail closed on denied/malformed traffic, send allowed payloads to real loopback UDP, poll nonblocking replies, and write synthesized response packets back to the TUN-like IO.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: live TUN fd smoke and UDP session cleanup/expiry are still separate follow-up work.
+- Exact next step: implement wrapper and loopback regression.
+
+## 2026-06-25T03:33:45Z
+- Current objective: complete policy-gated real UDP host session from TUN-like packets.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially reported formatting drift in new tests)
+  - `cargo fmt`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+  - `cargo fmt --check`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 89 runtime tests, 7 setup tests, and 39 smoltcp adapter tests passed. Added `TunUdpHostSession` with typed ingress/reply tick outcomes; regression proves allowed TUN-like UDP packets are audited/policy-gated, sent to a real loopback UDP socket, tracked in the flow table/open session map, nonblocking host replies are synthesized into valid TUN-bound IPv4/UDP packets, and denied packets record flow/audit state without opening host sockets.
+- Commit hash when committed: pending.
+- Remaining risks: UDP flow expiry/cleanup is not wired to close live sockets; live TUN fd smoke remains unavailable without CAP_NET_ADMIN; DNS hostname attribution for real host dialing still needs a cohesive path.
+- Exact next step: commit policy-gated UDP host session, then add deterministic cleanup/expiry for owned UDP host sessions keyed to `FlowTable::expire_udp` so long-running sessions do not leak host sockets.

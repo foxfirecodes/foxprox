@@ -1181,6 +1181,215 @@ impl<T: Read + Write, E: HostEgress, S: AuditSink> TunUdpEgressSession<T, E, S> 
     }
 }
 
+pub struct TunUdpHostSession<T, S> {
+    device: T,
+    kernel: VerificationKernel<S>,
+    flow_table: FlowTable,
+    sandbox_id: SandboxId,
+    broker_dns: Vec<IpAddr>,
+    buffer: Vec<u8>,
+    flows: HashMap<FlowKey, StdUdpFlowSession>,
+}
+
+impl<T, S> TunUdpHostSession<T, S> {
+    pub fn new(
+        device: T,
+        kernel: VerificationKernel<S>,
+        sandbox_id: SandboxId,
+        broker_dns: Vec<IpAddr>,
+        mtu: usize,
+    ) -> Self {
+        Self {
+            device,
+            kernel,
+            flow_table: FlowTable::new(),
+            sandbox_id,
+            broker_dns,
+            buffer: vec![0; mtu],
+            flows: HashMap::new(),
+        }
+    }
+
+    pub fn flow_table(&self) -> &FlowTable {
+        &self.flow_table
+    }
+
+    pub fn open_flow_count(&self) -> usize {
+        self.flows.len()
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        T,
+        VerificationKernel<S>,
+        FlowTable,
+        HashMap<FlowKey, StdUdpFlowSession>,
+    ) {
+        (self.device, self.kernel, self.flow_table, self.flows)
+    }
+}
+
+impl<T: Read + Write, S: AuditSink> TunUdpHostSession<T, S> {
+    pub fn run_once(
+        &mut self,
+        timestamp_millis: u128,
+        max_host_reply_bytes: usize,
+    ) -> io::Result<TunUdpHostSessionTick> {
+        let ingress = self.handle_next_udp_packet(timestamp_millis)?;
+        let host_replies = self.poll_host_replies(max_host_reply_bytes)?;
+        Ok(TunUdpHostSessionTick {
+            ingress,
+            host_replies,
+        })
+    }
+
+    fn handle_next_udp_packet(
+        &mut self,
+        timestamp_millis: u128,
+    ) -> io::Result<TunUdpHostIngressOutcome> {
+        let bytes_read = self.device.read(&mut self.buffer)?;
+        if bytes_read == 0 {
+            return Ok(TunUdpHostIngressOutcome::NoPacket);
+        }
+        let packet = &self.buffer[..bytes_read];
+        let udp = match parse_ip_packet(packet) {
+            Ok(ParsedIpPacket::Udpv4Packet(udp)) => udp,
+            Ok(ParsedIpPacket::Tcpv4Segment(_)) | Ok(ParsedIpPacket::Icmpv4EchoRequest(_)) => {
+                return Ok(TunUdpHostIngressOutcome::NotUdp);
+            }
+            Ok(ParsedIpPacket::UnsupportedIpv4Protocol(unsupported)) => {
+                return Ok(TunUdpHostIngressOutcome::DroppedUnsupportedIpv4 {
+                    source: IpAddr::V4(unsupported.source),
+                    destination: IpAddr::V4(unsupported.destination),
+                    protocol: unsupported.protocol,
+                });
+            }
+            Err(error) => return Ok(TunUdpHostIngressOutcome::DroppedMalformed { error }),
+        };
+        let flow = record_udpv4_flow(
+            &mut self.flow_table,
+            &udp,
+            &self.broker_dns,
+            timestamp_millis,
+        );
+        let flow_key = flow.key.clone();
+        let event =
+            udpv4_packet_to_event_with_broker_dns(self.sandbox_id.clone(), &udp, &self.broker_dns);
+        let decision = self.kernel.decide_and_audit(&event, timestamp_millis);
+        if decision.action != DecisionAction::Allow {
+            return Ok(TunUdpHostIngressOutcome::PolicyDenied { decision });
+        }
+
+        if !self.flows.contains_key(&flow_key) {
+            let session = match StdUdpFlowSession::connect(flow_key.clone()) {
+                Ok(session) => session,
+                Err(error) => {
+                    return Ok(TunUdpHostIngressOutcome::EgressFailed {
+                        decision,
+                        flow: flow_key,
+                        error,
+                    });
+                }
+            };
+            self.flows.insert(flow_key.clone(), session);
+        }
+        match self.flows[&flow_key].send_sandbox_payload(udp.payload) {
+            Ok(bytes) => Ok(TunUdpHostIngressOutcome::EgressSent {
+                decision,
+                flow: flow_key,
+                bytes,
+            }),
+            Err(error) => Ok(TunUdpHostIngressOutcome::EgressFailed {
+                decision,
+                flow: flow_key,
+                error,
+            }),
+        }
+    }
+
+    fn poll_host_replies(
+        &mut self,
+        max_host_reply_bytes: usize,
+    ) -> io::Result<Vec<TunUdpHostReplyOutcome>> {
+        let mut replies = Vec::new();
+        for (flow, session) in &self.flows {
+            match session.recv_host_reply_packet(max_host_reply_bytes) {
+                Ok(UdpHostReplyOutcome::WouldBlock) => {}
+                Ok(UdpHostReplyOutcome::Packet { bytes, packet }) => {
+                    self.device.write_all(&packet)?;
+                    replies.push(TunUdpHostReplyOutcome::PacketWritten {
+                        flow: flow.clone(),
+                        host_bytes: bytes,
+                        packet_bytes: packet.len(),
+                    });
+                }
+                Err(error) => replies.push(TunUdpHostReplyOutcome::HostReadFailed {
+                    flow: flow.clone(),
+                    error,
+                }),
+            }
+        }
+        Ok(replies)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TunUdpHostSessionTick {
+    pub ingress: TunUdpHostIngressOutcome,
+    pub host_replies: Vec<TunUdpHostReplyOutcome>,
+}
+
+impl TunUdpHostSessionTick {
+    pub fn made_progress(&self) -> bool {
+        matches!(self.ingress, TunUdpHostIngressOutcome::EgressSent { .. })
+            || self
+                .host_replies
+                .iter()
+                .any(|reply| matches!(reply, TunUdpHostReplyOutcome::PacketWritten { .. }))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TunUdpHostIngressOutcome {
+    NoPacket,
+    EgressSent {
+        decision: Decision,
+        flow: FlowKey,
+        bytes: usize,
+    },
+    EgressFailed {
+        decision: Decision,
+        flow: FlowKey,
+        error: UdpFlowSessionError,
+    },
+    PolicyDenied {
+        decision: Decision,
+    },
+    DroppedMalformed {
+        error: PacketError,
+    },
+    DroppedUnsupportedIpv4 {
+        source: IpAddr,
+        destination: IpAddr,
+        protocol: u8,
+    },
+    NotUdp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TunUdpHostReplyOutcome {
+    PacketWritten {
+        flow: FlowKey,
+        host_bytes: usize,
+        packet_bytes: usize,
+    },
+    HostReadFailed {
+        flow: FlowKey,
+        error: UdpFlowSessionError,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TunUdpSessionOutcome {
     EgressSent {
@@ -4640,13 +4849,29 @@ mod tests {
     }
 
     fn build_udp_ipv4_packet(source_port: u16, destination_port: u16, payload: &[u8]) -> Vec<u8> {
+        build_udp_ipv4_packet_with_addrs(
+            Ipv4Addr::new(10, 66, 0, 2),
+            Ipv4Addr::new(10, 66, 0, 1),
+            source_port,
+            destination_port,
+            payload,
+        )
+    }
+
+    fn build_udp_ipv4_packet_with_addrs(
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+        source_port: u16,
+        destination_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
         let mut udp_payload = Vec::new();
         udp_payload.extend_from_slice(&source_port.to_be_bytes());
         udp_payload.extend_from_slice(&destination_port.to_be_bytes());
         udp_payload.extend_from_slice(&((8 + payload.len()) as u16).to_be_bytes());
         udp_payload.extend_from_slice(&0u16.to_be_bytes());
         udp_payload.extend_from_slice(payload);
-        build_ipv4_packet(17, &udp_payload)
+        build_ipv4_packet_with_addrs(source, destination, 17, &udp_payload)
     }
 
     fn build_tcp_ipv4_packet(
@@ -4746,14 +4971,28 @@ mod tests {
     }
 
     fn build_ipv4_packet(protocol: u8, payload: &[u8]) -> Vec<u8> {
+        build_ipv4_packet_with_addrs(
+            Ipv4Addr::new(10, 66, 0, 2),
+            Ipv4Addr::new(10, 66, 0, 1),
+            protocol,
+            payload,
+        )
+    }
+
+    fn build_ipv4_packet_with_addrs(
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+        protocol: u8,
+        payload: &[u8],
+    ) -> Vec<u8> {
         let total_len = 20 + payload.len();
         let mut packet = vec![0u8; total_len];
         packet[0] = 0x45;
         packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
         packet[8] = 64;
         packet[9] = protocol;
-        packet[12..16].copy_from_slice(&[10, 66, 0, 2]);
-        packet[16..20].copy_from_slice(&[10, 66, 0, 1]);
+        packet[12..16].copy_from_slice(&source.octets());
+        packet[16..20].copy_from_slice(&destination.octets());
         packet[20..].copy_from_slice(payload);
         if protocol == 1 {
             let icmp_checksum = checksum(&packet[20..]);
@@ -4923,6 +5162,114 @@ mod tests {
         assert_eq!(response.source_port, 1234);
         assert_eq!(response.destination_port, 53000);
         assert_eq!(response.payload, b"host-answer");
+    }
+
+    #[test]
+    fn tun_udp_host_session_policy_gates_real_udp_and_writes_reply_packet() {
+        let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let server_thread = std::thread::spawn(move || {
+            let mut buffer = [0u8; 64];
+            let (count, peer) = server.recv_from(&mut buffer).unwrap();
+            assert_eq!(&buffer[..count], b"tun-udp-live");
+            server.send_to(b"tun-udp-reply", peer).unwrap();
+        });
+        let request = build_udp_ipv4_packet_with_addrs(
+            Ipv4Addr::new(10, 66, 0, 2),
+            Ipv4Addr::LOCALHOST,
+            53000,
+            server_addr.port(),
+            b"tun-udp-live",
+        );
+        let fake = FakeTunIo {
+            input: std::io::Cursor::new(request),
+            output: Vec::new(),
+        };
+        let mut rules = RuleSet::default();
+        let mut rule = PolicyRule::allow("allow-real-udp-session");
+        rule.protocol = Some(Protocol::Udp);
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut session = TunUdpHostSession::new(
+            fake,
+            kernel,
+            SandboxId::new("udp-host-session").unwrap(),
+            Vec::new(),
+            1500,
+        );
+
+        let first = session.run_once(100, 64).unwrap();
+        let mut saw_reply = false;
+        for millis in 101..140 {
+            let tick = session.run_once(millis, 64).unwrap();
+            if !tick.host_replies.is_empty() {
+                saw_reply = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        server_thread.join().unwrap();
+        let (fake, _, flow_table, flows) = session.into_parts();
+
+        let TunUdpHostIngressOutcome::EgressSent {
+            ref flow, bytes, ..
+        } = first.ingress
+        else {
+            panic!("expected UDP host egress");
+        };
+        assert!(first.made_progress());
+        assert_eq!(bytes, b"tun-udp-live".len());
+        assert_eq!(flow.destination.ip, server_addr.ip());
+        assert_eq!(flow.destination.port, server_addr.port());
+        assert!(flow_table.udp_flows().contains_key(flow));
+        assert_eq!(flows.len(), 1);
+        assert!(saw_reply);
+        let ParsedIpPacket::Udpv4Packet(response) = parse_ip_packet(&fake.output).unwrap() else {
+            panic!("expected UDP response packet");
+        };
+        assert_eq!(response.source, Ipv4Addr::LOCALHOST);
+        assert_eq!(response.destination, Ipv4Addr::new(10, 66, 0, 2));
+        assert_eq!(response.source_port, server_addr.port());
+        assert_eq!(response.destination_port, 53000);
+        assert_eq!(response.payload, b"tun-udp-reply");
+    }
+
+    #[test]
+    fn tun_udp_host_session_denies_before_opening_real_udp_socket() {
+        let request = build_udp_ipv4_packet(53000, 1234, b"blocked-host-session");
+        let fake = FakeTunIo {
+            input: std::io::Cursor::new(request),
+            output: Vec::new(),
+        };
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(8),
+        );
+        let mut session = TunUdpHostSession::new(
+            fake,
+            kernel,
+            SandboxId::new("udp-host-deny").unwrap(),
+            Vec::new(),
+            1500,
+        );
+
+        let tick = session.run_once(100, 64).unwrap();
+        let (fake, _, flow_table, flows) = session.into_parts();
+
+        assert!(matches!(
+            tick.ingress,
+            TunUdpHostIngressOutcome::PolicyDenied { .. }
+        ));
+        assert!(!tick.made_progress());
+        assert_eq!(flow_table.udp_flows().len(), 1);
+        assert!(flows.is_empty());
+        assert!(fake.output.is_empty());
     }
 
     #[test]
