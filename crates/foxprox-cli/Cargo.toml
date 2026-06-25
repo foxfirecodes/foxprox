@@ -8,6 +8,8 @@ rust-version.workspace = true
 
 [dependencies]
 foxprox-core = { path = "../foxprox-core" }
+foxprox-egress = { path = "../foxprox-egress" }
+foxprox-stack = { path = "../foxprox-stack" }
 serde_json = "1"
 
 [target.'cfg(unix)'.dependencies]
@@ -17,7 +19,6 @@ foxprox-device = { path = "../foxprox-device" }
 caps = "0.5"
 
 [dev-dependencies]
-foxprox-stack = { path = "../foxprox-stack" }
 pretty_assertions = "1"
 
 [lib]

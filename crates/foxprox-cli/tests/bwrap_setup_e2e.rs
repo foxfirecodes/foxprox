@@ -5,10 +5,10 @@ use foxprox_cli::{
     HostSetupControlHandoffStatus, HostSetupProcessExit, HostSetupProcessRunner,
 };
 use foxprox_core::{
-    AuditKind, BrokerCore, BwrapSetupPlan, Decision, NetworkSetupConfig, PolicyConfig,
-    PolicyEngine, Protocol,
+    AuditKind, BrokerCore, BwrapSetupPlan, Decision, JsonLineAuditSink, NetworkEndpoint,
+    NetworkSetupConfig, PolicyConfig, PolicyEngine, Protocol, RuntimeAuditFanIn,
 };
-use std::io::{ErrorKind, Read};
+use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -340,4 +340,126 @@ fn bwrap_foxproxsetup_received_tun_fd_drives_smoltcp_tcp_handshake() {
                 .is_some_and(|ip| ip.to_string() == "198.51.100.1")
             && record.source.as_ref().and_then(|endpoint| endpoint.port) == Some(8080)
     }));
+}
+
+#[test]
+#[ignore = "requires rootless bwrap, /dev/net/tun, CAP_NET_ADMIN inside bwrap, and real host TCP egress"]
+fn bwrap_foxproxsetup_received_tun_fd_bridges_tcp_bytes_to_host_socket() {
+    let setup_helper = env!("CARGO_BIN_EXE_foxproxsetup");
+    assert!(std::path::Path::new(setup_helper).exists());
+    assert!(std::path::Path::new("/dev/net/tun").exists());
+
+    let host_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let host_addr = host_listener.local_addr().unwrap();
+    let (server_tx, server_rx) = std::sync::mpsc::channel();
+    let host_server = std::thread::spawn(move || {
+        let (mut stream, _) = host_listener.accept().unwrap();
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request).unwrap();
+        stream.write_all(b"pong").unwrap();
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        server_tx.send(request).unwrap();
+    });
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let socket_path = std::env::temp_dir().join(format!(
+        "foxprox-bwrap-tcp-egress-e2e-{}-{unique}.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+    let mut config = NetworkSetupConfig::alpha_default(format!("bwrap-tcp-egress-e2e-{unique}"));
+    config.tun_name = format!("fxe{:x}", std::process::id() % 0x00ff_ffff);
+    config.setup_control_socket_path = Some(socket_path.to_string_lossy().to_string());
+
+    let target = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        concat!(
+            "import socket; ",
+            "s=socket.create_connection((\"198.51.100.1\", 8080), 3.0); ",
+            "s.sendall(b\"ping\"); ",
+            "data=s.recv(4); ",
+            "assert data == b\"pong\", data; ",
+            "s.close()"
+        )
+        .to_string(),
+    ];
+    let mut runner = RewritingBwrapRunner::new(setup_helper);
+    let plan = BwrapSetupPlan::new(config.clone(), &target);
+    runner.start_setup_process(&plan).unwrap();
+
+    let mut handoff = accept_setup_control_tun_handoff_with_timeouts(
+        &listener,
+        config,
+        &target,
+        Some(Duration::from_secs(3)),
+        Some(Duration::from_secs(3)),
+    );
+    let _ = std::fs::remove_file(&socket_path);
+    assert_eq!(handoff.status, HostSetupControlHandoffStatus::Complete);
+    let received = handoff.received.take().unwrap();
+
+    let mut stack = foxprox_stack::SmoltcpIpStack::new_ipv4([198, 51, 100, 1], 24, 1500);
+    stack.listen_tcp(8080, 4096, 4096);
+    let policy = PolicyConfig {
+        default_decision: Decision::Allow,
+        ..PolicyConfig::default()
+    };
+    let broker = BrokerCore::new(PolicyEngine::new(policy), 128);
+    let egress = foxprox_egress::BlockingTcpEgress::new(
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        1024,
+    );
+    let mut fan_in = RuntimeAuditFanIn::new("bwrap-tcp-egress-e2e", 256);
+    let mut audit_output = Vec::new();
+    let mut sink = JsonLineAuditSink::new(&mut audit_output);
+    let cancellation = foxprox_egress::AsyncRuntimeCancellationToken::uncancelled();
+    let report = foxprox_egress::run_received_tun_fd_smoltcp_tcp_egress_and_drain(
+        foxprox_egress::ReceivedTunSmoltcpTcpEgressSession {
+            setup_source: "host_setup_session".to_string(),
+            setup_records: &handoff.audit_records,
+            received,
+            sandbox_id: "bwrap-tcp-egress-e2e".to_string(),
+            broker,
+            stack,
+            egress,
+            egress_destination: NetworkEndpoint::socket(host_addr.ip(), host_addr.port()),
+            now_ms: 10_000,
+            max_packets_per_attempt: 8,
+            max_attempts: 300,
+            max_from_sandbox_bytes: 1024,
+            attempt_sleep: Duration::from_millis(10),
+        },
+        &mut fan_in,
+        &mut sink,
+        &cancellation,
+    )
+    .expect("received TUN fd bridges TCP bytes to host socket");
+
+    assert!(report.tcp_bridge.opened_egress, "{report:?}");
+    assert_eq!(report.tcp_bridge.byte_counts.from_sandbox, 4);
+    assert_eq!(report.tcp_bridge.byte_counts.to_sandbox, 4);
+    let host_request = server_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("host socket receives sandbox bytes");
+    assert_eq!(host_request, b"ping");
+    host_server.join().unwrap();
+
+    let exit = runner
+        .wait_setup_process_with_timeout(Duration::from_secs(3))
+        .expect("target process wait succeeds")
+        .expect("target process exits after TCP egress response");
+    assert!(exit.success, "target exchanged TCP bytes: {exit:?}");
+
+    let audit_text = String::from_utf8(audit_output).unwrap();
+    assert!(audit_text.contains("tcp_flow_closed"), "{audit_text}");
+    assert!(audit_text.contains("smoltcp"), "{audit_text}");
+    assert!(audit_text.contains("from_sandbox"), "{audit_text}");
+    assert!(audit_text.contains("to_sandbox"), "{audit_text}");
 }

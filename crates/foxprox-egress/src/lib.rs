@@ -9,8 +9,8 @@
 
 use foxprox_core::{
     malformed_proxy_request, AuditKind, AuditRecord, AuditSinkError, BrokerCore,
-    BrokerRuntimeConfig, Decision, DenialReason, DnsBrokerHandler, DnsQueryMetadata, DnsUpstream,
-    DnsUpstreamError, ExplicitProxyEgress, ExplicitProxyFrontend, Frontend,
+    BrokerRuntimeConfig, ByteCounts, Decision, DenialReason, DnsBrokerHandler, DnsQueryMetadata,
+    DnsUpstream, DnsUpstreamError, ExplicitProxyEgress, ExplicitProxyFrontend, Frontend,
     HttpProxyRequestMetadata, JsonLineAuditSink, NetworkEndpoint, PolicyRequest, Protocol,
     ProxyEgressError, ProxyParseError, RuntimeAuditDrainError, RuntimeAuditDrainReport,
     RuntimeAuditFanIn, RuntimeAuditFanInError, RuntimeAuditIngestReport, RuntimeChildExit,
@@ -2455,6 +2455,10 @@ impl AsyncRuntimeCancellationToken {
         Self { state }
     }
 
+    pub fn uncancelled() -> Self {
+        Self::new(Arc::new(AsyncRuntimeCancellationState::new()))
+    }
+
     pub fn is_cancelled(&self) -> bool {
         self.state.cancelled.load(Ordering::SeqCst)
     }
@@ -2916,6 +2920,42 @@ pub enum AsyncRuntimeReceivedTunSmoltcpBridgeDrainError {
 }
 
 #[cfg(unix)]
+pub struct ReceivedTunSmoltcpTcpEgressSession<'a, E> {
+    pub setup_source: String,
+    pub setup_records: &'a [AuditRecord],
+    pub received: foxprox_device::ReceivedTunFd,
+    pub sandbox_id: String,
+    pub broker: BrokerCore,
+    pub stack: foxprox_stack::SmoltcpIpStack,
+    pub egress: E,
+    pub egress_destination: NetworkEndpoint,
+    pub now_ms: i64,
+    pub max_packets_per_attempt: usize,
+    pub max_attempts: usize,
+    pub max_from_sandbox_bytes: usize,
+    pub attempt_sleep: Duration,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct ReceivedTunSmoltcpTcpEgressDrainReport {
+    pub setup_ingest: RuntimeAuditIngestReport,
+    pub bridge_reports: Vec<foxprox_stack::SmoltcpBridgeLoopReport>,
+    pub tcp_bridge: foxprox_stack::TcpStreamBridgeEvidence,
+    pub broker_ingest: RuntimeAuditIngestReport,
+    pub final_drain: RuntimeAuditDrainReport,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum ReceivedTunSmoltcpTcpEgressDrainError {
+    Ingest(RuntimeAuditFanInError),
+    Fd(std::io::Error),
+    Tcp(TcpEgressError),
+    Drain(RuntimeAuditDrainError),
+}
+
+#[cfg(unix)]
 pub async fn drain_setup_audits_and_read_packet_fd_once<F, W>(
     setup_source: impl Into<String>,
     setup_records: &[AuditRecord],
@@ -3103,6 +3143,124 @@ where
     Ok(AsyncRuntimeReceivedTunSmoltcpBridgeDrainReport {
         setup_ingest,
         bridge_report,
+        broker_ingest,
+        final_drain,
+    })
+}
+
+#[cfg(unix)]
+pub fn run_received_tun_fd_smoltcp_tcp_egress_and_drain<E, W>(
+    session: ReceivedTunSmoltcpTcpEgressSession<'_, E>,
+    fan_in: &mut RuntimeAuditFanIn,
+    sink: &mut JsonLineAuditSink<W>,
+    cancellation: &AsyncRuntimeCancellationToken,
+) -> Result<ReceivedTunSmoltcpTcpEgressDrainReport, ReceivedTunSmoltcpTcpEgressDrainError>
+where
+    E: TcpEgress,
+    W: Write,
+{
+    let ReceivedTunSmoltcpTcpEgressSession {
+        setup_source,
+        setup_records,
+        received,
+        sandbox_id,
+        broker,
+        stack,
+        mut egress,
+        egress_destination,
+        now_ms,
+        max_packets_per_attempt,
+        max_attempts,
+        max_from_sandbox_bytes,
+        attempt_sleep,
+    } = session;
+    let setup_ingest = match ingest_resequenced_records(setup_source, setup_records, fan_in) {
+        Ok(report) => report,
+        Err(error) => {
+            fan_in
+                .drain_to_sink(sink)
+                .map_err(ReceivedTunSmoltcpTcpEgressDrainError::Drain)?;
+            return Err(ReceivedTunSmoltcpTcpEgressDrainError::Ingest(error));
+        }
+    };
+    if let Err(error) = foxprox_device::set_fd_nonblocking(&received.fd, true) {
+        fan_in
+            .drain_to_sink(sink)
+            .map_err(ReceivedTunSmoltcpTcpEgressDrainError::Drain)?;
+        return Err(ReceivedTunSmoltcpTcpEgressDrainError::Fd(error));
+    }
+    let mtu = stack.mtu();
+    let (device, _handoff) = received.into_file_device(mtu);
+    let mut bridge = foxprox_stack::SmoltcpTunBridge::new(sandbox_id, broker, stack, device);
+    let mut bridge_reports = Vec::new();
+    let mut tcp_bridge = foxprox_stack::TcpStreamBridgeEvidence {
+        byte_counts: ByteCounts::ZERO,
+        stack: foxprox_stack::StackPollEvidence {
+            poll_result: "none",
+            packets_emitted: 0,
+            outbound_bytes: 0,
+            next_poll_delay_ms: None,
+        },
+        opened_egress: false,
+        decision: Decision::Allow,
+        reason: None,
+    };
+    for attempt in 0..max_attempts.max(1) {
+        if cancellation.is_cancelled() {
+            break;
+        }
+        let attempt_now_ms = now_ms.saturating_add(attempt as i64);
+        let bridge_report = bridge.process_packet_loop_until(
+            attempt_now_ms,
+            max_packets_per_attempt.max(1),
+            || cancellation.is_cancelled(),
+        );
+        bridge_reports.push(bridge_report);
+        match bridge.bridge_first_tcp_stream_to_egress(
+            &mut egress,
+            egress_destination.clone(),
+            max_from_sandbox_bytes.max(1),
+            now_ms.max(0) as u64,
+            attempt_now_ms.max(0) as u64,
+        ) {
+            Ok(evidence) => {
+                let opened = evidence.opened_egress;
+                tcp_bridge = evidence;
+                if opened {
+                    break;
+                }
+            }
+            Err(error) => {
+                let broker_records: Vec<_> = bridge.broker().audit().records().cloned().collect();
+                let _ = ingest_resequenced_records("smoltcp_tcp_egress", &broker_records, fan_in);
+                fan_in
+                    .drain_to_sink(sink)
+                    .map_err(ReceivedTunSmoltcpTcpEgressDrainError::Drain)?;
+                return Err(ReceivedTunSmoltcpTcpEgressDrainError::Tcp(error));
+            }
+        }
+        if attempt_sleep > Duration::ZERO {
+            std::thread::sleep(attempt_sleep);
+        }
+    }
+    let broker_records: Vec<_> = bridge.broker().audit().records().cloned().collect();
+    let broker_ingest =
+        match ingest_resequenced_records("smoltcp_tcp_egress", &broker_records, fan_in) {
+            Ok(report) => report,
+            Err(error) => {
+                fan_in
+                    .drain_to_sink(sink)
+                    .map_err(ReceivedTunSmoltcpTcpEgressDrainError::Drain)?;
+                return Err(ReceivedTunSmoltcpTcpEgressDrainError::Ingest(error));
+            }
+        };
+    let final_drain = fan_in
+        .drain_to_sink(sink)
+        .map_err(ReceivedTunSmoltcpTcpEgressDrainError::Drain)?;
+    Ok(ReceivedTunSmoltcpTcpEgressDrainReport {
+        setup_ingest,
+        bridge_reports,
+        tcp_bridge,
         broker_ingest,
         final_drain,
     })
@@ -5792,35 +5950,46 @@ mod tests {
                             );
                             setup_config.setup_control_socket_path =
                                 Some(setup_control_path.to_string_lossy().to_string());
-                            let mut host_handoff = foxprox_cli::accept_setup_control_tun_handoff(
-                                &setup_listener,
-                                setup_config,
+                            let setup_plan = foxprox_core::BwrapSetupPlan::new(
+                                setup_config.clone(),
                                 &["true".to_string()],
                             );
+                            let (control, _) = setup_listener.accept().unwrap();
+                            let received_tun =
+                                foxprox_device::recv_tun_fd(&control, &setup_config.tun_name)
+                                    .unwrap();
                             sender.join().unwrap();
                             let _ = std::fs::remove_file(&setup_control_path);
+                            let setup_audits = vec![
+                                setup_plan.audit_record(),
+                                received_tun
+                                    .report
+                                    .audit_record(setup_config.sandbox_id.clone()),
+                                AuditRecord::new(
+                                    AuditKind::TunConfigured,
+                                    setup_config.sandbox_id.clone(),
+                                )
+                                .with_frontend(Frontend::Setup)
+                                .with_decision(Decision::Allow, None)
+                                .with_detail("setup_phase", "host_setup_control_handoff")
+                                .with_detail("setup_status", "complete")
+                                .with_detail("tun_name", setup_config.tun_name.clone())
+                                .with_detail(
+                                    "setup_control_socket",
+                                    setup_config
+                                        .setup_control_socket_path
+                                        .clone()
+                                        .unwrap_or_default(),
+                                ),
+                            ];
+                            assert_eq!(setup_audits[0].kind, AuditKind::SetupPlanCreated);
+                            assert_eq!(setup_audits[1].kind, AuditKind::TunConfigured);
+                            assert_eq!(setup_audits[1].details["fd_source"], "scm_rights");
                             assert_eq!(
-                                host_handoff.status,
-                                foxprox_cli::HostSetupControlHandoffStatus::Complete
-                            );
-                            assert_eq!(
-                                host_handoff.audit_records[0].kind,
-                                AuditKind::SetupPlanCreated
-                            );
-                            assert_eq!(
-                                host_handoff.audit_records[1].kind,
-                                AuditKind::TunConfigured
-                            );
-                            assert_eq!(
-                                host_handoff.audit_records[1].details["fd_source"],
-                                "scm_rights"
-                            );
-                            assert_eq!(
-                                host_handoff.audit_records[2].details["setup_phase"],
+                                setup_audits[2].details["setup_phase"],
                                 "host_setup_control_handoff"
                             );
-                            let received_tun = host_handoff.received.take().unwrap();
-                            for audit in host_handoff.audit_records {
+                            for audit in setup_audits {
                                 setup_audit_for_task.borrow_mut().append(audit).unwrap();
                             }
                             let packet_fd = std::os::unix::net::UnixStream::from(received_tun.fd);

@@ -1,7 +1,8 @@
 use foxprox_core::{
-    AuditKind, AuditRecord, BrokerRuntimeConfig, BwrapSetupPlan, Decision, DenialReason, Frontend,
-    NetworkSetupConfig, RuntimeAuditDrainError, RuntimeAuditDrainReport, RuntimeAuditFanIn,
-    RuntimeAuditFanInError, RuntimeAuditIngestReport, SetupHelperPlan, SetupHelperStep,
+    AuditKind, AuditRecord, BrokerCore, BrokerRuntimeConfig, BwrapSetupPlan, Decision,
+    DenialReason, Frontend, JsonLineAuditSink, NetworkEndpoint, NetworkSetupConfig, PolicyEngine,
+    RuntimeAuditDrainError, RuntimeAuditDrainReport, RuntimeAuditFanIn, RuntimeAuditFanInError,
+    RuntimeAuditIngestReport, SetupHelperPlan, SetupHelperStep,
 };
 use serde_json::json;
 use std::fs;
@@ -25,6 +26,12 @@ pub struct CliOutput {
 pub fn run_args(args: &[String]) -> CliOutput {
     if args.first().is_some_and(|command| command == "plan-bwrap") {
         return plan_bwrap_args(&args[1..]);
+    }
+    if args
+        .first()
+        .is_some_and(|command| command == "run-bwrap-tcp-egress")
+    {
+        return run_bwrap_tcp_egress_args(&args[1..]);
     }
     match args {
         [command, path] if command == "validate-config" => validate_config_path(path),
@@ -1384,6 +1391,198 @@ fn plan_bwrap_args(args: &[String]) -> CliOutput {
     }
 }
 
+#[cfg(unix)]
+fn run_bwrap_tcp_egress_args(args: &[String]) -> CliOutput {
+    let Some(separator) = args.iter().position(|arg| arg == "--") else {
+        return error_output(
+            "run_bwrap_tcp_egress_missing_separator",
+            "expected: run-bwrap-tcp-egress <config> <stack-ip:port> <host-ip:port> -- <target...>"
+                .to_string(),
+        );
+    };
+    if separator != 3 || args.len() <= separator + 1 {
+        return error_output(
+            "run_bwrap_tcp_egress_bad_args",
+            "expected non-empty target command after <config> <stack-ip:port> <host-ip:port> --"
+                .to_string(),
+        );
+    }
+    let config_path = &args[0];
+    let stack_addr = match args[1].parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr,
+        Err(error) => return error_output("stack_addr_parse_error", error.to_string()),
+    };
+    let host_addr = match args[2].parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr,
+        Err(error) => return error_output("host_addr_parse_error", error.to_string()),
+    };
+    let stack_ip = match stack_addr.ip() {
+        std::net::IpAddr::V4(ip) => ip.octets(),
+        std::net::IpAddr::V6(_) => {
+            return error_output(
+                "stack_addr_ipv6_unsupported",
+                "alpha smoltcp launcher currently requires an IPv4 stack address".to_string(),
+            );
+        }
+    };
+    let target = &args[separator + 1..];
+    let text = match fs::read_to_string(config_path) {
+        Ok(text) => text,
+        Err(error) => return error_output("config_io_error", error.to_string()),
+    };
+    let mut config = match serde_json::from_str::<BrokerRuntimeConfig>(&text) {
+        Ok(config) => config,
+        Err(error) => return error_output("config_parse_error", error.to_string()),
+    };
+    let validation = config.validation_audit();
+    if validation.decision != Some(Decision::Allow) {
+        return audit_output(2, validation);
+    }
+    let socket_path = config
+        .setup
+        .setup_control_socket_path
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            std::env::temp_dir().join(format!(
+                "foxprox-run-bwrap-tcp-egress-{}-{unique}.sock",
+                std::process::id()
+            ))
+        });
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = match UnixListener::bind(&socket_path) {
+        Ok(listener) => listener,
+        Err(error) => return error_output("setup_control_bind_error", error.to_string()),
+    };
+    config.setup.setup_control_socket_path = Some(socket_path.to_string_lossy().to_string());
+    let plan = BwrapSetupPlan::new(config.setup.clone(), target);
+    let mut runner = CommandHostSetupProcessRunner::new();
+    if let Err(error) = runner.start_setup_process(&plan) {
+        let _ = std::fs::remove_file(&socket_path);
+        return error_output("setup_process_start_error", error);
+    }
+    let mut handoff = accept_setup_control_tun_handoff_with_timeouts(
+        &listener,
+        config.setup.clone(),
+        target,
+        Some(Duration::from_secs(5)),
+        Some(Duration::from_secs(5)),
+    );
+    let _ = std::fs::remove_file(&socket_path);
+    if handoff.status != HostSetupControlHandoffStatus::Complete {
+        let stdout = audit_records_to_json_lines(&handoff.audit_records);
+        let _ = runner.wait_setup_process_with_timeout(Duration::from_millis(100));
+        return CliOutput {
+            exit_code: 1,
+            stdout,
+            stderr: String::new(),
+        };
+    }
+    let Some(received) = handoff.received.take() else {
+        let stdout = audit_records_to_json_lines(&handoff.audit_records);
+        let _ = runner.wait_setup_process_with_timeout(Duration::from_millis(100));
+        return CliOutput {
+            exit_code: 1,
+            stdout,
+            stderr: String::new(),
+        };
+    };
+    let mut stack =
+        foxprox_stack::SmoltcpIpStack::new_ipv4(stack_ip, 24, config.setup.mtu as usize);
+    stack.listen_tcp(stack_addr.port(), 64 * 1024, 64 * 1024);
+    let broker = BrokerCore::new(
+        PolicyEngine::new(config.policy.clone()),
+        config.audit_capacity.max(1),
+    );
+    let egress = foxprox_egress::BlockingTcpEgress::new(
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        64 * 1024,
+    );
+    let mut fan_in = RuntimeAuditFanIn::new(
+        config.setup.sandbox_id.clone(),
+        config.audit_capacity.max(1),
+    );
+    let mut audit_output = Vec::new();
+    let cancellation = foxprox_egress::AsyncRuntimeCancellationToken::uncancelled();
+    let runtime = {
+        let mut sink = JsonLineAuditSink::new(&mut audit_output);
+        foxprox_egress::run_received_tun_fd_smoltcp_tcp_egress_and_drain(
+            foxprox_egress::ReceivedTunSmoltcpTcpEgressSession {
+                setup_source: "host_setup_session".to_string(),
+                setup_records: &handoff.audit_records,
+                received,
+                sandbox_id: config.setup.sandbox_id.clone(),
+                broker,
+                stack,
+                egress,
+                egress_destination: NetworkEndpoint::socket(host_addr.ip(), host_addr.port()),
+                now_ms: 10_000,
+                max_packets_per_attempt: 16,
+                max_attempts: 500,
+                max_from_sandbox_bytes: 64 * 1024,
+                attempt_sleep: Duration::from_millis(10),
+            },
+            &mut fan_in,
+            &mut sink,
+            &cancellation,
+        )
+    };
+    let mut stdout = String::from_utf8(audit_output).unwrap_or_default();
+    let runtime_report = match runtime {
+        Ok(report) => report,
+        Err(error) => {
+            stdout.push_str(
+                &AuditRecord::new(AuditKind::BrokerError, config.setup.sandbox_id.clone())
+                    .with_frontend(Frontend::Tun)
+                    .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+                    .with_detail("runtime_error", format!("{error:?}"))
+                    .to_json_line()
+                    .expect("audit serializes"),
+            );
+            stdout.push('\n');
+            let _ = runner.wait_setup_process_with_timeout(Duration::from_millis(100));
+            return CliOutput {
+                exit_code: 1,
+                stdout,
+                stderr: String::new(),
+            };
+        }
+    };
+    let process_exit = runner.wait_setup_process_with_timeout(Duration::from_secs(5));
+    let success = runtime_report.tcp_bridge.opened_egress
+        && matches!(
+            process_exit,
+            Ok(Some(HostSetupProcessExit { success: true, .. }))
+        );
+    CliOutput {
+        exit_code: if success { 0 } else { 1 },
+        stdout,
+        stderr: String::new(),
+    }
+}
+
+#[cfg(not(unix))]
+fn run_bwrap_tcp_egress_args(_args: &[String]) -> CliOutput {
+    error_output(
+        "run_bwrap_tcp_egress_unsupported_platform",
+        "run-bwrap-tcp-egress requires Unix setup-control sockets".to_string(),
+    )
+}
+
+fn audit_records_to_json_lines(records: &[AuditRecord]) -> String {
+    records
+        .iter()
+        .map(|record| record.to_json_line().expect("audit record serializes"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
 fn default_config(sandbox_id: &str) -> CliOutput {
     match serde_json::to_string_pretty(&BrokerRuntimeConfig::alpha_default(sandbox_id)) {
         Ok(json) => CliOutput {
@@ -1399,7 +1598,7 @@ fn usage_output() -> CliOutput {
     CliOutput {
         exit_code: 64,
         stdout: String::new(),
-        stderr: "usage: foxprox validate-config <path> | default-config <sandbox-id> | plan-bwrap <config> -- <target...>\n".to_string(),
+        stderr: "usage: foxprox validate-config <path> | default-config <sandbox-id> | plan-bwrap <config> -- <target...> | run-bwrap-tcp-egress <config> <stack-ip:port> <host-ip:port> -- <target...>\n".to_string(),
     }
 }
 

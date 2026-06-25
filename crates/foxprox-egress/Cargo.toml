@@ -14,8 +14,5 @@ tokio = { version = "1", features = ["macros", "net", "rt", "sync", "time"] }
 [target.'cfg(unix)'.dependencies]
 foxprox-device = { path = "../foxprox-device" }
 
-[dev-dependencies]
-foxprox-cli = { path = "../foxprox-cli" }
-
 [lib]
 path = "src/lib.rs"
