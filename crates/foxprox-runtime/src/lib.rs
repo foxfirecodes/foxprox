@@ -16,7 +16,7 @@ use foxprox_core::{
     FrontendKind, NormalizedEvent, Protocol, SandboxId, TcpConnectAttempt, UdpFlowAttempt,
     UdpTimeouts,
 };
-use foxprox_device::{DeviceError, DevicePacket, PacketDevice};
+use foxprox_device::{DeviceError, DevicePacket, PacketDevice, TryPacketDevice};
 use foxprox_egress::{EgressError, EgressOutcome, HostEgress, HostTcpStream, HostUdpFlow};
 use foxprox_net::{
     handle_ipv4_packet, handle_ipv4_packet_with_egress, handle_normalized_event_with_egress,
@@ -50,6 +50,36 @@ where
     A: AuditSink,
 {
     let packet = device.read_packet().map_err(RuntimeError::Device)?;
+    process_ipv4_device_packet(device, packet, ctx)
+}
+
+/// Try to process one IPv4 packet without blocking on an idle device. `Ok(None)`
+/// means no packet was ready, so callers can still run bridge maintenance.
+pub fn process_one_ipv4_device_packet_if_ready<D, E, A>(
+    device: &mut D,
+    ctx: DevicePacketStep<'_, E, A>,
+) -> Result<Option<PacketBrokerOutcome>, RuntimeError>
+where
+    D: TryPacketDevice,
+    E: HostEgress,
+    A: AuditSink,
+{
+    let Some(packet) = device.try_read_packet().map_err(RuntimeError::Device)? else {
+        return Ok(None);
+    };
+    process_ipv4_device_packet(device, packet, ctx).map(Some)
+}
+
+fn process_ipv4_device_packet<D, E, A>(
+    device: &mut D,
+    packet: DevicePacket,
+    ctx: DevicePacketStep<'_, E, A>,
+) -> Result<PacketBrokerOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    E: HostEgress,
+    A: AuditSink,
+{
     let outcome = handle_ipv4_packet(
         InboundIpv4Packet {
             sandbox_id: ctx.sandbox_id,
@@ -848,7 +878,11 @@ impl std::error::Error for RuntimeError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::RefCell, io::Cursor, rc::Rc};
+    use std::{
+        cell::RefCell,
+        io::{Cursor, ErrorKind, Read, Write},
+        rc::Rc,
+    };
 
     use foxprox_audit::BoundedAuditSink;
     use foxprox_core::{
@@ -891,6 +925,33 @@ mod tests {
         let bytes = device.into_inner().into_inner();
         assert_eq!(&bytes[..inbound.len()], inbound.as_slice());
         assert_eq!(bytes[inbound.len() + 20], 0);
+    }
+
+    #[test]
+    fn one_step_ipv4_runtime_returns_none_when_device_not_ready() {
+        let mut device = PreopenedTunDevice::from_io(WouldBlockIo, 1500).unwrap();
+        let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(4);
+        let sandbox_id = SandboxId::new("s1").unwrap();
+
+        let outcome = process_one_ipv4_device_packet_if_ready(
+            &mut device,
+            DevicePacketStep {
+                sandbox_id: &sandbox_id,
+                frontend: FrontendKind::Tun,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                sequence: 2,
+                timestamp_millis: 2000,
+            },
+        )
+        .unwrap();
+
+        assert!(outcome.is_none());
+        assert!(audit.records().is_empty());
+        assert!(egress.tcp_connects.is_empty());
     }
 
     #[test]
@@ -1442,6 +1503,24 @@ mod tests {
 
         fn poll_outbound_packets(&mut self) -> Result<Vec<OutboundIpPacket>, StackError> {
             Ok(Vec::new())
+        }
+    }
+
+    struct WouldBlockIo;
+
+    impl Read for WouldBlockIo {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(ErrorKind::WouldBlock))
+        }
+    }
+
+    impl Write for WouldBlockIo {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
         }
     }
 

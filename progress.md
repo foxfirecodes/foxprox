@@ -1255,3 +1255,25 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 0279186.
 - Remaining boundary risks: blocking device read integration, readiness registration, async scheduling, and fair per-flow budgets remain.
+
+## 2026-06-22 — Boundary objective: nonblocking device readiness contract
+
+- Boundary under work: packet device readiness for future runtime loops that should not block maintenance on an idle TUN/device read.
+- Allowed dependency direction: `foxprox-device` owns IO readiness normalization (`WouldBlock`); runtime can ask for an optional opaque `DevicePacket`; policy/audit still never see device or IO errors directly.
+- Dependency-risk assessment: bridge maintenance can now run independently, but the packet-ingest APIs still call blocking reads. A small readiness contract lets future loops skip packet ingestion when no device packet is ready without leaking OS error kinds into runtime logic.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for device/runtime/audit.
+- Observed results: added `TryPacketDevice` in `foxprox-device`, normalized `std::io::ErrorKind::WouldBlock` into `Ok(None)` for optional packet reads, and implemented it for `BlockingPacketDevice`/`PreopenedTunDevice`. Runtime now has `process_one_ipv4_device_packet_if_ready`, which returns `None` without policy/audit/egress side effects when no packet is ready. Added device and runtime tests for would-block behavior. All verification passed.
+- Changed files:
+  - `crates/foxprox-device/src/lib.rs`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 110 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-device` — device remains dependency-free.
+  - `cargo tree -p foxprox-runtime` — runtime consumes device readiness through the device contract.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: full async readiness registration, blocking production fd configuration, and fair loop scheduling remain.

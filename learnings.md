@@ -293,3 +293,8 @@
 
 - Keep bridge maintenance separate from packet-ingest steps: it can flush nonblocking host streams, adapter write-back, UDP replies, and UDP expiry without re-entering policy.
 - A synchronous tick contract gives a safe stepping stone toward async/readiness scheduling while preserving stack/egress/device boundaries.
+
+## 2026-06-22 — nonblocking device readiness
+
+- Device readiness belongs in `foxprox-device`: map OS `WouldBlock` into a device-level `Ok(None)` through `TryPacketDevice` so runtime loops do not inspect IO error kinds.
+- Keep blocking `PacketDevice` APIs for existing one-step tests, but add optional-read APIs for future maintenance-first loops.

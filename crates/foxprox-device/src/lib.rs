@@ -8,7 +8,7 @@
 
 use std::fmt;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 
 /// Default alpha MTU used by the TUN setup plan.
 pub const DEFAULT_ALPHA_MTU: usize = 1500;
@@ -41,6 +41,13 @@ impl DevicePacket {
 pub trait PacketDevice {
     fn read_packet(&mut self) -> Result<DevicePacket, DeviceError>;
     fn write_packet(&mut self, packet: &DevicePacket) -> Result<(), DeviceError>;
+}
+
+/// Optional-read packet device contract for nonblocking runtime loops. A return
+/// value of `Ok(None)` means no packet is currently ready, not policy denial or
+/// malformed packet data.
+pub trait TryPacketDevice: PacketDevice {
+    fn try_read_packet(&mut self) -> Result<Option<DevicePacket>, DeviceError>;
 }
 
 /// Generic blocking packet device over a `Read + Write` stream.
@@ -83,10 +90,13 @@ impl<Io> BlockingPacketDevice<Io> {
 impl<Io: Read + Write> PacketDevice for BlockingPacketDevice<Io> {
     fn read_packet(&mut self) -> Result<DevicePacket, DeviceError> {
         let mut buffer = vec![0_u8; self.max_packet_bytes];
-        let len = self
-            .io
-            .read(&mut buffer)
-            .map_err(|error| DeviceError::Io(error.to_string()))?;
+        let len = self.io.read(&mut buffer).map_err(|error| {
+            if error.kind() == ErrorKind::WouldBlock {
+                DeviceError::WouldBlock
+            } else {
+                DeviceError::Io(error.to_string())
+            }
+        })?;
         if len == 0 {
             return Err(DeviceError::EmptyRead);
         }
@@ -149,6 +159,16 @@ impl PreopenedTunDevice<File> {
     }
 }
 
+impl<Io: Read + Write> TryPacketDevice for BlockingPacketDevice<Io> {
+    fn try_read_packet(&mut self) -> Result<Option<DevicePacket>, DeviceError> {
+        match self.read_packet() {
+            Ok(packet) => Ok(Some(packet)),
+            Err(DeviceError::WouldBlock) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
 impl<Io: Read + Write> PacketDevice for PreopenedTunDevice<Io> {
     fn read_packet(&mut self) -> Result<DevicePacket, DeviceError> {
         self.inner.read_packet()
@@ -159,10 +179,17 @@ impl<Io: Read + Write> PacketDevice for PreopenedTunDevice<Io> {
     }
 }
 
+impl<Io: Read + Write> TryPacketDevice for PreopenedTunDevice<Io> {
+    fn try_read_packet(&mut self) -> Result<Option<DevicePacket>, DeviceError> {
+        self.inner.try_read_packet()
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum DeviceError {
     EmptyPacket,
     EmptyRead,
+    WouldBlock,
     InvalidMaxPacketBytes,
     PacketTooLarge { len: usize, max: usize },
     Io(String),
@@ -173,6 +200,7 @@ impl fmt::Display for DeviceError {
         match self {
             Self::EmptyPacket => f.write_str("device packet must not be empty"),
             Self::EmptyRead => f.write_str("device read returned no bytes"),
+            Self::WouldBlock => f.write_str("device read would block"),
             Self::InvalidMaxPacketBytes => {
                 f.write_str("max packet bytes must be greater than zero")
             }
@@ -227,6 +255,13 @@ mod tests {
     }
 
     #[test]
+    fn try_packet_device_reports_not_ready_without_exposing_io_kind() {
+        let mut device = BlockingPacketDevice::new(WouldBlockIo, DEFAULT_ALPHA_MTU).unwrap();
+
+        assert_eq!(device.try_read_packet().unwrap(), None);
+    }
+
+    #[test]
     fn preopened_tun_rejects_invalid_packet_limit() {
         let cursor = Cursor::new(Vec::<u8>::new());
         assert_eq!(
@@ -250,5 +285,23 @@ mod tests {
             device.write_packet(&packet),
             Err(DeviceError::PacketTooLarge { len: 3, max: 2 })
         );
+    }
+
+    struct WouldBlockIo;
+
+    impl Read for WouldBlockIo {
+        fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from(ErrorKind::WouldBlock))
+        }
+    }
+
+    impl Write for WouldBlockIo {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }
