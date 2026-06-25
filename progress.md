@@ -2067,3 +2067,18 @@
 - Observed result: launcher now prepares socket-handoff bwrap commands without preserved fds; live manual UDP/TUN smoke proves traffic crosses the rootless bwrap-created TUN fd bidirectionally when the host keeps the handed-off fd open.
 - Remaining risks: the live UDP reply smoke used a small Python packet responder rather than a checked-in Rust broker loop; next slice should move this into Rust product/test code using existing packet synthesis/runtime boundaries.
 - Exact next step: run full workspace verification, commit launcher socket handoff, then add a checked-in Rust live smoke harness or broker loop for the same UDP/TUN path.
+
+## 2026-06-25T14:57:30Z
+- Current objective: make the live rootless bwrap UDP/TUN smoke checked in and Rust-backed.
+- Files changed: `crates/foxprox-launcher/examples/live_bwrap_udp_smoke.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo build -p foxprox-setup --bin foxproxsetup`
+  - `cargo run -p foxprox-launcher --example live_bwrap_udp_smoke` (passed: `live bwrap UDP smoke passed: pong`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+  - final `cargo run -p foxprox-launcher --example live_bwrap_udp_smoke` (passed again)
+- Observed result: full deterministic verification passed; 55 core tests, 8 device tests, 4 integration tests, 7 launcher tests, 95 runtime tests, 10 setup tests, and 40 smoltcp adapter tests passed. The checked-in live example launches rootless bwrap, runs `foxproxsetup`, receives the real TUN fd through launcher socket handoff, reads a real UDP packet from the sandbox namespace, writes a Rust-synthesized UDP reply via the TUN fd, and verifies the sandbox process receives `pong`.
+- Commit hash when committed: pending.
+- Remaining risks: the checked-in live smoke proves UDP packet write-back but does not yet run the full TCP smoltcp bridge against a live bwrap TUN fd; TCP remains verified with deterministic raw-packet/TUN-like tests and real loopback host sockets.
+- Exact next step: commit live Rust bwrap UDP smoke, then attempt a live bwrap TCP smoke through the smoltcp bridge session or identify the minimal missing API for wiring live TUN fd to smoltcp session startup.
