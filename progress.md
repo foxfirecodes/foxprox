@@ -1210,3 +1210,16 @@
 - Recent direct DNS denial commit hash: `8e39076`.
 - Next verification gap: none for harness-lab alpha. Future work should be planned as post-alpha production hardening rather than alpha completion.
 - Commit hash after commit: pending.
+
+## 2026-06-22T15:10:00Z — Long-lived mixed broker session smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && target/debug/foxprox-lab run broker-session-smoke`
+- Environment assumptions: Linux bwrap/TUN fd handoff works; this smoke grants `CAP_NET_RAW` for the real ping sub-check; all host egress is loopback/local fixture traffic and no external network services are contacted.
+- Expected result: one sandbox process and one host broker loop should handle mixed traffic for the app lifetime: real ping/ICMP, UDP forward, broker DNS plus DNS-attributed UDP, QUIC candidate forward, transparent TCP/HTTP allow with host egress, transparent HTTP deny/reset before egress, transparent TLS SNI deny/reset before egress, and direct external DNS deny before egress.
+- Observed result: pass. Workspace tests passed (`foxprox-broker` 5, `foxprox-core` 64, `foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). `broker-session-smoke` emitted `"decision":"allow"` with all mixed-session booleans true: `ping_ok`, `dns_ok`, `direct_dns_denied`, `udp_ok`, `quic_ok`, `public_http_ok`, `http_denied`, and `tls_denied`.
+- Relevant output excerpt: `"reason":"one long-lived broker session handled mixed transparent DNS/UDP/QUIC/ICMP/TCP/HTTP/TLS traffic"`; `"udp_egress_calls":"3"`; `"tcp_egress_calls":"1"`; stdout ended with `broker session ok`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: The clarified alpha concern about long-lived broker lifecycle is now covered by a real end-to-end mixed-traffic sandbox session rather than isolated per-protocol smokes only. Remaining work is productionizing this session runner into user-facing CLI/config ergonomics, not alpha behavior proof.
+- Recent final verification commit hash: `d7767a9`; recent direct DNS commit hash: `8e39076`.
+- Next verification gap: commit broker session smoke and run one final alpha sweep including `broker-session-smoke`.
+- Commit hash after commit: pending.

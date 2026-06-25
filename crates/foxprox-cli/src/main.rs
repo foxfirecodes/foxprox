@@ -75,6 +75,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("https-connect-smoke");
             println!("socks5-smoke");
             println!("proxy-deny-smoke");
+            println!("broker-session-smoke");
             Ok(())
         }
         [cmd, scenario] if cmd == "run" => run_named_scenario(scenario),
@@ -130,6 +131,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         socks5_smoke_records()
     } else if scenario == "proxy-deny-smoke" {
         proxy_deny_smoke_records()
+    } else if scenario == "broker-session-smoke" {
+        broker_session_smoke_records()
     } else {
         run_scenario(ScenarioName::parse(scenario)?)
     };
@@ -3558,6 +3561,569 @@ fn run_udp_deny_smoke() -> Result<AuditRecord, String> {
         record = record.with_metadata("stderr", stderr);
     }
     Ok(record)
+}
+
+#[cfg(unix)]
+fn broker_session_smoke_records() -> Vec<AuditRecord> {
+    match run_broker_session_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::UnsupportedNetworkEvent,
+            "broker-session-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::Harness)
+        .with_protocol(Protocol::Unsupported)],
+    }
+}
+
+#[cfg(not(unix))]
+fn broker_session_smoke_records() -> Vec<AuditRecord> {
+    vec![AuditRecord::new(
+        EventKind::UnsupportedNetworkEvent,
+        "broker-session-smoke",
+        Decision::FailClosed,
+        "broker session smoke is only supported on Unix",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Unsupported)]
+}
+
+#[cfg(unix)]
+fn run_broker_session_smoke() -> Result<AuditRecord, String> {
+    let udp_fixture = UdpSocket::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind broker-session UDP fixture: {err}"))?;
+    let udp_fixture_addr = udp_fixture
+        .local_addr()
+        .map_err(|err| format!("failed to inspect broker-session UDP fixture: {err}"))?;
+    udp_fixture
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .map_err(|err| format!("failed to set broker-session UDP fixture timeout: {err}"))?;
+    let udp_thread = std::thread::spawn(move || -> Result<usize, String> {
+        let mut calls = 0;
+        let mut buf = [0_u8; 1500];
+        while calls < 3 {
+            let (n, peer) = udp_fixture
+                .recv_from(&mut buf)
+                .map_err(|err| format!("broker-session UDP fixture receive failed: {err}"))?;
+            let response = if n > 0 && buf[0] & 0x80 != 0 {
+                b"quic-reply".to_vec()
+            } else {
+                let mut out = b"egress:".to_vec();
+                out.extend_from_slice(&buf[..n]);
+                out
+            };
+            udp_fixture
+                .send_to(&response, peer)
+                .map_err(|err| format!("broker-session UDP fixture send failed: {err}"))?;
+            calls += 1;
+        }
+        Ok(calls)
+    });
+
+    let tcp_fixture = TcpListener::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind broker-session TCP fixture: {err}"))?;
+    let tcp_fixture_addr = tcp_fixture
+        .local_addr()
+        .map_err(|err| format!("failed to inspect broker-session TCP fixture: {err}"))?;
+    tcp_fixture
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make broker-session TCP fixture nonblocking: {err}"))?;
+    let tcp_thread = std::thread::spawn(move || -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            match tcp_fixture.accept() {
+                Ok((mut stream, _peer)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .map_err(|err| {
+                            format!("broker-session TCP fixture timeout failed: {err}")
+                        })?;
+                    let mut buf = [0_u8; 1024];
+                    let n = stream
+                        .read(&mut buf)
+                        .map_err(|err| format!("broker-session TCP fixture read failed: {err}"))?;
+                    if !buf[..n].starts_with(b"GET /public HTTP/1.1") {
+                        return Err(format!(
+                            "broker-session TCP fixture received unexpected bytes: {:?}",
+                            String::from_utf8_lossy(&buf[..n])
+                        ));
+                    }
+                    let mut reply = b"egress:".to_vec();
+                    reply.extend_from_slice(&buf[..n]);
+                    stream
+                        .write_all(&reply)
+                        .map_err(|err| format!("broker-session TCP fixture write failed: {err}"))?;
+                    return Ok(());
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(err) => return Err(format!("broker-session TCP fixture accept failed: {err}")),
+            }
+            if Instant::now() >= deadline {
+                return Err("broker-session TCP fixture timed out".to_string());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    });
+
+    let helper = setup_helper_path()?;
+    let target_dir = helper
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| {
+            format!(
+                "could not derive target directory from {}",
+                helper.display()
+            )
+        })?
+        .to_path_buf();
+    let socket_dir = target_dir.join(format!("foxprox-broker-session-{}", std::process::id()));
+    let socket_path = socket_dir.join("setup.sock");
+    let script_path = socket_dir.join("session.py");
+    let _ = std::fs::remove_file(&socket_path);
+    std::fs::create_dir_all(&socket_dir)
+        .map_err(|err| format!("failed to create broker-session socket dir: {err}"))?;
+    std::fs::write(&script_path, broker_session_python())
+        .map_err(|err| format!("failed to write broker-session python fixture: {err}"))?;
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|err| format!("failed to bind broker-session socket: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make broker-session listener nonblocking: {err}"))?;
+
+    let mut child = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--cap-add",
+            "CAP_NET_RAW",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--ro-bind",
+        ])
+        .arg(&target_dir)
+        .arg(&target_dir)
+        .args(["--bind"])
+        .arg(&socket_dir)
+        .arg(&socket_dir)
+        .args(["--proc", "/proc", "--"])
+        .env("FOXPROX_SETUP_SOCKET", &socket_path)
+        .arg(&helper)
+        .args(["--", "/usr/bin/python3"])
+        .arg(&script_path)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn bwrap broker-session smoke: {err}"))?;
+
+    let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
+    fd.set_nonblocking()?;
+
+    let udp_policy = PolicyEngine::new(
+        PolicyConfig::deny_by_default()
+            .allow_quic(true)
+            .with_rule(
+                PolicyRule::new("allow-broker-session-udp", RuleAction::Allow)
+                    .protocol(Protocol::Udp)
+                    .port(5354),
+            )
+            .with_rule(
+                PolicyRule::new("allow-broker-session-quic", RuleAction::Allow)
+                    .protocol(Protocol::Quic)
+                    .port(443),
+            ),
+    );
+    let mut broker = TransparentBroker::new(
+        "10.0.2.1:53".parse().expect("static broker DNS addr valid"),
+        [(
+            "lab.example".to_string(),
+            "203.0.113.77".parse().expect("static IP valid"),
+        )],
+        udp_policy,
+        LocalUdpEgress::new(udp_fixture_addr)?,
+        PolicyEngine::new(PolicyConfig::deny_by_default()),
+        MockEgressBackend::new(),
+        PolicyEngine::new(PolicyConfig::deny_by_default().allow_ping(true)),
+    );
+    broker.set_tick(2);
+
+    let public_ip: std::net::Ipv4Addr = "203.0.113.22".parse().expect("static IP valid");
+    let public_policy = PolicyEngine::new(
+        PolicyConfig::deny_by_default().with_rule(
+            PolicyRule::new("allow-broker-session-public-tcp", RuleAction::Allow)
+                .protocol(Protocol::Tcp)
+                .destination(Cidr::host(std::net::IpAddr::V4(public_ip)))
+                .port(80),
+        ),
+    );
+    let public_inspection =
+        foxprox_core::runtime::TransparentInspectionRuntime::new(PolicyEngine::new(
+            PolicyConfig::deny_by_default().with_rule(
+                PolicyRule::new("allow-broker-session-public-http", RuleAction::Allow)
+                    .protocol(Protocol::Http)
+                    .hostname("example.com")
+                    .http_path_prefix("/public"),
+            ),
+        ));
+    let mut public_bridge = TransparentTcpBridgeRuntime::listen(public_ip, 80, public_policy)?
+        .with_inspection(public_inspection);
+    let mut public_egress = LocalTcpStreamEgress::new(tcp_fixture_addr);
+
+    let http_deny_ip: std::net::Ipv4Addr = "203.0.113.24".parse().expect("static IP valid");
+    let mut http_deny_bridge = TransparentTcpBridgeRuntime::listen(
+        http_deny_ip,
+        80,
+        PolicyEngine::new(
+            PolicyConfig::deny_by_default().with_rule(
+                PolicyRule::new("allow-broker-session-http-deny-tcp", RuleAction::Allow)
+                    .protocol(Protocol::Tcp)
+                    .destination(Cidr::host(std::net::IpAddr::V4(http_deny_ip)))
+                    .port(80),
+            ),
+        ),
+    )?
+    .with_inspection(foxprox_core::runtime::TransparentInspectionRuntime::new(
+        PolicyEngine::new(
+            PolicyConfig::deny_by_default().with_rule(
+                PolicyRule::new("deny-broker-session-http-admin", RuleAction::DenyReset)
+                    .protocol(Protocol::Http)
+                    .hostname("example.com")
+                    .http_path_prefix("/admin"),
+            ),
+        ),
+    ));
+
+    let tls_deny_ip: std::net::Ipv4Addr = "203.0.113.25".parse().expect("static IP valid");
+    let mut tls_deny_bridge = TransparentTcpBridgeRuntime::listen(
+        tls_deny_ip,
+        443,
+        PolicyEngine::new(
+            PolicyConfig::deny_by_default().with_rule(
+                PolicyRule::new("allow-broker-session-tls-deny-tcp", RuleAction::Allow)
+                    .protocol(Protocol::Tcp)
+                    .destination(Cidr::host(std::net::IpAddr::V4(tls_deny_ip)))
+                    .port(443),
+            ),
+        ),
+    )?
+    .with_inspection(foxprox_core::runtime::TransparentInspectionRuntime::new(
+        PolicyEngine::new(
+            PolicyConfig::deny_by_default().with_rule(
+                PolicyRule::new("deny-broker-session-tls-blocked", RuleAction::DenyReset)
+                    .protocol(Protocol::Tls)
+                    .hostname("blocked.example"),
+            ),
+        ),
+    ));
+
+    let mut buf = [0_u8; 4096];
+    let deadline = Instant::now() + Duration::from_secs(45);
+    let mut packets_read = 0_u64;
+    let mut packets_written = 0_u64;
+    let mut public_bytes = 0_usize;
+    while Instant::now() < deadline {
+        match fd.read_packet(&mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                packets_read += 1;
+                let packet = &buf[..n];
+                let handled_tcp = dispatch_broker_session_tcp(
+                    &fd,
+                    packet,
+                    public_ip,
+                    &mut public_bridge,
+                    Some((&mut public_egress, tcp_fixture_addr, &mut public_bytes)),
+                    &mut packets_written,
+                )? || dispatch_broker_session_tcp(
+                    &fd,
+                    packet,
+                    http_deny_ip,
+                    &mut http_deny_bridge,
+                    None,
+                    &mut packets_written,
+                )? || dispatch_broker_session_tcp(
+                    &fd,
+                    packet,
+                    tls_deny_ip,
+                    &mut tls_deny_bridge,
+                    None,
+                    &mut packets_written,
+                )?;
+                if !handled_tcp {
+                    let step = broker.handle_ipv4_packet("broker-session-smoke", packet)?;
+                    for reply in step.packets_to_device {
+                        fd.write_packet(&reply)?;
+                        packets_written += 1;
+                    }
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to read TUN fd during broker session: {err}"
+                ))
+            }
+        }
+        for bridge in [
+            &mut public_bridge,
+            &mut http_deny_bridge,
+            &mut tls_deny_bridge,
+        ] {
+            for emitted in bridge.poll()? {
+                fd.write_packet(&emitted)?;
+                packets_written += 1;
+            }
+        }
+        if child
+            .try_wait()
+            .map_err(|err| format!("failed to poll broker-session child: {err}"))?
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for broker-session smoke: {err}"))?;
+    fd.close();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(&script_path);
+    let _ = std::fs::remove_dir(&socket_dir);
+    let udp_calls = udp_thread
+        .join()
+        .map_err(|_| "broker-session UDP fixture thread panicked".to_string())??;
+    tcp_thread
+        .join()
+        .map_err(|_| "broker-session TCP fixture thread panicked".to_string())??;
+
+    let ping_ok = broker
+        .audit
+        .iter()
+        .any(|audit| audit.kind == EventKind::IcmpMessage && audit.decision.is_allow());
+    let dns_ok = broker
+        .audit
+        .iter()
+        .any(|audit| audit.kind == EventKind::DnsQuery && audit.decision.is_allow());
+    let direct_dns_denied = broker.audit.iter().any(|audit| {
+        audit.kind == EventKind::DnsQuery && audit.reason == "direct external DNS denied"
+    });
+    let quic_ok = broker
+        .audit
+        .iter()
+        .any(|audit| audit.kind == EventKind::QuicCandidateFlow && audit.decision.is_allow());
+    let udp_ok = broker
+        .audit
+        .iter()
+        .filter(|audit| audit.kind == EventKind::UdpFlowCreated && audit.decision.is_allow())
+        .count()
+        >= 2;
+    let public_http_ok = public_bridge
+        .audit
+        .iter()
+        .any(|audit| audit.kind == EventKind::HttpRequest && audit.decision.is_allow());
+    let http_denied = http_deny_bridge
+        .audit
+        .iter()
+        .any(|audit| audit.kind == EventKind::HttpRequest && !audit.decision.is_allow());
+    let tls_denied = tls_deny_bridge
+        .audit
+        .iter()
+        .any(|audit| audit.kind == EventKind::TlsClientHello && !audit.decision.is_allow());
+    let success = output.status.success()
+        && ping_ok
+        && dns_ok
+        && direct_dns_denied
+        && udp_ok
+        && quic_ok
+        && public_http_ok
+        && http_denied
+        && tls_denied
+        && public_egress.calls() == 1
+        && udp_calls == 3;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut record = AuditRecord::new(
+        EventKind::UnsupportedNetworkEvent,
+        "broker-session-smoke",
+        if success { Decision::Allow } else { Decision::FailClosed },
+        if success {
+            "one long-lived broker session handled mixed transparent DNS/UDP/QUIC/ICMP/TCP/HTTP/TLS traffic"
+        } else {
+            "broker session smoke failed one or more mixed-traffic checks"
+        },
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Unsupported)
+    .with_metadata("status", output.status.to_string())
+    .with_metadata("packets_read", packets_read.to_string())
+    .with_metadata("packets_written", packets_written.to_string())
+    .with_metadata("ping_ok", ping_ok.to_string())
+    .with_metadata("dns_ok", dns_ok.to_string())
+    .with_metadata("direct_dns_denied", direct_dns_denied.to_string())
+    .with_metadata("udp_ok", udp_ok.to_string())
+    .with_metadata("quic_ok", quic_ok.to_string())
+    .with_metadata("public_http_ok", public_http_ok.to_string())
+    .with_metadata("http_denied", http_denied.to_string())
+    .with_metadata("tls_denied", tls_denied.to_string())
+    .with_metadata("udp_egress_calls", udp_calls.to_string())
+    .with_metadata("tcp_egress_calls", public_egress.calls().to_string())
+    .with_metadata("public_bytes", public_bytes.to_string());
+    if !stdout.is_empty() {
+        record = record.with_metadata("stdout", stdout);
+    }
+    if !stderr.is_empty() {
+        record = record.with_metadata("stderr", stderr);
+    }
+    Ok(record)
+}
+
+#[cfg(unix)]
+fn dispatch_broker_session_tcp(
+    fd: &fd_handoff::DeviceFd,
+    packet: &[u8],
+    destination_ip: std::net::Ipv4Addr,
+    bridge: &mut TransparentTcpBridgeRuntime,
+    mut egress: Option<(&mut LocalTcpStreamEgress, std::net::SocketAddr, &mut usize)>,
+    packets_written: &mut u64,
+) -> Result<bool, String> {
+    let Ok(parsed) = foxprox_core::packet::parse_ipv4(packet) else {
+        return Ok(false);
+    };
+    if parsed.protocol_number != 6 || parsed.destination != destination_ip {
+        return Ok(false);
+    }
+    let step = bridge.handle_ipv4_packet("broker-session-smoke", packet)?;
+    for emitted in step.emitted_packets {
+        fd.write_packet(&emitted)?;
+        *packets_written += 1;
+    }
+    if let Some(data) = step.egress_payload {
+        if let Some((backend, fixture, bytes_seen)) = egress.as_mut() {
+            if !data.is_empty() {
+                **bytes_seen += data.len();
+                let outcome = backend.execute(&EgressRequest::TcpStreamData {
+                    destination: *fixture,
+                    bytes: data,
+                })?;
+                for emitted in bridge.send_egress_response(&outcome.response_payload)? {
+                    fd.write_packet(&emitted)?;
+                    *packets_written += 1;
+                }
+            }
+        } else if !data.is_empty() {
+            return Err("denied broker-session TCP bridge produced host egress bytes".to_string());
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(unix)]
+fn broker_session_python() -> &'static str {
+    r#"import socket, subprocess, sys
+
+
+def udp_expect(addr, payload, expected):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(5)
+    s.sendto(payload, addr)
+    data, _ = s.recvfrom(512)
+    if data != expected:
+        print('unexpected udp reply', addr, data)
+        sys.exit(10)
+
+
+def udp_timeout(addr, payload):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(1)
+    s.sendto(payload, addr)
+    try:
+        data, _ = s.recvfrom(512)
+        print('unexpected udp timeout reply', addr, data)
+        sys.exit(11)
+    except socket.timeout:
+        return
+
+
+def dns_query(host):
+    q = b'\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00'
+    for label in host.split('.'):
+        q += bytes([len(label)]) + label.encode()
+    return q + b'\x00\x00\x01\x00\x01'
+
+
+def tcp_expect_public():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect(('203.0.113.22', 80))
+    req = b'GET /public HTTP/1.1\r\nHost: example.com\r\n\r\n'
+    s.sendall(req)
+    data = s.recv(256)
+    if not data.startswith(b'egress:GET /public'):
+        print('unexpected public tcp reply', data)
+        sys.exit(12)
+
+
+def tcp_expect_reset(addr, payload):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect(addr)
+    s.sendall(payload)
+    try:
+        data = s.recv(256)
+        if data:
+            print('unexpected denied tcp data', addr, data)
+            sys.exit(13)
+    except (ConnectionResetError, TimeoutError, OSError):
+        return
+
+
+def tls_client_hello(hostname):
+    host = hostname.encode()
+    sni = bytes([0]) + len(host).to_bytes(2, 'big') + host
+    sni_list = len(sni).to_bytes(2, 'big') + sni
+    ext = (0).to_bytes(2, 'big') + len(sni_list).to_bytes(2, 'big') + sni_list
+    exts = len(ext).to_bytes(2, 'big') + ext
+    hello = bytes([3, 3]) + bytes(32) + bytes([0]) + (2).to_bytes(2, 'big') + bytes([0x13, 0x01]) + bytes([1, 0]) + exts
+    hs = bytes([1]) + len(hello).to_bytes(3, 'big') + hello
+    return bytes([0x16, 3, 1]) + len(hs).to_bytes(2, 'big') + hs
+
+subprocess.run(['/usr/bin/ping', '-c', '1', '-W', '3', '10.0.2.1'], check=True)
+udp_expect(('203.0.113.10', 5354), b'probe', b'egress:probe')
+q = dns_query('lab.example')
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(5)
+s.sendto(q, ('10.0.2.1', 53))
+data, _ = s.recvfrom(512)
+if data[:2] != b'\x12\x34' or b'\xcb\x00\x71\x4d' not in data:
+    print('unexpected dns answer', data)
+    sys.exit(14)
+udp_expect(('203.0.113.77', 5354), b'probe', b'egress:probe')
+udp_expect(('203.0.113.30', 443), bytes([0xc3, 0, 0, 0]) + b'probe', b'quic-reply')
+tcp_expect_public()
+tcp_expect_reset(('203.0.113.24', 80), b'GET /admin HTTP/1.1\r\nHost: example.com\r\n\r\n')
+tcp_expect_reset(('203.0.113.25', 443), tls_client_hello('blocked.example'))
+udp_timeout(('8.8.8.8', 53), dns_query('example.com'))
+print('broker session ok')
+"#
 }
 
 fn http_proxy_smoke_records() -> Vec<AuditRecord> {
