@@ -1585,3 +1585,35 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * unexpected UID is rejected with structured `UnexpectedUid` metadata before fd receipt policy would trust the connection.
 * Audit evidence: this primitive returns structured error data for future launcher lifecycle/broker-error audit.
 * Residual risk: full launcher still needs to call this primitive on accepted control-socket connections and include the result in lifecycle/error audit.
+
+## 2026-06-25 - Alpha launcher and broker runtime
+
+* Invariant under work: alpha must be usable in a real sandbox environment, not only as pure helpers and ignored tests.
+* Threat or failure mode addressed: a collection of primitives can still be unsafe/unusable if no launcher owns bwrap setup, authenticates the control channel, receives the TUN fd, and runs a broker loop enforcing policy before host egress.
+* Planned verification: add a `foxprox` alpha launcher, broker-owned control socket with peer UID validation and exact fd receipt, smoltcp AnyIP TCP/DNS runtime, audit JSON output, real bwrap e2e tests for allowed TCP and denied DNS, then run full workspace checks.
+
+## 2026-06-25 - Usable alpha launcher/runtime results
+
+* Product code added:
+  * `foxprox` alpha launcher binary that starts real `bwrap`, injects broker DNS via generated `/run/systemd/resolve/stub-resolv.conf`, runs `foxproxsetup`, validates setup-helper peer UID with `SO_PEERCRED`, receives exactly one TUN fd, wraps it as a `TunDevice`, and runs the host broker until target exit or a bounded runtime.
+  * `foxprox-net::alpha_broker` smoltcp runtime with AnyIP TUN handling, JSON lifecycle/TCP/DNS audit output, policy-gated TCP host egress through `EgressPermit`, endpoint mapping (`--tcp-map`), broker DNS default-deny REFUSED responses, allowed DNS upstream forwarding, pending-response correlation, and DNS attribution cache mutation.
+  * `TunDevice::from_file` for safe validated wrapping of a received setup-helper TUN fd.
+  * README alpha usage for real sandbox runs.
+* Tests added/updated:
+  * ignored real bwrap e2e: `foxprox_launches_bwrap_and_bridges_allowed_tcp` proves a target curl inside the bwrap sandbox can connect to `10.0.0.2:8080`, with broker policy allow and host TCP bridge to `127.0.0.1`.
+  * ignored real bwrap e2e: `foxprox_launches_bwrap_and_default_denies_dns` proves unconfigured sandbox DNS receives denied/default-deny behavior and the target fails.
+  * ignored real bwrap e2e: `foxprox_launches_bwrap_and_forwards_allowed_dns` proves allow-listed DNS goes through broker-controlled upstream forwarding and returns the expected address to sandbox Python resolver code.
+* Commands run:
+  * Initial manual launcher attempt failed with `bwrap: Can't create file at /etc/resolv.conf: No such file or directory` because host `/etc/resolv.conf` is a symlink into `/run`; fixed by shadowing `/run` with tmpfs and using `--ro-bind-data` at `/run/systemd/resolve/stub-resolv.conf`.
+  * Manual `target/debug/foxprox --tcp-map 10.0.0.2:8080=127.0.0.1:<port> -- curl http://10.0.0.2:8080/` succeeded and emitted `broker_start`, `tcp_connect allow`, and `network_session_exit` JSON audit.
+  * `cargo test -p foxprox-cli --test foxprox -- --ignored --nocapture` — passed all 3 real bwrap alpha e2e tests.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: CLI 2 unit tests plus 5 ignored e2e/setup tests, core 161 unit tests plus 2 parser fuzz-smoke tests, device 3 tests plus 2 ignored, integrations 8 tests, net 2 tests plus 7 ignored, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * launcher refuses missing/invalid setup handoff via existing exact-fd and peer-credential primitives.
+  * TCP host sockets are opened only after policy allow creates an `EgressPermit`.
+  * DNS is deny-by-default with bounded REFUSED responses when no allow rule matches.
+  * allowed DNS responses must correlate with pending state before forwarding and cache mutation.
+* Audit evidence:
+  * alpha emits JSON lifecycle events and per-flow/per-DNS allow/deny decisions to stdout for sandbox runs.
+* Residual risk:
+  * alpha is intentionally minimal and bwrap-oriented: it supports transparent TCP and broker DNS in the launcher; generic UDP/QUIC production forwarding and explicit proxy listener processes remain future hardening/features beyond the currently usable alpha path.

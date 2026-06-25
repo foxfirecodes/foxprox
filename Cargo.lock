@@ -65,8 +65,10 @@ dependencies = [
 name = "foxprox-cli"
 version = "0.1.0"
 dependencies = [
+ "foxprox-core",
  "foxprox-device",
  "foxprox-integrations",
+ "foxprox-net",
  "libc",
 ]
 

@@ -293,3 +293,11 @@ Receiving into a one-fd-sized control buffer is not enough to prove exact descri
 ## 2026-06-21 - Control socket paths should be paired with SO_PEERCRED
 
 A private Unix socket path is a useful rendezvous channel, but broker-side setup handoff can be made stricter by checking `SO_PEERCRED` and rejecting unexpected UIDs before trusting SCM_RIGHTS payloads.
+
+## 2026-06-25 - bwrap resolv.conf injection must handle host symlinks
+
+On this host `/etc/resolv.conf` is a symlink to `/run/systemd/resolve/stub-resolv.conf`. Binding a generated file directly on `/etc/resolv.conf` inside bwrap failed. The alpha launcher now shadows `/run` with tmpfs, creates `/run/systemd/resolve`, and uses `--ro-bind-data` to populate the symlink target.
+
+## 2026-06-25 - smoltcp alpha runtime needs AnyIP for transparent TUN destinations
+
+A broker address like `10.0.0.2` can accept transparent connections for mapped destinations when smoltcp `Interface::set_any_ip(true)` is enabled. Policy and egress mapping must still decide the actual host socket before opening it.

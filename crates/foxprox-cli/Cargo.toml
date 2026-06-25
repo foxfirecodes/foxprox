@@ -7,10 +7,16 @@ repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]
+name = "foxprox"
+path = "src/bin/foxprox.rs"
+
+[[bin]]
 name = "foxproxsetup"
 path = "src/bin/foxproxsetup.rs"
 
 [dependencies]
+foxprox-core = { path = "../foxprox-core" }
 foxprox-device = { path = "../foxprox-device" }
 foxprox-integrations = { path = "../foxprox-integrations" }
+foxprox-net = { path = "../foxprox-net" }
 libc = "0.2"

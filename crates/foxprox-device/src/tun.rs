@@ -30,6 +30,12 @@ pub struct TunDevice {
 }
 
 impl TunDevice {
+    pub fn from_file(name: impl Into<String>, file: File) -> Result<Self, CreateTunError> {
+        let name = name.into();
+        validate_interface_name(&name)?;
+        Ok(Self { file, name })
+    }
+
     pub fn file(&self) -> &File {
         &self.file
     }
