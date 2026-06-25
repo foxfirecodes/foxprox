@@ -5259,3 +5259,27 @@ Commit: 6f87c94
 
 ### Remaining blind spots
 - Real bwrap setup now proves both UDP packet readback and a target TCP connect completing through the host smoltcp bridge over the received TUN fd. Remaining production work is still completing a user-facing launcher/runtime that keeps this loop running, forwards established smoltcp TCP/UDP flows to host sockets, orchestrates DNS/proxy/listeners/cleanup in one session, and exposes CLI ergonomics for non-test use.
+
+## 2026-06-24 — Bound real smoltcp handoff test
+
+Commit: ad039cb
+
+### Review
+- Round-156 correctness found a high issue in the real bwrap smoltcp E2E: it manually started bwrap, then used the unbounded `accept_setup_control_tun_handoff(...)`, so setup-helper exit or missing SCM_RIGHTS could hang the integration script before runtime bridge assertions.
+- The same review noted low audit precision: final smoltcp audit assertions checked broad direction/write evidence but not TCP endpoint/protocol fields.
+
+### Fix
+- Added `accept_setup_control_tun_handoff_with_timeouts(...)`, which keeps the existing handoff evidence shape but supports bounded accept and bounded SCM_RIGHTS receive via stream read timeout.
+- Added deterministic coverage proving setup-control handoff accept timeout returns fail-closed structured audit evidence instead of blocking.
+- Updated the real bwrap smoltcp E2E to use bounded setup-control accept/read timeouts before owning the TUN fd.
+- Strengthened smoltcp E2E audit assertions to require `Protocol::Tcp`, from-sandbox destination `198.51.100.1:8080`, and to-sandbox source `198.51.100.1:8080`.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features setup_control_handoff_timeout_is_bounded_and_audited -- --nocapture` — passed.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed, running both ignored real bwrap/TUN tests: UDP packet readback and smoltcp TCP handshake.
+- `cargo test --all-targets --all-features` — passed, including 32 CLI unit tests + 1 ignored privileged CLI unit test, 2 ignored bwrap E2E integration tests in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 109 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- The real bwrap smoltcp E2E now has bounded setup-control receipt and precise endpoint audit assertions. Remaining production work is still turning these tested seams into a user-facing long-running launcher/runtime with host-socket TCP/UDP forwarding from smoltcp flows, DNS/proxy/listener orchestration, cleanup/error handling, CLI ergonomics, and one rerunnable production command.
