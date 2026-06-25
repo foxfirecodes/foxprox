@@ -1989,3 +1989,31 @@
 - Commit hash when committed: pending.
 - Remaining risks: SOCKS helper is a deterministic connection-step harness, not a full long-running relay loop; live privileged TUN/bwrap smoke remains unavailable in this worktree.
 - Exact next step: commit SOCKS5 connection-step harness, then perform a final alpha-scope audit and either add the last missing verified boundary or record completion criteria.
+
+## 2026-06-25T03:59:55Z
+- Current objective: complete deterministic SOCKS5 connection-step IO coverage.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially reported formatting drift)
+  - `cargo fmt`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+  - `cargo fmt --check`
+- Observed result: verification passed; 55 core tests, 7 device tests, 3 integration tests, 6 launcher tests, 94 runtime tests, 7 setup tests, and 40 smoltcp adapter tests passed. Added `handle_socks5_connection_once`, SOCKS reply helpers, and typed connection outcomes; tests prove no-auth greeting, domain CONNECT success, policy denial, and rejected auth methods have explicit protocol replies and no undefined host egress.
+- Commit hash when committed: pending.
+- Remaining risks: full async listener/relay loops remain outside the deterministic step harness; live privileged TUN/bwrap smoke remains gated on CAP_NET_ADMIN.
+- Exact next step: commit SOCKS5 connection-step helper, then run final alpha-scope verification/audit and stop only if remaining work is blocked by live privilege or out-of-scope async listener orchestration.
+
+## 2026-06-25T04:02:30Z
+- Current objective: strengthen SOCKS5 connection-step coverage before final audit.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially reported formatting drift)
+  - `cargo fmt`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+  - `cargo fmt --check`
+- Observed result: verification passed; 55 core tests, 7 device tests, 3 integration tests, 6 launcher tests, 95 runtime tests, 7 setup tests, and 40 smoltcp adapter tests passed. Added a SOCKS5 connection-step regression for unresolved domain CONNECT requests, proving it replies with host-unreachable status, opens no host connection, and emits no audit event before resolution exists.
+- Commit hash when committed: amended into `88a500e`.
+- Remaining risks: same as previous entry: full async listener/relay loops and privileged end-to-end TUN/bwrap smoke are outside what this unprivileged deterministic harness can execute.
+- Exact next step: amend the prior checkpoint with this verification, then run final git status and scope audit.

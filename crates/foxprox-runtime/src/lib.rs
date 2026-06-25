@@ -3884,6 +3884,36 @@ mod tests {
     }
 
     #[test]
+    fn socks5_connection_step_rejects_unresolved_domain_before_audit() {
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = SocksRuntime::new(
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("socks-step-missing-resolution").unwrap(),
+        );
+        let mut bytes = vec![5, 1, 0, 5, 1, 0, 3, 11];
+        bytes.extend_from_slice(b"example.com");
+        bytes.extend_from_slice(&443u16.to_be_bytes());
+        let mut reader = std::io::Cursor::new(bytes);
+        let mut writer = Vec::new();
+
+        let outcome =
+            handle_socks5_connection_once(&mut runtime, &mut reader, &mut writer, None, 100)
+                .unwrap();
+
+        assert!(matches!(
+            outcome,
+            SocksConnectionOutcome::ConnectRejected(SocksRuntimeError::MissingResolvedIp)
+        ));
+        assert_eq!(runtime.egress().tcp_attempts, 0);
+        assert!(runtime.kernel().audit_sink().events().is_empty());
+        assert_eq!(writer, [vec![5, 0], socks5_reply(4).to_vec()].concat());
+    }
+
+    #[test]
     fn socks_runtime_denies_ip_connect_before_host_egress_by_default() {
         let kernel = VerificationKernel::new(
             PolicyEngine::new(PolicyConfig::default()),
