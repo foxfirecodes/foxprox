@@ -1497,3 +1497,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * invalid control socket paths are rejected before process launch.
 * Audit evidence: still a pure command builder; lifecycle/error audit belongs in launcher runtime around this command.
 * Residual risk: production launcher still needs configurable mount policy and child process supervision, but the command shape now matches the verified helper handoff path.
+
+## 2026-06-21 - Deterministic parser fuzz-smoke coverage
+
+* Invariant under work: packet, DNS, HTTP, TLS, SOCKS, and QUIC parser boundaries must reject arbitrary malformed bytes without panics or permissive fallback.
+* Threat or failure mode addressed: unit fixtures cover known malformed cases, but hostile sandbox traffic can supply arbitrary byte sequences; parser panics or accidental success on garbage could bypass fail-closed assumptions.
+* Planned verification: add deterministic pseudo-random fuzz-smoke integration tests over parser surfaces with bounded input sizes, assert functions either return structured success or error without panic, and run full checks.
+
+## 2026-06-21 - Deterministic parser fuzz-smoke coverage results
+
+* Tests added/updated:
+  * integration fuzz-smoke test runs deterministic pseudo-random byte sequences from length 0 through 511 across packet, DNS query/response, HTTP, CONNECT, TLS ClientHello, QUIC candidate, SOCKS greeting, and SOCKS CONNECT parsers.
+  * oversized all-0xff inputs assert parser-specific size limits fail closed without accepting unbounded data.
+* Commands run:
+  * Initial fuzz-smoke compile needed a function-name correction from `parse_quic_packet` to exported `parse_quic_candidate`.
+  * `cargo test -p foxprox-core --test parser_fuzz_smoke` and `cargo clippy -p foxprox-core --all-targets --all-features -- -D warnings` — passed.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: CLI 2 tests plus 2 ignored, core 161 unit tests plus 2 parser fuzz-smoke tests, device 3 tests plus 2 ignored, integrations 5 tests, net 2 tests plus 6 ignored, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * arbitrary malformed bytes across parser surfaces return structured success/error without panics.
+  * oversized inputs fail closed according to configured bounds.
+* Audit evidence: no audit events in parser-only fuzz smoke; parser failures feed existing fail-closed audit builders in handler tests.
+* Residual risk: this is deterministic in-repo fuzz smoke, not coverage-guided fuzzing; cargo-fuzz/libFuzzer harnesses remain future robustness work.

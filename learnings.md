@@ -277,3 +277,7 @@ Passing an inherited control fd through bwrap with `--sync-fd` conflicted with o
 ## 2026-06-21 - bwrap builder must include the setup control channel
 
 A bwrap command that runs `foxproxsetup -- target...` is structurally incomplete because the helper cannot hand the TUN fd back. The builder should require a validated control socket and emit it before the target separator.
+
+## 2026-06-21 - Parser fuzz smoke should cover all exposed ingress parsers
+
+A lightweight deterministic fuzz-smoke integration test can exercise packet, DNS, HTTP, CONNECT, TLS, QUIC, and SOCKS parsers on arbitrary bounded byte sequences to catch panics or accidental permissive fallbacks before adding full coverage-guided fuzzing.
