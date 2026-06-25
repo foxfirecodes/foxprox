@@ -264,6 +264,69 @@ fn read_socks5_greeting<Io: Read>(
     Ok(bytes)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProxyTunnelPumpStep {
+    pub max_client_to_host_bytes: usize,
+    pub max_host_to_client_bytes: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProxyTunnelPumpOutcome {
+    pub client_bytes_read: usize,
+    pub client_bytes_written_to_host: usize,
+    pub host_bytes_read: usize,
+    pub host_bytes_written_to_client: usize,
+}
+
+/// Pump bytes once in both directions for an already-allowed explicit CONNECT or
+/// SOCKS tunnel. Runtime owns the client IO; the host side remains behind the
+/// shared egress `HostTcpStream` contract.
+pub fn pump_proxy_tunnel_once<Client, Upstream>(
+    client: &mut Client,
+    upstream: &mut Upstream,
+    step: ProxyTunnelPumpStep,
+) -> Result<ProxyTunnelPumpOutcome, RuntimeError>
+where
+    Client: Read + Write,
+    Upstream: HostTcpStream,
+{
+    let mut client_buffer = vec![0_u8; step.max_client_to_host_bytes];
+    let client_bytes_read = match client.read(&mut client_buffer) {
+        Ok(len) => len,
+        Err(error) if error.kind() == ErrorKind::WouldBlock => 0,
+        Err(error) => return Err(RuntimeError::ProxyIo(error)),
+    };
+    client_buffer.truncate(client_bytes_read);
+    let client_bytes_written_to_host = if client_buffer.is_empty() {
+        0
+    } else {
+        upstream
+            .write_from_sandbox(&client_buffer)
+            .map_err(BrokerError::Egress)
+            .map_err(RuntimeError::Broker)?
+    };
+
+    let host_bytes = upstream
+        .read_to_sandbox(step.max_host_to_client_bytes)
+        .map_err(BrokerError::Egress)
+        .map_err(RuntimeError::Broker)?;
+    let host_bytes_read = host_bytes.len();
+    let mut host_bytes_written_to_client = 0;
+    if !host_bytes.is_empty() {
+        client
+            .write_all(&host_bytes)
+            .map_err(RuntimeError::ProxyIo)?;
+        host_bytes_written_to_client = host_bytes.len();
+    }
+
+    Ok(ProxyTunnelPumpOutcome {
+        client_bytes_read,
+        client_bytes_written_to_host,
+        host_bytes_read,
+        host_bytes_written_to_client,
+    })
+}
+
 fn read_socks5_connect_request<Io: Read>(
     io: &mut Io,
     max_bytes: usize,
@@ -2245,6 +2308,33 @@ mod tests {
     }
 
     #[test]
+    fn proxy_tunnel_pump_moves_bounded_bytes_both_directions() {
+        let mut client = DuplexIo::new(b"client-data".to_vec());
+        let writes = Rc::new(RefCell::new(Vec::new()));
+        let mut upstream = TunnelTcpStream {
+            writes: Rc::clone(&writes),
+            reads: vec![b"host-data".to_vec()].into(),
+        };
+
+        let outcome = pump_proxy_tunnel_once(
+            &mut client,
+            &mut upstream,
+            ProxyTunnelPumpStep {
+                max_client_to_host_bytes: 6,
+                max_host_to_client_bytes: 4,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.client_bytes_read, 6);
+        assert_eq!(outcome.client_bytes_written_to_host, 6);
+        assert_eq!(outcome.host_bytes_read, 4);
+        assert_eq!(outcome.host_bytes_written_to_client, 4);
+        assert_eq!(writes.borrow().as_slice(), &[b"client".to_vec()]);
+        assert_eq!(client.writes, b"host".to_vec());
+    }
+
+    #[test]
     fn one_step_runtime_reads_a_packet_and_writes_policy_allowed_reply() {
         let inbound = echo_request_packet();
         let cursor = Cursor::new(inbound.clone());
@@ -3900,6 +3990,26 @@ mod tests {
 
     struct RecordingTcpStream {
         writes: Rc<RefCell<Vec<Vec<u8>>>>,
+    }
+
+    struct TunnelTcpStream {
+        writes: Rc<RefCell<Vec<Vec<u8>>>>,
+        reads: std::collections::VecDeque<Vec<u8>>,
+    }
+
+    impl HostTcpStream for TunnelTcpStream {
+        fn write_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
+            self.writes.borrow_mut().push(bytes.to_vec());
+            Ok(bytes.len())
+        }
+
+        fn read_to_sandbox(&mut self, max_bytes: usize) -> Result<Vec<u8>, EgressError> {
+            let Some(mut bytes) = self.reads.pop_front() else {
+                return Ok(Vec::new());
+            };
+            bytes.truncate(max_bytes);
+            Ok(bytes)
+        }
     }
 
     impl HostTcpStream for RecordingTcpStream {

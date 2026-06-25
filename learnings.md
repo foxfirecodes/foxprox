@@ -433,3 +433,8 @@
 
 - Runtime should orchestrate SOCKS5 session steps but keep all wire replies and parser behavior in `foxprox-frontends`; policy sees only `SocksConnect` or unsupported normalized events.
 - SOCKS allowed paths can return a connected egress stream handle signal without implementing the full tunnel pump in the parser layer.
+
+## 2026-06-22 — explicit proxy tunnel pump
+
+- CONNECT/SOCKS tunnel byte movement should be a runtime pump over `HostTcpStream`, not part of frontend parsing or policy/audit.
+- Keep tunnel pumps bounded per call so listener/event-loop code can compose them with readiness and fairness budgets.

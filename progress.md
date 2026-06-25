@@ -1864,3 +1864,24 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 2c7f8bd.
 - Remaining boundary risks: full-duplex CONNECT/SOCKS tunnel pump and listener accept loop remain.
+
+## 2026-06-22 — Boundary objective: explicit proxy tunnel pump
+
+- Boundary under work: bidirectional byte pumping for allowed CONNECT/SOCKS tunnels.
+- Allowed dependency direction: runtime owns client-session pumping; egress exposes only `HostTcpStream`; frontends only parse setup handshakes; policy/audit are not given raw stream bytes.
+- Dependency-risk assessment: HTTP CONNECT and SOCKS CONNECT steps can open egress streams, but alpha proxy networking needs bounded byte movement in both directions without letting parser or policy layers own tunnel IO.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/egress/audit.
+- Observed results: added `pump_proxy_tunnel_once` with bounded client→host and host→client transfer over a generic client IO object and egress-owned `HostTcpStream`. Added a test proving bounded movement in both directions without exposing tunnel bytes to policy/audit or frontend parsers. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 160 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — tunnel pumping remains runtime-owned over egress traits.
+  - `cargo tree -p foxprox-egress` — host stream details remain egress-owned.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: TCP listener accept loop remains.
