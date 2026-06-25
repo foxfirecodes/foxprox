@@ -49,6 +49,7 @@ pub fn flush_audit_to_buffer(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransparentPacketRoute {
     BrokerDns,
+    DirectDns,
     Udp,
     Tcp,
     Icmp,
@@ -67,6 +68,8 @@ pub fn route_transparent_ipv4_packet(
             let destination = SocketAddr::new(IpAddr::V4(parsed.destination), udp.destination_port);
             if destination == broker_dns {
                 Ok(TransparentPacketRoute::BrokerDns)
+            } else if udp.destination_port == 53 {
+                Ok(TransparentPacketRoute::DirectDns)
             } else {
                 Ok(TransparentPacketRoute::Udp)
             }
@@ -1225,6 +1228,7 @@ mod tests {
     fn routes_transparent_packets_to_runtime_boundaries() {
         let broker_dns = "10.0.2.1:53".parse().unwrap();
         let dns = udp_probe_packet(IpAddr::V4(Ipv4Addr::new(10, 0, 2, 1)), 53, b"dns");
+        let direct_dns = udp_probe_packet(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)), 53, b"dns");
         let udp = udp_probe_packet(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)), 5354, b"probe");
         let tcp = tcp_syn_packet(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 22)), 80);
         let icmp = icmp_echo_packet();
@@ -1232,6 +1236,10 @@ mod tests {
         assert_eq!(
             route_transparent_ipv4_packet(&dns, broker_dns).unwrap(),
             TransparentPacketRoute::BrokerDns
+        );
+        assert_eq!(
+            route_transparent_ipv4_packet(&direct_dns, broker_dns).unwrap(),
+            TransparentPacketRoute::DirectDns
         );
         assert_eq!(
             route_transparent_ipv4_packet(&udp, broker_dns).unwrap(),

@@ -63,6 +63,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("udp-deny-smoke");
             println!("quic-smoke");
             println!("dns-smoke");
+            println!("direct-dns-deny-smoke");
             println!("dns-attribution-smoke");
             println!("tcp-syn-smoke");
             println!("tcp-synack-smoke");
@@ -105,6 +106,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         quic_smoke_records()
     } else if scenario == "dns-smoke" {
         dns_smoke_records()
+    } else if scenario == "direct-dns-deny-smoke" {
+        direct_dns_deny_smoke_records()
     } else if scenario == "dns-attribution-smoke" {
         dns_attribution_smoke_records()
     } else if scenario == "tcp-syn-smoke" {
@@ -1466,6 +1469,208 @@ fn run_dns_smoke() -> Result<AuditRecord, String> {
     .with_metadata("packets_read", packets_read.to_string())
     .with_metadata("answer", answer_ip.to_string())
     .with_metadata("attribution_cached", attribution.is_some().to_string());
+    if !stdout.is_empty() {
+        record = record.with_metadata("stdout", stdout);
+    }
+    if !stderr.is_empty() {
+        record = record.with_metadata("stderr", stderr);
+    }
+    Ok(record)
+}
+
+#[cfg(unix)]
+fn direct_dns_deny_smoke_records() -> Vec<AuditRecord> {
+    match run_direct_dns_deny_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::DnsQuery,
+            "direct-dns-deny-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::Harness)
+        .with_protocol(Protocol::Dns)],
+    }
+}
+
+#[cfg(not(unix))]
+fn direct_dns_deny_smoke_records() -> Vec<AuditRecord> {
+    vec![AuditRecord::new(
+        EventKind::DnsQuery,
+        "direct-dns-deny-smoke",
+        Decision::FailClosed,
+        "direct DNS deny smoke is only supported on Unix",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Dns)]
+}
+
+#[cfg(unix)]
+fn run_direct_dns_deny_smoke() -> Result<AuditRecord, String> {
+    let egress_socket = UdpSocket::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind direct DNS deny fixture socket: {err}"))?;
+    let egress_addr = egress_socket
+        .local_addr()
+        .map_err(|err| format!("failed to inspect direct DNS deny fixture socket: {err}"))?;
+    drop(egress_socket);
+    let helper = setup_helper_path()?;
+    let target_dir = helper
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| {
+            format!(
+                "could not derive target directory from {}",
+                helper.display()
+            )
+        })?
+        .to_path_buf();
+    let socket_dir = target_dir.join(format!("foxprox-direct-dns-deny-{}", std::process::id()));
+    let socket_path = socket_dir.join("setup.sock");
+    let _ = std::fs::remove_file(&socket_path);
+    std::fs::create_dir_all(&socket_dir)
+        .map_err(|err| format!("failed to create direct DNS deny socket dir: {err}"))?;
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|err| format!("failed to bind direct DNS deny socket: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make direct DNS deny listener nonblocking: {err}"))?;
+
+    let mut child = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--ro-bind",
+        ])
+        .arg(&target_dir)
+        .arg(&target_dir)
+        .args(["--bind"])
+        .arg(&socket_dir)
+        .arg(&socket_dir)
+        .args(["--proc", "/proc", "--"])
+        .env("FOXPROX_SETUP_SOCKET", &socket_path)
+        .arg(&helper)
+        .args([
+            "--",
+            "/usr/bin/python3",
+            "-c",
+            "import socket,sys; q=b'\\x12\\x34\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00'+b'\\x07example\\x03com\\x00'+b'\\x00\\x01\\x00\\x01'; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(1); s.sendto(q,('8.8.8.8',53));\ntry:\n data,_=s.recvfrom(512); print(data); sys.exit(4)\nexcept socket.timeout:\n sys.exit(0)",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn bwrap direct DNS deny smoke: {err}"))?;
+
+    let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
+    fd.set_nonblocking()?;
+    let mut broker = TransparentBroker::new(
+        "10.0.2.1:53".parse().expect("static broker DNS addr valid"),
+        [],
+        PolicyEngine::new(PolicyConfig::allow_by_default()),
+        LocalUdpEgress::new(egress_addr)?,
+        PolicyEngine::new(PolicyConfig::deny_by_default()),
+        MockEgressBackend::new(),
+        PolicyEngine::new(PolicyConfig::deny_by_default()),
+    );
+    let mut buf = [0_u8; 2048];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut packets_read = 0_u64;
+    let mut denied = false;
+    while Instant::now() < deadline {
+        match fd.read_packet(&mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                packets_read += 1;
+                let step = broker.handle_ipv4_packet("direct-dns-deny-smoke", &buf[..n])?;
+                if !step.packets_to_device.is_empty() {
+                    return Err("direct DNS deny unexpectedly produced a reply".to_string());
+                }
+                denied = broker.audit.last().is_some_and(|audit| {
+                    audit.kind == EventKind::DnsQuery && audit.decision == Decision::DenyDrop
+                });
+                if denied {
+                    break;
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to read TUN fd during direct DNS deny: {err}"
+                ))
+            }
+        }
+        if child
+            .try_wait()
+            .map_err(|err| format!("failed to poll direct DNS deny smoke: {err}"))?
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !denied {
+        return Err("timed out waiting for direct external DNS deny audit".to_string());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for direct DNS deny smoke: {err}"))?;
+    fd.close();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir(&socket_dir);
+    let runtime_audit = broker
+        .audit
+        .iter()
+        .rev()
+        .find(|audit| audit.kind == EventKind::DnsQuery)
+        .cloned();
+    let egress_calls = broker.udp.egress.calls();
+    let success = output.status.success() && denied && egress_calls == 0;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut record = AuditRecord::new(
+        EventKind::DnsQuery,
+        "direct-dns-deny-smoke",
+        if success {
+            Decision::DenyDrop
+        } else {
+            Decision::FailClosed
+        },
+        if success {
+            "direct external DNS query was denied before host egress"
+        } else {
+            "direct external DNS deny smoke did not fail closed as expected"
+        },
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Dns)
+    .with_metadata("status", output.status.to_string())
+    .with_metadata("packets_read", packets_read.to_string())
+    .with_metadata("denied", denied.to_string())
+    .with_metadata("egress_calls", egress_calls.to_string());
+    if let Some(audit) = runtime_audit {
+        record = record
+            .with_metadata("policy_decision", audit.decision.as_str())
+            .with_metadata("policy_reason", audit.reason.clone())
+            .with_metadata("runtime_audit", audit.to_json_line());
+    }
     if !stdout.is_empty() {
         record = record.with_metadata("stdout", stdout);
     }

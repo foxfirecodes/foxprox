@@ -1184,3 +1184,16 @@
 - Recent QUIC smoke commit hash: `e283a1f`.
 - Next verification gap: commit TLS SNI smoke; remaining alpha validation should be a final full sweep including the new ping, QUIC, HTTP deny, and TLS SNI smokes plus direct DNS bypass denial if not yet included in the broad environment set.
 - Commit hash after commit: pending.
+
+## 2026-06-22T14:10:00Z — Direct external DNS deny smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run direct-dns-deny-smoke`
+- Environment assumptions: Linux bwrap/TUN fd handoff works; sandbox Python sends a real UDP DNS A query to `8.8.8.8:53`; no external network service is contacted because the broker denies before host egress.
+- Expected result: `foxprox-broker::TransparentBroker` distinguishes broker DNS (`10.0.2.1:53`) from direct external DNS, emits a DNS deny audit with reason `direct external DNS denied`, writes no reply, and performs zero host egress calls even when generic UDP policy is allow-by-default.
+- Observed result: pass. `foxprox-broker` increased to 5 tests and workspace tests passed (`foxprox-core` 64, `foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). `direct-dns-deny-smoke` emitted `"decision":"deny_drop"`, `"policy_reason":"direct external DNS denied"`, and `"egress_calls":"0"`.
+- Relevant output excerpt: nested runtime audit `"event":"dns_query"`, `"destination":"8.8.8.8:53"`, `"decision":"deny_drop"`.
+- Changed files: `crates/foxprox-core/src/runtime.rs`, `crates/foxprox-broker/src/lib.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: direct external DNS is now blocked and audited by the reusable broker route, with both deterministic and real sandbox/TUN evidence.
+- Recent TLS SNI deny commit hash: `ad53a83`.
+- Next verification gap: commit direct DNS denial; then run final alpha full sweep including ping, QUIC, TLS SNI, direct DNS, transparent HTTP allow/deny, TCP bridge, and explicit proxy smokes.
+- Commit hash after commit: pending.

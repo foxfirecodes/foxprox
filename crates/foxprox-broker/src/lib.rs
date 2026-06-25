@@ -9,6 +9,7 @@ use foxprox_core::audit::{
     AuditRecord, BoundedAuditBuffer, Decision, EventKind, Frontend, Protocol,
 };
 use foxprox_core::egress::EgressBackend;
+use foxprox_core::packet::{parse_ipv4, parse_udp};
 use foxprox_core::policy::PolicyEngine;
 use foxprox_core::runtime::{
     flush_audit_to_buffer, route_transparent_ipv4_packet, TransparentDnsRuntime,
@@ -82,6 +83,11 @@ impl<U: EgressBackend, T: EgressBackend> TransparentBroker<U, T> {
                 self.sync_dns_cache();
                 BrokerStep::maybe(reply)
             }
+            Ok(TransparentPacketRoute::DirectDns) => {
+                self.audit
+                    .push(direct_dns_deny_record(&sandbox_id, packet)?);
+                BrokerStep::none()
+            }
             Ok(TransparentPacketRoute::Udp) => {
                 BrokerStep::maybe(self.udp.handle_ipv4_packet(&sandbox_id, packet)?)
             }
@@ -138,6 +144,26 @@ impl<U: EgressBackend, T: EgressBackend> TransparentBroker<U, T> {
         self.audit.append(&mut self.tcp.audit);
         self.audit.append(&mut self.icmp.audit);
     }
+}
+
+fn direct_dns_deny_record(sandbox_id: &str, packet: &[u8]) -> Result<AuditRecord, String> {
+    let parsed = parse_ipv4(packet).map_err(|err| format!("malformed IPv4 packet: {err}"))?;
+    let udp = parse_udp(parsed.payload).map_err(|err| format!("malformed UDP packet: {err}"))?;
+    Ok(AuditRecord::new(
+        EventKind::DnsQuery,
+        sandbox_id,
+        Decision::DenyDrop,
+        "direct external DNS denied",
+    )
+    .with_frontend(Frontend::Tun)
+    .with_protocol(Protocol::Dns)
+    .with_addresses(
+        Some(SocketAddr::new(parsed.source.into(), udp.source_port)),
+        Some(SocketAddr::new(
+            parsed.destination.into(),
+            udp.destination_port,
+        )),
+    ))
 }
 
 #[cfg(test)]
@@ -236,6 +262,39 @@ mod tests {
             EventKind::TcpConnectAttempt
         );
         assert_eq!(broker.tcp.egress.requests.len(), 1);
+    }
+
+    #[test]
+    fn broker_denies_direct_external_dns_before_udp_egress() {
+        let mut broker = TransparentBroker::new(
+            "10.0.2.1:53".parse().unwrap(),
+            [],
+            PolicyEngine::new(PolicyConfig::allow_by_default()),
+            MockEgressBackend::new(),
+            PolicyEngine::new(PolicyConfig::deny_by_default()),
+            MockEgressBackend::new(),
+            PolicyEngine::new(PolicyConfig::deny_by_default()),
+        );
+
+        let step = broker
+            .handle_ipv4_packet(
+                "lab",
+                &udp_packet(
+                    IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
+                    53,
+                    &dns_a_query("example.com"),
+                ),
+            )
+            .unwrap();
+
+        assert!(step.packets_to_device.is_empty());
+        assert_eq!(broker.audit.last().unwrap().kind, EventKind::DnsQuery);
+        assert_eq!(broker.audit.last().unwrap().decision, Decision::DenyDrop);
+        assert_eq!(
+            broker.audit.last().unwrap().reason,
+            "direct external DNS denied"
+        );
+        assert!(broker.udp.egress.requests.is_empty());
     }
 
     #[test]
