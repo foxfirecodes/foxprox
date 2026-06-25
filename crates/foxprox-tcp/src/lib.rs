@@ -182,6 +182,19 @@ impl SmoltcpTcpServer {
         self.poll()
     }
 
+    pub fn add_ip_address(&mut self, ip: Ipv4Addr, prefix_len: u8) -> bool {
+        let mut added = false;
+        self.iface.update_ip_addrs(|ip_addrs| {
+            let cidr = IpCidr::new(IpAddress::Ipv4(ip), prefix_len);
+            if ip_addrs.contains(&cidr) {
+                added = true;
+                return;
+            }
+            added = ip_addrs.push(cidr).is_ok();
+        });
+        added
+    }
+
     pub fn relay_once<H: Read + Write>(
         &mut self,
         host: &mut H,

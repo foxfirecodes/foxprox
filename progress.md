@@ -1779,3 +1779,25 @@
 - What failed or surprised the agent: no behavior failures; the one-shot CLI cannot observe DNS and TCP in the same long-lived daemon yet, so `--dns-attribution` provides an explicit preseed seam while the DNS handler/cache remains the source for production orchestration.
 - What remains unproven: a long-running runtime that records a DNS answer and later uses it for a separate TCP connection without preseed args. The alpha cache-to-flow boundary and live TCP enrichment seam are now both verified.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — transparent TCP original-destination egress
+
+- Slice attempted: make the bwrap/TUN/smoltcp launcher usable as a transparent prototype by forwarding TCP to the original packet destination when no explicit upstream override is supplied.
+- Why next: existing live proofs used a fixed host upstream and often had targets connect to the broker TUN IP. A usable transparent sandbox path should let the target connect to a destination IP and have the broker derive host egress from the TCP SYN destination.
+- Verification plan: add smoltcp IP aliasing for the parsed SYN destination, make `--upstream` optional in `bwrap-tcp-once`, use the TCP event destination for host egress when omitted, add focused tests and a live bwrap smoke against a host-reachable local address, then run all live smokes and workspace checks.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — original-destination transparent TCP egress
+
+- Slice attempted: make the bwrap/TUN/smoltcp launcher usable as a transparent prototype by forwarding TCP to the original packet destination when no explicit upstream override is supplied.
+- Why next: existing live proofs used a fixed host upstream and often had targets connect to the broker TUN IP. A usable transparent sandbox path should let the target connect to a destination IP and have the broker derive host egress from the TCP SYN destination.
+- What changed: `SmoltcpTcpServer` can now add destination IP aliases before accepting a packet. `BwrapTcpOnceConfig.upstream_addr` is optional, and `run_bwrap_tcp_once` falls back to the parsed TCP destination endpoint for host egress when no upstream override is configured. The CLI now treats `--upstream` as optional. Added a live ignored CLI smoke where curl inside bwrap connects to the host's non-loopback IPv4 address/port; the broker accepts the original destination through TUN/smoltcp, connects host egress to that same destination, and emits HTTP audit evidence.
+- Verification:
+  - Focused live original-destination check passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_cli_bwrap_tcp_once_uses_original_destination -- --ignored --nocapture`.
+  - All explicit live smokes passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, now 9/9.
+  - `cargo clippy --workspace --all-targets -- -D warnings` initially caught a manual-contains lint in the smoltcp alias helper; fixed it, then clippy passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: smoltcp accepted a dynamically added original-destination IP alias cleanly, allowing true destination-derived egress in the live bwrap test.
+- What remains unproven: multi-flow continuous daemon operation. The one-shot transparent prototype is now usable without hardcoding a separate upstream override for TCP.
+- Commit: this commit.

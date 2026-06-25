@@ -216,7 +216,7 @@ pub struct BwrapTcpOnceConfig {
     pub smoltcp_ip: Ipv4Addr,
     pub smoltcp_prefix_len: u8,
     pub listen_port: u16,
-    pub upstream_addr: SocketAddr,
+    pub upstream_addr: Option<SocketAddr>,
     pub max_packet_len: usize,
     pub max_packets: usize,
     pub sandbox_buffer_len: usize,
@@ -426,6 +426,9 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                 };
                 tcp_source = Some(event.source);
                 tcp_destination = Some(event.destination);
+                if let IpAddr::V4(destination_ip) = event.destination.ip {
+                    let _ = tcp.add_ip_address(destination_ip, config.smoltcp_prefix_len);
+                }
                 tcp_attribution = event.attribution.clone();
                 let evaluation = policy.evaluate(&NormalizedEvent::TcpConnectAttempt(event));
                 let allowed = evaluation.decision.is_allowed();
@@ -519,20 +522,23 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                     }
                 }
             }
-            let mut host =
-                TcpStream::connect(config.upstream_addr).map_err(|error| CliError::Io {
-                    context: format!("connect-tcp-upstream {}", config.upstream_addr),
-                    error,
-                })?;
+            let egress_addr = config
+                .upstream_addr
+                .or_else(|| tcp_destination.and_then(endpoint_to_socket_addr))
+                .ok_or_else(|| CliError::Core("bwrap-tcp-once-missing-upstream".to_owned()))?;
+            let mut host = TcpStream::connect(egress_addr).map_err(|error| CliError::Io {
+                context: format!("connect-tcp-upstream {egress_addr}"),
+                error,
+            })?;
             host.write_all(&sandbox_payload)
                 .map_err(|error| CliError::Io {
-                    context: format!("write-tcp-upstream {}", config.upstream_addr),
+                    context: format!("write-tcp-upstream {egress_addr}"),
                     error,
                 })?;
             let mut host_payload = vec![0_u8; config.host_buffer_len];
             let host_to_sandbox_bytes =
                 host.read(&mut host_payload).map_err(|error| CliError::Io {
-                    context: format!("read-tcp-upstream {}", config.upstream_addr),
+                    context: format!("read-tcp-upstream {egress_addr}"),
                     error,
                 })?;
             host_payload.truncate(host_to_sandbox_bytes);
@@ -581,6 +587,11 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
     Err(CliError::Core(
         "bwrap-tcp-once-no-sandbox-payload-before-packet-limit".to_owned(),
     ))
+}
+
+#[cfg(unix)]
+fn endpoint_to_socket_addr(endpoint: foxprox_core::Endpoint) -> Option<SocketAddr> {
+    endpoint.port.map(|port| SocketAddr::new(endpoint.ip, port))
 }
 
 #[cfg(unix)]
@@ -1085,7 +1096,7 @@ where
         smoltcp_ip: listen_ip.ok_or_else(bwrap_tcp_once_usage)?,
         smoltcp_prefix_len: listen_prefix.ok_or_else(bwrap_tcp_once_usage)?,
         listen_port: listen_port.ok_or_else(bwrap_tcp_once_usage)?,
-        upstream_addr: upstream_addr.ok_or_else(bwrap_tcp_once_usage)?,
+        upstream_addr,
         max_packet_len: max_packet_len.ok_or_else(bwrap_tcp_once_usage)?,
         max_packets: max_packets.ok_or_else(bwrap_tcp_once_usage)?,
         sandbox_buffer_len: sandbox_buffer_len.ok_or_else(bwrap_tcp_once_usage)?,
@@ -1236,7 +1247,7 @@ fn bwrap_tcp_once_usage() -> CliError {
 
 #[cfg(unix)]
 fn bwrap_tcp_once_usage_text() -> &'static str {
-    "usage: foxprox-cli bwrap-tcp-once --bwrap PROGRAM --setup PROGRAM --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP --listen-ip IP --listen-port PORT --upstream IP:PORT --sandbox ID [--config policy.toml] [--ip-program PATH] [--listen-prefix N] [--extra-bwrap-arg ARG ...] -- TARGET [ARGS...]"
+    "usage: foxprox-cli bwrap-tcp-once --bwrap PROGRAM --setup PROGRAM --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP --listen-ip IP --listen-port PORT --sandbox ID [--config policy.toml] [--upstream IP:PORT] [--ip-program PATH] [--listen-prefix N] [--extra-bwrap-arg ARG ...] -- TARGET [ARGS...]"
 }
 
 #[cfg(unix)]
@@ -1313,7 +1324,7 @@ fn run_packet_once_command(
 
 fn usage() -> CliError {
     CliError::Usage(
-        "usage: foxprox-cli packet-once --config <policy.toml> --sandbox <id> [--outbound <packet.bin>] < packet.bin\n       foxprox-cli bwrap-tcp-once --bwrap PROGRAM --setup PROGRAM --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP --listen-ip IP --listen-port PORT --upstream IP:PORT --sandbox ID [--config policy.toml] [--ip-program PATH] [--listen-prefix N] [--extra-bwrap-arg ARG ...] -- TARGET [ARGS...]\n       foxprox-cli setup --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP [--tun-device PATH] [--ip-program PATH] -- TARGET [ARGS...]"
+        "usage: foxprox-cli packet-once --config <policy.toml> --sandbox <id> [--outbound <packet.bin>] < packet.bin\n       foxprox-cli bwrap-tcp-once --bwrap PROGRAM --setup PROGRAM --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP --listen-ip IP --listen-port PORT --sandbox ID [--config policy.toml] [--upstream IP:PORT] [--ip-program PATH] [--listen-prefix N] [--extra-bwrap-arg ARG ...] -- TARGET [ARGS...]\n       foxprox-cli setup --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP [--tun-device PATH] [--ip-program PATH] -- TARGET [ARGS...]"
             .to_owned(),
     )
 }
@@ -1730,7 +1741,10 @@ mod tests {
         assert_eq!(config.broker_dns, "10.0.0.1".parse::<IpAddr>().unwrap());
         assert_eq!(config.smoltcp_ip, Ipv4Addr::new(10, 0, 0, 1));
         assert_eq!(config.listen_port, 8080);
-        assert_eq!(config.upstream_addr, "127.0.0.1:18080".parse().unwrap());
+        assert_eq!(
+            config.upstream_addr,
+            Some("127.0.0.1:18080".parse().unwrap())
+        );
         assert_eq!(config.sandbox_id, "cli-bwrap-test");
         assert_eq!(config.dns_cache.len(), 1);
         assert_eq!(config.max_packets, 8);

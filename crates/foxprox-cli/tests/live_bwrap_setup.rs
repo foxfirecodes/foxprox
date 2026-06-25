@@ -397,7 +397,7 @@ fn live_bwrap_tcp_connection_uses_smoltcp_and_host_stream() {
         smoltcp_ip: Ipv4Addr::new(10, 129, 0, 1),
         smoltcp_prefix_len: 24,
         listen_port: 8080,
-        upstream_addr,
+        upstream_addr: Some(upstream_addr),
         max_packet_len: 4096,
         max_packets: 16,
         sandbox_buffer_len: 64,
@@ -483,7 +483,7 @@ fn live_bwrap_tls_client_hello_emits_sni_audit() {
         smoltcp_ip: Ipv4Addr::new(10, 134, 0, 1),
         smoltcp_prefix_len: 24,
         listen_port: 443,
-        upstream_addr,
+        upstream_addr: Some(upstream_addr),
         max_packet_len: 4096,
         max_packets: 32,
         sandbox_buffer_len: 512,
@@ -569,7 +569,7 @@ fn live_bwrap_curl_fetches_http_through_smoltcp_launcher() {
         smoltcp_ip: Ipv4Addr::new(10, 130, 0, 1),
         smoltcp_prefix_len: 24,
         listen_port: 8080,
-        upstream_addr,
+        upstream_addr: Some(upstream_addr),
         max_packet_len: 4096,
         max_packets: 32,
         sandbox_buffer_len: 2048,
@@ -691,6 +691,108 @@ fn live_cli_bwrap_tcp_once_curl_emits_audit_json() {
     assert!(stdout.contains("\"kind\":\"tcp_connect\""));
     assert!(stdout.contains("\"kind\":\"http_request\""));
     assert!(stdout.contains("\"kind\":\"tcp_flow_closed\""));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "requires bwrap, /dev/net/tun, user namespaces, curl, and Python in the sandbox"]
+fn live_cli_bwrap_tcp_once_uses_original_destination() {
+    let Some(bwrap) = existing_path("/usr/bin/bwrap") else {
+        eprintln!("skipping live original-destination smoke: /usr/bin/bwrap missing");
+        return;
+    };
+    if !Path::new("/dev/net/tun").exists() {
+        eprintln!("skipping live original-destination smoke: /dev/net/tun missing");
+        return;
+    }
+    let Some(curl) = existing_path("/usr/bin/curl") else {
+        eprintln!("skipping live original-destination smoke: /usr/bin/curl missing");
+        return;
+    };
+    let Some(host_ip) = local_host_ipv4() else {
+        eprintln!("skipping live original-destination smoke: no non-loopback host IPv4");
+        return;
+    };
+    let setup = foxproxsetup_path();
+    let cli = foxprox_cli_path();
+    let dir = unique_test_dir("live-cli-original-dest");
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket_path = dir.join("broker.sock");
+    let resolv_conf = dir.join("resolv.conf");
+    let upstream = TcpListener::bind((host_ip, 0)).unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let upstream_thread = std::thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        let mut buffer = [0_u8; 1024];
+        let length = stream.read(&mut buffer).unwrap();
+        assert!(String::from_utf8_lossy(&buffer[..length]).starts_with("GET / HTTP/1.1"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .unwrap();
+    });
+
+    let output = Command::new(cli)
+        .arg("bwrap-tcp-once")
+        .arg("--bwrap")
+        .arg(bwrap)
+        .arg("--setup")
+        .arg(setup)
+        .arg("--broker-socket")
+        .arg(&socket_path)
+        .args([
+            "--tun-name",
+            "fpxorig0",
+            "--address-cidr",
+            "10.136.0.2/24",
+            "--mtu",
+            "1400",
+        ])
+        .arg("--resolv-conf")
+        .arg(&resolv_conf)
+        .args([
+            "--broker-dns",
+            "10.136.0.1",
+            "--ip-program",
+            "/usr/bin/ip",
+            "--listen-ip",
+            "10.136.0.1",
+            "--listen-port",
+        ])
+        .arg(upstream_addr.port().to_string())
+        .args([
+            "--sandbox",
+            "live-cli-original-dest",
+            "--max-packets",
+            "32",
+            "--extra-bwrap-arg",
+            "--dev-bind",
+            "--extra-bwrap-arg",
+            "/",
+            "--extra-bwrap-arg",
+            "/",
+            "--",
+        ])
+        .arg(curl)
+        .args([
+            "--max-time",
+            "5",
+            "--silent",
+            "--show-error",
+            &format!("http://{host_ip}:{}/", upstream_addr.port()),
+        ])
+        .output()
+        .unwrap();
+    upstream_thread.join().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(&format!("\"ip\":\"{host_ip}\"")));
+    assert!(stdout.contains("\"kind\":\"http_request\""));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -906,6 +1008,15 @@ fn foxprox_cli_path() -> PathBuf {
     std::env::var_os("CARGO_BIN_EXE_foxprox-cli")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("target/debug/foxprox-cli"))
+}
+
+fn local_host_ipv4() -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    socket.connect((Ipv4Addr::new(8, 8, 8, 8), 80)).ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_loopback() => Some(ip),
+        _ => None,
+    }
 }
 
 fn unique_test_dir(prefix: &str) -> PathBuf {

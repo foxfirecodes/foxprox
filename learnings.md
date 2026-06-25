@@ -344,3 +344,7 @@ Expose HTTP proxy, HTTPS CONNECT, and SOCKS5 TCP CONNECT as one-shot CLI listene
 ## 2026-06-22 — one-shot transparent launchers need DNS cache injection seams
 
 Until there is a long-running daemon that observes DNS and TCP in one runtime, pass a `DnsAttributionCache` into one-shot TCP launchers and expose a CLI preseed form like `--dns-attribution host=ip`. This proves the live TCP enrichment/audit path while keeping the DNS handler cache reusable for future orchestration.
+
+## 2026-06-22 — transparent TCP needs smoltcp destination aliases
+
+For original-destination TUN TCP, add the parsed SYN destination IP as an smoltcp interface alias before feeding the packet. Then the host egress can default to the packet destination endpoint when no explicit upstream override is configured.
