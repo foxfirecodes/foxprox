@@ -288,3 +288,7 @@ To prove a Rust launcher can spawn setup and receive an fd without invoking bwra
 ## 2026-06-22 — setup launchers must return the live child after fd handoff
 
 For real bwrap sessions, do not wait for the setup/target process immediately after receiving the TUN fd. The target may be blocked waiting for broker traffic. Return the live child plus received fd so the broker can process packets before supervising exit.
+
+## 2026-06-22 — bwrap TCP smoke validates live-child setup orchestration
+
+A real bwrap target can be spawned with a broker listener, return a TUN fd via `spawn_setup_command_and_accept_fd`, and then block on TCP connect while the broker starts smoltcp processing. Wait for the child only after forwarding completes.

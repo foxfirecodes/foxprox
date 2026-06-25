@@ -1557,3 +1557,18 @@
 - What failed or surprised the agent: no behavior failures; keeping the child live after fd handoff matches the actual bwrap target lifecycle much better.
 - What remains unproven: replacing the manual command construction in ignored live tests with this orchestration helper for full bwrap sessions.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — live bwrap test uses live-child launcher seam
+
+- Slice attempted: use the new live-child launcher seam in a real bwrap smoke so fd handoff and target supervision match production shape.
+- Why next: the helper existed but live bwrap smokes still manually started the command and accepted fds inside a broker thread; using the helper proves it works for a target that remains blocked on broker TCP forwarding after fd handoff.
+- What changed: the live bwrap TCP smoke now builds the bwrap/`foxproxsetup` command, calls `spawn_setup_command_and_accept_fd`, feeds the received fd into `SmoltcpTcpServer`, relays traffic, and waits for the still-live bwrap child only after broker forwarding completes.
+- Verification:
+  - Focused live check passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_bwrap_tcp -- --ignored --nocapture`.
+  - All explicit live smokes passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; receiving the fd first and only then starting packet processing still works because the target's SYN waits in the TUN stream until the broker loop starts.
+- What remains unproven: packaging this into a user-facing long-running launcher command and supervising multi-connection sessions.
+- Commit: this commit.
