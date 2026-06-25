@@ -5350,3 +5350,27 @@ Commit: a336d7b
 
 ### Remaining alpha gaps
 - This proves one real host TCP request/response over bwrap + received TUN + smoltcp + host socket egress, but the product still needs general transparent destination mapping instead of explicit stack/host endpoint mapping, long-running multi-flow TCP forwarding, UDP reply/write-back over smoltcp/TUN, DNS listener orchestration inside the same launcher, explicit proxy listener lifecycle in the same launcher, cleanup/lifecycle audit hardening, and curl/DNS/proxy production E2Es before `docs/initial-impl.md` can be considered complete.
+
+## 2026-06-25 — Exercise bwrap TCP egress launcher command
+
+Commit: 8debeca
+
+### Review
+- Reviewer run `fda43a0f` found no blocker/high issues for the new received-TUN smoltcp TCP host egress path, but flagged a medium validation gap: the new user-facing `foxprox run-bwrap-tcp-egress ...` command existed but the real E2E exercised lower-level session APIs instead of the CLI command itself.
+
+### Fix
+- Added ignored real E2E `foxprox_run_bwrap_tcp_egress_command_bridges_target_bytes`.
+  - Builds a real config file with allow policy and unique TUN name.
+  - Runs the actual `foxprox` binary with `run-bwrap-tcp-egress <config> 198.51.100.1:8080 <host-addr> -- python3 ...`.
+  - Prepends the cargo-built `foxproxsetup` directory to `PATH` so the launcher-spawned bwrap setup command resolves the test helper.
+  - Verifies the sandbox target sends `ping`, the real host TCP listener receives it, the target receives `pong`, the command exits successfully, and stdout contains setup-control, smoltcp, and `tcp_flow_closed` audit evidence.
+
+### Validation
+- `cargo test -p foxprox-cli --test bwrap_setup_e2e --all-features -- --ignored --nocapture` — passed all four ignored real bwrap/TUN tests.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all four ignored real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed: 33 CLI unit tests + 1 ignored privileged CLI unit test, 4 ignored bwrap E2E tests in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 109 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining alpha gaps
+- Direct launcher command validation is now covered for one mapped TCP request/response. The remaining `docs/initial-impl.md` gaps are still broader: transparent destination mapping, multi-flow/long-running TCP forwarding, UDP response routing, DNS/proxy listener orchestration in the same launcher, cleanup/lifecycle audit hardening, and curl/DNS/proxy production E2Es.
