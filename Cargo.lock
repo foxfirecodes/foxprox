@@ -76,6 +76,9 @@ dependencies = [
 [[package]]
 name = "foxprox-integrations"
 version = "0.1.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "foxprox-net"

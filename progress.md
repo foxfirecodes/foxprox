@@ -1363,3 +1363,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * the core DNS handler preserves audit denial reason and produces a parseable REFUSED response with no answers.
 * Audit evidence: the test asserts the core DNS audit carries `DefaultDeny` before the response is emitted.
 * Residual risk: live allowed-query forwarding to upstream DNS, pending response correlation over real sockets, DNS cache mutation in the runtime loop, and resolver configuration inside setup helper remain future work.
+
+## 2026-06-21 - Setup helper TUN fd handoff primitive
+
+* Invariant under work: setup helpers must transfer broker-owned TUN file descriptors over an explicit Unix control channel instead of relying on inherited ambient descriptors or direct host networking.
+* Threat or failure mode addressed: without a reviewed fd-passing boundary, bwrap/external namespace setup can accidentally leak unrelated descriptors, fail open after setup, or make the broker depend on bwrap-specific process layout.
+* Planned verification: add SCM_RIGHTS send/receive helpers with exact single-fd validation, unit tests for round-trip fd transfer and non-fd message denial, then run the full check command.
+
+## 2026-06-21 - Setup helper TUN fd handoff primitive results
+
+* Tests added/updated:
+  * Unix `SCM_RIGHTS` helper sends exactly one raw fd over a Unix stream and receives it as an owned fd.
+  * receiving a normal byte without fd rights fails closed with `MissingFd`.
+* Commands run:
+  * Initial integration test compile failed because `OwnedFd` is not `PartialEq` and a few variables were unnecessarily mutable; switched to `matches!` and removed unnecessary `mut`.
+  * `cargo test -p foxprox-integrations --lib` and `cargo clippy -p foxprox-integrations --all-targets --all-features -- -D warnings` — passed.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: core 161 tests, device 3 tests plus 2 ignored, integrations 5 tests, net 4 ignored tests, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * setup fd handoff now has an explicit single-fd transfer primitive with missing-fd detection rather than ambient inherited descriptor assumptions.
+  * integration crate contains reviewed unsafe only in the Unix fd-passing boundary; core remains `#![forbid(unsafe_code)]`.
+* Audit evidence: this primitive does not emit audit; runtime setup code should wrap successful/failed handoff with lifecycle/broker-error events.
+* Residual risk: actual `foxproxsetup` binary, privilege drop, bwrap child execution, and cross-namespace end-to-end fd handoff remain future work.

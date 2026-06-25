@@ -253,3 +253,7 @@ Queueing a UDP response with `send_slice` is not enough; the event loop must con
 ## 2026-06-21 - DNS denial over smoltcp needs broker IP configured in policy
 
 Real broker-DNS tests should configure the smoltcp service IP as a broker DNS server so port-53 traffic reaches normal DNS policy evaluation instead of direct-bypass denial. Default-deny then produces a bounded REFUSED response through the shared DNS handler.
+
+## 2026-06-21 - TUN fd handoff should use explicit SCM_RIGHTS validation
+
+Setup helpers should send the TUN fd over a Unix control socket and the broker should reject messages without exactly the expected fd rights. This avoids relying on ambient inherited descriptors and keeps unsafe code isolated outside the policy core.
