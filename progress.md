@@ -1599,5 +1599,5 @@
   - `cargo tree -p foxprox-device` — device remains dependency-free.
   - `cargo tree -p foxprox-runtime` — runtime still consumes only device traits.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: a569705.
 - Remaining boundary risks: SCM_RIGHTS control-socket passing and privilege drop enforcement remain.
