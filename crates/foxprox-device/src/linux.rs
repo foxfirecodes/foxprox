@@ -3,8 +3,9 @@ use std::fmt;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::mem;
-use std::os::fd::{FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::path::PathBuf;
+use std::time::Duration;
 
 const DEFAULT_TUN_PATH: &str = "/dev/net/tun";
 const IFNAMSIZ: usize = libc::IFNAMSIZ;
@@ -77,6 +78,22 @@ impl TunPacketIo {
         Ok(packet)
     }
 
+    pub fn wait_readable(&self, timeout: Duration) -> Result<bool, TunIoError> {
+        let timeout_ms = timeout.as_millis().min(libc::c_int::MAX as u128) as libc::c_int;
+        let mut poll_fd = libc::pollfd {
+            fd: self.fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let rc = unsafe_poll(&mut poll_fd, timeout_ms);
+        if rc < 0 {
+            return Err(TunIoError::Poll {
+                error: std::io::Error::last_os_error().to_string(),
+            });
+        }
+        Ok(rc > 0 && poll_fd.revents & libc::POLLIN != 0)
+    }
+
     pub fn write_packet(&mut self, packet: &[u8]) -> Result<(), TunIoError> {
         if packet.len() > self.max_packet_len {
             return Err(TunIoError::PacketTooLarge {
@@ -110,6 +127,9 @@ pub enum TunIoError {
     Write {
         error: String,
     },
+    Poll {
+        error: String,
+    },
 }
 
 impl fmt::Display for TunIoError {
@@ -125,6 +145,7 @@ impl fmt::Display for TunIoError {
             ),
             Self::Read { error } => write!(f, "tun-io-read-error: {error}"),
             Self::Write { error } => write!(f, "tun-io-write-error: {error}"),
+            Self::Poll { error } => write!(f, "tun-io-poll-error: {error}"),
         }
     }
 }
@@ -238,6 +259,12 @@ fn c_char_slice_as_u8(value: &[libc::c_char]) -> &[u8] {
     // SAFETY: `libc::c_char` has size 1, and this creates an immutable byte
     // view over the exact same initialized fixed-size interface-name buffer.
     unsafe { std::slice::from_raw_parts(ptr, byte_len) }
+}
+
+fn unsafe_poll(fd: &mut libc::pollfd, timeout_ms: libc::c_int) -> libc::c_int {
+    // SAFETY: `fd` points to one initialized pollfd value owned by this stack
+    // frame, and the kernel only mutates its `revents` field during the call.
+    unsafe { libc::poll(fd, 1, timeout_ms) }
 }
 
 fn tunsetiff(fd: libc::c_int, request: &mut IfReq) -> Result<(), std::io::Error> {

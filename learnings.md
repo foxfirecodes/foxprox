@@ -348,3 +348,11 @@ Until there is a long-running daemon that observes DNS and TCP in one runtime, p
 ## 2026-06-22 — transparent TCP needs smoltcp destination aliases
 
 For original-destination TUN TCP, add the parsed SYN destination IP as an smoltcp interface alias before feeding the packet. Then the host egress can default to the packet destination endpoint when no explicit upstream override is configured.
+
+## 2026-06-22 — bwrap DNS smoke needs an isolated `/etc/resolv.conf`
+
+For real resolver behavior inside `bwrap`, bind-mount a temporary resolver file over `/etc/resolv.conf` and have `foxproxsetup` write that in-sandbox path. In live tests, `--tmpfs /etc` followed by `--bind <temp-resolv> /etc/resolv.conf` avoids host resolver mutation and makes curl/glibc use the broker DNS address.
+
+## 2026-06-22 — one-shot TUN launchers must poll target exit
+
+Do not block indefinitely on `read()` from a TUN fd in a one-shot launcher. Poll the fd with a short timeout and call `child.try_wait()` between reads so DNS failures, policy denial, or target startup failures return audit/error evidence instead of hanging the CLI.

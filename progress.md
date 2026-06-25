@@ -1811,3 +1811,19 @@
   - Documentation-only slice; previous code verification remains current: live bwrap suite 9/9, clippy workspace, test workspace, fmt check.
 - What remains unproven: documentation command copy/paste depends on local tools such as `nc` or equivalent host test server; the live Rust smoke remains the authoritative evidence.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — DNS and TCP in one bwrap launcher
+
+- Slice attempted: make the transparent `bwrap-tcp-once` alpha command usable for ordinary sandbox DNS followed by TCP, instead of requiring a preseeded DNS cache or direct IP target only.
+- Why next: a real bwrap sandbox prototype should be able to install broker DNS in the sandbox, observe a DNS query, forward it to host egress, record attribution, then use that attribution for the subsequent transparent TCP flow in the same launcher.
+- What changed: `BwrapTcpOnceConfig` and the CLI now accept optional `--dns-upstream IP:PORT`. When configured, the launcher recognizes IPv4 UDP packets to `--broker-dns`:53 before feeding packets to smoltcp, handles them through `DnsBrokerDatagramHandler`, emits DNS audit JSON, writes DNS responses back to TUN, and records answers into the same DNS attribution cache later used by TCP connect/TLS policy. `TunPacketIo` gained a safe poll/readiness helper so the launcher can notice target exit instead of blocking forever on TUN reads when a sandbox process exits before producing the expected TCP payload. Added a live ignored CLI smoke that bind-mounts an isolated `/etc/resolv.conf`, runs curl by hostname inside bwrap, forwards DNS to a host fake resolver, then forwards the resulting original-destination HTTP connection and asserts `dns_query`, `tcp_connect` with `dns_cache`, and `http_request` audit evidence.
+- Verification:
+  - Focused parser check passed: `cargo test -p foxprox-cli bwrap_tcp_once_arg_parser -- --nocapture`.
+  - Focused live DNS+TCP check passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_cli_bwrap_tcp_once_resolves_dns_and_uses_original_destination -- --ignored --nocapture`.
+  - Full live bwrap suite passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, now 10/10.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- What failed or surprised the agent: glibc/curl did not use the intended resolver until the live test bind-mounted an isolated file over `/etc/resolv.conf`; using `--tmpfs /etc` plus `--bind temp-resolv /etc/resolv.conf` avoids mutating host resolver state and made ordinary curl DNS exercise the broker path. Also, blocking TUN reads can hang a one-shot launcher after target exit; polling and `child.try_wait()` fixed that alpha usability issue.
+- What remains unproven: multiple concurrent TCP flows and long-running process supervision. DNS-to-TCP attribution in a single real bwrap run is now proven.
+- Commit: this commit.

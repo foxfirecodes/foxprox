@@ -12,6 +12,7 @@ foxprox-broker = { path = "../foxprox-broker" }
 foxprox-config = { path = "../foxprox-config" }
 foxprox-core = { path = "../foxprox-core" }
 foxprox-device = { path = "../foxprox-device" }
+foxprox-dns = { path = "../foxprox-dns" }
 foxprox-egress = { path = "../foxprox-egress" }
 foxprox-flow = { path = "../foxprox-flow" }
 foxprox-packet = { path = "../foxprox-packet" }
@@ -27,5 +28,4 @@ name = "foxproxsetup"
 path = "src/bin/foxproxsetup.rs"
 
 [dev-dependencies]
-foxprox-dns = { path = "../foxprox-dns" }
 serde_json = { workspace = true }
