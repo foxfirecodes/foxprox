@@ -5238,3 +5238,24 @@ Commit: 61c5d84
 
 ### Remaining blind spots
 - The received-fd smoltcp bridge now drains setup-ingest failures and verifies SYN-ACK writeback in deterministic coverage. Remaining production work is still real long-running scheduling over the received real TUN fd, host-socket TCP/UDP forwarding from smoltcp flows, DNS/proxy/listener orchestration in one session, cleanup/error handling, CLI ergonomics, and a rerunnable end-to-end launcher command.
+
+## 2026-06-24 — Exercise real bwrap smoltcp handshake
+
+Commit: 6f87c94
+
+### Fix
+- Added an ignored real bwrap/`foxproxsetup` integration test that runs the setup helper, receives the real configured TUN fd via SCM_RIGHTS, and drives a real target TCP connect through that fd while the host runs the smoltcp TUN bridge.
+- The target executes inside the bwrap network namespace after `CAP_NET_ADMIN` has been dropped and attempts `socket.create_connection(("198.51.100.1", 8080), 3.0)`.
+- The host side accepts the setup-control fd handoff, marks the fd nonblocking, owns it as `TunIoPacketDevice<File>`, runs `SmoltcpTunBridge` until it emits a response packet, then verifies the target process exits successfully.
+- The test asserts structured smoltcp audit evidence for both `from_sandbox` packet observation and `to_sandbox` write-back attempt, proving the real received TUN fd can carry a live target TCP handshake through the runtime bridge rather than only raw packet readback.
+- Added `foxprox-stack` as a CLI dev-dependency for this real integration test.
+
+### Commands run
+- `scripts/integration/bwrap-setup-e2e.sh` — initially failed because the first runtime packet processed could be incidental/non-target traffic and because connecting to `10.0.2.1` timed out; updated the target to connect to `198.51.100.1:8080`, matched the stack address, and looped until smoltcp write-back evidence appeared.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed, running both ignored real bwrap/TUN tests: UDP packet readback and smoltcp TCP handshake.
+- `cargo test --all-targets --all-features` — passed, including 31 CLI unit tests + 1 ignored privileged CLI unit test, 2 ignored bwrap E2E integration tests in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 109 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining blind spots
+- Real bwrap setup now proves both UDP packet readback and a target TCP connect completing through the host smoltcp bridge over the received TUN fd. Remaining production work is still completing a user-facing launcher/runtime that keeps this loop running, forwards established smoltcp TCP/UDP flows to host sockets, orchestrates DNS/proxy/listeners/cleanup in one session, and exposes CLI ergonomics for non-test use.
