@@ -5535,3 +5535,33 @@ Commit: cfdcbe1
 
 ### Remaining alpha gaps
 - DNS policy correctness is improved, but the launchers are still separate bounded single-exchange proofs. Remaining alpha blockers: one long-running production command combining DNS/TCP/UDP/proxy, transparent destination mapping/config, multi-flow TCP/UDP sessions, transparent HTTP/TLS attribution in smoltcp data plane, explicit HTTP/SOCKS proxy lifecycle in launcher, and lifecycle/cleanup audit hardening.
+
+## 2026-06-25 — Preserve DNS denial decisions in UDP bridge
+
+Commit: fad08e7
+
+### Review follow-up
+- Addressed reviewer run `121493ca` findings:
+  - Direct external DNS sent through the DNS TUN launcher no longer bypasses the existing `DirectDnsBypass` policy/audit path.
+  - DNS policy denials that produce a REFUSED packet are no longer reported as generic allowed UDP bridge success.
+
+### Fix
+- Added destination-aware policy ownership to `UdpDatagramExchange` via `handles_policy_for(destination)`.
+  - `DnsUdpExchange` owns policy only for the configured broker DNS endpoint.
+  - UDP/53 to non-broker DNS servers now falls back to the bridge's normal policy evaluation and emits `AuditKind::DnsQueryDecision` with `DenialReason::DirectDnsBypass`.
+- Added `datagram_decision()` to let policy-owning exchanges propagate their final decision/reason back to `UdpDatagramBridgeEvidence`.
+  - DNS allow responses report `Decision::Allow`.
+  - DNS REFUSED denial responses report the DNS handler's denial decision/reason even though a refused packet was delivered back to the sandbox.
+- `run-bwrap-udp-egress` and `run-bwrap-dns-egress` now require both `udp_bridge.exchanged` and `udp_bridge.decision == Decision::Allow` before exiting 0.
+- Added tests proving direct external DNS preserves `DirectDnsBypass`, policy-owned DNS denial evidence is propagated after response delivery, DNS denials expose refused-response decisions, and non-broker DNS exchange attempts do not retain stale DNS decisions/observations.
+
+### Validation
+- `cargo test -p foxprox-stack --all-targets --all-features udp_exchange -- --nocapture` — passed 5 focused UDP bridge tests.
+- `cargo test -p foxprox-egress --all-targets --all-features dns_udp_exchange -- --nocapture` — passed 4 focused DNS UDP exchange tests.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all seven ignored real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed: 33 CLI unit tests + 1 ignored privileged CLI unit test, 7 ignored bwrap E2E tests in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 113 egress tests, and 21 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining alpha gaps
+- Still outstanding: one combined long-running runtime/launcher, transparent destination mapping/config, multi-flow TCP/UDP/DNS loops, explicit HTTP/SOCKS proxy lifecycle in the same launcher, smoltcp transparent HTTP/TLS attribution, and cleanup/lifecycle audit hardening.
