@@ -619,6 +619,7 @@ pub mod fd_handoff {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
+    use std::process::Command;
 
     use nix::cmsg_space;
     use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
@@ -730,6 +731,55 @@ pub mod fd_handoff {
     }
 
     impl std::error::Error for BrokerControlError {}
+
+    /// Result of spawning a setup command and receiving its fd handoff.
+    #[derive(Debug)]
+    pub struct SetupCommandRunResult {
+        pub received: ReceivedFd,
+        pub status_code: Option<i32>,
+        pub status_success: bool,
+    }
+
+    /// Errors while spawning or waiting for a setup command.
+    #[derive(Debug)]
+    pub enum SetupCommandRunError {
+        Spawn(String),
+        Broker(BrokerControlError),
+        Wait(String),
+    }
+
+    impl fmt::Display for SetupCommandRunError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                Self::Spawn(error) => write!(f, "setup-command-spawn-error: {error}"),
+                Self::Broker(error) => write!(f, "setup-command-broker-error: {error}"),
+                Self::Wait(error) => write!(f, "setup-command-wait-error: {error}"),
+            }
+        }
+    }
+
+    impl std::error::Error for SetupCommandRunError {}
+
+    /// Spawn a setup command while accepting one setup fd on the broker listener.
+    pub fn run_setup_command_and_receive_fd(
+        listener: BrokerControlListener,
+        mut command: Command,
+    ) -> Result<SetupCommandRunResult, SetupCommandRunError> {
+        let mut child = command
+            .spawn()
+            .map_err(|error| SetupCommandRunError::Spawn(error.to_string()))?;
+        let received = listener
+            .accept_setup_fd()
+            .map_err(SetupCommandRunError::Broker)?;
+        let status = child
+            .wait()
+            .map_err(|error| SetupCommandRunError::Wait(error.to_string()))?;
+        Ok(SetupCommandRunResult {
+            received,
+            status_code: status.code(),
+            status_success: status.success(),
+        })
+    }
 
     /// Errors from SCM_RIGHTS setup fd handoff.
     #[derive(Debug)]
@@ -1171,6 +1221,66 @@ mod tests {
         ));
         assert!(!resolv_conf.exists());
         assert!(fd_handoff::receive_setup_fd(&broker_socket).is_err());
+        remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launcher_spawns_setup_command_and_receives_fd_handoff() {
+        use std::fs::{create_dir_all, remove_dir_all, OpenOptions};
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::process::Command;
+
+        let Some(python) = ["/usr/bin/python3", "/bin/python3"]
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.exists())
+        else {
+            eprintln!("skipping launcher fd test: python3 missing");
+            return;
+        };
+        let dir = unique_test_dir("launcher-fd");
+        create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("setup.sock");
+        let fd_path = dir.join("tun-fd-standin");
+        let mut fd_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&fd_path)
+            .unwrap();
+        fd_file.write_all(b"launcher-fd").unwrap();
+        fd_file.seek(SeekFrom::Start(0)).unwrap();
+        drop(fd_file);
+        let listener = fd_handoff::BrokerControlListener::bind(&socket_path).unwrap();
+        let script = r#"
+import array, os, socket, sys
+sock_path, fd_path = sys.argv[1], sys.argv[2]
+fd = os.open(fd_path, os.O_RDWR)
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(sock_path)
+fds = array.array('i', [fd])
+sock.sendmsg([b'foxprox-fd'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)])
+sock.close()
+os.close(fd)
+"#;
+        let mut command = Command::new(python);
+        command
+            .arg("-c")
+            .arg(script)
+            .arg(&socket_path)
+            .arg(&fd_path);
+
+        let result = fd_handoff::run_setup_command_and_receive_fd(listener, command).unwrap();
+        let mut received_file = std::fs::File::from(result.received.fd);
+        let mut contents = String::new();
+        received_file.read_to_string(&mut contents).unwrap();
+
+        assert!(result.status_success);
+        assert_eq!(result.status_code, Some(0));
+        assert_eq!(result.received.marker, b"foxprox-fd".to_vec());
+        assert_eq!(contents, "launcher-fd");
         remove_dir_all(dir).unwrap();
     }
 

@@ -280,3 +280,7 @@ For the initial smoltcp-to-host bridge proof, use a helper over `Read + Write` r
 ## 2026-06-22 — live smoltcp TCP smoke can relay one target socket through loopback
 
 A minimal live TCP forwarding proof is: target Python connects to the broker-side TUN IP, broker feeds TUN packets into a `Medium::Ip` smoltcp listener, waits for `can_recv`, relays one payload to a host loopback TCP server, writes the host response into smoltcp, polls, and writes captured TX packets back to TUN.
+
+## 2026-06-22 — launcher fd orchestration can be tested with a tiny child sender
+
+To prove a Rust launcher can spawn setup and receive an fd without invoking bwrap in default tests, spawn a small child process that connects to the broker Unix socket and sends a read/write fd via SCM_RIGHTS, then assert child status and broker-side fd readability.

@@ -1515,3 +1515,24 @@
 - What this proves: the alpha TCP gate now has live evidence for TUN fd → smoltcp TCP accept → host TCP stream → smoltcp response → TUN fd → sandbox target receive.
 - What remains unproven: long-running/multi-connection TCP scheduling, policy-gated smoltcp connection opens, connection close/error audit, and production launcher orchestration.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — launcher spawns setup and receives fd slice
+
+- Slice attempted: add a Rust launcher orchestration boundary that spawns a setup command while a broker control listener is active, then returns the received setup fd and child status.
+- Why next: live bwrap tests manually assemble Command + BrokerControlListener; production needs a reusable launcher primitive connecting bwrap planning to broker fd receipt.
+- Verification plan: add a generic `run_setup_command_and_receive_fd` helper in integrations, test it with a fake setup script that connects to the broker socket and sends an fd through existing SCM_RIGHTS helper, then run focused integration tests plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — launcher spawns setup and receives fd
+
+- Slice attempted: add a Rust launcher orchestration boundary that spawns a setup command while a broker control listener is active, then returns the received setup fd and child status.
+- Why next: live bwrap tests manually assembled `Command` plus `BrokerControlListener`; production needs a reusable launcher primitive connecting bwrap planning to broker fd receipt.
+- What changed: `foxprox-integrations::fd_handoff` now exposes `run_setup_command_and_receive_fd`, returning the received fd plus child exit status. This provides the host-side orchestration seam for future bwrap launchers: spawn setup command, accept SCM_RIGHTS fd, then wait for setup completion.
+- Verification:
+  - Focused check passed: `cargo test -p foxprox-integrations launcher_spawns -- --nocapture`, using a Python child process that connects to the broker socket and sends a read/write fd with SCM_RIGHTS; the Rust launcher received the fd and verified broker-side readability.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 15 `foxprox-integrations` tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; using a child process instead of an in-process thread gives real spawn/wait evidence without requiring bwrap in default tests.
+- What remains unproven: using this helper with the full bwrap command plan in a non-ignored runtime path and supervising long-running target lifetime.
+- Commit: this commit.
