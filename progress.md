@@ -1841,3 +1841,25 @@
 - Commit hash when committed: pending.
 - Remaining risks: live TUN fd smoke remains unavailable without CAP_NET_ADMIN; TCP close/FIN detection from packets is not automatic; UDP/QUIC still need equivalent real forwarding loops.
 - Exact next step: commit owned TCP IO session wrapper, then advance UDP alpha by adding a real nonblocking UDP socket flow session that sends allowed datagrams and receives host replies into synthesized TUN packets.
+
+## 2026-06-25T03:24:40Z
+- Current objective: advance UDP alpha by adding a real nonblocking UDP host flow session with reply-to-TUN synthesis.
+- Git status summary: clean worktree after commit `a9de605`.
+- Intended slice: add a runtime `StdUdpFlowSession` that validates UDP/IPv4 flow keys, sends sandbox payloads to a real host UDP endpoint through a nonblocking socket, receives host replies, and synthesizes valid TUN-bound IPv4/UDP response packets.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` using loopback UDP sockets only.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: policy-gated creation from TUN packets and flow table ownership remain separate until the next slice.
+- Exact next step: implement `StdUdpFlowSession` and loopback echo regression.
+
+## 2026-06-25T03:27:15Z
+- Current objective: complete real nonblocking UDP host flow primitive.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt` after `cargo fmt --check` identified formatting-only drift in the new UDP session code.
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+  - `cargo fmt --check`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 87 runtime tests, 7 setup tests, and 39 smoltcp adapter tests passed. Added `StdUdpFlowSession`, `UdpFlowSessionError`, and `UdpHostReplyOutcome`; loopback UDP regression proves sandbox bytes are sent to a real nonblocking host UDP socket and host replies are synthesized into valid sandbox-bound IPv4/UDP packets.
+- Commit hash when committed: pending.
+- Remaining risks: the real UDP primitive is not yet wired to policy-gated TUN packet handling; live TUN fd smoke remains unavailable without CAP_NET_ADMIN.
+- Exact next step: commit real UDP flow primitive, then add a policy-gated TUN UDP host session wrapper that owns TUN-like IO, records allowed flow state, sends allowed datagrams with `StdUdpFlowSession`, polls for replies, and writes synthesized packets back to TUN-like IO.

@@ -837,6 +837,80 @@ pub fn synthesize_tun_udp_response(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UdpFlowSessionError {
+    NonUdpFlow,
+    UnsupportedAddressFamily,
+    SocketFailed,
+    SendFailed,
+    Route(UdpResponseRouteError),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UdpHostReplyOutcome {
+    WouldBlock,
+    Packet { bytes: usize, packet: Vec<u8> },
+}
+
+pub struct StdUdpFlowSession {
+    flow: FlowKey,
+    socket: UdpSocket,
+}
+
+impl StdUdpFlowSession {
+    pub fn connect(flow: FlowKey) -> Result<Self, UdpFlowSessionError> {
+        if flow.protocol != Protocol::Udp {
+            return Err(UdpFlowSessionError::NonUdpFlow);
+        }
+        let IpAddr::V4(_) = flow.source.ip else {
+            return Err(UdpFlowSessionError::UnsupportedAddressFamily);
+        };
+        let IpAddr::V4(_) = flow.destination.ip else {
+            return Err(UdpFlowSessionError::UnsupportedAddressFamily);
+        };
+        let socket = UdpSocket::bind(unspecified_socket_addr_for(flow.destination.ip))
+            .map_err(|_| UdpFlowSessionError::SocketFailed)?;
+        socket
+            .connect(endpoint_to_socket_addr(&flow.destination))
+            .map_err(|_| UdpFlowSessionError::SocketFailed)?;
+        socket
+            .set_nonblocking(true)
+            .map_err(|_| UdpFlowSessionError::SocketFailed)?;
+        Ok(Self { flow, socket })
+    }
+
+    pub fn flow(&self) -> &FlowKey {
+        &self.flow
+    }
+
+    pub fn send_sandbox_payload(&self, payload: &[u8]) -> Result<usize, UdpFlowSessionError> {
+        self.socket
+            .send(payload)
+            .map_err(|_| UdpFlowSessionError::SendFailed)
+    }
+
+    pub fn recv_host_reply_packet(
+        &self,
+        max_bytes: usize,
+    ) -> Result<UdpHostReplyOutcome, UdpFlowSessionError> {
+        let mut buffer = vec![0; max_bytes];
+        let count = match self.socket.recv(&mut buffer) {
+            Ok(count) => count,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                return Ok(UdpHostReplyOutcome::WouldBlock);
+            }
+            Err(_) => return Err(UdpFlowSessionError::SocketFailed),
+        };
+        buffer.truncate(count);
+        let packet =
+            synthesize_tun_udp_response(&self.flow, &buffer).map_err(UdpFlowSessionError::Route)?;
+        Ok(UdpHostReplyOutcome::Packet {
+            bytes: buffer.len(),
+            packet,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RuntimeOutcome {
     Denied {
         decision: Decision,
@@ -3848,6 +3922,72 @@ mod tests {
             synthesize_tun_udp_response(&ipv6, b"nope"),
             Err(UdpResponseRouteError::UnsupportedAddressFamily)
         );
+    }
+
+    #[test]
+    fn std_udp_flow_session_sends_payload_and_synthesizes_host_reply_packet() {
+        let server = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let server_addr = server.local_addr().unwrap();
+        let server_thread = std::thread::spawn(move || {
+            let mut buffer = [0u8; 64];
+            let (count, peer) = server.recv_from(&mut buffer).unwrap();
+            assert_eq!(&buffer[..count], b"udp-session");
+            server.send_to(b"udp-reply", peer).unwrap();
+        });
+        let flow = FlowKey::new(
+            Protocol::Udp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            Endpoint::new(server_addr.ip(), server_addr.port()),
+        );
+        let session = StdUdpFlowSession::connect(flow.clone()).unwrap();
+
+        let sent = session.send_sandbox_payload(b"udp-session").unwrap();
+        let mut reply = UdpHostReplyOutcome::WouldBlock;
+        for _ in 0..40 {
+            reply = session.recv_host_reply_packet(64).unwrap();
+            if matches!(reply, UdpHostReplyOutcome::Packet { .. }) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        server_thread.join().unwrap();
+
+        assert_eq!(sent, b"udp-session".len());
+        let UdpHostReplyOutcome::Packet { bytes, packet } = reply else {
+            panic!("expected UDP reply packet");
+        };
+        assert_eq!(bytes, b"udp-reply".len());
+        let ParsedIpPacket::Udpv4Packet(response) = parse_ip_packet(&packet).unwrap() else {
+            panic!("expected UDP response packet");
+        };
+        assert_eq!(response.source, Ipv4Addr::LOCALHOST);
+        assert_eq!(response.destination, Ipv4Addr::new(10, 66, 0, 2));
+        assert_eq!(response.source_port, server_addr.port());
+        assert_eq!(response.destination_port, 53000);
+        assert_eq!(response.payload, b"udp-reply");
+    }
+
+    #[test]
+    fn std_udp_flow_session_rejects_non_udp_or_non_ipv4_flows() {
+        let non_udp = FlowKey::new(
+            Protocol::Tcp,
+            Endpoint::new(IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2)), 53000),
+            Endpoint::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 443),
+        );
+        assert!(matches!(
+            StdUdpFlowSession::connect(non_udp),
+            Err(UdpFlowSessionError::NonUdpFlow)
+        ));
+
+        let ipv6 = FlowKey::new(
+            Protocol::Udp,
+            Endpoint::new(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), 53000),
+            Endpoint::new(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), 443),
+        );
+        assert!(matches!(
+            StdUdpFlowSession::connect(ipv6),
+            Err(UdpFlowSessionError::UnsupportedAddressFamily)
+        ));
     }
 
     #[test]
