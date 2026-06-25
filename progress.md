@@ -1494,5 +1494,5 @@
   - `cargo tree -p foxprox-runtime` — runtime coordinates net attribution and inspect contracts.
   - `cargo tree -p foxprox-net` — net owns DNS attribution cache/enrichment.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 81bcbd1.
 - Remaining boundary risks: updating cache from live DNS packets in the stack runtime loop remains.
