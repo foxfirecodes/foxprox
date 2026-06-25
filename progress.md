@@ -1632,3 +1632,26 @@
 - What failed or surprised the agent: the first assertion expected `tcp_connect_attempt`, but the stable audit schema name is `tcp_connect`; the test was corrected to match the existing audit schema.
 - What remains unproven: fully unbounded multi-connection scheduling and polished user-facing launcher UX. The alpha Milestone 2 validation requirement for open/close logs is now covered by the reusable launcher summary and live smokes.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — user-facing bwrap TCP once command slice
+
+- Slice attempted: expose the production-shaped bwrap/TUN/smoltcp TCP once launcher through the `foxprox-cli` process boundary and prove it with live curl.
+- Why next: the reusable helper exists and emits audit, but the alpha has no user-facing launcher command beyond `packet-once` and `setup`.
+- Verification plan: add a `bwrap-tcp-once` command parser that builds `BwrapTcpOnceConfig`, emits audit JSON lines on stdout, unit-test parser shape, run a live ignored curl smoke through the CLI binary, then run all live smokes and workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — user-facing bwrap TCP once command
+
+- Slice attempted: expose the production-shaped bwrap/TUN/smoltcp TCP once launcher through the `foxprox-cli` process boundary and prove it with live curl.
+- Why next: the reusable helper existed and emitted audit, but alpha had no user-facing launcher command beyond `packet-once` and `setup`.
+- What changed: `foxprox-cli` now accepts `bwrap-tcp-once`, parsing bwrap/setup paths, broker socket, TUN setup args, smoltcp listener address/port, upstream host TCP address, sandbox id, sizing limits, extra bwrap args, and target argv. The command runs `run_bwrap_tcp_once`, emits the generated audit JSON lines to stdout, and fails if the target exits unsuccessfully. Parser coverage was added for the documented command shape. A new ignored live smoke invokes the actual CLI binary, runs curl inside bwrap, and asserts stdout contains `tcp_connect` and `tcp_flow_closed` audit records.
+- Verification:
+  - Focused parser check passed: `cargo test -p foxprox-cli bwrap_tcp_once_arg_parser -- --nocapture`.
+  - Focused live CLI check passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_cli_bwrap_tcp_once -- --ignored --nocapture`.
+  - All explicit live smokes passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, now 5/5 including the CLI command smoke.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 11 `foxprox-cli` unit tests and the ignored live CLI smoke compiling by default.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; exposing extra bwrap args as repeatable `--extra-bwrap-arg` keeps the command useful for live proof without pretending to own complete sandbox filesystem policy.
+- What remains unproven: a polished long-running multi-flow broker daemon. The documented alpha milestone proofs and a user-facing one-flow live curl command now have direct evidence.
+- Commit: this commit.

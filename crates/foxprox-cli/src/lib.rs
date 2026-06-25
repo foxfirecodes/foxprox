@@ -26,7 +26,9 @@ use std::process::Command;
 use foxprox_audit::{audit_record_to_json_line, AuditSinkError};
 use foxprox_broker::IpPacketBroker;
 use foxprox_config::{policy_config_from_toml, ConfigError};
-use foxprox_core::{FrontendKind, NormalizedEvent, PolicyConfig, PolicyEngine, SandboxId};
+use foxprox_core::{
+    DefaultPolicy, FrontendKind, NormalizedEvent, PolicyConfig, PolicyEngine, SandboxId,
+};
 use foxprox_device::{TunIoError, TunPacketIo};
 use foxprox_egress::{EgressError, UdpEgress, UdpTarget};
 use foxprox_flow::ClosedTcpFlow;
@@ -552,6 +554,18 @@ where
     if command.as_os_str() == "packet-once" {
         return run_packet_once_args(args);
     }
+    if command.as_os_str() == "bwrap-tcp-once" {
+        #[cfg(unix)]
+        {
+            return run_bwrap_tcp_once_args(args);
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(CliError::Usage(
+                "bwrap-tcp-once command is only supported on Unix".to_owned(),
+            ));
+        }
+    }
     if command.as_os_str() == "setup" {
         #[cfg(all(unix, target_os = "linux"))]
         {
@@ -566,6 +580,171 @@ where
         }
     }
     Err(usage())
+}
+
+#[cfg(unix)]
+fn run_bwrap_tcp_once_args<I>(args: I) -> Result<(), CliError>
+where
+    I: Iterator<Item = PathBuf>,
+{
+    let config = parse_bwrap_tcp_once_args(args)?;
+    let summary = run_bwrap_tcp_once(&config)?;
+    for line in summary.audit_json_lines {
+        io::stdout()
+            .write_all(line.as_bytes())
+            .map_err(|error| CliError::Io {
+                context: "write-audit-stdout".to_owned(),
+                error,
+            })?;
+    }
+    if !summary.target_status_success {
+        return Err(CliError::Core(format!(
+            "bwrap-tcp-once-target-failed: status={:?}",
+            summary.target_status_code
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn parse_bwrap_tcp_once_args<I>(mut args: I) -> Result<BwrapTcpOnceConfig, CliError>
+where
+    I: Iterator<Item = PathBuf>,
+{
+    let mut bwrap_program = None;
+    let mut setup_program = None;
+    let mut broker_socket = None;
+    let mut tun_name = None;
+    let mut address_cidr = None;
+    let mut mtu = None;
+    let mut resolv_conf = None;
+    let mut broker_dns = None;
+    let mut ip_program = PathBuf::from("ip");
+    let mut listen_ip = None;
+    let mut listen_prefix = Some(24_u8);
+    let mut listen_port = None;
+    let mut upstream_addr = None;
+    let mut sandbox_id = None;
+    let mut max_packet_len = Some(4096_usize);
+    let mut max_packets = Some(64_usize);
+    let mut sandbox_buffer_len = Some(8192_usize);
+    let mut host_buffer_len = Some(8192_usize);
+    let mut extra_bwrap_args = Vec::new();
+    let mut target_argv = Vec::new();
+
+    while let Some(flag) = args.next() {
+        if flag.as_os_str() == "--" {
+            target_argv.extend(args.map(|value| value.to_string_lossy().into_owned()));
+            break;
+        }
+        match flag.to_string_lossy().as_ref() {
+            "--bwrap" => bwrap_program = args.next(),
+            "--setup" => setup_program = args.next(),
+            "--broker-socket" => broker_socket = args.next(),
+            "--tun-name" => tun_name = args.next().map(path_to_string),
+            "--address-cidr" => address_cidr = args.next().map(path_to_string),
+            "--mtu" => {
+                mtu = Some(parse_u16_arg(
+                    "--mtu",
+                    &args.next().ok_or_else(bwrap_tcp_once_usage)?,
+                )?)
+            }
+            "--resolv-conf" => resolv_conf = args.next(),
+            "--broker-dns" => {
+                broker_dns = Some(parse_ip_arg(
+                    "--broker-dns",
+                    &args.next().ok_or_else(bwrap_tcp_once_usage)?,
+                )?)
+            }
+            "--ip-program" => ip_program = args.next().ok_or_else(bwrap_tcp_once_usage)?,
+            "--listen-ip" => {
+                listen_ip = Some(parse_ipv4_arg(
+                    "--listen-ip",
+                    &args.next().ok_or_else(bwrap_tcp_once_usage)?,
+                )?)
+            }
+            "--listen-prefix" => {
+                listen_prefix = Some(parse_u8_arg(
+                    "--listen-prefix",
+                    &args.next().ok_or_else(bwrap_tcp_once_usage)?,
+                )?)
+            }
+            "--listen-port" => {
+                listen_port = Some(parse_u16_arg(
+                    "--listen-port",
+                    &args.next().ok_or_else(bwrap_tcp_once_usage)?,
+                )?)
+            }
+            "--upstream" => {
+                upstream_addr = Some(parse_socket_addr_arg(
+                    "--upstream",
+                    &args.next().ok_or_else(bwrap_tcp_once_usage)?,
+                )?)
+            }
+            "--sandbox" => sandbox_id = args.next().map(path_to_string),
+            "--max-packet-len" => {
+                max_packet_len = Some(parse_usize_arg(
+                    "--max-packet-len",
+                    &args.next().ok_or_else(bwrap_tcp_once_usage)?,
+                )?)
+            }
+            "--max-packets" => {
+                max_packets = Some(parse_usize_arg(
+                    "--max-packets",
+                    &args.next().ok_or_else(bwrap_tcp_once_usage)?,
+                )?)
+            }
+            "--sandbox-buffer-len" => {
+                sandbox_buffer_len = Some(parse_usize_arg(
+                    "--sandbox-buffer-len",
+                    &args.next().ok_or_else(bwrap_tcp_once_usage)?,
+                )?)
+            }
+            "--host-buffer-len" => {
+                host_buffer_len = Some(parse_usize_arg(
+                    "--host-buffer-len",
+                    &args.next().ok_or_else(bwrap_tcp_once_usage)?,
+                )?)
+            }
+            "--extra-bwrap-arg" => {
+                extra_bwrap_args.push(path_to_string(
+                    args.next().ok_or_else(bwrap_tcp_once_usage)?,
+                ));
+            }
+            _ => return Err(bwrap_tcp_once_usage()),
+        }
+    }
+
+    if target_argv.is_empty() || target_argv[0].trim().is_empty() {
+        return Err(bwrap_tcp_once_usage());
+    }
+
+    Ok(BwrapTcpOnceConfig {
+        bwrap_program: bwrap_program.ok_or_else(bwrap_tcp_once_usage)?,
+        setup_program: setup_program.ok_or_else(bwrap_tcp_once_usage)?,
+        broker_socket: broker_socket.ok_or_else(bwrap_tcp_once_usage)?,
+        tun_name: tun_name.ok_or_else(bwrap_tcp_once_usage)?,
+        address_cidr: address_cidr.ok_or_else(bwrap_tcp_once_usage)?,
+        mtu: mtu.ok_or_else(bwrap_tcp_once_usage)?,
+        resolv_conf: resolv_conf.ok_or_else(bwrap_tcp_once_usage)?,
+        broker_dns: broker_dns.ok_or_else(bwrap_tcp_once_usage)?,
+        ip_program,
+        extra_bwrap_args,
+        target_argv,
+        sandbox_id: sandbox_id.ok_or_else(bwrap_tcp_once_usage)?,
+        policy: PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        },
+        smoltcp_ip: listen_ip.ok_or_else(bwrap_tcp_once_usage)?,
+        smoltcp_prefix_len: listen_prefix.ok_or_else(bwrap_tcp_once_usage)?,
+        listen_port: listen_port.ok_or_else(bwrap_tcp_once_usage)?,
+        upstream_addr: upstream_addr.ok_or_else(bwrap_tcp_once_usage)?,
+        max_packet_len: max_packet_len.ok_or_else(bwrap_tcp_once_usage)?,
+        max_packets: max_packets.ok_or_else(bwrap_tcp_once_usage)?,
+        sandbox_buffer_len: sandbox_buffer_len.ok_or_else(bwrap_tcp_once_usage)?,
+        host_buffer_len: host_buffer_len.ok_or_else(bwrap_tcp_once_usage)?,
+    })
 }
 
 #[cfg(unix)]
@@ -634,10 +813,26 @@ fn path_to_string(value: PathBuf) -> String {
 }
 
 #[cfg(unix)]
+fn parse_u8_arg(flag: &str, value: &Path) -> Result<u8, CliError> {
+    value
+        .to_string_lossy()
+        .parse::<u8>()
+        .map_err(|error| CliError::Usage(format!("invalid {flag}: {error}")))
+}
+
+#[cfg(unix)]
 fn parse_u16_arg(flag: &str, value: &Path) -> Result<u16, CliError> {
     value
         .to_string_lossy()
         .parse::<u16>()
+        .map_err(|error| CliError::Usage(format!("invalid {flag}: {error}")))
+}
+
+#[cfg(unix)]
+fn parse_usize_arg(flag: &str, value: &Path) -> Result<usize, CliError> {
+    value
+        .to_string_lossy()
+        .parse::<usize>()
         .map_err(|error| CliError::Usage(format!("invalid {flag}: {error}")))
 }
 
@@ -647,6 +842,32 @@ fn parse_ip_arg(flag: &str, value: &Path) -> Result<IpAddr, CliError> {
         .to_string_lossy()
         .parse::<IpAddr>()
         .map_err(|error| CliError::Usage(format!("invalid {flag}: {error}")))
+}
+
+#[cfg(unix)]
+fn parse_ipv4_arg(flag: &str, value: &Path) -> Result<Ipv4Addr, CliError> {
+    value
+        .to_string_lossy()
+        .parse::<Ipv4Addr>()
+        .map_err(|error| CliError::Usage(format!("invalid {flag}: {error}")))
+}
+
+#[cfg(unix)]
+fn parse_socket_addr_arg(flag: &str, value: &Path) -> Result<SocketAddr, CliError> {
+    value
+        .to_string_lossy()
+        .parse::<SocketAddr>()
+        .map_err(|error| CliError::Usage(format!("invalid {flag}: {error}")))
+}
+
+#[cfg(unix)]
+fn bwrap_tcp_once_usage() -> CliError {
+    CliError::Usage(bwrap_tcp_once_usage_text().to_owned())
+}
+
+#[cfg(unix)]
+fn bwrap_tcp_once_usage_text() -> &'static str {
+    "usage: foxprox-cli bwrap-tcp-once --bwrap PROGRAM --setup PROGRAM --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP --listen-ip IP --listen-port PORT --upstream IP:PORT --sandbox ID [--ip-program PATH] [--listen-prefix N] [--extra-bwrap-arg ARG ...] -- TARGET [ARGS...]"
 }
 
 #[cfg(unix)]
@@ -723,7 +944,7 @@ fn run_packet_once_command(
 
 fn usage() -> CliError {
     CliError::Usage(
-        "usage: foxprox-cli packet-once --config <policy.toml> --sandbox <id> [--outbound <packet.bin>] < packet.bin\n       foxprox-cli setup --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP [--tun-device PATH] [--ip-program PATH] -- TARGET [ARGS...]"
+        "usage: foxprox-cli packet-once --config <policy.toml> --sandbox <id> [--outbound <packet.bin>] < packet.bin\n       foxprox-cli bwrap-tcp-once --bwrap PROGRAM --setup PROGRAM --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP --listen-ip IP --listen-port PORT --upstream IP:PORT --sandbox ID [--ip-program PATH] [--listen-prefix N] [--extra-bwrap-arg ARG ...] -- TARGET [ARGS...]\n       foxprox-cli setup --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP [--tun-device PATH] [--ip-program PATH] -- TARGET [ARGS...]"
             .to_owned(),
     )
 }
@@ -1051,6 +1272,73 @@ mod tests {
             config.target_argv,
             vec!["curl".to_owned(), "http://example.com".to_owned()]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bwrap_tcp_once_arg_parser_accepts_documented_shape() {
+        let config = parse_bwrap_tcp_once_args(
+            [
+                "--bwrap",
+                "/usr/bin/bwrap",
+                "--setup",
+                "/usr/libexec/foxproxsetup",
+                "--broker-socket",
+                "/tmp/broker.sock",
+                "--tun-name",
+                "foxprox0",
+                "--address-cidr",
+                "10.0.0.2/24",
+                "--mtu",
+                "1400",
+                "--resolv-conf",
+                "/tmp/resolv.conf",
+                "--broker-dns",
+                "10.0.0.1",
+                "--ip-program",
+                "/sbin/ip",
+                "--listen-ip",
+                "10.0.0.1",
+                "--listen-prefix",
+                "24",
+                "--listen-port",
+                "8080",
+                "--upstream",
+                "127.0.0.1:18080",
+                "--sandbox",
+                "cli-bwrap-test",
+                "--max-packets",
+                "8",
+                "--extra-bwrap-arg",
+                "--dev-bind",
+                "--extra-bwrap-arg",
+                "/",
+                "--extra-bwrap-arg",
+                "/",
+                "--",
+                "curl",
+                "http://10.0.0.1:8080/",
+            ]
+            .into_iter()
+            .map(PathBuf::from),
+        )
+        .unwrap();
+
+        assert_eq!(config.bwrap_program, PathBuf::from("/usr/bin/bwrap"));
+        assert_eq!(
+            config.setup_program,
+            PathBuf::from("/usr/libexec/foxproxsetup")
+        );
+        assert_eq!(config.broker_socket, PathBuf::from("/tmp/broker.sock"));
+        assert_eq!(config.tun_name, "foxprox0");
+        assert_eq!(config.broker_dns, "10.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(config.smoltcp_ip, Ipv4Addr::new(10, 0, 0, 1));
+        assert_eq!(config.listen_port, 8080);
+        assert_eq!(config.upstream_addr, "127.0.0.1:18080".parse().unwrap());
+        assert_eq!(config.sandbox_id, "cli-bwrap-test");
+        assert_eq!(config.max_packets, 8);
+        assert_eq!(config.extra_bwrap_args, ["--dev-bind", "/", "/"]);
+        assert_eq!(config.target_argv, ["curl", "http://10.0.0.1:8080/"]);
     }
 
     #[test]

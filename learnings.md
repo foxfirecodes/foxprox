@@ -304,3 +304,7 @@ After smoltcp forwarding works with a Python socket, add a curl smoke against a 
 ## 2026-06-22 — TCP forwarding proofs should emit existing core audit, not invent test-only logs
 
 For live TUN/smoltcp forwarding, parse the first SYN packet with `foxprox-packet`, evaluate the resulting `TcpConnectAttempt` through `PolicyEngine`, and reuse the existing `tcp_connect` audit schema. Pair it with `ClosedTcpFlow::audit_record()` for close byte counts.
+
+## 2026-06-22 — CLI audit stdout should remain JSON-only for live launchers
+
+The `bwrap-tcp-once` command emits only generated audit JSON lines on stdout and reports target failure via process error. This preserves the same audit-output discipline as `packet-once` while still letting ignored live tests assert process-boundary behavior.
