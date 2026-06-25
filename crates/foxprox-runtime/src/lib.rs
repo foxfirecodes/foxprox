@@ -9,6 +9,7 @@ use std::{
     collections::{HashMap, VecDeque},
     fmt,
     net::SocketAddr,
+    time::Instant,
 };
 
 use foxprox_audit::{AuditRecord, AuditSink, FlowClosedAudit};
@@ -19,10 +20,10 @@ use foxprox_core::{
 use foxprox_device::{DeviceError, DevicePacket, PacketDevice, TryPacketDevice};
 use foxprox_egress::{EgressError, EgressOutcome, HostEgress, HostTcpStream, HostUdpFlow};
 use foxprox_net::{
-    handle_ipv4_packet, handle_ipv4_packet_with_egress, handle_normalized_event_with_egress,
-    handle_normalized_event_without_egress, udp_timeout, BrokerError, BrokerEventOutcome,
-    FlowProtocol, InboundIpv4Packet, OutboundIpPacket, PacketBrokerOutcome, StackAdapter,
-    StackEvent, StackTcpData, StackTcpWrite,
+    apply_dns_attribution, handle_ipv4_packet, handle_ipv4_packet_with_egress,
+    handle_normalized_event_with_egress, handle_normalized_event_without_egress, udp_timeout,
+    BrokerError, BrokerEventOutcome, DnsAttributionCache, FlowProtocol, InboundIpv4Packet,
+    OutboundIpPacket, PacketBrokerOutcome, StackAdapter, StackEvent, StackTcpData, StackTcpWrite,
 };
 use foxprox_policy::PolicyEngine;
 
@@ -379,6 +380,12 @@ where
     })
 }
 
+#[derive(Clone, Copy)]
+pub struct StackDnsAttribution<'a> {
+    pub cache: &'a DnsAttributionCache,
+    pub now: Instant,
+}
+
 pub struct StackRuntimeTickStep<'a, S, E, A, U>
 where
     E: HostEgress,
@@ -391,6 +398,7 @@ where
     pub udp_bridges: &'a mut UdpBridgeTable<U>,
     pub sequence_start: u64,
     pub timestamp_millis: u64,
+    pub dns_attribution: Option<StackDnsAttribution<'a>>,
     pub max_tcp_read_bytes_per_stream: usize,
     pub max_udp_read_bytes_per_flow: usize,
     pub budget: BridgeMaintenanceBudget,
@@ -426,6 +434,7 @@ where
         udp_bridges,
         sequence_start,
         timestamp_millis,
+        dns_attribution,
         max_tcp_read_bytes_per_stream,
         max_udp_read_bytes_per_flow,
         budget,
@@ -442,6 +451,7 @@ where
             tcp_bridges,
             sequence_start,
             timestamp_millis,
+            dns_attribution,
         },
     )?;
     let maintenance = process_bridge_maintenance_tick(
@@ -956,6 +966,7 @@ where
     pub tcp_bridges: &'a mut StackTcpBridgeTable<E::TcpStream>,
     pub sequence_start: u64,
     pub timestamp_millis: u64,
+    pub dns_attribution: Option<StackDnsAttribution<'a>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1051,7 +1062,10 @@ where
 
     for (offset, event) in events.into_iter().enumerate() {
         match event {
-            StackEvent::PolicyEvent(event) => {
+            StackEvent::PolicyEvent(mut event) => {
+                if let Some(dns_attribution) = ctx.dns_attribution {
+                    apply_dns_attribution(&mut event, dns_attribution.cache, dns_attribution.now);
+                }
                 let result = handle_normalized_event_with_egress(
                     &event,
                     ctx.policy,
@@ -1212,8 +1226,9 @@ mod tests {
 
     use foxprox_audit::BoundedAuditSink;
     use foxprox_core::{
-        DnsQuery, HttpRequest, HttpsConnect, NormalizedEvent, PolicyRule, PortMatcher, Protocol,
-        ProtocolMatcher, RuntimeConfig, SocksConnect, TcpConnectAttempt, UdpFlowAttempt,
+        DestinationMatcher, DnsQuery, Hostname, HttpRequest, HttpsConnect, NormalizedEvent,
+        PolicyRule, PortMatcher, Protocol, ProtocolMatcher, RuntimeConfig, SocksConnect,
+        TcpConnectAttempt, UdpFlowAttempt,
     };
     use foxprox_device::PreopenedTunDevice;
     use foxprox_egress::{MockEgress, MockHttpResponse, MockTcpStream, MockUdpHandle};
@@ -1354,6 +1369,7 @@ mod tests {
                 udp_bridges: &mut udp_bridges,
                 sequence_start: 1,
                 timestamp_millis: 1000,
+                dns_attribution: None,
                 max_tcp_read_bytes_per_stream: 1024,
                 max_udp_read_bytes_per_flow: 1024,
                 budget: BridgeMaintenanceBudget::default(),
@@ -1693,6 +1709,7 @@ mod tests {
                 tcp_bridges: &mut tcp_bridges,
                 sequence_start: 20,
                 timestamp_millis: 3000,
+                dns_attribution: None,
             },
         )
         .unwrap();
@@ -1733,6 +1750,7 @@ mod tests {
                 tcp_bridges: &mut tcp_bridges,
                 sequence_start: 20,
                 timestamp_millis: 3000,
+                dns_attribution: None,
             },
         )
         .unwrap();
@@ -1772,6 +1790,7 @@ mod tests {
                 tcp_bridges: &mut tcp_bridges,
                 sequence_start: 10,
                 timestamp_millis: 2000,
+                dns_attribution: None,
             },
         )
         .unwrap();
@@ -1784,6 +1803,54 @@ mod tests {
         let bytes = device.into_inner().into_inner();
         assert_eq!(&bytes[..inbound.len()], inbound.as_slice());
         assert_eq!(&bytes[inbound.len()..], &[0x45, 0, 0, 20]);
+    }
+
+    #[test]
+    fn stack_policy_events_use_dns_attribution_before_policy() {
+        let inbound = vec![0x45, 0, 0, 20];
+        let cursor = Cursor::new(inbound);
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let connect = tcp_connect_event();
+        let mut adapter = ScriptedStackAdapter::new(vec![StackEvent::PolicyEvent(
+            NormalizedEvent::TcpConnectAttempt(connect.clone()),
+        )]);
+        let now = Instant::now();
+        let mut cache = DnsAttributionCache::default();
+        cache.observe(
+            Hostname::new("example.com").unwrap(),
+            [connect.destination.ip()],
+            now,
+            std::time::Duration::from_secs(60),
+        );
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut rule = PolicyRule::allow(foxprox_core::RuleId::new("dns-domain").unwrap());
+        rule.protocol = ProtocolMatcher::Exact(Protocol::Tcp);
+        rule.destination = DestinationMatcher::Hostname(Hostname::new("example.com").unwrap());
+        config.rules.push(rule);
+        let policy = PolicyEngine::new(config);
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(4);
+        let mut tcp_bridges = StackTcpBridgeTable::default();
+
+        let outcome = process_one_stack_device_packet(
+            &mut device,
+            StackDevicePacketStep {
+                adapter: &mut adapter,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                tcp_bridges: &mut tcp_bridges,
+                sequence_start: 25,
+                timestamp_millis: 3500,
+                dns_attribution: Some(StackDnsAttribution { cache: &cache, now }),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.broker_outcomes, vec![BrokerEventOutcome::Forwarded]);
+        assert_eq!(egress.tcp_connects.len(), 1);
+        let record = audit.records().front().unwrap();
+        assert_eq!(record.hostname.as_ref().unwrap().as_str(), "example.com");
     }
 
     #[test]
@@ -1827,6 +1894,7 @@ mod tests {
                 tcp_bridges: &mut tcp_bridges,
                 sequence_start: 30,
                 timestamp_millis: 4000,
+                dns_attribution: None,
             },
         )
         .unwrap();
@@ -1888,6 +1956,7 @@ mod tests {
                 tcp_bridges: &mut tcp_bridges,
                 sequence_start: 30,
                 timestamp_millis: 4000,
+                dns_attribution: None,
             },
         )
         .unwrap();
@@ -1934,6 +2003,7 @@ mod tests {
                 tcp_bridges: &mut tcp_bridges,
                 sequence_start: 40,
                 timestamp_millis: 5000,
+                dns_attribution: None,
             },
         )
         .unwrap();

@@ -343,3 +343,8 @@
 
 - DNS correlation should be an explicit net-layer enrichment step over normalized TCP/UDP events; policy should never need DNS cache internals or wire-parser records.
 - Preserve existing hostname attribution when present so high-confidence proxy/SNI/HTTP metadata is not overwritten by medium-confidence DNS cache entries.
+
+## 2026-06-22 — stack runtime DNS attribution wiring
+
+- Stack adapters should continue to emit normalized events without cache access; runtime can enrich those events from `DnsAttributionCache` immediately before policy/audit.
+- Pass DNS attribution context explicitly through runtime step structs so tests and future schedulers can choose the cache timebase without adding global state.

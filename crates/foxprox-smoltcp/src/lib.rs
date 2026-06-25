@@ -607,6 +607,7 @@ mod tests {
                 tcp_bridges: &mut tcp_bridges,
                 sequence_start: 1,
                 timestamp_millis: 1000,
+                dns_attribution: None,
             },
         )
         .unwrap();

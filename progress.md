@@ -1474,3 +1474,25 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: cc1b91f.
 - Remaining boundary risks: wiring the cache into long-running stack runtime state remains.
+
+## 2026-06-22 — Boundary objective: stack runtime DNS attribution wiring
+
+- Boundary under work: long-running stack runtime policy events enriched from DNS cache before policy/audit decisions.
+- Allowed dependency direction: runtime may pass `foxprox-net::DnsAttributionCache` into stack orchestration; stack adapters still emit normalized events, and policy/audit see only enriched normalized event fields.
+- Dependency-risk assessment: a net-layer enrichment helper exists but stack traffic still bypasses it unless runtime applies it before policy. The risk is domain rules silently failing for transparent stack TCP despite broker DNS observations.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/net/audit.
+- Observed results: added `StackDnsAttribution` to runtime stack packet/tick steps and applied `foxprox_net::apply_dns_attribution` to stack adapter policy events before policy/audit/egress handling. Added a runtime test proving a DNS-correlated hostname can satisfy a transparent TCP domain rule and appears in audit without exposing cache internals to policy. Updated smoltcp runtime integration call sites. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `crates/foxprox-smoltcp/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 126 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime coordinates net attribution and inspect contracts.
+  - `cargo tree -p foxprox-net` — net owns DNS attribution cache/enrichment.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: updating cache from live DNS packets in the stack runtime loop remains.
