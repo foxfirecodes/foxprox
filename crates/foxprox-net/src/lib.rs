@@ -312,6 +312,30 @@ where
         .map(|evaluated| evaluated.outcome)
 }
 
+/// Process a normalized inline observation through policy and audit without
+/// dispatching egress. Transparent TCP payload inspection uses this because the
+/// host TCP stream was already opened through the shared egress contract.
+pub fn handle_normalized_event_without_egress<A>(
+    event: &NormalizedEvent,
+    policy: &PolicyEngine,
+    audit: &mut A,
+    sequence: u64,
+    timestamp_millis: u64,
+) -> Result<PolicyAuditOutcome, BrokerError>
+where
+    A: AuditSink,
+{
+    let decision = policy.decide(event);
+    let record = AuditRecord::from_event(sequence, timestamp_millis, event, &decision);
+    audit.record(record).map_err(BrokerError::Audit)?;
+    let outcome = if decision.is_allowed() {
+        BrokerEventOutcome::NoEgressRequired
+    } else {
+        BrokerEventOutcome::Denied(decision_denial_action(&decision))
+    };
+    Ok(PolicyAuditOutcome { decision, outcome })
+}
+
 /// Process a normalized event and return the egress handle, when one was
 /// created, so runtime bridge code can retain it without re-running policy or
 /// opening sockets outside the shared egress boundary.
@@ -373,6 +397,13 @@ pub struct BrokerEventResult<E: HostEgress> {
     pub decision: PolicyDecision,
     pub outcome: BrokerEventOutcome,
     pub egress_outcome: Option<DispatchOutcome<E>>,
+}
+
+/// Policy/audit result for inline observations that must not dispatch egress.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PolicyAuditOutcome {
+    pub decision: PolicyDecision,
+    pub outcome: BrokerEventOutcome,
 }
 
 /// One inbound IPv4 packet plus the normalized session/frontend labels needed

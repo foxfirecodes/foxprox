@@ -20,8 +20,9 @@ use foxprox_device::{DeviceError, DevicePacket, PacketDevice, TryPacketDevice};
 use foxprox_egress::{EgressError, EgressOutcome, HostEgress, HostTcpStream, HostUdpFlow};
 use foxprox_net::{
     handle_ipv4_packet, handle_ipv4_packet_with_egress, handle_normalized_event_with_egress,
-    udp_timeout, BrokerError, BrokerEventOutcome, FlowProtocol, InboundIpv4Packet,
-    OutboundIpPacket, PacketBrokerOutcome, StackAdapter, StackEvent, StackTcpData, StackTcpWrite,
+    handle_normalized_event_without_egress, udp_timeout, BrokerError, BrokerEventOutcome,
+    FlowProtocol, InboundIpv4Packet, OutboundIpPacket, PacketBrokerOutcome, StackAdapter,
+    StackEvent, StackTcpData, StackTcpWrite,
 };
 use foxprox_policy::PolicyEngine;
 
@@ -666,6 +667,7 @@ pub struct StackTcpBridgeTable<T> {
 struct StackTcpBridge<T> {
     stream: T,
     pending_sandbox_to_host: VecDeque<Vec<u8>>,
+    first_payload_inspected: bool,
 }
 
 impl<T> StackTcpBridge<T> {
@@ -673,6 +675,7 @@ impl<T> StackTcpBridge<T> {
         Self {
             stream,
             pending_sandbox_to_host: VecDeque::new(),
+            first_payload_inspected: false,
         }
     }
 
@@ -759,6 +762,16 @@ impl<T> StackTcpBridgeTable<T> {
             .get(key)
             .map(StackTcpBridge::pending_sandbox_bytes)
             .unwrap_or(0)
+    }
+
+    fn mark_first_payload_inspected(&mut self, key: &StackTcpFlowKey) -> Option<bool> {
+        let bridge = self.streams.get_mut(key)?;
+        if bridge.first_payload_inspected {
+            Some(false)
+        } else {
+            bridge.first_payload_inspected = true;
+            Some(true)
+        }
     }
 
     pub fn total_pending_sandbox_bytes(&self) -> usize {
@@ -952,6 +965,8 @@ pub struct StackDevicePacketOutcome {
     pub tcp_bytes_written_to_egress: usize,
     pub tcp_bytes_pending_to_egress: usize,
     pub tcp_data_without_bridge: usize,
+    pub transparent_inspection_events: usize,
+    pub transparent_inspection_denials: usize,
     pub tcp_bridges_removed: usize,
     pub flow_closed_events: usize,
     pub outbound_packets_written: usize,
@@ -992,6 +1007,24 @@ where
     process_stack_device_packet(device, packet, ctx).map(Some)
 }
 
+fn transparent_first_payload_event(data: &StackTcpData) -> Option<NormalizedEvent> {
+    match data.destination.port() {
+        80 => Some(foxprox_inspect::inspect_plaintext_http_request(
+            data.sandbox_id.clone(),
+            data.frontend,
+            &data.bytes,
+        )),
+        443 => Some(foxprox_inspect::inspect_tls_client_hello(
+            data.sandbox_id.clone(),
+            data.frontend,
+            data.destination,
+            None,
+            &data.bytes,
+        )),
+        _ => None,
+    }
+}
+
 fn process_stack_device_packet<D, S, E, A>(
     device: &mut D,
     packet: DevicePacket,
@@ -1011,6 +1044,8 @@ where
     let mut tcp_data_events = 0;
     let mut tcp_bytes_written_to_egress = 0;
     let mut tcp_data_without_bridge = 0;
+    let mut transparent_inspection_events = 0;
+    let mut transparent_inspection_denials = 0;
     let mut tcp_bridges_removed = 0;
     let mut flow_closed_events = 0;
 
@@ -1040,6 +1075,29 @@ where
             }
             StackEvent::TcpData(data) => {
                 tcp_data_events += 1;
+                if ctx
+                    .tcp_bridges
+                    .mark_first_payload_inspected(&StackTcpFlowKey::from_tcp_data(&data))
+                    .unwrap_or(false)
+                {
+                    if let Some(event) = transparent_first_payload_event(&data) {
+                        transparent_inspection_events += 1;
+                        let result = handle_normalized_event_without_egress(
+                            &event,
+                            ctx.policy,
+                            ctx.audit,
+                            ctx.sequence_start + offset as u64,
+                            ctx.timestamp_millis,
+                        )
+                        .map_err(RuntimeError::Broker)?;
+                        if !result.decision.is_allowed() {
+                            transparent_inspection_denials += 1;
+                            ctx.tcp_bridges
+                                .remove(&StackTcpFlowKey::from_tcp_data(&data));
+                            continue;
+                        }
+                    }
+                }
                 match ctx
                     .tcp_bridges
                     .write_from_sandbox(&data)
@@ -1102,6 +1160,8 @@ where
         tcp_bytes_written_to_egress,
         tcp_bytes_pending_to_egress: ctx.tcp_bridges.total_pending_sandbox_bytes(),
         tcp_data_without_bridge,
+        transparent_inspection_events,
+        transparent_inspection_denials,
         tcp_bridges_removed,
         flow_closed_events,
         outbound_packets_written,
@@ -1737,7 +1797,7 @@ mod tests {
             frontend: FrontendKind::Tun,
             source: "10.0.0.2:49152".parse().unwrap(),
             destination: "203.0.113.10:80".parse().unwrap(),
-            bytes: b"hello".to_vec(),
+            bytes: b"GET /hello HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec(),
         };
         let mut adapter = ScriptedStackAdapter::new(vec![
             StackEvent::PolicyEvent(NormalizedEvent::TcpConnectAttempt(connect.clone())),
@@ -1748,6 +1808,9 @@ mod tests {
         rule.protocol = ProtocolMatcher::Exact(Protocol::Tcp);
         rule.port = PortMatcher::Exact(80);
         config.rules.push(rule);
+        let mut http_rule = PolicyRule::allow(foxprox_core::RuleId::new("http").unwrap());
+        http_rule.protocol = ProtocolMatcher::Exact(Protocol::Http);
+        config.rules.push(http_rule);
         let policy = PolicyEngine::new(config);
         let writes = Rc::new(RefCell::new(Vec::new()));
         let mut egress = RecordingEgress::new(Rc::clone(&writes));
@@ -1770,13 +1833,72 @@ mod tests {
 
         assert_eq!(outcome.broker_outcomes, vec![BrokerEventOutcome::Forwarded]);
         assert_eq!(outcome.tcp_data_events, 1);
-        assert_eq!(outcome.tcp_bytes_written_to_egress, 5);
+        assert_eq!(
+            outcome.tcp_bytes_written_to_egress,
+            b"GET /hello HTTP/1.1\r\nHost: example.com\r\n\r\n".len()
+        );
         assert_eq!(outcome.tcp_data_without_bridge, 0);
+        assert_eq!(outcome.transparent_inspection_events, 1);
+        assert_eq!(outcome.transparent_inspection_denials, 0);
         assert_eq!(tcp_bridges.len(), 1);
         assert!(tcp_bridges.contains_key(&StackTcpFlowKey::from_connect_attempt(&connect)));
         assert_eq!(egress.tcp_connects, vec![connect]);
-        assert_eq!(writes.borrow().as_slice(), &[b"hello".to_vec()]);
-        assert_eq!(audit.records().len(), 1);
+        assert_eq!(
+            writes.borrow().as_slice(),
+            &[b"GET /hello HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec()]
+        );
+        assert_eq!(audit.records().len(), 2);
+    }
+
+    #[test]
+    fn transparent_http_denial_removes_bridge_without_forwarding_payload() {
+        let inbound = vec![0x45, 0, 0, 20];
+        let cursor = Cursor::new(inbound);
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let connect = tcp_connect_event();
+        let data = foxprox_net::StackTcpData {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:49152".parse().unwrap(),
+            destination: "203.0.113.10:80".parse().unwrap(),
+            bytes: b"GET /blocked HTTP/1.1\r\nHost: denied.example\r\n\r\n".to_vec(),
+        };
+        let mut adapter = ScriptedStackAdapter::new(vec![
+            StackEvent::PolicyEvent(NormalizedEvent::TcpConnectAttempt(connect)),
+            StackEvent::TcpData(data),
+        ]);
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut tcp_rule = PolicyRule::allow(foxprox_core::RuleId::new("tcp-80").unwrap());
+        tcp_rule.protocol = ProtocolMatcher::Exact(Protocol::Tcp);
+        tcp_rule.port = PortMatcher::Exact(80);
+        config.rules.push(tcp_rule);
+        let policy = PolicyEngine::new(config);
+        let writes = Rc::new(RefCell::new(Vec::new()));
+        let mut egress = RecordingEgress::new(Rc::clone(&writes));
+        let mut audit = BoundedAuditSink::new(4);
+        let mut tcp_bridges = StackTcpBridgeTable::default();
+
+        let outcome = process_one_stack_device_packet(
+            &mut device,
+            StackDevicePacketStep {
+                adapter: &mut adapter,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                tcp_bridges: &mut tcp_bridges,
+                sequence_start: 30,
+                timestamp_millis: 4000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.broker_outcomes, vec![BrokerEventOutcome::Forwarded]);
+        assert_eq!(outcome.transparent_inspection_events, 1);
+        assert_eq!(outcome.transparent_inspection_denials, 1);
+        assert_eq!(outcome.tcp_bytes_written_to_egress, 0);
+        assert!(writes.borrow().is_empty());
+        assert!(tcp_bridges.is_empty());
+        assert_eq!(audit.records().len(), 2);
     }
 
     #[test]

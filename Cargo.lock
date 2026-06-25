@@ -152,6 +152,7 @@ dependencies = [
  "foxprox-core",
  "foxprox-device",
  "foxprox-egress",
+ "foxprox-inspect",
  "foxprox-net",
  "foxprox-packet",
  "foxprox-policy",

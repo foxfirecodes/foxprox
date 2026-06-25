@@ -1427,3 +1427,28 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 52cde96.
 - Remaining boundary risks: executing these commands, fd handoff, and OS-specific error mapping remain.
+
+## 2026-06-22 — Boundary objective: transparent TCP payload inspection before forwarding
+
+- Boundary under work: transparent HTTP/TLS first-payload policy gates for stack TCP forwarding.
+- Allowed dependency direction: `foxprox-inspect` emits normalized HTTP/TLS/unsupported events from stream bytes; runtime asks `foxprox-net` to apply policy/audit without opening a second egress path; existing egress TCP bridge remains the only host forwarding handle.
+- Dependency-risk assessment: direct TUN HTTP/HTTPS policy is incomplete if TCP payload bytes are bridged after only an IP/port connect decision. The risk is accidentally proxying transparent bytes through the HTTP egress path, so this boundary needs an explicit policy/audit-only event handler.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/inspect/net/audit.
+- Observed results: added `handle_normalized_event_without_egress` in `foxprox-net` so inline transparent observations can be policy/audited without opening a second egress path. Added plaintext transparent HTTP inspection in `foxprox-inspect`. Runtime now marks the first TCP bridge payload, emits normalized transparent HTTP or TLS inspection events for ports 80/443, records policy/audit, and drops/removes the bridge on inspection denial before forwarding bytes. Added tests proving allowed transparent HTTP is audited then forwarded and denied transparent HTTP is not forwarded. All verification passed.
+- Changed files:
+  - `crates/foxprox-net/src/lib.rs`
+  - `crates/foxprox-inspect/src/lib.rs`
+  - `crates/foxprox-runtime/Cargo.toml`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 124 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime depends on inspect/net contracts, not parser internals.
+  - `cargo tree -p foxprox-inspect` — inspect remains core-only.
+  - `cargo tree -p foxprox-net` — net owns policy/audit orchestration.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: full stream reassembly and deferred host connect before HTTP/TLS allow remain.

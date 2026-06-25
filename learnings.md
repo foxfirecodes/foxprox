@@ -333,3 +333,8 @@
 
 - Keep privileged Linux setup as data-only command planning in `foxprox-integrations`; broker runtime/device crates should only consume preopened device handles.
 - Validate TUN broker/sandbox address families before producing helper commands so the helper boundary fails before invoking privileged `ip` operations.
+
+## 2026-06-22 — transparent TCP payload inspection gate
+
+- Transparent HTTP/TLS payload policy must use a policy/audit-only path after the TCP bridge exists; dispatching normalized HTTP events through the normal egress path would duplicate forwarding and create a proxy bypass shape.
+- Runtime can gate first TCP payloads by destination port using only normalized `StackTcpData`; parser-specific HTTP/TLS details remain in `foxprox-inspect`, and policy/audit still consume normalized events.

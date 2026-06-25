@@ -9,14 +9,103 @@ use std::fmt;
 use std::net::SocketAddr;
 
 use foxprox_core::{
-    FrontendKind, Hostname, HostnameAttribution, HostnameMismatch, NormalizedEvent, SandboxId,
-    TlsClientHello, UnsupportedNetworkEvent, UnsupportedReason,
+    DestinationHost, FrontendKind, Hostname, HostnameAttribution, HostnameMismatch, HttpMethod,
+    HttpRequest, HttpScheme, NormalizedEvent, SandboxId, TlsClientHello, UnsupportedNetworkEvent,
+    UnsupportedReason,
 };
 
 const TLS_HANDSHAKE: u8 = 22;
 const TLS_CLIENT_HELLO: u8 = 1;
 const EXT_SERVER_NAME: u16 = 0;
 const EXT_ENCRYPTED_CLIENT_HELLO: u16 = 0xfe0d;
+
+/// Inspect one transparent plaintext HTTP request head and emit a normalized
+/// `HttpRequest` event. This function is intentionally independent from the
+/// HTTP proxy frontend: transparent stream bytes are already on a TCP bridge and
+/// must be policy/audit checked without proxy egress dispatch.
+pub fn inspect_plaintext_http_request(
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    bytes: &[u8],
+) -> NormalizedEvent {
+    match parse_plaintext_http_request(sandbox_id.clone(), frontend, bytes) {
+        Ok(event) => NormalizedEvent::HttpRequest(event),
+        Err(error) => NormalizedEvent::UnsupportedNetworkEvent(UnsupportedNetworkEvent {
+            sandbox_id,
+            frontend,
+            reason: UnsupportedReason::MalformedPacket,
+            safe_metadata: Some(error.to_string()),
+        }),
+    }
+}
+
+fn parse_plaintext_http_request(
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    bytes: &[u8],
+) -> Result<HttpRequest, InspectError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| InspectError::Malformed("HTTP utf8"))?;
+    let head = text
+        .split_once("\r\n\r\n")
+        .map(|(head, _)| head)
+        .unwrap_or(text);
+    let mut lines = head.split("\r\n");
+    let request_line = lines
+        .next()
+        .ok_or(InspectError::Malformed("missing HTTP request line"))?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or(InspectError::Malformed("missing HTTP method"))?;
+    let target = parts
+        .next()
+        .ok_or(InspectError::Malformed("missing HTTP target"))?;
+    let _version = parts
+        .next()
+        .ok_or(InspectError::Malformed("missing HTTP version"))?;
+    let mut host = None;
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("host") {
+                host = Some(value.trim());
+                break;
+            }
+        }
+    }
+    let host = host.ok_or(InspectError::Malformed("missing HTTP Host"))?;
+    let (host, port) = parse_host_port(host, 80)?;
+    Ok(HttpRequest {
+        sandbox_id,
+        frontend,
+        method: HttpMethod::parse(method),
+        scheme: HttpScheme::Http,
+        host,
+        port,
+        path_query: target.to_string(),
+    })
+}
+
+fn parse_host_port(value: &str, default_port: u16) -> Result<(DestinationHost, u16), InspectError> {
+    if let Some((host, port)) = value.rsplit_once(':') {
+        if !host.contains(':') {
+            let port = port
+                .parse()
+                .map_err(|_| InspectError::Malformed("bad HTTP Host port"))?;
+            return Ok((parse_destination_host(host)?, port));
+        }
+    }
+    Ok((parse_destination_host(value)?, default_port))
+}
+
+fn parse_destination_host(value: &str) -> Result<DestinationHost, InspectError> {
+    if let Ok(ip) = value.parse() {
+        Ok(DestinationHost::Ip(ip))
+    } else {
+        Hostname::new(value)
+            .map(DestinationHost::Hostname)
+            .map_err(|_| InspectError::Malformed("invalid HTTP Host"))
+    }
+}
 
 /// Inspect a TLS ClientHello and emit normalized SNI/mismatch metadata. Malformed
 /// handshakes and visible ECH extension use unsupported fail-closed events.
@@ -230,6 +319,33 @@ mod tests {
 
     fn sandbox() -> SandboxId {
         SandboxId::new("s1").unwrap()
+    }
+
+    #[test]
+    fn transparent_http_inspection_emits_normalized_request() {
+        let event = inspect_plaintext_http_request(
+            sandbox(),
+            FrontendKind::Tun,
+            b"GET /allowed/path HTTP/1.1\r\nHost: Example.COM:8080\r\n\r\n",
+        );
+
+        let NormalizedEvent::HttpRequest(request) = event else {
+            panic!("expected HTTP request");
+        };
+        assert_eq!(request.frontend, FrontendKind::Tun);
+        assert_eq!(request.host.hostname().unwrap().as_str(), "example.com");
+        assert_eq!(request.port, 8080);
+        assert_eq!(request.path_query, "/allowed/path");
+    }
+
+    #[test]
+    fn malformed_transparent_http_fails_closed() {
+        let event =
+            inspect_plaintext_http_request(sandbox(), FrontendKind::Tun, b"GET / HTTP/1.1\r\n\r\n");
+        let NormalizedEvent::UnsupportedNetworkEvent(event) = event else {
+            panic!("expected unsupported event");
+        };
+        assert_eq!(event.reason, UnsupportedReason::MalformedPacket);
     }
 
     #[test]
