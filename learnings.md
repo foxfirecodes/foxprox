@@ -276,3 +276,7 @@ When testing smoltcp stream send after receiving client payload, poll may emit A
 ## 2026-06-22 — first TCP relay helper can be stream-agnostic
 
 For the initial smoltcp-to-host bridge proof, use a helper over `Read + Write` rather than tying it directly to `TcpEgressConnection`. This proves byte movement and keeps the helper reusable for loopback tests and later egress-backed runtime wiring.
+
+## 2026-06-22 — live smoltcp TCP smoke can relay one target socket through loopback
+
+A minimal live TCP forwarding proof is: target Python connects to the broker-side TUN IP, broker feeds TUN packets into a `Medium::Ip` smoltcp listener, waits for `can_recv`, relays one payload to a host loopback TCP server, writes the host response into smoltcp, polls, and writes captured TX packets back to TUN.

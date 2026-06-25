@@ -8,11 +8,14 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::io::{Read, Write};
+use std::net::Ipv4Addr;
 use std::rc::Rc;
 
+use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::socket::tcp;
 use smoltcp::time::Instant;
+use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 
 /// In-memory raw-IP device for smoltcp/TUN integration tests.
 #[derive(Debug)]
@@ -134,6 +137,76 @@ impl std::fmt::Display for TcpRelayError {
 }
 
 impl std::error::Error for TcpRelayError {}
+
+/// Minimal smoltcp TCP server wrapper for TUN integration proofs.
+pub struct SmoltcpTcpServer {
+    iface: Interface,
+    sockets: SocketSet<'static>,
+    handle: SocketHandle,
+    device: InMemoryIpDevice,
+    now_millis: i64,
+}
+
+impl SmoltcpTcpServer {
+    pub fn new(ip: Ipv4Addr, prefix_len: u8, listen_port: u16, mtu: usize) -> Self {
+        let mut device = InMemoryIpDevice::new(mtu);
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = 0x1234;
+        let now = Instant::from_millis(0);
+        let mut iface = Interface::new(config, &mut device, now);
+        iface.update_ip_addrs(|ip_addrs| {
+            ip_addrs
+                .push(IpCidr::new(IpAddress::Ipv4(ip), prefix_len))
+                .unwrap();
+        });
+        let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 8192]);
+        let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 8192]);
+        let tcp_socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
+        let mut sockets = SocketSet::new(vec![]);
+        let handle = sockets.add(tcp_socket);
+        sockets
+            .get_mut::<tcp::Socket>(handle)
+            .listen(listen_port)
+            .unwrap();
+        Self {
+            iface,
+            sockets,
+            handle,
+            device,
+            now_millis: 0,
+        }
+    }
+
+    pub fn accept_packet(&mut self, packet: Vec<u8>) -> Vec<Vec<u8>> {
+        self.device.push_rx(packet);
+        self.poll()
+    }
+
+    pub fn relay_once<H: Read + Write>(
+        &mut self,
+        host: &mut H,
+        sandbox_buffer_len: usize,
+        host_buffer_len: usize,
+    ) -> Result<TcpRelayOnceStats, TcpRelayError> {
+        relay_tcp_socket_once(
+            self.sockets.get_mut::<tcp::Socket>(self.handle),
+            host,
+            sandbox_buffer_len,
+            host_buffer_len,
+        )
+    }
+
+    pub fn can_recv(&mut self) -> bool {
+        self.sockets.get_mut::<tcp::Socket>(self.handle).can_recv()
+    }
+
+    pub fn poll(&mut self) -> Vec<Vec<u8>> {
+        let now = Instant::from_millis(self.now_millis);
+        self.now_millis += 1;
+        self.iface.poll(now, &mut self.device, &mut self.sockets);
+        self.device.take_tx()
+    }
+}
 
 /// Relay one available smoltcp TCP payload to a host stream and one host
 /// response back into the smoltcp socket.

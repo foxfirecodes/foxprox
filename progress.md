@@ -1493,3 +1493,25 @@
 - What failed or surprised the agent: no behavior failures; a `Read + Write` host abstraction keeps the first relay helper independent of concrete egress configuration while still proving host socket bridging.
 - What remains unproven: live TUN fd integration for smoltcp and a long-running TCP bridge loop.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — live bwrap smoltcp TCP forwarding slice
+
+- Slice attempted: prove a real bwrap target TCP connection can traverse the received TUN fd, enter smoltcp, relay payload to a host TCP socket, and receive the host response through TUN.
+- Why next: smoltcp host-stream relay is unit-proven; the remaining high-risk TCP gate is live TUN integration.
+- Verification plan: expose a small `SmoltcpTcpServer` wrapper in `foxprox-tcp`, add an ignored live bwrap TCP smoke using target Python `socket.connect/send/recv`, a host loopback TCP server, and the broker's live received TUN fd. Run the ignored live test explicitly plus workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — live bwrap smoltcp TCP forwarding
+
+- Slice attempted: prove a real bwrap target TCP connection can traverse the received TUN fd, enter smoltcp, relay payload to a host TCP socket, and receive the host response through TUN.
+- Why next: smoltcp host-stream relay was unit-proven; the remaining high-risk TCP gate was live TUN integration.
+- What changed: `foxprox-tcp` now exposes `SmoltcpTcpServer`, a small raw-IP smoltcp server wrapper with packet ingress, TX packet capture, receive readiness, and one-shot host stream relay. The ignored live bwrap test now includes a TCP smoke: target Python connects to 10.129.0.1:8080, sends `hi`, the broker feeds live TUN packets into smoltcp, relays `hi` to a host loopback TCP server, receives `ok`, writes smoltcp's outbound packets back through TUN, and the target receives `ok`.
+- Verification:
+  - Focused checks passed: `cargo test -p foxprox-tcp -- --nocapture` and `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`; all three live bwrap smokes passed, including the new TCP smoltcp/host-stream path.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed after fixing a clippy useless-conversion warning in the smoltcp IP address setup.
+  - `cargo test --workspace` passed; the three live bwrap tests compile and remain ignored by default.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures in the live TCP smoke; the smoltcp wrapper only needed to skip non-ready packets and relay once when `can_recv` became true.
+- What this proves: the alpha TCP gate now has live evidence for TUN fd → smoltcp TCP accept → host TCP stream → smoltcp response → TUN fd → sandbox target receive.
+- What remains unproven: long-running/multi-connection TCP scheduling, policy-gated smoltcp connection opens, connection close/error audit, and production launcher orchestration.
+- Commit: this commit.

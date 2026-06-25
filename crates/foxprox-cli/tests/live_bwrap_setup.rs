@@ -1,6 +1,7 @@
 #![cfg(target_os = "linux")]
 
-use std::net::{Ipv4Addr, UdpSocket};
+use std::io::{Read, Write};
+use std::net::{Ipv4Addr, TcpListener, TcpStream, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc;
@@ -16,6 +17,7 @@ use foxprox_dns::{handle_tun_dns_packet, DnsBrokerDatagramHandler, UdpDnsForward
 use foxprox_egress::{HostUdpEgress, UdpTarget};
 use foxprox_inspect::DnsAttributionCache;
 use foxprox_integrations::fd_handoff::BrokerControlListener;
+use foxprox_tcp::SmoltcpTcpServer;
 
 #[test]
 #[ignore = "requires bwrap, /dev/net/tun, user namespaces, and Python in the sandbox"]
@@ -234,6 +236,113 @@ fn live_bwrap_dns_query_uses_tun_dns_handler_and_host_upstream() {
     assert_eq!(&packet[12..16], &[10, 127, 0, 2]);
     assert_eq!(&packet[16..20], &[10, 127, 0, 1]);
     assert!(packet.ends_with(&query));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "requires bwrap, /dev/net/tun, user namespaces, and Python in the sandbox"]
+fn live_bwrap_tcp_connection_uses_smoltcp_and_host_stream() {
+    let Some(bwrap) = existing_path("/usr/bin/bwrap") else {
+        eprintln!("skipping live TCP smoke: /usr/bin/bwrap missing");
+        return;
+    };
+    if !Path::new("/dev/net/tun").exists() {
+        eprintln!("skipping live TCP smoke: /dev/net/tun missing");
+        return;
+    }
+    let Some(python) = existing_path("/usr/bin/python3") else {
+        eprintln!("skipping live TCP smoke: /usr/bin/python3 missing");
+        return;
+    };
+    let setup = foxproxsetup_path();
+    let dir = unique_test_dir("live-bwrap-tcp");
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket_path = dir.join("broker.sock");
+    let resolv_conf = dir.join("resolv.conf");
+    let listener = BrokerControlListener::bind(&socket_path).unwrap();
+    let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let upstream_thread = std::thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        let mut buffer = [0_u8; 16];
+        let length = stream.read(&mut buffer).unwrap();
+        assert_eq!(&buffer[..length], b"hi");
+        stream.write_all(b"ok").unwrap();
+    });
+    let (packet_tx, packet_rx) = mpsc::channel();
+
+    let broker_thread = std::thread::spawn(move || {
+        let received = listener.accept_setup_fd().unwrap();
+        let mut tun = TunPacketIo::from_owned_fd(received.fd, 4096).unwrap();
+        let mut tcp = SmoltcpTcpServer::new(Ipv4Addr::new(10, 129, 0, 1), 24, 8080, 1400);
+        let mut host = TcpStream::connect(upstream_addr).unwrap();
+        loop {
+            let packet = tun.read_packet().unwrap();
+            for outbound in tcp.accept_packet(packet.clone()) {
+                tun.write_packet(&outbound).unwrap();
+            }
+            if tcp.can_recv() {
+                let stats = tcp.relay_once(&mut host, 64, 64).unwrap();
+                for outbound in tcp.poll() {
+                    tun.write_packet(&outbound).unwrap();
+                }
+                packet_tx.send((packet, stats)).unwrap();
+                break;
+            }
+        }
+    });
+    let status = Command::new(bwrap)
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/",
+            "/",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+        ])
+        .arg(setup)
+        .arg("--broker-socket")
+        .arg(&socket_path)
+        .args([
+            "--tun-name",
+            "fpxtcp0",
+            "--address-cidr",
+            "10.129.0.2/24",
+            "--mtu",
+            "1400",
+        ])
+        .arg("--resolv-conf")
+        .arg(&resolv_conf)
+        .args([
+            "--broker-dns",
+            "10.129.0.1",
+            "--ip-program",
+            "/usr/bin/ip",
+            "--",
+        ])
+        .arg(python)
+        .args([
+            "-c",
+            "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(5); s.connect(('10.129.0.1', 8080)); s.sendall(b'hi'); data=s.recv(16); assert data == b'ok', data",
+        ])
+        .status()
+        .unwrap();
+
+    assert!(status.success(), "bwrap TCP smoke exited with {status}");
+    let (packet, stats) = packet_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("broker relays live TCP payload through smoltcp");
+    broker_thread.join().unwrap();
+    upstream_thread.join().unwrap();
+
+    assert_eq!(packet[0] >> 4, 4);
+    assert_eq!(packet[9], 6);
+    assert_eq!(stats.sandbox_to_host_bytes, 2);
+    assert_eq!(stats.host_to_sandbox_bytes, 2);
     std::fs::remove_dir_all(dir).unwrap();
 }
 

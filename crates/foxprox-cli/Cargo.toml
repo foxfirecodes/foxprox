@@ -25,4 +25,5 @@ path = "src/bin/foxproxsetup.rs"
 [dev-dependencies]
 foxprox-dns = { path = "../foxprox-dns" }
 foxprox-inspect = { path = "../foxprox-inspect" }
+foxprox-tcp = { path = "../foxprox-tcp" }
 serde_json = { workspace = true }
