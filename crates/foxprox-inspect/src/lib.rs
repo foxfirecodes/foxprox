@@ -322,6 +322,27 @@ mod tests {
     }
 
     #[test]
+    fn malformed_tls_corpus_fails_closed_without_panics() {
+        let corpus: &[&[u8]] = &[
+            b"",
+            &[TLS_HANDSHAKE],
+            &[TLS_HANDSHAKE, 0x03, 0x03, 0xff, 0xff],
+            &[0x16, 0x03, 0x03, 0x00, 0x04, 0x02, 0, 0, 0],
+        ];
+
+        for bytes in corpus {
+            let event = inspect_tls_client_hello(
+                sandbox(),
+                FrontendKind::Tun,
+                "203.0.113.10:443".parse().unwrap(),
+                None,
+                bytes,
+            );
+            assert!(matches!(event, NormalizedEvent::UnsupportedNetworkEvent(_)));
+        }
+    }
+
+    #[test]
     fn transparent_http_inspection_emits_normalized_request() {
         let event = inspect_plaintext_http_request(
             sandbox(),

@@ -469,6 +469,29 @@ mod tests {
     }
 
     #[test]
+    fn malformed_proxy_corpus_fails_closed_without_panics() {
+        for bytes in [
+            b"".as_slice(),
+            b"GET",
+            b"GET / HTTP/1.1\r\n\r\n",
+            &[0xff, 0xfe, 0xfd],
+        ] {
+            let event = parse_http_request(sandbox(), FrontendKind::HttpProxy, bytes);
+            assert!(matches!(event, NormalizedEvent::UnsupportedNetworkEvent(_)));
+        }
+
+        for bytes in [
+            b"".as_slice(),
+            &[0x05],
+            &[0x05, 0x01, 0x00],
+            &[0x05, 0x01, 0x00, 0x09],
+        ] {
+            let event = parse_socks5_connect(sandbox(), bytes);
+            assert!(matches!(event, NormalizedEvent::UnsupportedNetworkEvent(_)));
+        }
+    }
+
+    #[test]
     fn parses_explicit_http_request_to_normalized_event() {
         let event = parse_http_request(
             sandbox(),

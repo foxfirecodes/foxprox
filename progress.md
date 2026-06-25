@@ -1621,3 +1621,27 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: ec95775.
 - Remaining boundary risks: OS-specific capability drop implementation and SCM_RIGHTS fd passing remain.
+
+## 2026-06-22 — Boundary objective: malformed-input fuzz corpus tests
+
+- Boundary under work: fuzz-style malformed input coverage for packet, proxy, and TLS parser boundaries.
+- Allowed dependency direction: fuzz corpus tests stay inside parser/packet crates and assert normalized fail-closed outputs; policy/audit do not receive parser internals or panics.
+- Dependency-risk assessment: alpha robustness requires malformed packet/proxy/TLS handling. Without corpus-style tests, parser edge cases can regress into panics or non-normalized errors.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for packet/frontends/inspect/audit.
+- Observed results: added malformed corpus tests in `foxprox-packet`, `foxprox-frontends`, and `foxprox-inspect`. The tests feed malformed IPv4, HTTP proxy, SOCKS5, and TLS ClientHello inputs through public boundary functions and assert normalized fail-closed/unsupported outcomes without panics. All verification passed.
+- Changed files:
+  - `crates/foxprox-packet/src/lib.rs`
+  - `crates/foxprox-frontends/src/lib.rs`
+  - `crates/foxprox-inspect/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 134 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-packet` — packet remains core-only.
+  - `cargo tree -p foxprox-frontends` — frontends remains core-only.
+  - `cargo tree -p foxprox-inspect` — inspect remains core-only.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: coverage-guided fuzz harnesses remain future work.

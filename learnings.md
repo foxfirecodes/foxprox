@@ -378,3 +378,8 @@
 
 - Model setup-helper lifecycle explicitly: apply network setup, drop setup-only privileges, then exec target. This keeps capability/exec sequencing in integrations instead of broker runtime.
 - Tests should assert ordering around privilege drop, not just command construction, because alpha safety depends on target exec happening after setup privileges are gone.
+
+## 2026-06-22 — malformed corpus tests
+
+- Corpus-style unit tests are a lightweight fallback before coverage-guided fuzzing is wired in; they prove malformed packet/proxy/TLS inputs normalize to unsupported events instead of panicking.
+- Keep malformed corpus tests in boundary crates (`packet`, `frontends`, `inspect`) so policy/audit never see parser-specific error objects.

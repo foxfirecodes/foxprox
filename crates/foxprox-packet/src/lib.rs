@@ -512,6 +512,30 @@ mod tests {
     }
 
     #[test]
+    fn malformed_ipv4_corpus_fails_closed_without_panics() {
+        let corpus: &[&[u8]] = &[
+            b"",
+            &[0x45],
+            &[0x45, 0, 0, 1],
+            &[
+                0x65, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 10, 0, 0, 2, 10, 0, 0, 1,
+            ],
+            &[
+                0x45, 0, 0, 20, 0, 0, 0x20, 1, 64, 17, 0, 0, 10, 0, 0, 2, 10, 0, 0, 1,
+            ],
+        ];
+
+        for bytes in corpus {
+            let inspection = inspect_ipv4_packet(sandbox(), FrontendKind::Tun, bytes);
+            assert!(matches!(
+                inspection.event,
+                NormalizedEvent::UnsupportedNetworkEvent(_)
+            ));
+            assert!(inspection.synthetic_reply.is_none());
+        }
+    }
+
+    #[test]
     fn icmp_echo_request_returns_normalized_event_and_synthetic_reply() {
         let request = echo_request_packet();
         let inspection = inspect_ipv4_packet(sandbox(), FrontendKind::Tun, &request);
