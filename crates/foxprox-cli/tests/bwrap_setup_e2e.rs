@@ -5,8 +5,8 @@ use foxprox_cli::{
     HostSetupControlHandoffStatus, HostSetupProcessExit, HostSetupProcessRunner,
 };
 use foxprox_core::{
-    AuditKind, BrokerCore, BwrapSetupPlan, Decision, JsonLineAuditSink, NetworkEndpoint,
-    NetworkSetupConfig, PolicyConfig, PolicyEngine, Protocol, RuntimeAuditFanIn,
+    AuditKind, BrokerCore, BrokerRuntimeConfig, BwrapSetupPlan, Decision, JsonLineAuditSink,
+    NetworkEndpoint, NetworkSetupConfig, PolicyConfig, PolicyEngine, Protocol, RuntimeAuditFanIn,
 };
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
@@ -462,4 +462,84 @@ fn bwrap_foxproxsetup_received_tun_fd_bridges_tcp_bytes_to_host_socket() {
     assert!(audit_text.contains("smoltcp"), "{audit_text}");
     assert!(audit_text.contains("from_sandbox"), "{audit_text}");
     assert!(audit_text.contains("to_sandbox"), "{audit_text}");
+}
+
+#[test]
+#[ignore = "requires rootless bwrap, /dev/net/tun, CAP_NET_ADMIN inside bwrap, and foxprox launcher TCP egress"]
+fn foxprox_run_bwrap_tcp_egress_command_bridges_target_bytes() {
+    let foxprox = env!("CARGO_BIN_EXE_foxprox");
+    let setup_helper = env!("CARGO_BIN_EXE_foxproxsetup");
+    assert!(std::path::Path::new(foxprox).exists());
+    assert!(std::path::Path::new(setup_helper).exists());
+    assert!(std::path::Path::new("/dev/net/tun").exists());
+
+    let host_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let host_addr = host_listener.local_addr().unwrap();
+    let (server_tx, server_rx) = std::sync::mpsc::channel();
+    let host_server = std::thread::spawn(move || {
+        let (mut stream, _) = host_listener.accept().unwrap();
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request).unwrap();
+        stream.write_all(b"pong").unwrap();
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        server_tx.send(request).unwrap();
+    });
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_path =
+        std::env::temp_dir().join(format!("foxprox-run-bwrap-tcp-egress-{unique}.json"));
+    let mut config = BrokerRuntimeConfig::alpha_default(format!("foxprox-cli-e2e-{unique}"));
+    config.setup.tun_name = format!("fxc{:x}", std::process::id() % 0x00ff_ffff);
+    config.policy = PolicyConfig {
+        default_decision: Decision::Allow,
+        ..PolicyConfig::default()
+    };
+    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+
+    let target = [
+        "python3",
+        "-c",
+        concat!(
+            "import socket; ",
+            "s=socket.create_connection((\"198.51.100.1\", 8080), 3.0); ",
+            "s.sendall(b\"ping\"); ",
+            "data=s.recv(4); ",
+            "assert data == b\"pong\", data; ",
+            "s.close()"
+        ),
+    ];
+    let setup_dir = std::path::Path::new(setup_helper).parent().unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!("{}:{}", setup_dir.display(), path.to_string_lossy());
+    let output = Command::new(foxprox)
+        .env("PATH", path)
+        .arg("run-bwrap-tcp-egress")
+        .arg(&config_path)
+        .arg("198.51.100.1:8080")
+        .arg(host_addr.to_string())
+        .arg("--")
+        .args(target)
+        .output()
+        .expect("foxprox launcher command runs");
+    let _ = std::fs::remove_file(&config_path);
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let host_request = server_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("host socket receives bytes through CLI launcher");
+    assert_eq!(host_request, b"ping");
+    host_server.join().unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("tcp_flow_closed"), "{stdout}");
+    assert!(stdout.contains("smoltcp"), "{stdout}");
+    assert!(stdout.contains("host_setup_control_handoff"), "{stdout}");
 }
