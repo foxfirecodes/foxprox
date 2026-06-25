@@ -5408,3 +5408,35 @@ Commit: e51880f
 
 ### Remaining alpha gaps
 - Real UDP request/response over bwrap + received TUN is now proven, including CLI launcher validation. Remaining `docs/initial-impl.md` gaps are: transparent destination mapping/config model instead of explicit mapped endpoints, long-running multi-flow TCP/UDP sessions, DNS service over the TUN path and DNS cache integration in the launcher, explicit HTTP/SOCKS proxy lifecycle in the launcher, cleanup/lifecycle audit hardening, and curl/DNS/proxy production E2Es.
+
+## 2026-06-25 — Tighten UDP exchange fail-closed evidence
+
+Commit: ef6c6c5
+
+### Review
+- Reviewer run `e9f5b32d` found three UDP exchange issues after the real bwrap UDP proof:
+  - High: non-UDP packets read by the UDP exchange bridge were consumed without audit evidence.
+  - Medium: host UDP exchange used `send_to` followed by `recv` on an unconnected UDP socket, so a datagram from an unexpected peer could be accepted.
+  - Medium: response packet synthesis/parse failures after host egress did not append structured broker-error evidence.
+
+### Fix
+- UDP exchange now audits every parsed inbound packet before protocol filtering.
+- Non-UDP packets in the UDP exchange path now append a fail-closed `BrokerError` with `UnsupportedProtocol` and do not silently disappear.
+- Malformed UDP response-template failures append fail-closed broker-error evidence.
+- Oversized/unsynthesizable or unparsable UDP response packets append fail-closed broker-error evidence before returning an error.
+- Host UDP exchange now `connect`s the UDP socket and uses `send`/`recv`, constraining accepted responses to the configured peer.
+- Added focused stack tests for:
+  - successful UDP exchange response write-back;
+  - non-UDP packets failing closed with audit evidence;
+  - response synthesis failure audit evidence.
+
+### Validation
+- `cargo test -p foxprox-stack --all-targets --all-features udp_exchange -- --nocapture` — passed 3 focused UDP exchange tests.
+- `cargo test -p foxprox-cli --test bwrap_setup_e2e --all-features -- --ignored --nocapture` — passed all six ignored real bwrap/TUN tests.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all six ignored real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed: 33 CLI unit tests + 1 ignored privileged CLI unit test, 6 ignored bwrap E2E tests in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 109 egress tests, and 19 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining alpha gaps
+- The `e9f5b32d` blocker/high product-scope findings remain: DNS/proxy lifecycle is not integrated into the launchers, transparent destination mapping is still explicit/test-style, launchers are bounded single-exchange proofs rather than long-running multi-flow sessions, transparent HTTP/TLS attribution is not yet wired through the smoltcp data plane, and lifecycle/cleanup audit is not yet using the production runtime harness.
