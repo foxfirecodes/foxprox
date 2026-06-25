@@ -5283,3 +5283,22 @@ Commit: ad039cb
 
 ### Remaining blind spots
 - The real bwrap smoltcp E2E now has bounded setup-control receipt and precise endpoint audit assertions. Remaining production work is still turning these tested seams into a user-facing long-running launcher/runtime with host-socket TCP/UDP forwarding from smoltcp flows, DNS/proxy/listener orchestration, cleanup/error handling, CLI ergonomics, and one rerunnable production command.
+
+## 2026-06-24 — Fail closed direct handoff read timeouts
+
+Commit: ccb8d94
+
+### Review
+- Round-157 correctness found one medium issue after `ad039cb`: `accept_setup_control_tun_handoff_with_timeouts(...)` installed the stream read timeout with `let _ = ...`, so a platform/socket error while setting that timeout could silently degrade the timeout-enabled API into an unbounded `recv_tun_fd` call.
+- The same review noted a low direct-evidence gap: the new helper had deterministic accept-timeout coverage, while direct accepted-but-no-fd read-timeout behavior was only covered through the broader host setup session path.
+
+### Fix
+- `accept_setup_control_tun_handoff_with_timeouts(...)` now treats `UnixStream::set_read_timeout(...)` failure as fail-closed setup-control handoff evidence and returns without entering `recv_tun_fd`.
+- Added `setup_control_handoff_read_timeout_is_bounded_and_audited`, which accepts a real Unix stream that sends no SCM_RIGHTS payload and asserts the helper returns fail-closed receive-failure evidence under the read timeout.
+
+### Commands run
+- `cargo test -p foxprox-cli --all-targets --all-features setup_control_handoff_ -- --nocapture` — passed both direct helper timeout tests.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed both ignored real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed, including 33 CLI unit tests + 1 ignored privileged CLI unit test, 2 ignored bwrap E2E tests in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 109 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
