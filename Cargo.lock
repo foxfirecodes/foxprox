@@ -190,6 +190,7 @@ dependencies = [
  "caps",
  "foxprox-core",
  "foxprox-device",
+ "foxprox-stack",
  "pretty_assertions",
  "serde_json",
 ]

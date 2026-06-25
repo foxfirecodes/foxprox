@@ -17,6 +17,7 @@ foxprox-device = { path = "../foxprox-device" }
 caps = "0.5"
 
 [dev-dependencies]
+foxprox-stack = { path = "../foxprox-stack" }
 pretty_assertions = "1"
 
 [lib]
