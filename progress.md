@@ -1342,3 +1342,23 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 0aaf715.
 - Remaining boundary risks: true round-robin readiness cursors, per-sandbox fairness, and rate accounting remain.
+
+## 2026-06-22 — Boundary objective: per-sandbox bridge retention limits
+
+- Boundary under work: per-sandbox TCP/UDP bridge retention caps in runtime-owned bridge tables.
+- Allowed dependency direction: runtime enforces retained-flow resource limits using normalized sandbox ids; egress handles and policy/audit contracts remain unchanged.
+- Dependency-risk assessment: global bridge caps exist for UDP and pending-byte caps exist for TCP, but a single sandbox can still occupy all retained bridge slots. Per-sandbox caps reduce blast radius without leaking scheduler state into egress/policy/audit.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/audit.
+- Observed results: added default global and per-sandbox retained bridge caps for TCP and UDP. `UdpBridgeTable` now rejects inserts that exceed either global or per-sandbox flow caps. `StackTcpBridgeTable` now has global/per-sandbox stream caps plus a fallible `try_insert`; stack policy/egress handling uses the fallible path so retention-limit failures return runtime errors rather than panicking. Added tests for TCP and UDP per-sandbox limits. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 115 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — per-sandbox caps remain runtime-owned.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: rate-limit accounting and cross-sandbox weighted fairness remain.

@@ -313,3 +313,8 @@
 
 - Keep scheduling/fairness state in `foxprox-runtime`: bridge maintenance can expose max TCP streams and UDP flows per tick while egress handles and stack adapters remain unchanged.
 - Count budgets separately from byte budgets: per-flow byte caps bound individual reads, while per-tick flow caps bound total runtime work before returning to the scheduler.
+
+## 2026-06-22 — per-sandbox bridge caps
+
+- Runtime bridge retention should enforce both global and per-sandbox caps using normalized `SandboxId`; this prevents one sandbox from consuming all TCP/UDP retained-flow slots without involving policy/audit.
+- Keep existing convenience `insert` methods for tests/simple callers, but use fallible insertion on policy/egress paths so resource-limit failures surface as runtime/broker errors instead of panics.

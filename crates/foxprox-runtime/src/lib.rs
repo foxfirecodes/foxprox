@@ -123,6 +123,9 @@ impl UdpFlowKey {
 /// the shared `HostUdpFlow` contract.
 pub const DEFAULT_UDP_BRIDGE_IDLE_TIMEOUT_MILLIS: u64 = 60_000;
 pub const DEFAULT_MAX_UDP_BRIDGES: usize = 4096;
+pub const DEFAULT_MAX_UDP_BRIDGES_PER_SANDBOX: usize = 1024;
+pub const DEFAULT_MAX_TCP_BRIDGES: usize = 4096;
+pub const DEFAULT_MAX_TCP_BRIDGES_PER_SANDBOX: usize = 1024;
 pub const DEFAULT_MAX_TCP_BRIDGES_PER_TICK: usize = 64;
 pub const DEFAULT_MAX_UDP_BRIDGES_PER_TICK: usize = 64;
 
@@ -144,12 +147,14 @@ impl Default for BridgeMaintenanceBudget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UdpBridgeLimits {
     pub max_flows: usize,
+    pub max_flows_per_sandbox: usize,
 }
 
 impl Default for UdpBridgeLimits {
     fn default() -> Self {
         Self {
             max_flows: DEFAULT_MAX_UDP_BRIDGES,
+            max_flows_per_sandbox: DEFAULT_MAX_UDP_BRIDGES_PER_SANDBOX,
         }
     }
 }
@@ -220,10 +225,22 @@ impl<U> UdpBridgeTable<U> {
         now_millis: u64,
         idle_timeout_millis: u64,
     ) -> Result<Option<U>, EgressError> {
-        if !self.flows.contains_key(&key) && self.flows.len() >= self.limits.max_flows {
-            return Err(EgressError::StreamIo(
-                "UDP bridge flow limit exceeded".into(),
-            ));
+        if !self.flows.contains_key(&key) {
+            if self.flows.len() >= self.limits.max_flows {
+                return Err(EgressError::StreamIo(
+                    "UDP bridge flow limit exceeded".into(),
+                ));
+            }
+            let sandbox_flows = self
+                .flows
+                .keys()
+                .filter(|existing| existing.sandbox_id == key.sandbox_id)
+                .count();
+            if sandbox_flows >= self.limits.max_flows_per_sandbox {
+                return Err(EgressError::StreamIo(
+                    "UDP bridge sandbox flow limit exceeded".into(),
+                ));
+            }
         }
         Ok(self
             .flows
@@ -590,12 +607,16 @@ pub const DEFAULT_MAX_PENDING_SANDBOX_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StackTcpBridgeLimits {
     pub max_pending_sandbox_bytes: usize,
+    pub max_streams: usize,
+    pub max_streams_per_sandbox: usize,
 }
 
 impl Default for StackTcpBridgeLimits {
     fn default() -> Self {
         Self {
             max_pending_sandbox_bytes: DEFAULT_MAX_PENDING_SANDBOX_BYTES,
+            max_streams: DEFAULT_MAX_TCP_BRIDGES,
+            max_streams_per_sandbox: DEFAULT_MAX_TCP_BRIDGES_PER_SANDBOX,
         }
     }
 }
@@ -660,9 +681,36 @@ impl<T> StackTcpBridgeTable<T> {
     }
 
     pub fn insert(&mut self, key: StackTcpFlowKey, stream: T) -> Option<T> {
-        self.streams
+        self.try_insert(key, stream)
+            .expect("default TCP bridge limits exceeded")
+    }
+
+    pub fn try_insert(
+        &mut self,
+        key: StackTcpFlowKey,
+        stream: T,
+    ) -> Result<Option<T>, EgressError> {
+        if !self.streams.contains_key(&key) {
+            if self.streams.len() >= self.limits.max_streams {
+                return Err(EgressError::StreamIo(
+                    "TCP bridge stream limit exceeded".into(),
+                ));
+            }
+            let sandbox_streams = self
+                .streams
+                .keys()
+                .filter(|existing| existing.sandbox_id == key.sandbox_id)
+                .count();
+            if sandbox_streams >= self.limits.max_streams_per_sandbox {
+                return Err(EgressError::StreamIo(
+                    "TCP bridge sandbox stream limit exceeded".into(),
+                ));
+            }
+        }
+        Ok(self
+            .streams
             .insert(key, StackTcpBridge::new(stream))
-            .map(|bridge| bridge.stream)
+            .map(|bridge| bridge.stream))
     }
 
     pub fn remove(&mut self, key: &StackTcpFlowKey) -> Option<T> {
@@ -947,7 +995,9 @@ where
                 ) = (&event, result.egress_outcome)
                 {
                     ctx.tcp_bridges
-                        .insert(StackTcpFlowKey::from_connect_attempt(connect), stream);
+                        .try_insert(StackTcpFlowKey::from_connect_attempt(connect), stream)
+                        .map_err(BrokerError::Egress)
+                        .map_err(RuntimeError::Broker)?;
                 }
                 broker_outcomes.push(result.outcome);
             }
@@ -1294,7 +1344,10 @@ mod tests {
             source: "10.0.0.2:53001".parse().unwrap(),
             destination: "203.0.113.11:12345".parse().unwrap(),
         };
-        let mut bridges = UdpBridgeTable::with_limits(UdpBridgeLimits { max_flows: 1 });
+        let mut bridges = UdpBridgeTable::with_limits(UdpBridgeLimits {
+            max_flows: 1,
+            max_flows_per_sandbox: usize::MAX,
+        });
 
         bridges
             .try_insert_with_timeout(first, ReadableUdpFlow::new(VecDeque::new()), 0, 30)
@@ -1310,6 +1363,42 @@ mod tests {
         };
 
         assert!(error.to_string().contains("UDP bridge flow limit"));
+        assert_eq!(bridges.len(), 1);
+    }
+
+    #[test]
+    fn udp_bridge_table_enforces_per_sandbox_flow_limit() {
+        let mut bridges = UdpBridgeTable::with_limits(UdpBridgeLimits {
+            max_flows: usize::MAX,
+            max_flows_per_sandbox: 1,
+        });
+        let first = UdpFlowKey {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:53000".parse().unwrap(),
+            destination: "203.0.113.10:12345".parse().unwrap(),
+        };
+        let second = UdpFlowKey {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:53001".parse().unwrap(),
+            destination: "203.0.113.11:12345".parse().unwrap(),
+        };
+
+        bridges
+            .try_insert_with_timeout(first, ReadableUdpFlow::new(VecDeque::new()), 0, 30)
+            .unwrap();
+        let error = match bridges.try_insert_with_timeout(
+            second,
+            ReadableUdpFlow::new(VecDeque::new()),
+            0,
+            30,
+        ) {
+            Ok(_) => panic!("expected UDP bridge sandbox flow limit error"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("UDP bridge sandbox flow limit"));
         assert_eq!(bridges.len(), 1);
     }
 
@@ -1673,6 +1762,38 @@ mod tests {
     }
 
     #[test]
+    fn tcp_bridge_table_enforces_per_sandbox_stream_limit() {
+        let mut bridges = StackTcpBridgeTable::with_limits(StackTcpBridgeLimits {
+            max_pending_sandbox_bytes: usize::MAX,
+            max_streams: usize::MAX,
+            max_streams_per_sandbox: 1,
+        });
+        let first = StackTcpFlowKey::new(
+            SandboxId::new("s1").unwrap(),
+            FrontendKind::Tun,
+            "10.0.0.2:49152".parse().unwrap(),
+            "203.0.113.10:80".parse().unwrap(),
+        );
+        let second = StackTcpFlowKey::new(
+            SandboxId::new("s1").unwrap(),
+            FrontendKind::Tun,
+            "10.0.0.2:49153".parse().unwrap(),
+            "203.0.113.11:80".parse().unwrap(),
+        );
+
+        bridges.try_insert(first, MockTcpStream).unwrap();
+        let error = match bridges.try_insert(second, MockTcpStream) {
+            Ok(_) => panic!("expected TCP bridge sandbox stream limit error"),
+            Err(error) => error,
+        };
+
+        assert!(error
+            .to_string()
+            .contains("TCP bridge sandbox stream limit"));
+        assert_eq!(bridges.len(), 1);
+    }
+
+    #[test]
     fn bridge_table_rejects_pending_sandbox_bytes_over_limit() {
         let key = StackTcpFlowKey::new(
             SandboxId::new("s1").unwrap(),
@@ -1683,6 +1804,8 @@ mod tests {
         let writes = Rc::new(RefCell::new(Vec::new()));
         let mut bridges = StackTcpBridgeTable::with_limits(StackTcpBridgeLimits {
             max_pending_sandbox_bytes: 3,
+            max_streams: usize::MAX,
+            max_streams_per_sandbox: usize::MAX,
         });
         bridges.insert(
             key.clone(),
