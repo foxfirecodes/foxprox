@@ -296,3 +296,7 @@ A real bwrap target can be spawned with a broker listener, return a TUN fd via `
 ## 2026-06-22 — keep bwrap network setup composable with external sandbox policy
 
 The network broker should not hardcode broad filesystem/mount decisions into `plan_bwrap_setup`. Let callers pass additional bwrap args before `foxproxsetup`; live smokes can explicitly add `--dev-bind / /`, while production sandbox runtimes can supply stricter mounts.
+
+## 2026-06-22 — curl live smoke proves application-level TCP, not just socket bytes
+
+After smoltcp forwarding works with a Python socket, add a curl smoke against a tiny host HTTP server. `curl` validates that a normal dynamically-linked user tool can run inside the bwrap namespace and receive a full application response through TUN/smoltcp.

@@ -1595,3 +1595,25 @@
 - What failed or surprised the agent: no behavior failures; the missing abstraction was not smoltcp but the ownership/lifecycle seam that keeps the bwrap child alive while broker code relays the first TCP flow.
 - What remains unproven: a fully unbounded multi-connection TCP scheduler and a polished end-user sandbox CLI; the alpha evidence now has product-code launcher orchestration for the one-flow TCP proof.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — live sandbox curl through smoltcp launcher slice
+
+- Slice attempted: prove an ordinary application (`curl`) inside the live bwrap namespace can use the reusable bwrap TCP once launcher path to fetch an HTTP response through TUN, smoltcp, and a host TCP server.
+- Why next: Python socket TCP forwarding is proven, but the remaining alpha-facing confidence gap is a real user tool performing application-level TCP/HTTP over the production-shaped launcher helper.
+- Verification plan: add an ignored live curl smoke that skips when `/usr/bin/curl` is unavailable, serves one HTTP response from a host loopback `TcpListener`, runs `curl http://<broker-tun-ip>:8080/` inside bwrap through `run_bwrap_tcp_once`, and checks the host saw an HTTP GET plus the launcher relayed nonzero bytes in both directions. Run the focused live curl smoke, all live smokes, and workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — live sandbox curl through smoltcp launcher
+
+- Slice attempted: prove an ordinary application (`curl`) inside the live bwrap namespace can use the reusable bwrap TCP once launcher path to fetch an HTTP response through TUN, smoltcp, and a host TCP server.
+- Why next: Python socket TCP forwarding was proven, but the remaining alpha-facing confidence gap was a real user tool performing application-level TCP/HTTP over the production-shaped launcher helper.
+- What changed: the ignored live bwrap test suite now includes `live_bwrap_curl_fetches_http_through_smoltcp_launcher`. It starts a host loopback HTTP server, runs `curl --max-time 5 --silent --show-error http://10.130.0.1:8080/` inside bwrap via `run_bwrap_tcp_once`, and asserts the host saw `GET / HTTP/1.1` plus nonzero byte counts in both relay directions.
+- Verification:
+  - Focused live curl check passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_bwrap_curl -- --ignored --nocapture`.
+  - All explicit live smokes passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, now covering UDP, DNS, Python TCP, and curl-over-TCP.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed; the live curl smoke compiles and remains ignored by default.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: curl's response body appears in `--nocapture` output because the smoke intentionally exercises the real target stdout path; this is harmless evidence that the application received `ok`.
+- What remains unproven: unbounded production scheduling and polished CLI UX; the documented alpha forwarding proof now includes live curl-level TCP evidence through the reusable launcher path.
+- Commit: this commit.

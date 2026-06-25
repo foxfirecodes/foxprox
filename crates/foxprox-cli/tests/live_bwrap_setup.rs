@@ -303,6 +303,80 @@ fn live_bwrap_tcp_connection_uses_smoltcp_and_host_stream() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+#[ignore = "requires bwrap, /dev/net/tun, user namespaces, curl, and Python in the sandbox"]
+fn live_bwrap_curl_fetches_http_through_smoltcp_launcher() {
+    let Some(bwrap) = existing_path("/usr/bin/bwrap") else {
+        eprintln!("skipping live curl smoke: /usr/bin/bwrap missing");
+        return;
+    };
+    if !Path::new("/dev/net/tun").exists() {
+        eprintln!("skipping live curl smoke: /dev/net/tun missing");
+        return;
+    }
+    let Some(curl) = existing_path("/usr/bin/curl") else {
+        eprintln!("skipping live curl smoke: /usr/bin/curl missing");
+        return;
+    };
+    let setup = foxproxsetup_path();
+    let dir = unique_test_dir("live-bwrap-curl");
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket_path = dir.join("broker.sock");
+    let resolv_conf = dir.join("resolv.conf");
+    let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let (request_tx, request_rx) = mpsc::channel();
+    let upstream_thread = std::thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        let mut buffer = [0_u8; 1024];
+        let length = stream.read(&mut buffer).unwrap();
+        request_tx.send(buffer[..length].to_vec()).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .unwrap();
+    });
+
+    let summary = run_bwrap_tcp_once(&BwrapTcpOnceConfig {
+        bwrap_program: bwrap,
+        setup_program: setup,
+        broker_socket: socket_path,
+        tun_name: "fpxcurl0".to_owned(),
+        address_cidr: "10.130.0.2/24".to_owned(),
+        mtu: 1400,
+        resolv_conf,
+        broker_dns: IpAddr::V4(Ipv4Addr::new(10, 130, 0, 1)),
+        ip_program: PathBuf::from("/usr/bin/ip"),
+        extra_bwrap_args: vec!["--dev-bind".to_owned(), "/".to_owned(), "/".to_owned()],
+        target_argv: vec![
+            curl.display().to_string(),
+            "--max-time".to_owned(),
+            "5".to_owned(),
+            "--silent".to_owned(),
+            "--show-error".to_owned(),
+            "http://10.130.0.1:8080/".to_owned(),
+        ],
+        smoltcp_ip: Ipv4Addr::new(10, 130, 0, 1),
+        smoltcp_prefix_len: 24,
+        listen_port: 8080,
+        upstream_addr,
+        max_packet_len: 4096,
+        max_packets: 32,
+        sandbox_buffer_len: 2048,
+        host_buffer_len: 512,
+    })
+    .unwrap();
+    upstream_thread.join().unwrap();
+    let request = request_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("host HTTP server receives curl request");
+
+    assert!(summary.target_status_success);
+    assert!(summary.sandbox_to_host_bytes > 0);
+    assert!(summary.host_to_sandbox_bytes > 0);
+    assert!(String::from_utf8_lossy(&request).starts_with("GET / HTTP/1.1"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 fn dns_a_query(hostname: &str) -> Vec<u8> {
     let mut query = vec![
         0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
