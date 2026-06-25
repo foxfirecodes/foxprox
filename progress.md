@@ -1297,5 +1297,5 @@
   - `cargo tree -p foxprox-device` — readiness stays in device crate.
   - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated behind adapter.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 79feaf2.
 - Remaining boundary risks: full loop scheduling, readiness registration, and fairness budgets remain.
