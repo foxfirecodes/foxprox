@@ -428,3 +428,8 @@
 
 - Explicit proxy session IO belongs in runtime: frontends parse bounded request heads into normalized events, net/policy/audit decide, and egress owns host response streams.
 - Add a response-stream trait to egress instead of letting runtime depend on `TcpStream` or std IO details for forwarded HTTP responses.
+
+## 2026-06-22 — explicit SOCKS5 session step
+
+- Runtime should orchestrate SOCKS5 session steps but keep all wire replies and parser behavior in `foxprox-frontends`; policy sees only `SocksConnect` or unsupported normalized events.
+- SOCKS allowed paths can return a connected egress stream handle signal without implementing the full tunnel pump in the parser layer.

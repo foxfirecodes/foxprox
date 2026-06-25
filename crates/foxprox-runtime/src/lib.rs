@@ -64,6 +64,23 @@ pub struct ExplicitHttpProxyOutcome {
     pub connected_tunnel: bool,
 }
 
+pub struct ExplicitSocks5Step<'a, E, A> {
+    pub sandbox_id: &'a SandboxId,
+    pub policy: &'a PolicyEngine,
+    pub egress: &'a mut E,
+    pub audit: &'a mut A,
+    pub parser_limits: ParserLimits,
+    pub sequence: u64,
+    pub timestamp_millis: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExplicitSocks5Outcome {
+    pub event: NormalizedEvent,
+    pub broker_outcome: BrokerEventOutcome,
+    pub connected_tunnel: bool,
+}
+
 /// Process one bounded explicit HTTP proxy request from a client stream.
 ///
 /// This step keeps listener/session IO in runtime, parsing in frontends, policy
@@ -157,6 +174,120 @@ fn read_http_proxy_head<Io: Read>(
             Err(error) => return Err(error),
         }
     }
+    Ok(bytes)
+}
+
+/// Process one SOCKS5 no-auth CONNECT request from a client stream.
+pub fn process_one_socks5_connect<Io, E, A>(
+    io: &mut Io,
+    step: ExplicitSocks5Step<'_, E, A>,
+) -> Result<ExplicitSocks5Outcome, RuntimeError>
+where
+    Io: Read + Write,
+    E: HostEgress,
+    A: AuditSink,
+{
+    let greeting = read_socks5_greeting(io, step.parser_limits.max_socks5_message_bytes)
+        .map_err(RuntimeError::ProxyIo)?;
+    let method_reply =
+        foxprox_frontends::select_socks5_no_auth_method_with_limits(&greeting, step.parser_limits)
+            .unwrap_or([0x05, 0xff]);
+    io.write_all(&method_reply).map_err(RuntimeError::ProxyIo)?;
+    if method_reply[1] == 0xff {
+        let event =
+            NormalizedEvent::UnsupportedNetworkEvent(foxprox_core::UnsupportedNetworkEvent {
+                sandbox_id: step.sandbox_id.clone(),
+                frontend: FrontendKind::Socks5,
+                reason: foxprox_core::UnsupportedReason::MalformedProxyRequest,
+                safe_metadata: Some("SOCKS5 no acceptable auth method".into()),
+            });
+        let result = handle_normalized_event_with_egress(
+            &event,
+            step.policy,
+            step.egress,
+            step.audit,
+            step.sequence,
+            step.timestamp_millis,
+        )
+        .map_err(RuntimeError::Broker)?;
+        return Ok(ExplicitSocks5Outcome {
+            event,
+            broker_outcome: result.outcome,
+            connected_tunnel: false,
+        });
+    }
+
+    let request = read_socks5_connect_request(io, step.parser_limits.max_socks5_message_bytes)
+        .map_err(RuntimeError::ProxyIo)?;
+    let event = foxprox_frontends::parse_socks5_connect_with_limits(
+        step.sandbox_id.clone(),
+        &request,
+        step.parser_limits,
+    );
+    let mut result = handle_normalized_event_with_egress(
+        &event,
+        step.policy,
+        step.egress,
+        step.audit,
+        step.sequence,
+        step.timestamp_millis,
+    )
+    .map_err(RuntimeError::Broker)?;
+    let reply_code = foxprox_frontends::socks5_reply_for_policy_decision(&result.decision);
+    let reply = foxprox_frontends::build_socks5_connect_reply(reply_code);
+    io.write_all(&reply).map_err(RuntimeError::ProxyIo)?;
+    let connected_tunnel = matches!(
+        result.egress_outcome.take(),
+        Some(EgressOutcome::TcpConnected(_))
+    ) && result.decision.is_allowed();
+
+    Ok(ExplicitSocks5Outcome {
+        event,
+        broker_outcome: result.outcome,
+        connected_tunnel,
+    })
+}
+
+fn read_socks5_greeting<Io: Read>(
+    io: &mut Io,
+    max_bytes: usize,
+) -> Result<Vec<u8>, std::io::Error> {
+    let mut header = [0_u8; 2];
+    io.read_exact(&mut header)?;
+    let total = 2 + usize::from(header[1]);
+    if total > max_bytes {
+        return Ok(header.to_vec());
+    }
+    let mut bytes = header.to_vec();
+    bytes.resize(total, 0);
+    io.read_exact(&mut bytes[2..])?;
+    Ok(bytes)
+}
+
+fn read_socks5_connect_request<Io: Read>(
+    io: &mut Io,
+    max_bytes: usize,
+) -> Result<Vec<u8>, std::io::Error> {
+    let mut header = [0_u8; 4];
+    io.read_exact(&mut header)?;
+    let mut bytes = header.to_vec();
+    let remaining = match header[3] {
+        0x01 => 6,
+        0x03 => {
+            let mut len = [0_u8; 1];
+            io.read_exact(&mut len)?;
+            bytes.push(len[0]);
+            usize::from(len[0]) + 2
+        }
+        0x04 => 18,
+        _ => 0,
+    };
+    if bytes.len().saturating_add(remaining) > max_bytes {
+        return Ok(bytes);
+    }
+    let start = bytes.len();
+    bytes.resize(start + remaining, 0);
+    io.read_exact(&mut bytes[start..])?;
     Ok(bytes)
 }
 
@@ -2047,6 +2178,73 @@ mod tests {
     }
 
     #[test]
+    fn explicit_socks5_connect_uses_shared_policy_audit_and_egress() {
+        let mut io = DuplexIo::new(socks5_domain_connect_bytes("example.com", 443));
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut rule = PolicyRule::allow(foxprox_core::RuleId::new("socks").unwrap());
+        rule.protocol = ProtocolMatcher::Exact(Protocol::SocksConnect);
+        config.rules.push(rule);
+        let policy = PolicyEngine::new(config);
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(4);
+        let sandbox_id = SandboxId::new("s1").unwrap();
+
+        let outcome = process_one_socks5_connect(
+            &mut io,
+            ExplicitSocks5Step {
+                sandbox_id: &sandbox_id,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                parser_limits: ParserLimits::default(),
+                sequence: 1,
+                timestamp_millis: 1000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.broker_outcome, BrokerEventOutcome::Forwarded);
+        assert!(outcome.connected_tunnel);
+        assert_eq!(egress.socks_connects.len(), 1);
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(&io.writes[..2], &[0x05, 0x00]);
+        assert_eq!(&io.writes[2..], &[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn explicit_socks5_denial_writes_policy_reply_without_egress() {
+        let mut io = DuplexIo::new(socks5_domain_connect_bytes("example.com", 443));
+        let policy = PolicyEngine::new(RuntimeConfig::deny_by_default());
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(4);
+        let sandbox_id = SandboxId::new("s1").unwrap();
+
+        let outcome = process_one_socks5_connect(
+            &mut io,
+            ExplicitSocks5Step {
+                sandbox_id: &sandbox_id,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                parser_limits: ParserLimits::default(),
+                sequence: 1,
+                timestamp_millis: 1000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.broker_outcome,
+            BrokerEventOutcome::Denied(Some(DenialAction::Drop))
+        );
+        assert!(!outcome.connected_tunnel);
+        assert!(egress.socks_connects.is_empty());
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(&io.writes[..2], &[0x05, 0x00]);
+        assert_eq!(&io.writes[2..], &[0x05, 0x02, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+    }
+
+    #[test]
     fn one_step_runtime_reads_a_packet_and_writes_policy_allowed_reply() {
         let inbound = echo_request_packet();
         let cursor = Cursor::new(inbound.clone());
@@ -3562,6 +3760,37 @@ mod tests {
         }
     }
 
+    struct DuplexIo {
+        reads: Cursor<Vec<u8>>,
+        writes: Vec<u8>,
+    }
+
+    impl DuplexIo {
+        fn new(reads: Vec<u8>) -> Self {
+            Self {
+                reads: Cursor::new(reads),
+                writes: Vec::new(),
+            }
+        }
+    }
+
+    impl Read for DuplexIo {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.reads.read(buf)
+        }
+    }
+
+    impl Write for DuplexIo {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
     struct RecordingUdpFlow {
         writes: Rc<RefCell<Vec<Vec<u8>>>>,
     }
@@ -3753,6 +3982,22 @@ mod tests {
             destination: "203.0.113.10:80".parse().unwrap(),
             hostname: None,
         }
+    }
+
+    fn socks5_domain_connect_bytes(hostname: &str, port: u16) -> Vec<u8> {
+        let mut bytes = vec![
+            0x05,
+            0x01,
+            0x00,
+            0x05,
+            0x01,
+            0x00,
+            0x03,
+            hostname.len() as u8,
+        ];
+        bytes.extend_from_slice(hostname.as_bytes());
+        bytes.extend_from_slice(&port.to_be_bytes());
+        bytes
     }
 
     fn dns_query_packet(id: u16, hostname: &str, qtype: u16) -> Vec<u8> {

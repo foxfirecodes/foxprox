@@ -1842,3 +1842,25 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 74d6146.
 - Remaining boundary risks: full-duplex CONNECT tunnel pump and listener accept loop remain.
+
+## 2026-06-22 — Boundary objective: explicit SOCKS5 CONNECT session step
+
+- Boundary under work: production-facing SOCKS5 CONNECT IO through shared policy/audit/egress.
+- Allowed dependency direction: runtime owns SOCKS session stepping; frontends own SOCKS wire parsing/reply codes; net/policy/audit/egress handle normalized events only.
+- Dependency-risk assessment: SOCKS parser and policy-to-reply helpers exist, but alpha explicit proxy support needs a concrete session step that negotiates no-auth, parses CONNECT, applies shared policy/audit, opens shared egress for allowed destinations, and returns SOCKS replies for denials.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/frontends/egress/audit.
+- Observed results: added `process_one_socks5_connect` in runtime. The step reads a bounded SOCKS5 greeting and CONNECT request, uses frontend-owned no-auth selection/parsing/reply mapping, runs shared policy/audit/egress through `foxprox-net`, writes success or denial replies, and reports whether an allowed tunnel stream was opened. Added allowed and denied SOCKS session tests. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 159 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime session IO consumes existing frontend/net/egress contracts.
+  - `cargo tree -p foxprox-frontends` — SOCKS wire details remain frontend/core-only.
+  - `cargo tree -p foxprox-egress` — host connect remains egress-owned.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: full-duplex CONNECT/SOCKS tunnel pump and listener accept loop remain.
