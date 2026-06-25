@@ -5321,3 +5321,32 @@ Commit: a169975
 - `cargo test --all-targets --all-features` — passed, including 33 CLI unit tests + 1 ignored privileged CLI unit test, 2 ignored bwrap E2E tests in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 109 egress tests, and 16 stack tests.
 - `cargo fmt --check` — passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+## 2026-06-24 — Bridge real bwrap TCP bytes to host egress
+
+Commit: a336d7b
+
+### Scope
+- Continued alpha completion against `docs/initial-impl.md`, specifically the Milestone 2 gap that real bwrap/smoltcp had only proven TCP handshake/write-back, not sandbox application bytes bridged to a real host TCP socket.
+
+### Implementation
+- Added `foxprox_egress::ReceivedTunSmoltcpTcpEgressSession` and `run_received_tun_fd_smoltcp_tcp_egress_and_drain(...)`.
+  - The runner owns a received SCM_RIGHTS TUN fd, sets it nonblocking, feeds packets through `SmoltcpTunBridge`, drains the first smoltcp TCP stream into a `TcpEgress`, writes host response bytes back through smoltcp/TUN, and drains setup + broker audit records through the fan-in sink.
+  - It is bounded by `max_attempts`, `max_packets_per_attempt`, cancellation, and per-attempt sleep.
+- Added public `AsyncRuntimeCancellationToken::uncancelled()` so non-test callers can run bounded synchronous received-fd sessions without constructing private cancellation state.
+- Added `foxprox run-bwrap-tcp-egress <config> <stack-ip:port> <host-ip:port> -- <target...>` as an alpha launcher path.
+  - It validates config, binds setup-control socket, starts bwrap/`foxproxsetup`, receives the TUN fd with bounded accept/read timeouts, runs the smoltcp TCP egress bridge against a configured host socket endpoint, drains audit JSON lines, waits for target exit with timeout, and exits nonzero on setup/runtime/target failure.
+- Broke the `foxprox-egress` dev-dependency cycle on `foxprox-cli` by replacing the one egress test use of CLI handoff helpers with direct setup-plan + SCM_RIGHTS receive evidence.
+- Added ignored real E2E `bwrap_foxproxsetup_received_tun_fd_bridges_tcp_bytes_to_host_socket`.
+  - The target runs inside real bwrap network namespace, connects to `198.51.100.1:8080`, sends `ping`, receives `pong`, and exits.
+  - The host starts a real `127.0.0.1:0` TCP listener, receives `ping` through `BlockingTcpEgress`, returns `pong`, and the test asserts byte counts plus `tcp_flow_closed`/smoltcp/from_sandbox/to_sandbox audit evidence.
+
+### Validation
+- `cargo test -p foxprox-cli --test bwrap_setup_e2e --all-features -- --ignored --nocapture` — passed all three ignored real bwrap/TUN tests.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all three ignored real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed: 33 CLI unit tests + 1 ignored privileged CLI unit test, 3 ignored bwrap E2E tests in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 109 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining alpha gaps
+- This proves one real host TCP request/response over bwrap + received TUN + smoltcp + host socket egress, but the product still needs general transparent destination mapping instead of explicit stack/host endpoint mapping, long-running multi-flow TCP forwarding, UDP reply/write-back over smoltcp/TUN, DNS listener orchestration inside the same launcher, explicit proxy listener lifecycle in the same launcher, cleanup/lifecycle audit hardening, and curl/DNS/proxy production E2Es before `docs/initial-impl.md` can be considered complete.
