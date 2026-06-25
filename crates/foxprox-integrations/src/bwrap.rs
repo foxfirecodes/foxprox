@@ -4,6 +4,7 @@ pub struct BwrapSetupConfig {
     pub setup_helper: String,
     pub target_args: Vec<String>,
     pub proxy_environment: Option<ProxyEnvironment>,
+    pub control_socket: Option<String>,
 }
 
 impl BwrapSetupConfig {
@@ -17,11 +18,17 @@ impl BwrapSetupConfig {
             setup_helper: setup_helper.into(),
             target_args,
             proxy_environment: None,
+            control_socket: None,
         }
     }
 
     pub fn with_proxy_environment(mut self, proxy_environment: ProxyEnvironment) -> Self {
         self.proxy_environment = Some(proxy_environment);
+        self
+    }
+
+    pub fn with_control_socket(mut self, path: impl Into<String>) -> Self {
+        self.control_socket = Some(path.into());
         self
     }
 }
@@ -115,7 +122,9 @@ pub enum SetupBuildError {
     EmptyBwrapProgram,
     EmptySetupHelper,
     EmptyTarget,
+    MissingControlSocket,
     InvalidArgument,
+    InvalidControlSocket,
     InvalidProxyEnvironment,
 }
 
@@ -127,6 +136,10 @@ pub fn build_bwrap_setup_command(
     if config.target_args.is_empty() {
         return Err(SetupBuildError::EmptyTarget);
     }
+    let control_socket = config
+        .control_socket
+        .ok_or(SetupBuildError::MissingControlSocket)?;
+    validate_arg(&control_socket).map_err(|_| SetupBuildError::InvalidControlSocket)?;
     for arg in &config.target_args {
         validate_arg(arg).map_err(|_| SetupBuildError::InvalidArgument)?;
     }
@@ -144,6 +157,8 @@ pub fn build_bwrap_setup_command(
         "/dev/net/tun".to_string(),
         "--".to_string(),
         config.setup_helper,
+        "--control-socket".to_string(),
+        control_socket,
         "--".to_string(),
     ];
     args.extend(config.target_args);
@@ -172,11 +187,14 @@ mod tests {
 
     #[test]
     fn bwrap_setup_command_includes_required_network_setup_boundary() {
-        let command = build_bwrap_setup_command(BwrapSetupConfig::new(
-            "bwrap",
-            "foxproxsetup",
-            vec!["curl".into(), "https://example.com".into()],
-        ))
+        let command = build_bwrap_setup_command(
+            BwrapSetupConfig::new(
+                "bwrap",
+                "foxproxsetup",
+                vec!["curl".into(), "https://example.com".into()],
+            )
+            .with_control_socket("/tmp/foxprox.sock"),
+        )
         .unwrap();
 
         assert_eq!(command.program, "bwrap");
@@ -201,6 +219,8 @@ mod tests {
         assert!(command.args.ends_with(&[
             "--".into(),
             "foxproxsetup".into(),
+            "--control-socket".into(),
+            "/tmp/foxprox.sock".into(),
             "--".into(),
             "curl".into(),
             "https://example.com".into(),
@@ -210,27 +230,46 @@ mod tests {
     #[test]
     fn bwrap_setup_command_rejects_ambiguous_or_empty_argv() {
         assert_eq!(
-            build_bwrap_setup_command(BwrapSetupConfig::new(
-                "",
-                "foxproxsetup",
-                vec!["true".into()],
-            )),
+            build_bwrap_setup_command(
+                BwrapSetupConfig::new("", "foxproxsetup", vec!["true".into()])
+                    .with_control_socket("/tmp/foxprox.sock"),
+            ),
             Err(SetupBuildError::EmptyBwrapProgram)
         );
         assert_eq!(
-            build_bwrap_setup_command(BwrapSetupConfig::new("bwrap", "", vec!["true".into()])),
+            build_bwrap_setup_command(
+                BwrapSetupConfig::new("bwrap", "", vec!["true".into()])
+                    .with_control_socket("/tmp/foxprox.sock"),
+            ),
             Err(SetupBuildError::EmptySetupHelper)
         );
         assert_eq!(
-            build_bwrap_setup_command(BwrapSetupConfig::new("bwrap", "foxproxsetup", Vec::new())),
+            build_bwrap_setup_command(
+                BwrapSetupConfig::new("bwrap", "foxproxsetup", Vec::new())
+                    .with_control_socket("/tmp/foxprox.sock"),
+            ),
             Err(SetupBuildError::EmptyTarget)
         );
         assert_eq!(
             build_bwrap_setup_command(BwrapSetupConfig::new(
                 "bwrap",
                 "foxproxsetup",
-                vec!["bad\0arg".into()],
+                vec!["true".into()],
             )),
+            Err(SetupBuildError::MissingControlSocket)
+        );
+        assert_eq!(
+            build_bwrap_setup_command(
+                BwrapSetupConfig::new("bwrap", "foxproxsetup", vec!["true".into()])
+                    .with_control_socket("bad\0sock"),
+            ),
+            Err(SetupBuildError::InvalidControlSocket)
+        );
+        assert_eq!(
+            build_bwrap_setup_command(
+                BwrapSetupConfig::new("bwrap", "foxproxsetup", vec!["bad\0arg".into()])
+                    .with_control_socket("/tmp/foxprox.sock"),
+            ),
             Err(SetupBuildError::InvalidArgument)
         );
     }
@@ -244,6 +283,7 @@ mod tests {
             .with_no_proxy("localhost,127.0.0.1");
         let command = build_bwrap_setup_command(
             BwrapSetupConfig::new("bwrap", "foxproxsetup", vec!["true".into()])
+                .with_control_socket("/tmp/foxprox.sock")
                 .with_proxy_environment(proxy_environment),
         )
         .unwrap();
@@ -262,6 +302,7 @@ mod tests {
         assert_eq!(
             build_bwrap_setup_command(
                 BwrapSetupConfig::new("bwrap", "foxproxsetup", vec!["true".into()])
+                    .with_control_socket("/tmp/foxprox.sock")
                     .with_proxy_environment(bad_proxy_environment),
             ),
             Err(SetupBuildError::InvalidProxyEnvironment)

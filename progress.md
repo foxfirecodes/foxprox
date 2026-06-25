@@ -1476,3 +1476,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * the handed-off fd remains live for broker-side packet observation after the helper execs the target.
 * Audit evidence: no runtime audit sink yet; setup lifecycle/error events are still core builders awaiting launcher integration.
 * Residual risk: production bwrap launcher still needs configurable filesystem policy, proxy/DNS environment injection, and lifecycle audit around child process management.
+
+## 2026-06-21 - bwrap command builder includes setup control channel
+
+* Invariant under work: bwrap command construction must include an explicit setup control channel argument for `foxproxsetup` so TUN fd handoff is not optional or implicit.
+* Threat or failure mode addressed: the earlier builder could produce `foxproxsetup -- target...` without `--control-fd` or `--control-socket`, which the real helper must reject and which would prevent broker ownership of the TUN fd.
+* Planned verification: update the builder to require a validated control socket path, include it in helper argv before the target separator, add negative tests for missing/invalid control paths, and run full checks.
+
+## 2026-06-21 - bwrap command builder includes setup control channel results
+
+* Tests added/updated:
+  * bwrap command builder now requires a validated control socket and emits `foxproxsetup --control-socket <path> -- target...`.
+  * tests assert missing control sockets and NUL-containing control paths fail before command construction.
+  * existing proxy environment and required bwrap flag tests now cover the real helper control-channel argv shape.
+* Commands run:
+  * `cargo test -p foxprox-integrations --lib` and `cargo clippy -p foxprox-integrations --all-targets --all-features -- -D warnings` — passed.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: CLI 2 tests plus 2 ignored, core 161 tests, device 3 tests plus 2 ignored, integrations 5 tests, net 2 tests plus 6 ignored, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * integration code can no longer build a bwrap setup command that omits the fd handoff control channel.
+  * invalid control socket paths are rejected before process launch.
+* Audit evidence: still a pure command builder; lifecycle/error audit belongs in launcher runtime around this command.
+* Residual risk: production launcher still needs configurable mount policy and child process supervision, but the command shape now matches the verified helper handoff path.

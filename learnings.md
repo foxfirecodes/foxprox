@@ -273,3 +273,7 @@ Even after TUN packets are policy-gated, host socket creation must require an al
 ## 2026-06-21 - bwrap fd handoff works better through a control socket path
 
 Passing an inherited control fd through bwrap with `--sync-fd` conflicted with owned-fd lifetime assumptions. For the bwrap-compatible path, a Unix control socket path is a safer setup-helper handoff mechanism; the helper connects to it and sends the TUN fd with SCM_RIGHTS.
+
+## 2026-06-21 - bwrap builder must include the setup control channel
+
+A bwrap command that runs `foxproxsetup -- target...` is structurally incomplete because the helper cannot hand the TUN fd back. The builder should require a validated control socket and emit it before the target separator.
