@@ -1132,6 +1132,41 @@ mod tests {
     }
 
     #[test]
+    fn property_policy_default_and_dns_invariants_hold_across_endpoint_space() {
+        let default_deny = PolicyEngine::new(PolicyConfig::default());
+        let default_allow = PolicyEngine::new(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        });
+        for last_octet in 1..=64 {
+            for port in [1_u16, 53, 80, 443, 8080, 65535] {
+                let destination = Ipv4Addr::new(198, 51, 100, last_octet);
+                let tcp = tcp_event(destination, port);
+                assert!(!default_deny.evaluate(&tcp).decision.is_allowed());
+                assert!(default_allow.evaluate(&tcp).decision.is_allowed());
+
+                let dns = NormalizedEvent::DnsQuery(DnsQuery {
+                    sandbox_id: sandbox_id(),
+                    frontend: FrontendKind::Tun,
+                    source: Some(Endpoint::udp(Ipv4Addr::new(10, 0, 0, 2).into(), 53000)),
+                    resolver: Endpoint::udp(destination.into(), 53),
+                    hostname: format!("host-{last_octet}.example.com"),
+                    query_type: "A".to_owned(),
+                });
+                let dns_decision = default_allow.evaluate(&dns).decision;
+                assert_eq!(
+                    dns_decision,
+                    PolicyDecision::Deny {
+                        behavior: DenialBehavior::Drop,
+                        reason: "direct-external-dns-denied".to_owned(),
+                        rule_id: None,
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
     fn exposes_core_crate_marker() {
         assert_eq!(CRATE_NAME, "foxprox-core");
     }

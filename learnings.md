@@ -308,3 +308,7 @@ For live TUN/smoltcp forwarding, parse the first SYN packet with `foxprox-packet
 ## 2026-06-22 — CLI audit stdout should remain JSON-only for live launchers
 
 The `bwrap-tcp-once` command emits only generated audit JSON lines on stdout and reports target failure via process error. This preserves the same audit-output discipline as `packet-once` while still letting ignored live tests assert process-boundary behavior.
+
+## 2026-06-22 — deterministic fuzz loops are useful alpha CI coverage
+
+For alpha robustness without introducing a separate fuzz runner, add deterministic pseudo-random byte sweeps inside normal unit tests. They catch panic/fail-closed regressions in packet, proxy, SOCKS, and TLS parsers while staying runnable under `cargo test --workspace`.

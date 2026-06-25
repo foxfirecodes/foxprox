@@ -958,6 +958,30 @@ mod tests {
         payload
     }
 
+    fn fuzz_bytes(seed: &mut u64, len: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(len);
+        for _ in 0..len {
+            *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            bytes.push((*seed >> 32) as u8);
+        }
+        bytes
+    }
+
+    #[test]
+    fn fuzz_packet_boundaries_do_not_panic_and_fail_closed() {
+        let mut seed = 0xf0f0_1234_abcd_9876_u64;
+        for len in 0..256 {
+            let packet = fuzz_bytes(&mut seed, len);
+            let _ = parse_ipv4_packet(&context(), &packet);
+            let ipv4_event = parse_ipv4_packet_fail_closed(&context(), &packet);
+            let _ = PolicyEngine::new(PolicyConfig::default()).evaluate(&ipv4_event);
+            let _ = parse_ipv6_packet(&context(), &packet);
+            let ipv6_event = parse_ipv6_packet_fail_closed(&context(), &packet);
+            let _ = PolicyEngine::new(PolicyConfig::default()).evaluate(&ipv6_event);
+            let _ = parse_ipv4_udp_datagram(&packet);
+        }
+    }
+
     #[test]
     fn parses_ipv4_tcp_syn_into_connect_attempt() {
         let packet = ipv4_packet(

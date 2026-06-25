@@ -782,6 +782,52 @@ mod tests {
         parse_ipv4_packet(&context(), &packet).unwrap()
     }
 
+    fn fuzz_bytes(seed: &mut u64, len: usize) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(len);
+        for _ in 0..len {
+            *seed = seed
+                .wrapping_mul(2862933555777941757)
+                .wrapping_add(3037000493);
+            bytes.push((*seed >> 29) as u8);
+        }
+        bytes
+    }
+
+    #[test]
+    fn fuzz_inspection_parsers_do_not_panic() {
+        let mut seed = 0x5151_aaaa_dead_beef_u64;
+        let sandbox = SandboxId::new("inspect-fuzz").unwrap();
+        let source = Some(Endpoint::tcp(Ipv4Addr::new(10, 0, 0, 2).into(), 49152));
+        let destination = Endpoint::tcp(Ipv4Addr::new(93, 184, 216, 34).into(), 443);
+        for len in 0..512 {
+            let bytes = fuzz_bytes(&mut seed, len);
+            let _ = parse_plaintext_http_request(
+                sandbox.clone(),
+                FrontendKind::Tun,
+                source,
+                Some(destination),
+                &bytes,
+            );
+            let _ =
+                parse_http_proxy_request(sandbox.clone(), FrontendKind::HttpProxy, source, &bytes);
+            let _ = parse_https_connect_request(
+                sandbox.clone(),
+                FrontendKind::HttpProxy,
+                source,
+                &bytes,
+            );
+            let _ = parse_tls_client_hello(
+                sandbox.clone(),
+                FrontendKind::Tun,
+                source,
+                destination,
+                None,
+                &bytes,
+            );
+            let _ = parse_socks5_connect_request(sandbox.clone(), FrontendKind::Socks5, &bytes);
+        }
+    }
+
     fn dns_a_response(hostname: &str, address: [u8; 4], ttl_seconds: u32) -> Vec<u8> {
         let mut response = vec![
             0x12, 0x34, // ID

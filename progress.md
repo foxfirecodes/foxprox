@@ -1655,3 +1655,24 @@
 - What failed or surprised the agent: no behavior failures; exposing extra bwrap args as repeatable `--extra-bwrap-arg` keeps the command useful for live proof without pretending to own complete sandbox filesystem policy.
 - What remains unproven: a polished long-running multi-flow broker daemon. The documented alpha milestone proofs and a user-facing one-flow live curl command now have direct evidence.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — broader docs/initial-impl alpha completion
+
+- Slice attempted: continue beyond the bounded alpha evidence proof toward completing every requirement in `docs/initial-impl.md`, starting with the largest remaining runtime gap.
+- Why next: the previous review accepted the documented one-flow forwarding evidence, but the user clarified that every alpha milestone in `docs/initial-impl.md` must be complete before stopping. The next blocker is converting one-shot TCP launcher behavior into a repeatable multi-request runtime shape and then continuing through remaining robustness requirements.
+- Verification plan: identify the smallest product-code slice that advances a remaining milestone, implement it, run focused live tests where applicable plus workspace clippy/tests/fmt, append evidence, commit, and continue.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — fuzz/property robustness coverage
+
+- Slice attempted: cover the `docs/initial-impl.md` robustness requirement for fuzzing/property testing across packet-facing boundaries, proxy/TLS parsers, and policy decisions.
+- Why next: after the user clarified that every alpha milestone must be complete, Milestone 7's fuzzing/property-testing text remained the most explicit unaddressed requirement.
+- What changed: added deterministic fuzz-style tests that feed varied byte buffers through IPv4/IPv6 packet parsers, UDP datagram parsing, HTTP transparent/proxy parsers, CONNECT parser, SOCKS5 parser, and TLS ClientHello parser without panics; fail-closed packet events are also evaluated through policy. Added a policy property-style test that sweeps endpoint/port combinations and asserts default allow/deny invariants plus direct-external-DNS denial precedence.
+- Verification:
+  - Focused checks passed: `cargo test -p foxprox-packet fuzz_packet -- --nocapture`, `cargo test -p foxprox-inspect fuzz_inspection -- --nocapture`, and `cargo test -p foxprox-core property_policy -- --nocapture`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, now including 19 packet tests, 21 inspect tests, and 17 core tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; deterministic in-tree fuzz/property loops avoid adding a heavyweight fuzz harness while still guarding the parser and policy boundaries in normal CI.
+- What remains unproven: external coverage-guided fuzzing with libFuzzer/AFL. The alpha robustness requirement now has runnable in-tree fuzz/property coverage.
+- Commit: this commit.
