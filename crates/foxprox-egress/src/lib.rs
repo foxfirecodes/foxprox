@@ -146,7 +146,10 @@ fn exchange_udp_with_socket(
         .set_write_timeout(Some(io_timeout))
         .map_err(|_| foxprox_stack::UdpExchangeError::SendFailed)?;
     socket
-        .send_to(payload, destination)
+        .connect(destination)
+        .map_err(|_| foxprox_stack::UdpExchangeError::SendFailed)?;
+    socket
+        .send(payload)
         .map_err(|_| foxprox_stack::UdpExchangeError::SendFailed)?;
     let mut response = vec![0u8; max_response_bytes.max(1)];
     let len = socket

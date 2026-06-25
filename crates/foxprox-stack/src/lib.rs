@@ -756,22 +756,6 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                 )));
             }
         };
-        if parsed.protocol != foxprox_core::Protocol::Udp {
-            return Ok(Some(udp_datagram_evidence(
-                ByteCounts::ZERO,
-                false,
-                Decision::Allow,
-                None,
-            )));
-        }
-        let Some((payload, response_template)) = udp_payload_and_response_template(&packet) else {
-            return Ok(Some(udp_datagram_evidence(
-                ByteCounts::ZERO,
-                false,
-                Decision::FailClosed,
-                Some(DenialReason::MalformedPacket),
-            )));
-        };
         let request = request_for_packet(&self.sandbox_id, &parsed);
         let inbound_audit = packet_audit(
             &self.sandbox_id,
@@ -789,6 +773,51 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                 decision.reason,
             )));
         }
+        if parsed.protocol != foxprox_core::Protocol::Udp {
+            let audit = AuditRecord::new_at(
+                AuditKind::BrokerError,
+                self.sandbox_id.clone(),
+                now_ms as u128,
+            )
+            .with_frontend(Frontend::Tun)
+            .with_protocol(parsed.protocol)
+            .with_source(parsed.source_endpoint())
+            .with_destination(parsed.destination_endpoint())
+            .with_decision(
+                Decision::FailClosed,
+                Some(DenialReason::UnsupportedProtocol),
+            )
+            .with_detail("stack", "udp_exchange")
+            .with_detail("error", "non_udp_packet_in_udp_exchange");
+            let _ = self.broker.append_audit_for(&request, audit);
+            return Ok(Some(udp_datagram_evidence(
+                ByteCounts::ZERO,
+                false,
+                Decision::FailClosed,
+                Some(DenialReason::UnsupportedProtocol),
+            )));
+        }
+        let Some((payload, response_template)) = udp_payload_and_response_template(&packet) else {
+            let audit = AuditRecord::new_at(
+                AuditKind::BrokerError,
+                self.sandbox_id.clone(),
+                now_ms as u128,
+            )
+            .with_frontend(Frontend::Tun)
+            .with_protocol(parsed.protocol)
+            .with_source(parsed.source_endpoint())
+            .with_destination(parsed.destination_endpoint())
+            .with_decision(Decision::FailClosed, Some(DenialReason::MalformedPacket))
+            .with_detail("stack", "udp_exchange")
+            .with_detail("error", "udp_response_template_failed");
+            let _ = self.broker.append_audit_for(&request, audit);
+            return Ok(Some(udp_datagram_evidence(
+                ByteCounts::ZERO,
+                false,
+                Decision::FailClosed,
+                Some(DenialReason::MalformedPacket),
+            )));
+        };
         let policy_decision = self.broker.evaluate(&request);
         if policy_decision.decision.is_deny() {
             return Ok(Some(udp_datagram_evidence(
@@ -814,10 +843,44 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                     return Err(error);
                 }
             };
-        let response = response_packet(&response_template, &response_payload)
-            .ok_or(UdpExchangeError::SendFailed)?;
-        let response_parsed =
-            ParsedIpPacket::parse(&response).map_err(|_| UdpExchangeError::SendFailed)?;
+        let response = match response_packet(&response_template, &response_payload) {
+            Some(response) => response,
+            None => {
+                let audit = AuditRecord::new_at(
+                    AuditKind::BrokerError,
+                    self.sandbox_id.clone(),
+                    now_ms as u128,
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(foxprox_core::Protocol::Udp)
+                .with_source(parsed.destination_endpoint())
+                .with_destination(parsed.source_endpoint())
+                .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+                .with_detail("stack", "udp_exchange")
+                .with_detail("error", "udp_response_packet_synthesis_failed");
+                let _ = self.broker.append_audit_for(&request, audit);
+                return Err(UdpExchangeError::SendFailed);
+            }
+        };
+        let response_parsed = match ParsedIpPacket::parse(&response) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                let audit = AuditRecord::new_at(
+                    AuditKind::BrokerError,
+                    self.sandbox_id.clone(),
+                    now_ms as u128,
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(foxprox_core::Protocol::Udp)
+                .with_source(parsed.destination_endpoint())
+                .with_destination(parsed.source_endpoint())
+                .with_decision(Decision::FailClosed, Some(DenialReason::MalformedPacket))
+                .with_detail("stack", "udp_exchange")
+                .with_detail("error", "udp_response_packet_parse_failed");
+                let _ = self.broker.append_audit_for(&request, audit);
+                return Err(UdpExchangeError::SendFailed);
+            }
+        };
         let response_request = request_for_packet(&self.sandbox_id, &response_parsed);
         let outbound_audit = packet_audit(
             &self.sandbox_id,
@@ -1299,6 +1362,70 @@ mod tests {
                 && record.details.get("stack").map(String::as_str) == Some("udp_exchange")
                 && record.details.get("direction").map(String::as_str) == Some("to_sandbox")
                 && record.details.get("write_phase").map(String::as_str) == Some("attempt")
+        }));
+    }
+
+    #[test]
+    fn udp_exchange_bridge_fails_closed_and_audits_non_udp_packets() {
+        let device = InMemoryPacketDevice::with_inbound([ipv4_icmp_echo_request()]);
+        let config = PolicyConfig {
+            allow_ping: true,
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 16);
+        let stack = SmoltcpIpStack::new_ipv4([198, 51, 100, 1], 24, 1500);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+        let mut egress = MockUdpExchange::new(b"pong".to_vec());
+
+        let evidence = bridge
+            .bridge_next_udp_datagram_to_egress(&mut egress, 6_100)
+            .unwrap()
+            .unwrap();
+
+        assert!(!evidence.exchanged);
+        assert_eq!(evidence.decision, Decision::FailClosed);
+        assert_eq!(evidence.reason, Some(DenialReason::UnsupportedProtocol));
+        assert!(egress.requests.is_empty());
+        let records: Vec<_> = bridge.broker().audit().records().collect();
+        assert!(records.iter().any(|record| {
+            record.kind == AuditKind::PacketObserved
+                && record.details.get("stack").map(String::as_str) == Some("udp_exchange")
+                && record.details.get("direction").map(String::as_str) == Some("from_sandbox")
+        }));
+        assert!(records.iter().any(|record| {
+            record.kind == AuditKind::BrokerError
+                && record.decision == Some(Decision::FailClosed)
+                && record.reason == Some(DenialReason::UnsupportedProtocol)
+                && record.details.get("error").map(String::as_str)
+                    == Some("non_udp_packet_in_udp_exchange")
+        }));
+    }
+
+    #[test]
+    fn udp_exchange_bridge_audits_response_synthesis_failure() {
+        let packet = ipv4_udp_packet([10, 0, 2, 15], [198, 51, 100, 1], 50_000, 5353, b"ping");
+        let device = InMemoryPacketDevice::with_inbound([packet]);
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 16);
+        let stack = SmoltcpIpStack::new_ipv4([198, 51, 100, 1], 24, 1500);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+        let mut egress = MockUdpExchange::new(vec![0u8; 70_000]);
+
+        let error = bridge
+            .bridge_next_udp_datagram_to_egress(&mut egress, 6_200)
+            .unwrap_err();
+
+        assert_eq!(error, UdpExchangeError::SendFailed);
+        let records: Vec<_> = bridge.broker().audit().records().collect();
+        assert!(records.iter().any(|record| {
+            record.kind == AuditKind::BrokerError
+                && record.decision == Some(Decision::FailClosed)
+                && record.details.get("error").map(String::as_str)
+                    == Some("udp_response_packet_synthesis_failed")
         }));
     }
 
