@@ -16,7 +16,7 @@ The live smoke tests require unprivileged user namespaces, `bwrap`, and access t
 
 ## Transparent bwrap TCP/HTTP/TLS one-shot
 
-`foxprox-cli bwrap-tcp-once` starts a `bwrap` sandbox, runs `foxproxsetup` inside the setup phase with temporary `CAP_NET_ADMIN`, receives the TUN fd over a Unix socket, drops `CAP_NET_ADMIN` before the target command, and brokers one TCP flow through smoltcp.
+`foxprox-cli bwrap-tcp-once` starts a `bwrap` sandbox, runs `foxproxsetup` inside the setup phase with temporary `CAP_NET_ADMIN`, receives the TUN fd over a Unix socket, drops `CAP_NET_ADMIN` before the target command, and brokers DNS, UDP, and one TCP flow through the received TUN fd. TCP uses smoltcp; UDP uses original-destination host UDP egress with synthesized TUN responses.
 
 Example HTTP request to an original destination address, with the sandbox resolver also wired through the broker for hostname-based targets:
 
@@ -104,13 +104,13 @@ Live bwrap/TUN evidence:
 cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture
 ```
 
-The live suite currently covers setup/fd handoff, ICMP write-back, UDP forwarding, DNS-over-TUN, smoltcp TCP forwarding, original-destination transparent egress, DNS-to-TCP attribution in one real bwrap run, HTTP allow/deny audit, TLS SNI audit, and CLI JSON audit output.
+The live suite currently covers setup/fd handoff, ICMP write-back, UDP forwarding, DNS-over-TUN, smoltcp TCP forwarding, original-destination transparent TCP and UDP egress, DNS-to-TCP attribution in one real bwrap run, HTTP allow/deny audit, TLS SNI audit, and CLI JSON audit output.
 
 ## Current alpha boundary
 
 This is an alpha prototype, not a production daemon. It intentionally proves narrow vertical slices:
 
-- one transparent TCP flow per `bwrap-tcp-once` run;
+- one transparent TCP flow per `bwrap-tcp-once` run, with DNS and UDP packets handled while that target runs;
 - one explicit-proxy request/connection per proxy command;
 - ignored live tests for privileged/bwrap/TUN behavior;
 - DNS and TCP can run in the same one-shot launcher, but a long-running multi-flow supervisor is still future work.

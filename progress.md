@@ -1827,3 +1827,17 @@
 - What failed or surprised the agent: glibc/curl did not use the intended resolver until the live test bind-mounted an isolated file over `/etc/resolv.conf`; using `--tmpfs /etc` plus `--bind temp-resolv /etc/resolv.conf` avoids mutating host resolver state and made ordinary curl DNS exercise the broker path. Also, blocking TUN reads can hang a one-shot launcher after target exit; polling and `child.try_wait()` fixed that alpha usability issue.
 - What remains unproven: multiple concurrent TCP flows and long-running process supervision. DNS-to-TCP attribution in a single real bwrap run is now proven.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — original-destination UDP in bwrap CLI launcher
+
+- Slice attempted: add usable transparent UDP forwarding to the real bwrap CLI launcher, not just low-level helper/live proof coverage.
+- Why next: full alpha usability should include TCP, DNS, ICMP proof, and UDP/QUIC-shaped traffic from a real sandbox. The CLI launcher already handled DNS and TCP; generic UDP packets still lacked an integrated CLI path.
+- What changed: the bwrap launcher now recognizes non-DNS IPv4 UDP packets, evaluates shared policy/audit, forwards allowed payloads to the original destination through host UDP egress, synthesizes the UDP response packet, and writes it back to the sandbox TUN fd. Added an ignored live CLI smoke where Python inside bwrap sends UDP to a host non-loopback original destination and receives `pong`; stdout contains `udp_flow` audit for that destination.
+- Verification:
+  - Focused live UDP CLI check passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_cli_bwrap_tcp_once_forwards_original_destination_udp -- --ignored --nocapture`.
+  - Full live bwrap suite passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, now 11/11.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- What remains unproven: long-lived UDP flow table in the CLI launcher; low-level flow-table resource limits/timeouts remain covered in unit/property tests.
+- Commit: this commit.

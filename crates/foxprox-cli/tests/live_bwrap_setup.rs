@@ -699,6 +699,101 @@ fn live_cli_bwrap_tcp_once_curl_emits_audit_json() {
 
 #[test]
 #[ignore = "requires bwrap, /dev/net/tun, user namespaces, curl, and Python in the sandbox"]
+fn live_cli_bwrap_tcp_once_forwards_original_destination_udp() {
+    let Some(bwrap) = existing_path("/usr/bin/bwrap") else {
+        eprintln!("skipping live CLI UDP smoke: /usr/bin/bwrap missing");
+        return;
+    };
+    if !Path::new("/dev/net/tun").exists() {
+        eprintln!("skipping live CLI UDP smoke: /dev/net/tun missing");
+        return;
+    }
+    let Some(python) = existing_path("/usr/bin/python3") else {
+        eprintln!("skipping live CLI UDP smoke: /usr/bin/python3 missing");
+        return;
+    };
+    let Some(host_ip) = local_host_ipv4() else {
+        eprintln!("skipping live CLI UDP smoke: no non-loopback host IPv4");
+        return;
+    };
+    let setup = foxproxsetup_path();
+    let cli = foxprox_cli_path();
+    let dir = unique_test_dir("live-cli-udp-original-dest");
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket_path = dir.join("broker.sock");
+    let resolv_conf = dir.join("resolv.conf");
+    let upstream = UdpSocket::bind((host_ip, 0)).unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let upstream_thread = std::thread::spawn(move || {
+        let mut buffer = [0_u8; 64];
+        let (length, peer) = upstream.recv_from(&mut buffer).unwrap();
+        assert_eq!(&buffer[..length], b"ping");
+        upstream.send_to(b"pong", peer).unwrap();
+    });
+
+    let script = format!(
+        "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(5); s.sendto(b'ping', ('{host_ip}', {})); data, addr = s.recvfrom(16); assert data == b'pong', data",
+        upstream_addr.port()
+    );
+    let output = Command::new(cli)
+        .arg("bwrap-tcp-once")
+        .arg("--bwrap")
+        .arg(bwrap)
+        .arg("--setup")
+        .arg(setup)
+        .arg("--broker-socket")
+        .arg(&socket_path)
+        .args([
+            "--tun-name",
+            "fpxudpcli0",
+            "--address-cidr",
+            "10.138.0.2/24",
+            "--mtu",
+            "1400",
+        ])
+        .arg("--resolv-conf")
+        .arg(&resolv_conf)
+        .args([
+            "--broker-dns",
+            "10.138.0.1",
+            "--ip-program",
+            "/usr/bin/ip",
+            "--listen-ip",
+            "10.138.0.1",
+            "--listen-port",
+            "9",
+            "--sandbox",
+            "live-cli-udp-original-dest",
+            "--max-packets",
+            "32",
+            "--extra-bwrap-arg",
+            "--dev-bind",
+            "--extra-bwrap-arg",
+            "/",
+            "--extra-bwrap-arg",
+            "/",
+            "--",
+        ])
+        .arg(python)
+        .args(["-c", &script])
+        .output()
+        .unwrap();
+    upstream_thread.join().unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"kind\":\"udp_flow\""));
+    assert!(stdout.contains(&format!("\"ip\":\"{host_ip}\"")));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "requires bwrap, /dev/net/tun, user namespaces, curl, and Python in the sandbox"]
 fn live_cli_bwrap_tcp_once_resolves_dns_and_uses_original_destination() {
     let Some(bwrap) = existing_path("/usr/bin/bwrap") else {
         eprintln!("skipping live DNS+TCP smoke: /usr/bin/bwrap missing");

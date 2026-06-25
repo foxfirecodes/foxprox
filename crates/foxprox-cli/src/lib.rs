@@ -472,6 +472,30 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                 }
             }
         }
+        if let Ok(datagram) = parse_ipv4_udp_datagram(&packet) {
+            if let Ok(event) = parse_ipv4_packet(&packet_context, &packet) {
+                let event = dns_cache.enrich_event(event, SystemTime::now());
+                if matches!(event, NormalizedEvent::UdpFlowAttempt(_)) {
+                    let evaluation = policy.evaluate(&event);
+                    let allowed = evaluation.decision.is_allowed();
+                    audit_json_lines.push(audit_record_to_json_line(&evaluation.audit)?);
+                    if allowed {
+                        let target = UdpTarget::new_ip(
+                            IpAddr::V4(datagram.destination),
+                            datagram.destination_port,
+                        )?;
+                        let response = forward_ipv4_udp_packet_once(
+                            &packet,
+                            &dns_egress,
+                            &target,
+                            config.host_buffer_len,
+                        )?;
+                        tun.write_packet(&response)?;
+                    }
+                    continue;
+                }
+            }
+        }
         if !open_audited {
             if let Ok(NormalizedEvent::TcpConnectAttempt(event)) =
                 parse_ipv4_packet(&packet_context, &packet)
