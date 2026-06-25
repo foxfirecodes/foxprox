@@ -1750,3 +1750,17 @@
 - What failed or surprised the agent: no behavior failures; a synthetic ClientHello over a normal TCP socket is enough to prove SNI inspection/audit in the live TUN path without needing a full TLS server handshake.
 - What remains unproven: live DNS/SNI mismatch denial in the bwrap TCP launcher; static core/inspect tests already cover mismatch policy.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — user-facing explicit proxy one-shot commands
+
+- Slice attempted: expose explicit proxy networking through CLI process boundaries rather than leaving HTTP/CONNECT/SOCKS only as library helpers.
+- Why next: review flagged that `docs/initial-impl.md` requires explicit HTTP proxy, HTTPS CONNECT, and SOCKS5 TCP CONNECT support with shared policy/audit, but the CLI only exposed transparent packet/TUN paths.
+- What changed: `foxprox-cli` now depends on `foxprox-proxy` and exposes `http-proxy-once`, `http-connect-once`, and `socks5-once` commands. Each command binds a requested listener address, loads optional TOML policy config or default-allow, serves one connection through the existing proxy frontend/host egress helpers, and writes the shared audit JSON line to stdout. Added parser coverage for the documented proxy command shape.
+- Verification:
+  - Focused parser check passed: `cargo test -p foxprox-cli proxy_once_arg_parser -- --nocapture`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 12 `foxprox-cli` tests and the existing 23 `foxprox-proxy` explicit proxy tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; the existing proxy serve-one library helpers mapped cleanly into CLI commands once policy loading and audit stdout were centralized.
+- What remains unproven: bwrap environment injection for proxy variables in a live sandbox command; bwrap planning already supports proxy env args, and explicit proxy listener behavior is covered by process/listener tests.
+- Commit: this commit.

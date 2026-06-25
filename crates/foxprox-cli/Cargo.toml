@@ -15,6 +15,7 @@ foxprox-device = { path = "../foxprox-device" }
 foxprox-egress = { path = "../foxprox-egress" }
 foxprox-flow = { path = "../foxprox-flow" }
 foxprox-packet = { path = "../foxprox-packet" }
+foxprox-proxy = { path = "../foxprox-proxy" }
 foxprox-tcp = { path = "../foxprox-tcp" }
 
 [target.'cfg(unix)'.dependencies]

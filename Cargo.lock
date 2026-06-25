@@ -119,6 +119,7 @@ dependencies = [
  "foxprox-inspect",
  "foxprox-integrations",
  "foxprox-packet",
+ "foxprox-proxy",
  "foxprox-tcp",
  "serde_json",
 ]

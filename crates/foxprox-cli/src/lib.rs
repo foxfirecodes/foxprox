@@ -10,10 +10,10 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 #[cfg(unix)]
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 #[cfg(unix)]
@@ -30,12 +30,17 @@ use foxprox_core::{
     DefaultPolicy, FrontendKind, NormalizedEvent, PolicyConfig, PolicyEngine, SandboxId,
 };
 use foxprox_device::{TunIoError, TunPacketIo};
-use foxprox_egress::{EgressError, UdpEgress, UdpTarget};
+use foxprox_egress::{EgressError, HostTcpEgress, UdpEgress, UdpTarget};
 use foxprox_flow::ClosedTcpFlow;
 #[cfg(unix)]
 use foxprox_inspect::{parse_plaintext_http_request, parse_tls_client_hello};
 use foxprox_packet::{
     parse_ipv4_packet, parse_ipv4_udp_datagram, synthesize_ipv4_udp_response, PacketContext,
+};
+#[cfg(unix)]
+use foxprox_proxy::{
+    serve_one_http_connect_connection, serve_one_http_proxy_connection,
+    serve_one_socks5_connection, HttpProxyPreflight, Socks5Preflight,
 };
 
 #[cfg(target_os = "linux")]
@@ -681,6 +686,42 @@ where
             ));
         }
     }
+    if command.as_os_str() == "http-proxy-once" {
+        #[cfg(unix)]
+        {
+            return run_http_proxy_once_args(args);
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(CliError::Usage(
+                "http-proxy-once command is only supported on Unix".to_owned(),
+            ));
+        }
+    }
+    if command.as_os_str() == "http-connect-once" {
+        #[cfg(unix)]
+        {
+            return run_http_connect_once_args(args);
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(CliError::Usage(
+                "http-connect-once command is only supported on Unix".to_owned(),
+            ));
+        }
+    }
+    if command.as_os_str() == "socks5-once" {
+        #[cfg(unix)]
+        {
+            return run_socks5_once_args(args);
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(CliError::Usage(
+                "socks5-once command is only supported on Unix".to_owned(),
+            ));
+        }
+    }
     if command.as_os_str() == "setup" {
         #[cfg(all(unix, target_os = "linux"))]
         {
@@ -695,6 +736,162 @@ where
         }
     }
     Err(usage())
+}
+
+#[cfg(unix)]
+fn run_http_proxy_once_args<I>(args: I) -> Result<(), CliError>
+where
+    I: Iterator<Item = PathBuf>,
+{
+    let config = parse_proxy_once_args(args)?;
+    let listener = TcpListener::bind(config.listen).map_err(|error| CliError::Io {
+        context: format!("bind-http-proxy {}", config.listen),
+        error,
+    })?;
+    let policy = load_proxy_policy(config.config_path.as_deref())?;
+    let handler = HttpProxyPreflight::new(PolicyEngine::new(policy));
+    let egress = HostTcpEgress::new(Duration::from_millis(config.timeout_ms))?;
+    let result = serve_one_http_proxy_connection(
+        &listener,
+        &handler,
+        &egress,
+        SandboxId::new(config.sandbox_id).map_err(|error| CliError::Core(error.to_string()))?,
+    )
+    .map_err(|error| CliError::Core(error.to_string()))?;
+    io::stdout()
+        .write_all(audit_record_to_json_line(&result.preflight.evaluation.audit)?.as_bytes())
+        .map_err(|error| CliError::Io {
+            context: "write-audit-stdout".to_owned(),
+            error,
+        })?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_http_connect_once_args<I>(args: I) -> Result<(), CliError>
+where
+    I: Iterator<Item = PathBuf>,
+{
+    let config = parse_proxy_once_args(args)?;
+    let listener = TcpListener::bind(config.listen).map_err(|error| CliError::Io {
+        context: format!("bind-http-connect {}", config.listen),
+        error,
+    })?;
+    let policy = load_proxy_policy(config.config_path.as_deref())?;
+    let handler = HttpProxyPreflight::new(PolicyEngine::new(policy));
+    let egress = HostTcpEgress::new(Duration::from_millis(config.timeout_ms))?;
+    let result = serve_one_http_connect_connection(
+        &listener,
+        &handler,
+        &egress,
+        SandboxId::new(config.sandbox_id).map_err(|error| CliError::Core(error.to_string()))?,
+    )
+    .map_err(|error| CliError::Core(error.to_string()))?;
+    io::stdout()
+        .write_all(audit_record_to_json_line(&result.preflight.evaluation.audit)?.as_bytes())
+        .map_err(|error| CliError::Io {
+            context: "write-audit-stdout".to_owned(),
+            error,
+        })?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn run_socks5_once_args<I>(args: I) -> Result<(), CliError>
+where
+    I: Iterator<Item = PathBuf>,
+{
+    let config = parse_proxy_once_args(args)?;
+    let listener = TcpListener::bind(config.listen).map_err(|error| CliError::Io {
+        context: format!("bind-socks5 {}", config.listen),
+        error,
+    })?;
+    let policy = load_proxy_policy(config.config_path.as_deref())?;
+    let handler = Socks5Preflight::new(PolicyEngine::new(policy));
+    let egress = HostTcpEgress::new(Duration::from_millis(config.timeout_ms))?;
+    let result = serve_one_socks5_connection(
+        &listener,
+        &handler,
+        &egress,
+        SandboxId::new(config.sandbox_id).map_err(|error| CliError::Core(error.to_string()))?,
+    )
+    .map_err(|error| CliError::Core(error.to_string()))?;
+    if let Some(preflight) = result.preflight {
+        io::stdout()
+            .write_all(audit_record_to_json_line(&preflight.evaluation.audit)?.as_bytes())
+            .map_err(|error| CliError::Io {
+                context: "write-audit-stdout".to_owned(),
+                error,
+            })?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+struct ProxyOnceArgs {
+    listen: SocketAddr,
+    sandbox_id: String,
+    config_path: Option<PathBuf>,
+    timeout_ms: u64,
+}
+
+#[cfg(unix)]
+fn parse_proxy_once_args<I>(mut args: I) -> Result<ProxyOnceArgs, CliError>
+where
+    I: Iterator<Item = PathBuf>,
+{
+    let mut listen = None;
+    let mut sandbox_id = None;
+    let mut config_path = None;
+    let mut timeout_ms = 3_000_u64;
+    while let Some(flag) = args.next() {
+        match flag.to_string_lossy().as_ref() {
+            "--listen" => {
+                listen = Some(parse_socket_addr_arg(
+                    "--listen",
+                    &args.next().ok_or_else(proxy_once_usage)?,
+                )?)
+            }
+            "--sandbox" => sandbox_id = args.next().map(path_to_string),
+            "--config" => config_path = args.next(),
+            "--timeout-ms" => {
+                timeout_ms =
+                    parse_u64_arg("--timeout-ms", &args.next().ok_or_else(proxy_once_usage)?)?
+            }
+            _ => return Err(proxy_once_usage()),
+        }
+    }
+    Ok(ProxyOnceArgs {
+        listen: listen.ok_or_else(proxy_once_usage)?,
+        sandbox_id: sandbox_id.ok_or_else(proxy_once_usage)?,
+        config_path,
+        timeout_ms,
+    })
+}
+
+#[cfg(unix)]
+fn load_proxy_policy(config_path: Option<&Path>) -> Result<PolicyConfig, CliError> {
+    if let Some(config_path) = config_path {
+        let config_toml = fs::read_to_string(config_path).map_err(|error| CliError::Io {
+            context: format!("read-config {}", config_path.display()),
+            error,
+        })?;
+        Ok(policy_config_from_toml(&config_toml)?)
+    } else {
+        Ok(PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        })
+    }
+}
+
+#[cfg(unix)]
+fn proxy_once_usage() -> CliError {
+    CliError::Usage(
+        "usage: foxprox-cli <http-proxy-once|http-connect-once|socks5-once> --listen IP:PORT --sandbox ID [--config policy.toml] [--timeout-ms MS]"
+            .to_owned(),
+    )
 }
 
 #[cfg(unix)]
@@ -960,6 +1157,14 @@ fn parse_usize_arg(flag: &str, value: &Path) -> Result<usize, CliError> {
     value
         .to_string_lossy()
         .parse::<usize>()
+        .map_err(|error| CliError::Usage(format!("invalid {flag}: {error}")))
+}
+
+#[cfg(unix)]
+fn parse_u64_arg(flag: &str, value: &Path) -> Result<u64, CliError> {
+    value
+        .to_string_lossy()
+        .parse::<u64>()
         .map_err(|error| CliError::Usage(format!("invalid {flag}: {error}")))
 }
 
@@ -1399,6 +1604,31 @@ mod tests {
             config.target_argv,
             vec!["curl".to_owned(), "http://example.com".to_owned()]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proxy_once_arg_parser_accepts_documented_shape() {
+        let config = parse_proxy_once_args(
+            [
+                "--listen",
+                "127.0.0.1:18080",
+                "--sandbox",
+                "proxy-cli-test",
+                "--config",
+                "/tmp/policy.toml",
+                "--timeout-ms",
+                "500",
+            ]
+            .into_iter()
+            .map(PathBuf::from),
+        )
+        .unwrap();
+
+        assert_eq!(config.listen, "127.0.0.1:18080".parse().unwrap());
+        assert_eq!(config.sandbox_id, "proxy-cli-test");
+        assert_eq!(config.config_path, Some(PathBuf::from("/tmp/policy.toml")));
+        assert_eq!(config.timeout_ms, 500);
     }
 
     #[cfg(unix)]

@@ -336,3 +336,7 @@ To distinguish DNS-cache, HTTP Host, TLS SNI, explicit proxy host, and QUIC meta
 ## 2026-06-22 — TLS SNI live evidence does not need a full TLS handshake
 
 For transparent HTTPS metadata proof, send a handcrafted TLS ClientHello over the live bwrap TCP path, inspect SNI before forwarding, and have a fake host TCP server acknowledge the raw bytes. This proves SNI audit without building a real TLS endpoint.
+
+## 2026-06-22 — explicit proxy CLI can wrap serve-one library helpers
+
+Expose HTTP proxy, HTTPS CONNECT, and SOCKS5 TCP CONNECT as one-shot CLI listener commands that load the same policy config and emit the same audit JSON. This proves process-boundary usability without adding a long-running daemon yet.
