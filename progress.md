@@ -1538,5 +1538,5 @@
   - `cargo tree -p foxprox-net` — net owns DNS packet interception.
   - `cargo tree -p foxprox-dns` — DNS remains core-only.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 21455f6.
 - Remaining boundary risks: TCP DNS and async DNS serving remain.
