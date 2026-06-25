@@ -1922,3 +1922,25 @@
 - Commit hash when committed: pending.
 - Remaining risks: no privileged end-to-end bwrap/TUN smoke has executed in this unprivileged worktree; TCP/UDP real host tests remain loopback-only and deterministic.
 - Exact next step: commit live-TUN smoke/skip harness, then reassess docs for any remaining alpha feature gap that can be advanced without privileged namespace execution.
+
+## 2026-06-25T03:42:30Z
+- Current objective: close the remaining DNS-attribution gap for packet-pumped real TCP host sessions.
+- Git status summary: clean worktree after commit `b003121`.
+- Intended slice: add DNS-cache-aware smoltcp TCP host session opening so policy decisions can use broker DNS attribution while still dialing the real destination socket, preserving the existing no-attribution helper as a wrapper.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: this still uses loopback-only host sockets in tests; live TUN/bwrap smoke remains capability-gated.
+- Exact next step: implement DNS-cache-aware connect helper and regression.
+
+## 2026-06-25T03:46:20Z
+- Current objective: close DNS-attributed policy for packet-pumped real TCP host sessions.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially reported formatting drift in the new DNS-aware helper/test)
+  - `cargo fmt`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 7 device tests, 3 integration tests, 6 launcher tests, 90 runtime tests, 7 setup tests, and 40 smoltcp adapter tests passed. Added DNS-cache-aware `connect_next_allowed_host_session_with_dns_cache` and `pump_tun_and_open_next_allowed_host_session_with_dns_cache`; regression proves packet-pumped SYNs can be allowed by broker-DNS hostname attribution, audit the hostname, and still dial a real loopback host socket.
+- Commit hash when committed: pending.
+- Remaining risks: live privileged TUN/bwrap smoke is still capability-gated; explicit proxy listener sockets are represented by runtimes/parsers but not by a long-running listener loop.
+- Exact next step: commit DNS-aware TCP host session helper, then either add deterministic explicit proxy listener-step harnesses or conclude alpha if listener loops are intentionally out of scope for the verified kernel slice.

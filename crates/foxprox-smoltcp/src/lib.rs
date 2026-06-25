@@ -386,22 +386,45 @@ impl SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>> {
     }
 
     pub fn connect_next_allowed_host_session<S: foxprox_core::AuditSink>(
-        mut adapter: SmoltcpIpLoopback,
+        adapter: SmoltcpIpLoopback,
         components: &foxprox_runtime::BrokerRuntimeComponents,
         kernel: &mut foxprox_core::VerificationKernel<S>,
         sandbox_id: foxprox_core::SandboxId,
         host_address: SocketAddr,
         timestamp_millis: u128,
     ) -> Result<(Self, FlowKey, foxprox_core::Decision), SmoltcpTcpBridgeSessionError> {
+        Self::connect_next_allowed_host_session_with_dns_cache(
+            adapter,
+            components,
+            kernel,
+            sandbox_id,
+            None,
+            host_address,
+            timestamp_millis,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn connect_next_allowed_host_session_with_dns_cache<S: foxprox_core::AuditSink>(
+        mut adapter: SmoltcpIpLoopback,
+        components: &foxprox_runtime::BrokerRuntimeComponents,
+        kernel: &mut foxprox_core::VerificationKernel<S>,
+        sandbox_id: foxprox_core::SandboxId,
+        dns_cache: Option<&foxprox_core::DnsCache>,
+        host_address: SocketAddr,
+        timestamp_millis: u128,
+    ) -> Result<(Self, FlowKey, foxprox_core::Decision), SmoltcpTcpBridgeSessionError> {
         let attempt = adapter
             .next_connect_attempt()
             .ok_or(SmoltcpTcpBridgeSessionError::NoConnectAttempt)?;
+        let hostname =
+            dns_cache.and_then(|cache| cache.lookup_ip(attempt.destination.ip, timestamp_millis));
         let event = foxprox_core::NormalizedEvent::TcpConnectAttempt {
             sandbox_id,
             frontend: foxprox_core::FrontendKind::Tun,
             source: Some(attempt.source.clone()),
             destination: attempt.destination.clone(),
-            hostname: None,
+            hostname,
             sni_status: foxprox_core::SniStatus::Missing,
             sni_dns_mismatch: false,
         };
@@ -434,7 +457,7 @@ impl SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>> {
         W: Write,
         S: foxprox_core::AuditSink,
     >(
-        mut adapter: SmoltcpIpLoopback,
+        adapter: SmoltcpIpLoopback,
         reader: &mut R,
         writer: &mut W,
         buffer: &mut [u8],
@@ -448,13 +471,50 @@ impl SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>> {
         (Self, FlowKey, foxprox_core::Decision, SmoltcpTunPumpOutcome),
         SmoltcpTcpBridgeSessionError,
     > {
+        Self::pump_tun_and_open_next_allowed_host_session_with_dns_cache(
+            adapter,
+            reader,
+            writer,
+            buffer,
+            components,
+            kernel,
+            sandbox_id,
+            None,
+            host_address,
+            poll_millis,
+            timestamp_millis,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn pump_tun_and_open_next_allowed_host_session_with_dns_cache<
+        R: Read,
+        W: Write,
+        S: foxprox_core::AuditSink,
+    >(
+        mut adapter: SmoltcpIpLoopback,
+        reader: &mut R,
+        writer: &mut W,
+        buffer: &mut [u8],
+        components: &foxprox_runtime::BrokerRuntimeComponents,
+        kernel: &mut foxprox_core::VerificationKernel<S>,
+        sandbox_id: foxprox_core::SandboxId,
+        dns_cache: Option<&foxprox_core::DnsCache>,
+        host_address: SocketAddr,
+        poll_millis: i64,
+        timestamp_millis: u128,
+    ) -> Result<
+        (Self, FlowKey, foxprox_core::Decision, SmoltcpTunPumpOutcome),
+        SmoltcpTcpBridgeSessionError,
+    > {
         let pump = pump_one_tun_packet(&mut adapter, reader, writer, buffer, poll_millis)
             .map_err(|_| SmoltcpTcpBridgeSessionError::TunWrite)?;
-        let (session, flow, decision) = Self::connect_next_allowed_host_session(
+        let (session, flow, decision) = Self::connect_next_allowed_host_session_with_dns_cache(
             adapter,
             components,
             kernel,
             sandbox_id,
+            dns_cache,
             host_address,
             timestamp_millis,
         )?;
@@ -1092,8 +1152,9 @@ fn pump_read_tun_packet<W: Write>(
 mod tests {
     use super::*;
     use foxprox_core::{
-        parse_ip_packet, DecisionAction, ParsedIpPacket, PolicyConfig, PolicyEngine, PolicyRule,
-        Protocol, RuleSet, SandboxId, VecAuditSink, VerificationKernel,
+        parse_ip_packet, AttributionConfidence, DecisionAction, DnsCache, DnsObservation, Hostname,
+        ParsedIpPacket, PolicyConfig, PolicyEngine, PolicyRule, Protocol, RuleSet, SandboxId,
+        VecAuditSink, VerificationKernel,
     };
     use foxprox_runtime::{
         build_runtime_components, BrokerRuntimeConfig, EgressError, HostEgress, StdTcpStreamBridge,
@@ -1993,6 +2054,92 @@ mod tests {
             }
             other => panic!("expected SYN/ACK packet, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn pumped_host_session_can_use_dns_cache_domain_policy() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.set_packet_loopback(false);
+        adapter.set_connect_report_mode(TcpConnectReportMode::AcceptedListenerSockets);
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        let destination = Ipv4Addr::new(10, 66, 0, 1);
+        let syn = ipv4_tcp_syn_packet(Ipv4Addr::new(10, 66, 0, 2), destination, 50001, 8080, 7);
+        let mut rule = PolicyRule::allow("allow-dns-attributed-pumped-open");
+        rule.protocol = Some(Protocol::Tcp);
+        rule.domain_suffix = Some(Hostname::normalize("example.test").unwrap());
+        rule.minimum_confidence = Some(AttributionConfidence::Medium);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut dns_cache = DnsCache::new();
+        dns_cache.record(DnsObservation::new(
+            Hostname::normalize("api.example.test").unwrap(),
+            vec![IpAddr::V4(destination)],
+            5,
+            10_000,
+        ));
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+        });
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("dns-pumped-open-components").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let mut reader = Cursor::new(syn);
+        let mut writer = Vec::new();
+        let mut buffer = vec![0; 1500];
+
+        let (_session, flow, decision, _pump) =
+            SmoltcpTcpBridgeSession::pump_tun_and_open_next_allowed_host_session_with_dns_cache(
+                adapter,
+                &mut reader,
+                &mut writer,
+                &mut buffer,
+                &components,
+                &mut kernel,
+                SandboxId::new("dns-pumped-open").unwrap(),
+                Some(&dns_cache),
+                listen_addr,
+                1,
+                6,
+            )
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(decision.action, DecisionAction::Allow);
+        assert_eq!(
+            decision.rule_id.as_deref(),
+            Some("allow-dns-attributed-pumped-open")
+        );
+        assert_eq!(flow.destination.ip, IpAddr::V4(destination));
+        assert_eq!(kernel.audit_sink().events().len(), 1);
+        assert_eq!(
+            kernel.audit_sink().events()[0]
+                .hostname
+                .as_ref()
+                .map(|hostname| hostname.as_str()),
+            Some("api.example.test")
+        );
     }
 
     #[test]
