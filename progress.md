@@ -5462,3 +5462,43 @@ Commit: 6d6f500
 
 ### Remaining alpha gaps
 - This improves transparent endpoint policy/audit semantics but does not remove the explicit mapped egress endpoint from the alpha launcher. Remaining gaps continue to include DNS/proxy lifecycle integration, transparent destination mapping/config, long-running multi-flow sessions, transparent HTTP/TLS attribution in the smoltcp data plane, and lifecycle/cleanup hardening.
+
+## 2026-06-25 — Add real bwrap DNS launcher proof
+
+Commit: 6f263dc
+
+### Scope
+- Addressed the highest-priority alpha blocker from reviewer run `1bebfce5`: DNS service was not present in any user-facing bwrap runtime path.
+
+### Implementation
+- Extended `foxprox_stack::UdpDatagramExchange` with optional audit-record extraction so higher-level UDP exchange sessions can drain DNS-handler audit evidence alongside TUN packet evidence.
+- Added `foxprox_egress::DnsUdpExchange`, which wraps `DnsBrokerHandler` as a TUN UDP datagram exchange:
+  - handles DNS query payloads from sandbox UDP packets;
+  - forwards allowed queries through `DnsUpstream`;
+  - commits successful DNS observations to the shared DNS cache;
+  - exposes DNS audit records for fan-in draining.
+- Added `foxprox run-bwrap-dns-egress <config> -- <target...>`:
+  - validates config;
+  - starts bwrap/`foxproxsetup`;
+  - receives the TUN fd with bounded setup-control accept/read;
+  - services one DNS query sent over the received TUN fd to `config.setup.broker_dns_ip:53`;
+  - forwards to `config.dns_upstream` using `BlockingDnsUpstream`;
+  - writes the DNS response back to the sandbox through TUN;
+  - drains setup, packet, and DNS query/observation audit JSON lines;
+  - waits for target exit and fails nonzero on setup/runtime/target failure.
+- Added ignored real bwrap E2E `foxprox_run_bwrap_dns_egress_command_answers_target_query`:
+  - starts a real local UDP DNS upstream on the host;
+  - configures `dns_upstream` to that socket;
+  - runs the actual `foxprox run-bwrap-dns-egress` command;
+  - target sends a raw DNS A query to sandbox broker DNS `10.0.2.3:53` and asserts the returned A record `203.0.113.7`;
+  - test asserts upstream saw the query and launcher audit includes DNS query evidence, returned addresses, and TUN write-back.
+
+### Validation
+- `cargo test -p foxprox-cli --test bwrap_setup_e2e --all-features foxprox_run_bwrap_dns_egress_command_answers_target_query -- --ignored --nocapture` — passed.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all seven ignored real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed: 33 CLI unit tests + 1 ignored privileged CLI unit test, 7 ignored bwrap E2E tests in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 109 egress tests, and 19 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining alpha gaps
+- DNS now has a real bwrap launcher proof, but it is still a bounded single-query path. Remaining completion work: combine DNS/TCP/UDP/proxy into one long-running production command, remove explicit mapped endpoint assumptions, add multi-flow TCP/UDP loops, wire transparent HTTP/TLS attribution through smoltcp flows, integrate explicit HTTP/SOCKS proxy lifecycle into the launcher, and harden lifecycle/cleanup audit with runtime harness semantics.
