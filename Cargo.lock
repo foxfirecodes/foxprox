@@ -10,6 +10,7 @@ version = "0.1.0"
 name = "foxprox-device"
 version = "0.1.0"
 dependencies = [
+ "foxprox-core",
  "libc",
 ]
 

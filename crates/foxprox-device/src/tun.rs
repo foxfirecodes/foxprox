@@ -277,7 +277,7 @@ pub fn configure_tun_interface(
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read;
+    use std::io::{Read, Write};
     use std::process::Command;
     use std::time::Duration;
 
@@ -339,6 +339,61 @@ mod tests {
             TunSetup::new("fp0", "10.0.0.1/24", "bad route", 1500),
             Err(TunSetupError::InvalidAddress)
         );
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_ADMIN in a disposable network namespace"]
+    fn writes_policy_gated_icmp_reply_to_real_tun() {
+        let config = TunConfig::new("fp0").unwrap();
+        let mut device = create_tun(&config).unwrap();
+        let setup = TunSetup::new("fp0", "10.0.0.1/24", "0.0.0.0/0", 1300).unwrap();
+        configure_tun_interface(&setup, &mut IpCommandRunner).unwrap();
+        set_nonblocking(device.raw_fd()).unwrap();
+
+        let mut ping = Command::new("ping")
+            .args(["-c", "1", "-W", "1", "10.0.0.2"])
+            .spawn()
+            .unwrap();
+        let mut packet = [0_u8; 2048];
+        let mut wrote_reply = false;
+        for _ in 0..20 {
+            match device.file.read(&mut packet) {
+                Ok(n) if n > 0 => {
+                    let outcome = foxprox_core::handle_tun_packet(
+                        &packet[..n],
+                        &foxprox_core::PolicyConfig {
+                            allow_ping: true,
+                            ..foxprox_core::PolicyConfig::default()
+                        },
+                        foxprox_core::TunPacketContext {
+                            timestamp_millis: 1,
+                            sandbox_id: foxprox_core::SandboxId::new("tun-e2e"),
+                            dns_attribution: None,
+                        },
+                    );
+                    if let foxprox_core::TunPacketOutcome::WriteBack {
+                        response, audit, ..
+                    } = outcome
+                    {
+                        assert_eq!(audit.decision, Some(foxprox_core::AuditDecision::Allow));
+                        device.file.write_all(&response).unwrap();
+                        wrote_reply = true;
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                other => panic!("unexpected TUN read result: {other:?}"),
+            }
+        }
+
+        assert!(
+            wrote_reply,
+            "expected ping to produce an inbound TUN packet"
+        );
+        let status = ping.wait().unwrap();
+        assert!(status.success(), "ping should receive the synthetic reply");
     }
 
     #[test]

@@ -1260,3 +1260,23 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * packet observation from ping proves sandbox-side traffic reaches the TUN fd.
 * Audit evidence: this is device setup plumbing; runtime lifecycle audit emission still needs to be wired around successful/failed setup.
 * Residual risk: packet write-back through the real TUN fd, fd handoff from setup helper to host broker, privilege drop before target exec, and smoltcp forwarding are still future work.
+
+## 2026-06-21 - Real TUN ICMP write-back proof
+
+* Invariant under work: packet write-back must be proven against a real TUN fd, using strict packet parsing/policy allow before synthetic ICMP echo replies are written back to the sandbox side.
+* Threat or failure mode addressed: a pure ICMP synthesis test does not prove that bytes emitted by the broker are accepted by the kernel TUN path or that write-back is gated by policy at the device boundary.
+* Planned verification: add an ignored network-namespace TUN test that runs ping, reads the echo request from TUN, passes it through the core TUN packet handler with ping allowed, writes the synthesized response to TUN, and asserts ping succeeds; run full checks and the ignored test under `unshare -Urn`.
+
+## 2026-06-21 - Real TUN ICMP write-back proof results
+
+* Tests added/updated:
+  * ignored network-namespace test now runs `ping`, reads real TUN packets, feeds them through `handle_tun_packet` with ping explicitly allowed, writes the synthesized ICMP reply back to TUN, and asserts ping succeeds.
+* Commands run:
+  * Initial `unshare -Urn bash -lc 'cargo test -p foxprox-device writes_policy_gated_icmp_reply_to_real_tun -- --ignored --nocapture'` failed because the test panicked on the first non-writeback packet; updated it to continue until a policy-gated write-back outcome is observed.
+  * `unshare -Urn bash -lc 'cargo test -p foxprox-device writes_policy_gated_icmp_reply_to_real_tun -- --ignored --nocapture'` — passed: ping received one synthetic reply with 0% packet loss.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: core 161 tests, device 3 tests plus 2 ignored, integrations 3 tests, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * real write-back occurs only after strict packet parse, shared policy allow with `allow_ping`, and core ICMP synthesis.
+  * the test tolerates unrelated transient packets but only writes a response for an explicit `TunPacketOutcome::WriteBack`.
+* Audit evidence: the real TUN test asserts the write-back outcome carries an allow audit decision before writing to the fd.
+* Residual risk: this proves ICMP write-back only; TCP/UDP forwarding through a userspace stack and host sockets is still future work.

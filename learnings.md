@@ -233,3 +233,7 @@ The broker DNS server allowlist is for broker-controlled DNS service on port 53.
 ## 2026-06-21 - Real TUN setup tests should run in disposable user/network namespaces
 
 `unshare -Urn` provides enough CAP_NET_ADMIN for local TUN setup proof without changing host routes. Address assignment already creates a connected route, so tests should add a distinct route such as default; empty writes to TUN are invalid and should not be used as write-back proof.
+
+## 2026-06-21 - Real TUN tests may see non-target packets before the expected flow
+
+End-to-end TUN tests should loop until the expected policy-gated outcome appears rather than assuming the first packet read from the fd is the target protocol. Only write back after the core handler returns an explicit write-back outcome with an allow audit decision.
