@@ -106,6 +106,12 @@ fn receive_file_from_socket_fd(socket_fd: RawFd) -> Result<File, DeviceError> {
     Ok(unsafe { File::from_raw_fd(fd) })
 }
 
+#[cfg(unix)]
+pub fn set_file_nonblocking(file: &File, nonblocking: bool) -> Result<(), DeviceError> {
+    unix_nonblocking::set_nonblocking(file.as_raw_fd(), nonblocking)
+        .map_err(|error| io_error("set fd nonblocking", error))
+}
+
 impl From<IntegrationError> for DeviceError {
     fn from(error: IntegrationError) -> Self {
         Self::InvalidConfig(error)
@@ -351,6 +357,41 @@ pub fn create_tun(_name: &str) -> Result<TunDevice, DeviceError> {
 }
 
 #[cfg(unix)]
+mod unix_nonblocking {
+    use std::io;
+    use std::os::fd::RawFd;
+    use std::os::raw::c_int;
+
+    const F_GETFL: c_int = 3;
+    const F_SETFL: c_int = 4;
+    const O_NONBLOCK: c_int = 0o4000;
+
+    unsafe extern "C" {
+        fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
+    }
+
+    pub fn set_nonblocking(fd: RawFd, nonblocking: bool) -> io::Result<()> {
+        // SAFETY: fcntl is called with a valid fd supplied by the caller and a
+        // command that returns the current file status flags.
+        let flags = unsafe { fcntl(fd, F_GETFL) };
+        if flags < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let updated = if nonblocking {
+            flags | O_NONBLOCK
+        } else {
+            flags & !O_NONBLOCK
+        };
+        // SAFETY: fcntl is called with a valid fd and the file status flags
+        // returned by F_GETFL with only O_NONBLOCK toggled.
+        if unsafe { fcntl(fd, F_SETFL, updated) } < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
 mod unix_fd_receive {
     use std::io;
     use std::mem::{size_of, zeroed};
@@ -584,6 +625,14 @@ mod tests {
         let mut buf = [0u8; 2];
         payload_rx.read_exact(&mut buf).unwrap();
         assert_eq!(&buf, b"ok");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn received_files_can_be_marked_nonblocking_for_live_tun_loops() {
+        let file = File::open("/dev/null").unwrap();
+        set_file_nonblocking(&file, true).unwrap();
+        set_file_nonblocking(&file, false).unwrap();
     }
 
     #[test]

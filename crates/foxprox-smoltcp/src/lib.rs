@@ -1106,7 +1106,13 @@ pub fn pump_one_tun_packet<R: Read, W: Write>(
     buffer: &mut [u8],
     now_millis: i64,
 ) -> io::Result<SmoltcpTunPumpOutcome> {
-    let bytes_read = reader.read(buffer)?;
+    let bytes_read = match reader.read(buffer) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            return Ok(SmoltcpTunPumpOutcome::NoPacket);
+        }
+        Err(error) => return Err(error),
+    };
     pump_read_tun_packet(adapter, writer, &buffer[..bytes_read], now_millis)
 }
 
@@ -1116,7 +1122,13 @@ pub fn pump_one_tun_packet_io<T: Read + Write>(
     buffer: &mut [u8],
     now_millis: i64,
 ) -> io::Result<SmoltcpTunPumpOutcome> {
-    let bytes_read = io.read(buffer)?;
+    let bytes_read = match io.read(buffer) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            return Ok(SmoltcpTunPumpOutcome::NoPacket);
+        }
+        Err(error) => return Err(error),
+    };
     pump_read_tun_packet(adapter, io, &buffer[..bytes_read], now_millis)
 }
 

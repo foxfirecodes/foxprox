@@ -2082,3 +2082,29 @@
 - Commit hash when committed: pending.
 - Remaining risks: the checked-in live smoke proves UDP packet write-back but does not yet run the full TCP smoltcp bridge against a live bwrap TUN fd; TCP remains verified with deterministic raw-packet/TUN-like tests and real loopback host sockets.
 - Exact next step: commit live Rust bwrap UDP smoke, then attempt a live bwrap TCP smoke through the smoltcp bridge session or identify the minimal missing API for wiring live TUN fd to smoltcp session startup.
+
+## 2026-06-25T15:05:30Z
+- Current objective: add live rootless bwrap TCP smoke through the Rust smoltcp bridge.
+- Files changed: `crates/foxprox-device/src/lib.rs`, `crates/foxprox-smoltcp/Cargo.toml`, `crates/foxprox-smoltcp/src/lib.rs`, `crates/foxprox-smoltcp/examples/live_bwrap_tcp_smoke.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo run -p foxprox-smoltcp --example live_bwrap_tcp_smoke` (initially failed with `NoConnectAttempt` because live TUN first emitted non-TCP/early packets; fixed the example to pump until an accepted connect is visible before consuming the adapter into a session)
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+  - final `cargo run -p foxprox-smoltcp --example live_bwrap_tcp_smoke` (passed: `live bwrap TCP smoke passed: live-reply`)
+- Observed result: full deterministic verification passed; 55 core tests, 9 device tests, 4 integration tests, 7 launcher tests, 95 runtime tests, 10 setup tests, and 40 smoltcp adapter tests passed. The live TCP example launches rootless bwrap, configures a real TUN with `foxproxsetup`, receives the fd over socket handoff, uses smoltcp to accept the sandbox TCP SYN, policy-gates it, opens a real localhost TCP host connection, forwards sandbox bytes to the host, reads the host reply, injects it through smoltcp, and the sandbox process receives `live-reply`.
+- Commit hash when committed: pending.
+- Remaining risks: examples are smoke harnesses rather than a polished CLI; however the alpha forwarding paths now have both deterministic tests and rootless bwrap live proof for UDP/TUN and TCP/smoltcp/TUN.
+- Exact next step: commit live TCP smoke, run both live examples once more, and perform a final alpha-scope audit.
+
+## 2026-06-25T15:08:30Z
+- Current objective: final alpha live-smoke audit after rootless bwrap UDP and TCP proof harnesses.
+- Files changed: `progress.md` only, amended into prior live TCP smoke checkpoint.
+- Verification commands run:
+  - `cargo run -p foxprox-launcher --example live_bwrap_udp_smoke`
+  - `cargo run -p foxprox-smoltcp --example live_bwrap_tcp_smoke`
+- Observed result: both live rootless bwrap examples passed (`pong` for UDP/TUN write-back and `live-reply` for TCP/smoltcp/host bridge). Worktree was clean before this ledger amendment. At this point the alpha prototype has deterministic and live coverage for rootless bwrap TUN setup, fd handoff, capability drop, DNS resolver config, UDP TUN packet reply, TCP smoltcp TUN forwarding to real localhost host sockets, policy/audit gates, explicit HTTP/SOCKS connection-step fail-closed behavior, and setup/launcher planning.
+- Commit hash when committed: amended into `c35a10b`.
+- Remaining risks/deferred beyond alpha prototype: examples are smoke harnesses rather than a polished long-running CLI daemon; live tests use loopback host sockets and synthetic sandbox clients; additional production work should package the broker event loop and broaden live DNS/proxy scenarios.
+- Exact next step: stop and report completion, with commands and commit hash, because documented alpha prototype criteria now have deterministic tests plus rootless bwrap live proof for the critical forwarding paths.
