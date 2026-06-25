@@ -1733,5 +1733,5 @@
   - `cargo tree -p foxprox-device` — Linux ioctl dependency is isolated to device.
   - `cargo tree -p foxprox-runtime` — runtime still consumes device traits.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 300fc45.
 - Remaining boundary risks: privileged end-to-end namespace smoke tests remain.
