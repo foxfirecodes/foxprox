@@ -272,6 +272,7 @@ impl<U> UdpBridgeTable<U> {
 pub struct UdpBridgeReadOutcome {
     pub udp_flows_read: usize,
     pub udp_bytes_read_from_egress: usize,
+    pub udp_flows_removed_on_error: usize,
     pub outbound_packets_written: usize,
 }
 
@@ -309,19 +310,29 @@ where
     U: HostUdpFlow,
 {
     let mut replies = Vec::new();
+    let mut failed_ipv4_flows = Vec::new();
     for (key, bridge) in bridges.flows.iter_mut().take(max_flows) {
-        let bytes = bridge
-            .flow
-            .recv_to_sandbox(max_bytes_per_flow)
-            .map_err(BrokerError::Egress)
-            .map_err(RuntimeError::Broker)?;
-        if !bytes.is_empty() {
-            bridge.last_activity_millis = now_millis;
-            replies.push((key.clone(), bytes));
+        match bridge.flow.recv_to_sandbox(max_bytes_per_flow) {
+            Ok(bytes) if !bytes.is_empty() => {
+                bridge.last_activity_millis = now_millis;
+                replies.push((key.clone(), bytes));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                if matches!(
+                    (key.source.ip(), key.destination.ip()),
+                    (std::net::IpAddr::V4(_), std::net::IpAddr::V4(_))
+                ) {
+                    failed_ipv4_flows.push(key.clone());
+                } else {
+                    return Err(RuntimeError::Broker(BrokerError::Egress(error)));
+                }
+            }
         }
     }
 
     let udp_flows_read = replies.len();
+    let udp_flows_removed_on_error = failed_ipv4_flows.len();
     let mut udp_bytes_read_from_egress = 0;
     let mut outbound_packets_written = 0;
     for (key, bytes) in replies {
@@ -344,10 +355,25 @@ where
         write_outbound_packets(device, &[outbound])?;
         outbound_packets_written += 1;
     }
+    for key in failed_ipv4_flows {
+        bridges.remove(&key);
+        let packet = foxprox_packet::synthesize_udp_ipv4_unreachable_from_flow(
+            key.source,
+            key.destination,
+            3,
+        )
+        .map_err(BrokerError::Packet)
+        .map_err(RuntimeError::Broker)?;
+        let outbound =
+            OutboundIpPacket::new(packet.bytes().to_vec()).map_err(RuntimeError::Stack)?;
+        write_outbound_packets(device, &[outbound])?;
+        outbound_packets_written += 1;
+    }
 
     Ok(UdpBridgeReadOutcome {
         udp_flows_read,
         udp_bytes_read_from_egress,
+        udp_flows_removed_on_error,
         outbound_packets_written,
     })
 }
@@ -454,6 +480,7 @@ pub struct BridgeMaintenanceOutcome {
     pub tcp_bytes_enqueued_to_stack: usize,
     pub udp_flows_read: usize,
     pub udp_bytes_read_from_egress: usize,
+    pub udp_flows_removed_on_error: usize,
     pub udp_flows_expired: usize,
     pub outbound_packets_written: usize,
 }
@@ -498,6 +525,7 @@ where
         tcp_bytes_enqueued_to_stack: tcp.tcp_bytes_enqueued_to_stack,
         udp_flows_read: udp.udp_flows_read,
         udp_bytes_read_from_egress: udp.udp_bytes_read_from_egress,
+        udp_flows_removed_on_error: udp.udp_flows_removed_on_error,
         udp_flows_expired,
         outbound_packets_written: tcp.outbound_packets_written + udp.outbound_packets_written,
     })
@@ -1517,6 +1545,34 @@ mod tests {
     }
 
     #[test]
+    fn udp_bridge_host_error_writes_ipv4_icmp_unreachable_and_removes_flow() {
+        let cursor = Cursor::new(Vec::new());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let key = UdpFlowKey {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:53000".parse().unwrap(),
+            destination: "203.0.113.10:12345".parse().unwrap(),
+        };
+        let mut bridges = UdpBridgeTable::default();
+        bridges.insert(key, FailingUdpFlow);
+
+        let outcome =
+            flush_udp_bridge_reads_to_device(&mut device, &mut bridges, 1024, 20).unwrap();
+
+        assert_eq!(outcome.udp_flows_read, 0);
+        assert_eq!(outcome.udp_flows_removed_on_error, 1);
+        assert_eq!(outcome.outbound_packets_written, 1);
+        assert!(bridges.is_empty());
+        let bytes = device.into_inner().into_inner();
+        assert_eq!(bytes[9], 1);
+        assert_eq!(bytes[20], 3);
+        assert_eq!(bytes[21], 3);
+        assert_eq!(&bytes[12..16], &[203, 0, 113, 10]);
+        assert_eq!(&bytes[16..20], &[10, 0, 0, 2]);
+    }
+
+    #[test]
     fn udp_bridge_reads_ipv6_host_reply_and_writes_sandbox_packet() {
         let cursor = Cursor::new(Vec::new());
         let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
@@ -2144,6 +2200,18 @@ mod tests {
             };
             bytes.truncate(max_bytes);
             Ok(bytes)
+        }
+    }
+
+    struct FailingUdpFlow;
+
+    impl HostUdpFlow for FailingUdpFlow {
+        fn send_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError> {
+            Ok(bytes.len())
+        }
+
+        fn recv_to_sandbox(&mut self, _max_bytes: usize) -> Result<Vec<u8>, EgressError> {
+            Err(EgressError::StreamIo("udp host failure".into()))
         }
     }
 

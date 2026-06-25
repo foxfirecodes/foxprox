@@ -265,6 +265,40 @@ pub fn synthesize_udp_ipv4_response(
     Ok(SyntheticIpPacket { bytes: packet })
 }
 
+/// Synthesize an IPv4 ICMP port-unreachable response for a failed UDP flow.
+///
+/// Runtime callers provide only the normalized UDP flow key. Packet code owns
+/// the minimal quoted IPv4/UDP packet bytes required by ICMP.
+pub fn synthesize_udp_ipv4_unreachable_from_flow(
+    original_source: SocketAddr,
+    original_destination: SocketAddr,
+    code: u8,
+) -> Result<SyntheticIpPacket, PacketError> {
+    let (source_ip, destination_ip) = match (original_source.ip(), original_destination.ip()) {
+        (IpAddr::V4(source), IpAddr::V4(destination)) => (source, destination),
+        _ => {
+            return Err(PacketError::unsupported(
+                "udp ipv4 unreachable requires IPv4 socket addresses",
+            ));
+        }
+    };
+    let mut original = vec![0_u8; 28];
+    original[0] = 0x45;
+    original[2..4].copy_from_slice(&28_u16.to_be_bytes());
+    original[8] = 64;
+    original[9] = 17;
+    original[12..16].copy_from_slice(&source_ip.octets());
+    original[16..20].copy_from_slice(&destination_ip.octets());
+    original[20..22].copy_from_slice(&original_source.port().to_be_bytes());
+    original[22..24].copy_from_slice(&original_destination.port().to_be_bytes());
+    original[24..26].copy_from_slice(&8_u16.to_be_bytes());
+    let udp_checksum = udp_checksum_ipv4(source_ip, destination_ip, &original[20..]);
+    original[26..28].copy_from_slice(&udp_checksum.to_be_bytes());
+    let ip_checksum = internet_checksum(&original[..20]);
+    original[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+    synthesize_ipv4_icmp_unreachable(&original, code)
+}
+
 /// Synthesize an IPv6 UDP response packet for a host reply to an original
 /// sandbox UDP flow. The returned packet swaps the original flow endpoints.
 pub fn synthesize_udp_ipv6_response(
@@ -593,6 +627,27 @@ mod tests {
         assert_eq!(u16::from_be_bytes([bytes[22], bytes[23]]), 53000);
         assert_ne!(u16::from_be_bytes([bytes[26], bytes[27]]), 0);
         assert_eq!(&bytes[28..], b"pong");
+    }
+
+    #[test]
+    fn udp_ipv4_unreachable_from_flow_quotes_minimal_udp_packet() {
+        let packet = synthesize_udp_ipv4_unreachable_from_flow(
+            "10.0.0.2:53000".parse().unwrap(),
+            "203.0.113.10:12345".parse().unwrap(),
+            3,
+        )
+        .unwrap();
+        let bytes = packet.bytes();
+
+        assert_eq!(bytes[9], 1);
+        assert_eq!(&bytes[12..16], &[203, 0, 113, 10]);
+        assert_eq!(&bytes[16..20], &[10, 0, 0, 2]);
+        assert_eq!(bytes[20], 3);
+        assert_eq!(bytes[21], 3);
+        assert_eq!(u16::from_be_bytes([bytes[48], bytes[49]]), 53000);
+        assert_eq!(u16::from_be_bytes([bytes[50], bytes[51]]), 12345);
+        assert_eq!(internet_checksum(&bytes[..20]), 0);
+        assert_eq!(internet_checksum(&bytes[20..]), 0);
     }
 
     #[test]

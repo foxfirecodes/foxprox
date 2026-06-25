@@ -1384,3 +1384,25 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 3e291f4.
 - Remaining boundary risks: IPv6 packet classification/input path and ICMPv6 errors remain.
+
+## 2026-06-22 — Boundary objective: UDP host-failure ICMP write-back
+
+- Boundary under work: ICMP error write-back for IPv4 UDP bridge host-side failures.
+- Allowed dependency direction: packet crate owns ICMP/IPv4 wire synthesis; runtime detects egress-flow failure through `HostUdpFlow`, removes the retained bridge, and writes opaque ICMP packets without exposing socket errors to policy/audit.
+- Dependency-risk assessment: UDP bridge read errors currently bubble as runtime errors and leave no sandbox-visible network failure. A packet-owned ICMP unreachable helper lets runtime report host-side failure while preserving normalized boundaries.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/packet/audit.
+- Observed results: added `synthesize_udp_ipv4_unreachable_from_flow` in `foxprox-packet`, which builds the quoted minimal IPv4/UDP packet and delegates ICMP response construction to packet-owned code. Runtime UDP bridge reads now remove failed IPv4 flows, synthesize ICMP port-unreachable packets, and write opaque packets to the device instead of bubbling the egress error to policy/audit. Added packet and runtime tests. All verification passed.
+- Changed files:
+  - `crates/foxprox-packet/src/lib.rs`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 119 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime uses packet crate for ICMP bytes.
+  - `cargo tree -p foxprox-packet` — packet crate remains core-only.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: TCP reset/error signaling and ICMPv6 errors remain.

@@ -323,3 +323,8 @@
 
 - UDP reply synthesis belongs in `foxprox-packet` for both IPv4 and IPv6; runtime should choose based only on normalized `SocketAddr` families and write opaque packet bytes.
 - IPv6 UDP checksums require the IPv6 pseudo-header and cannot be omitted, unlike IPv4's optional zero UDP checksum behavior.
+
+## 2026-06-22 — UDP host-failure ICMP write-back
+
+- Runtime can turn IPv4 UDP bridge read failures into ICMP port-unreachable write-back by using only normalized flow keys; packet crate should synthesize the quoted IPv4/UDP bytes.
+- Remove failed UDP bridges after emitting the error response so maintenance ticks do not repeatedly report the same host-side failure.
