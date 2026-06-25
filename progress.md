@@ -5502,3 +5502,36 @@ Commit: 6f263dc
 
 ### Remaining alpha gaps
 - DNS now has a real bwrap launcher proof, but it is still a bounded single-query path. Remaining completion work: combine DNS/TCP/UDP/proxy into one long-running production command, remove explicit mapped endpoint assumptions, add multi-flow TCP/UDP loops, wire transparent HTTP/TLS attribution through smoltcp flows, integrate explicit HTTP/SOCKS proxy lifecycle into the launcher, and harden lifecycle/cleanup audit with runtime harness semantics.
+
+## 2026-06-25 — Gate DNS exchange with DNS policy
+
+Commit: cfdcbe1
+
+### Review
+- Reviewer run `f4c6f65b` found DNS launcher correctness issues:
+  - DNS allow-list policy could not work unless raw UDP was also allowed, because the TUN UDP bridge evaluated generic UDP before `DnsBrokerHandler` saw the DNS payload.
+  - DNS audit records were lost on UDP bridge error paths.
+  - DNS observations were committed before TUN response audit/write-back succeeded.
+  - DNS-shaped payloads to non-broker destinations could be treated as broker DNS.
+
+### Fix
+- Extended `UdpDatagramExchange` with policy ownership, delivery acknowledgement, and audit extraction hooks.
+- `DnsUdpExchange` now owns DNS policy for broker-DNS datagrams, so default-deny configs can allow DNS by `Protocol::Dns`/hostname without also allowing raw UDP.
+- `DnsUdpExchange` now rejects non-broker DNS destinations before handling payloads.
+- DNS observations are now pending until the outer TUN response write succeeds; commit happens via `on_datagram_delivered()` after write-back.
+- UDP exchange error-path fan-in now includes egress/DNS audit records as well as bridge records.
+- Exported `DnsObservation` from `foxprox-core` for the egress adapter.
+- Added focused non-ignored tests proving:
+  - DNS hostname allow-list works without raw UDP allow;
+  - DNS observations commit only after delivery acknowledgement;
+  - non-broker DNS destinations are rejected.
+
+### Validation
+- `cargo test -p foxprox-egress --all-targets --all-features dns_udp_exchange -- --nocapture` — passed 3 focused DNS UDP exchange tests.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all seven ignored real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed: 33 CLI unit tests + 1 ignored privileged CLI unit test, 7 ignored bwrap E2E tests in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 112 egress tests, and 19 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining alpha gaps
+- DNS policy correctness is improved, but the launchers are still separate bounded single-exchange proofs. Remaining alpha blockers: one long-running production command combining DNS/TCP/UDP/proxy, transparent destination mapping/config, multi-flow TCP/UDP sessions, transparent HTTP/TLS attribution in smoltcp data plane, explicit HTTP/SOCKS proxy lifecycle in launcher, and lifecycle/cleanup audit hardening.
