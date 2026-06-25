@@ -1862,5 +1862,5 @@
   - `cargo tree -p foxprox-frontends` — SOCKS wire details remain frontend/core-only.
   - `cargo tree -p foxprox-egress` — host connect remains egress-owned.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 2c7f8bd.
 - Remaining boundary risks: full-duplex CONNECT/SOCKS tunnel pump and listener accept loop remain.
