@@ -1801,3 +1801,13 @@
 - What failed or surprised the agent: smoltcp accepted a dynamically added original-destination IP alias cleanly, allowing true destination-derived egress in the live bwrap test.
 - What remains unproven: multi-flow continuous daemon operation. The one-shot transparent prototype is now usable without hardcoding a separate upstream override for TCP.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — alpha prototype usage guide
+
+- Slice attempted: document how to run the alpha prototype in a real bwrap/TUN environment.
+- Why next: after original-destination TCP egress, the prototype is usable but the command requires several setup arguments. A user-facing alpha needs an explicit, copyable runbook and a clear boundary between alpha evidence and future daemon productionization.
+- What changed: added `docs/alpha-prototype.md` with prerequisites, transparent `bwrap-tcp-once` usage, original-destination behavior, JSON audit expectations, explicit proxy one-shot commands, verification commands, and current alpha limitations.
+- Verification:
+  - Documentation-only slice; previous code verification remains current: live bwrap suite 9/9, clippy workspace, test workspace, fmt check.
+- What remains unproven: documentation command copy/paste depends on local tools such as `nc` or equivalent host test server; the live Rust smoke remains the authoritative evidence.
+- Commit: this commit.
