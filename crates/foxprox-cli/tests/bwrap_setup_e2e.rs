@@ -1,11 +1,12 @@
 #![cfg(unix)]
 
 use foxprox_cli::{
-    run_host_setup_control_session_with_runner, HostSetupControlHandoffStatus,
-    HostSetupProcessExit, HostSetupProcessRunner,
+    accept_setup_control_tun_handoff_with_timeouts, run_host_setup_control_session_with_runner,
+    HostSetupControlHandoffStatus, HostSetupProcessExit, HostSetupProcessRunner,
 };
 use foxprox_core::{
-    AuditKind, BrokerCore, BwrapSetupPlan, Decision, NetworkSetupConfig, PolicyConfig, PolicyEngine,
+    AuditKind, BrokerCore, BwrapSetupPlan, Decision, NetworkSetupConfig, PolicyConfig,
+    PolicyEngine, Protocol,
 };
 use std::io::{ErrorKind, Read};
 use std::path::PathBuf;
@@ -258,7 +259,13 @@ fn bwrap_foxproxsetup_received_tun_fd_drives_smoltcp_tcp_handshake() {
     let plan = BwrapSetupPlan::new(config.clone(), &target);
     runner.start_setup_process(&plan).unwrap();
 
-    let mut handoff = foxprox_cli::accept_setup_control_tun_handoff(&listener, config, &target);
+    let mut handoff = accept_setup_control_tun_handoff_with_timeouts(
+        &listener,
+        config,
+        &target,
+        Some(Duration::from_secs(3)),
+        Some(Duration::from_secs(3)),
+    );
     let _ = std::fs::remove_file(&socket_path);
     assert_eq!(handoff.status, HostSetupControlHandoffStatus::Complete);
     let received = handoff.received.take().unwrap();
@@ -306,13 +313,31 @@ fn bwrap_foxproxsetup_received_tun_fd_drives_smoltcp_tcp_handshake() {
     let records: Vec<_> = bridge.broker().audit().records().collect();
     assert!(records.iter().any(|record| {
         record.kind == AuditKind::PacketObserved
+            && record.protocol == Some(Protocol::Tcp)
             && record.details.get("stack").map(String::as_str) == Some("smoltcp")
             && record.details.get("direction").map(String::as_str) == Some("from_sandbox")
+            && record
+                .destination
+                .as_ref()
+                .and_then(|endpoint| endpoint.ip)
+                .is_some_and(|ip| ip.to_string() == "198.51.100.1")
+            && record
+                .destination
+                .as_ref()
+                .and_then(|endpoint| endpoint.port)
+                == Some(8080)
     }));
     assert!(records.iter().any(|record| {
         record.kind == AuditKind::PacketObserved
+            && record.protocol == Some(Protocol::Tcp)
             && record.details.get("stack").map(String::as_str) == Some("smoltcp")
             && record.details.get("direction").map(String::as_str) == Some("to_sandbox")
             && record.details.get("write_phase").map(String::as_str) == Some("attempt")
+            && record
+                .source
+                .as_ref()
+                .and_then(|endpoint| endpoint.ip)
+                .is_some_and(|ip| ip.to_string() == "198.51.100.1")
+            && record.source.as_ref().and_then(|endpoint| endpoint.port) == Some(8080)
     }));
 }

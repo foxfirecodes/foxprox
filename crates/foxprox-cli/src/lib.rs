@@ -202,8 +202,19 @@ pub struct HostSetupControlHandoffReport {
 #[cfg(unix)]
 pub fn accept_setup_control_tun_handoff(
     listener: &UnixListener,
+    config: NetworkSetupConfig,
+    target: &[String],
+) -> HostSetupControlHandoffReport {
+    accept_setup_control_tun_handoff_with_timeouts(listener, config, target, None, None)
+}
+
+#[cfg(unix)]
+pub fn accept_setup_control_tun_handoff_with_timeouts(
+    listener: &UnixListener,
     mut config: NetworkSetupConfig,
     target: &[String],
+    accept_timeout: Option<Duration>,
+    read_timeout: Option<Duration>,
 ) -> HostSetupControlHandoffReport {
     if config.setup_control_socket_path.is_none() {
         let local_path = listener
@@ -214,17 +225,10 @@ pub fn accept_setup_control_tun_handoff(
     }
     let plan = BwrapSetupPlan::new(config.clone(), target);
     let mut audit_records = vec![plan.audit_record()];
-    let (stream, _) = match listener.accept() {
-        Ok(accepted) => accepted,
+    let stream = match accept_setup_control_stream(listener, accept_timeout) {
+        Ok(stream) => stream,
         Err(error) => {
-            audit_records.push(
-                AuditRecord::new(AuditKind::BrokerError, config.sandbox_id.clone())
-                    .with_frontend(Frontend::Setup)
-                    .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
-                    .with_detail("setup_phase", "host_setup_control_handoff")
-                    .with_detail("setup_status", "failed")
-                    .with_detail("setup_error", error.to_string()),
-            );
+            audit_records.push(setup_control_handoff_error_audit(&config, error));
             return HostSetupControlHandoffReport {
                 status: HostSetupControlHandoffStatus::Failed,
                 plan,
@@ -234,6 +238,7 @@ pub fn accept_setup_control_tun_handoff(
             };
         }
     };
+    let _ = stream.set_read_timeout(read_timeout);
     match foxprox_device::recv_tun_fd(&stream, &config.tun_name) {
         Ok(received) => {
             audit_records.push(received.report.audit_record(config.sandbox_id.clone()));
@@ -268,6 +273,55 @@ pub fn accept_setup_control_tun_handoff(
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn accept_setup_control_stream(
+    listener: &UnixListener,
+    accept_timeout: Option<Duration>,
+) -> Result<UnixStream, String> {
+    let Some(accept_timeout) = accept_timeout else {
+        return listener
+            .accept()
+            .map(|(stream, _)| stream)
+            .map_err(|error| error.to_string());
+    };
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| error.to_string())?;
+    let started = Instant::now();
+    loop {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let _ = listener.set_nonblocking(false);
+                return Ok(stream);
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if started.elapsed() >= accept_timeout {
+                    let _ = listener.set_nonblocking(false);
+                    return Err("timed out waiting for setup-control fd handoff".to_string());
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                let _ = listener.set_nonblocking(false);
+                return Err(error.to_string());
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn setup_control_handoff_error_audit(
+    config: &NetworkSetupConfig,
+    error: impl Into<String>,
+) -> AuditRecord {
+    AuditRecord::new(AuditKind::BrokerError, config.sandbox_id.clone())
+        .with_frontend(Frontend::Setup)
+        .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+        .with_detail("setup_phase", "host_setup_control_handoff")
+        .with_detail("setup_status", "failed")
+        .with_detail("setup_error", error.into())
 }
 
 #[cfg(unix)]
@@ -1749,6 +1803,37 @@ mod tests {
             report.audit_records[2].details["setup_phase"],
             "host_setup_control_handoff"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_control_handoff_timeout_is_bounded_and_audited() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-host-setup-control-timeout-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.setup_control_socket_path = Some(path.to_string_lossy().to_string());
+
+        let report = accept_setup_control_tun_handoff_with_timeouts(
+            &listener,
+            config,
+            &["true".to_string()],
+            Some(Duration::from_millis(10)),
+            Some(Duration::from_millis(10)),
+        );
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(report.status, HostSetupControlHandoffStatus::Failed);
+        assert!(report.received.is_none());
+        let audit = report.audit_records.last().unwrap();
+        assert_eq!(audit.kind, AuditKind::BrokerError);
+        assert_eq!(audit.decision, Some(Decision::FailClosed));
+        assert_eq!(audit.details["setup_phase"], "host_setup_control_handoff");
+        assert!(audit.details["setup_error"].contains("timed out"));
     }
 
     #[cfg(unix)]
