@@ -1601,3 +1601,23 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: a569705.
 - Remaining boundary risks: SCM_RIGHTS control-socket passing and privilege drop enforcement remain.
+
+## 2026-06-22 — Boundary objective: setup-helper privilege-drop lifecycle
+
+- Boundary under work: explicit setup-helper lifecycle ordering from TUN setup to privilege drop to target exec.
+- Allowed dependency direction: `foxprox-integrations` owns setup-helper lifecycle contracts; broker runtime and policy/audit never handle capabilities, bwrap, or target exec details.
+- Dependency-risk assessment: setup command execution and fd adoption exist, but alpha requires setup-only privileges to be dropped before target exec. Encoding the lifecycle prevents callers from accidentally execing the target before the privileged setup phase is complete.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for integrations/audit.
+- Observed results: added `TargetCommand`, `SetupHelperLifecycleExecutor`, and `run_setup_helper_lifecycle` in `foxprox-integrations`. The lifecycle applies the TUN setup plan, calls a privilege-drop hook, then execs the target. Added a mock lifecycle test proving setup commands happen before privilege drop and target exec happens after privilege drop. All verification passed.
+- Changed files:
+  - `crates/foxprox-integrations/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 131 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-integrations` — lifecycle remains integrations/core-only.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: OS-specific capability drop implementation and SCM_RIGHTS fd passing remain.

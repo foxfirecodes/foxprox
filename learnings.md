@@ -373,3 +373,8 @@
 
 - Raw fd adoption should be isolated in `foxprox-device::PreopenedTunDevice`; this is the narrow unsafe boundary between trusted setup helper fd handoff and safe runtime packet IO.
 - Runtime remains generic over `PacketDevice`/`TryPacketDevice`, so fd ownership details do not leak into policy, audit, net, or stack code.
+
+## 2026-06-22 — setup-helper privilege lifecycle
+
+- Model setup-helper lifecycle explicitly: apply network setup, drop setup-only privileges, then exec target. This keeps capability/exec sequencing in integrations instead of broker runtime.
+- Tests should assert ordering around privilege drop, not just command construction, because alpha safety depends on target exec happening after setup privileges are gone.

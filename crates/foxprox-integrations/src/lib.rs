@@ -284,6 +284,35 @@ where
     Ok(())
 }
 
+/// Target command that the setup helper execs after network setup privileges are
+/// dropped.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TargetCommand {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+/// Setup-helper lifecycle executor. Implementations are trusted integration
+/// code; broker core never observes capability or exec details.
+pub trait SetupHelperLifecycleExecutor: TunSetupExecutor {
+    fn drop_setup_privileges(&mut self) -> Result<(), IntegrationError>;
+    fn exec_target(&mut self, target: &TargetCommand) -> Result<(), IntegrationError>;
+}
+
+/// Apply setup, drop setup-only privileges, then exec the target command.
+pub fn run_setup_helper_lifecycle<E>(
+    setup: &TunSetupCommandPlan,
+    target: &TargetCommand,
+    executor: &mut E,
+) -> Result<(), IntegrationError>
+where
+    E: SetupHelperLifecycleExecutor,
+{
+    execute_tun_setup_plan(setup, executor)?;
+    executor.drop_setup_privileges()?;
+    executor.exec_target(target)
+}
+
 /// Standard setup-helper executor. It is intentionally in integrations, not in
 /// runtime or broker core.
 #[derive(Clone, Debug, Default)]
@@ -335,6 +364,8 @@ pub enum IntegrationError {
     MismatchedTunAddressFamilies,
     CommandFailed { program: String, status: String },
     FileWriteFailed { path: PathBuf, reason: String },
+    PrivilegeDropFailed(String),
+    ExecFailed { program: String, reason: String },
 }
 
 impl fmt::Display for IntegrationError {
@@ -350,6 +381,10 @@ impl fmt::Display for IntegrationError {
             }
             Self::FileWriteFailed { path, reason } => {
                 write!(f, "setup file write {} failed: {reason}", path.display())
+            }
+            Self::PrivilegeDropFailed(reason) => write!(f, "privilege drop failed: {reason}"),
+            Self::ExecFailed { program, reason } => {
+                write!(f, "target exec {program} failed: {reason}")
             }
         }
     }
@@ -390,6 +425,19 @@ mod tests {
                 file.path.display(),
                 file.contents.trim_end()
             ));
+            Ok(())
+        }
+    }
+
+    impl SetupHelperLifecycleExecutor for RecordingExecutor {
+        fn drop_setup_privileges(&mut self) -> Result<(), IntegrationError> {
+            self.operations.push("drop-privileges".to_string());
+            Ok(())
+        }
+
+        fn exec_target(&mut self, target: &TargetCommand) -> Result<(), IntegrationError> {
+            self.operations
+                .push(format!("exec:{} {}", target.program, target.args.join(" ")));
             Ok(())
         }
     }
@@ -477,6 +525,33 @@ mod tests {
         };
         let error = execute_tun_setup_plan(&plan, &mut failing).unwrap_err();
         assert!(matches!(error, IntegrationError::CommandFailed { .. }));
+    }
+
+    #[test]
+    fn setup_helper_lifecycle_drops_privileges_before_target_exec() {
+        let plan = LinuxIpTunSetup::plan_commands(&request()).unwrap();
+        let target = TargetCommand {
+            program: "curl".to_string(),
+            args: vec!["http://example.com".to_string()],
+        };
+        let mut executor = RecordingExecutor::default();
+
+        run_setup_helper_lifecycle(&plan, &target, &mut executor).unwrap();
+
+        let drop_index = executor
+            .operations
+            .iter()
+            .position(|operation| operation == "drop-privileges")
+            .unwrap();
+        let exec_index = executor
+            .operations
+            .iter()
+            .position(|operation| operation.starts_with("exec:curl"))
+            .unwrap();
+        assert!(executor.operations[..drop_index]
+            .iter()
+            .any(|operation| operation.starts_with("cmd:ip link set")));
+        assert!(drop_index < exec_index);
     }
 
     #[test]
