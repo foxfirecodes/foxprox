@@ -17,11 +17,15 @@ use foxprox_core::{
     HostnameConfidence, NormalizedEvent, PolicyDecision, Protocol, SandboxId, UdpClassification,
     UdpTimeouts,
 };
-use foxprox_dns::{build_address_response, build_refused_response, parse_dns_query_event};
+use foxprox_dns::{
+    build_address_response, build_refused_response, parse_address_records, parse_dns_query_event,
+};
 use foxprox_egress::{
     dispatch_allowed_event, DispatchOutcome, EgressError, EgressOutcome, HostEgress, HostUdpFlow,
 };
-use foxprox_packet::{inspect_ipv4_packet, synthesize_ipv4_denial_response};
+use foxprox_packet::{
+    inspect_ipv4_packet, synthesize_ipv4_denial_response, synthesize_udp_ipv4_response,
+};
 use foxprox_policy::PolicyEngine;
 
 /// Network-stack adapter boundary. Implementations may use smoltcp or another
@@ -546,6 +550,98 @@ where
     })
 }
 
+/// IPv4 packet handling input for broker DNS service interception.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Ipv4DnsServiceRequest<'a> {
+    pub packet: InboundIpv4Packet<'a>,
+    pub broker_dns_addrs: &'a [IpAddr],
+    pub response_ttl: Duration,
+    pub sequence: u64,
+    pub timestamp_millis: u64,
+}
+
+/// Mutable DNS cache update returned after a DNS service packet is handled.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DnsCacheUpdate {
+    pub records: Vec<foxprox_dns::DnsAddressRecord>,
+}
+
+/// Handle a broker-addressed IPv4 UDP/53 packet as DNS service traffic. Non-DNS
+/// packets return `Ok(None)` so callers can fall back to generic packet handling.
+pub fn handle_ipv4_dns_service_packet<E, A>(
+    request: Ipv4DnsServiceRequest<'_>,
+    policy: &PolicyEngine,
+    egress: &mut E,
+    audit: &mut A,
+) -> Result<Option<(PacketBrokerOutcome, DnsCacheUpdate)>, BrokerError>
+where
+    E: HostEgress,
+    A: AuditSink,
+{
+    let inspection = inspect_ipv4_packet(
+        request.packet.sandbox_id.clone(),
+        request.packet.frontend,
+        request.packet.bytes,
+    );
+    let NormalizedEvent::UdpFlowAttempt(flow) = &inspection.event else {
+        return Ok(None);
+    };
+    if flow.classification != UdpClassification::Dns
+        || !request.broker_dns_addrs.contains(&flow.destination.ip())
+    {
+        return Ok(None);
+    }
+    let Some(payload) = inspection.udp_payload.as_deref() else {
+        return Ok(None);
+    };
+
+    let dns = handle_dns_packet(
+        DnsPacketRequest {
+            sandbox_id: request.packet.sandbox_id,
+            frontend: request.packet.frontend,
+            source: flow.source,
+            destination: flow.destination,
+            broker_dns_addrs: request.broker_dns_addrs,
+            packet: payload,
+            response_ttl: request.response_ttl,
+            sequence: request.sequence,
+            timestamp_millis: request.timestamp_millis,
+        },
+        policy,
+        egress,
+        audit,
+    )?;
+
+    let mut outbound_packets = Vec::new();
+    let mut cache_records = Vec::new();
+    if let Some(response) = &dns.response {
+        cache_records = parse_address_records(response).unwrap_or_default();
+        let packet = synthesize_udp_ipv4_response(flow.source, flow.destination, response)
+            .map_err(BrokerError::Packet)?;
+        outbound_packets
+            .push(OutboundIpPacket::new(packet.bytes().to_vec()).map_err(BrokerError::Stack)?);
+    }
+
+    let outcome = if dns.decision.is_allowed() {
+        BrokerEventOutcome::Forwarded
+    } else {
+        BrokerEventOutcome::Denied(decision_denial_action(&dns.decision))
+    };
+
+    Ok(Some((
+        PacketBrokerOutcome {
+            event: dns.event,
+            decision: dns.decision,
+            outcome,
+            udp_bytes_sent: 0,
+            outbound_packets,
+        },
+        DnsCacheUpdate {
+            records: cache_records,
+        },
+    )))
+}
+
 /// DNS packet handling input for the broker DNS service path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DnsPacketRequest<'a> {
@@ -1047,6 +1143,59 @@ mod tests {
     }
 
     #[test]
+    fn ipv4_broker_dns_packet_returns_udp_response_and_cache_records() {
+        let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
+        let mut egress = MockEgress {
+            dns_results: vec!["203.0.113.10:0".parse().unwrap()],
+            ..MockEgress::default()
+        };
+        let mut audit = BoundedAuditSink::new(8);
+        let sandbox_id = SandboxId::new("s1").unwrap();
+        let dns_payload = dns_query_packet(0x1234, "example.com", 1);
+        let packet = udp_packet_to(
+            "10.0.0.2".parse().unwrap(),
+            53000,
+            "10.255.0.1".parse().unwrap(),
+            53,
+            &dns_payload,
+        );
+
+        let (outcome, cache_update) = handle_ipv4_dns_service_packet(
+            Ipv4DnsServiceRequest {
+                packet: InboundIpv4Packet {
+                    sandbox_id: &sandbox_id,
+                    frontend: FrontendKind::Tun,
+                    bytes: &packet,
+                },
+                broker_dns_addrs: &["10.255.0.1".parse().unwrap()],
+                response_ttl: Duration::from_secs(60),
+                sequence: 4,
+                timestamp_millis: 4000,
+            },
+            &policy,
+            &mut egress,
+            &mut audit,
+        )
+        .unwrap()
+        .expect("expected broker DNS handling");
+
+        assert_eq!(outcome.outcome, BrokerEventOutcome::Forwarded);
+        assert_eq!(outcome.outbound_packets.len(), 1);
+        assert_eq!(cache_update.records.len(), 1);
+        assert_eq!(cache_update.records[0].hostname.as_str(), "example.com");
+        assert_eq!(
+            cache_update.records[0].addr,
+            "203.0.113.10".parse::<IpAddr>().unwrap()
+        );
+        let bytes = outcome.outbound_packets[0].bytes();
+        assert_eq!(bytes[9], 17);
+        assert_eq!(&bytes[12..16], &[10, 255, 0, 1]);
+        assert_eq!(&bytes[16..20], &[10, 0, 0, 2]);
+        assert_eq!(u16::from_be_bytes([bytes[20], bytes[21]]), 53);
+        assert_eq!(u16::from_be_bytes([bytes[22], bytes[23]]), 53000);
+    }
+
+    #[test]
     fn denied_dns_packet_returns_refused_without_egress() {
         let policy = PolicyEngine::new(RuntimeConfig::deny_by_default());
         let mut egress = MockEgress::default();
@@ -1217,6 +1366,22 @@ mod tests {
     }
 
     fn udp_packet(source_port: u16, destination_port: u16, payload: &[u8]) -> Vec<u8> {
+        udp_packet_to(
+            "10.0.0.2".parse().unwrap(),
+            source_port,
+            "203.0.113.10".parse().unwrap(),
+            destination_port,
+            payload,
+        )
+    }
+
+    fn udp_packet_to(
+        source_ip: std::net::Ipv4Addr,
+        source_port: u16,
+        destination_ip: std::net::Ipv4Addr,
+        destination_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
         let udp_len = 8 + payload.len();
         let total_len = 20 + udp_len;
         let mut packet = vec![0_u8; total_len];
@@ -1224,8 +1389,8 @@ mod tests {
         packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
         packet[8] = 64;
         packet[9] = 17;
-        packet[12..16].copy_from_slice(&[10, 0, 0, 2]);
-        packet[16..20].copy_from_slice(&[203, 0, 113, 10]);
+        packet[12..16].copy_from_slice(&source_ip.octets());
+        packet[16..20].copy_from_slice(&destination_ip.octets());
         packet[20..22].copy_from_slice(&source_port.to_be_bytes());
         packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
         packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());

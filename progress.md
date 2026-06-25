@@ -1496,3 +1496,25 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 81bcbd1.
 - Remaining boundary risks: updating cache from live DNS packets in the stack runtime loop remains.
+
+## 2026-06-22 — Boundary objective: broker DNS service for IPv4 TUN packets
+
+- Boundary under work: route broker-addressed UDP/53 packets through the DNS subsystem, synthesize UDP responses, and update DNS attribution cache.
+- Allowed dependency direction: `foxprox-net` may combine packet inspection, DNS subsystem, egress, and packet synthesis; policy/audit still consume normalized `DnsQuery` events only, and runtime receives opaque outbound packets.
+- Dependency-risk assessment: `handle_dns_packet` exists but raw IPv4 UDP packets can still follow generic UDP forwarding unless the net boundary recognizes broker DNS destinations and returns a DNS response packet. This is required for transparent DNS reachability and attribution.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for net/dns/packet/audit.
+- Observed results: added `Ipv4DnsServiceRequest`, `DnsCacheUpdate`, and `handle_ipv4_dns_service_packet` in `foxprox-net`. Broker-addressed IPv4 UDP/53 packets now route through `handle_dns_packet`, resolve via shared egress, synthesize opaque IPv4 UDP DNS responses through `foxprox-packet`, and return normalized DNS address records for attribution cache updates. Non-broker DNS packets fall through to generic handling. Added a test proving response packet endpoint reversal and cache records. All verification passed.
+- Changed files:
+  - `crates/foxprox-net/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 127 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-net` — net orchestrates DNS/packet/egress boundaries.
+  - `cargo tree -p foxprox-dns` — DNS remains core-only.
+  - `cargo tree -p foxprox-packet` — packet remains core-only.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: TCP DNS and live runtime DNS service scheduling remain.

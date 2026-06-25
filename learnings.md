@@ -348,3 +348,8 @@
 
 - Stack adapters should continue to emit normalized events without cache access; runtime can enrich those events from `DnsAttributionCache` immediately before policy/audit.
 - Pass DNS attribution context explicitly through runtime step structs so tests and future schedulers can choose the cache timebase without adding global state.
+
+## 2026-06-22 — broker DNS service interception
+
+- Broker-addressed UDP/53 packets should be intercepted in `foxprox-net` before generic UDP forwarding so the DNS subsystem can audit/resolve/refuse and packet code can synthesize the UDP response.
+- Return parsed DNS address records as a cache update rather than mutating hidden global state; runtime can decide how to apply them to its attribution cache.
