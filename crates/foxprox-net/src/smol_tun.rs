@@ -141,7 +141,7 @@ pub fn set_nonblocking(fd: RawFd) -> Result<(), SmolTunError> {
 #[cfg(test)]
 mod tests {
     use std::io::{Read as _, Write as _};
-    use std::net::{TcpListener, TcpStream};
+    use std::net::{TcpListener, TcpStream, UdpSocket};
     use std::process::Command;
     use std::time::{Duration as StdDuration, Instant as StdInstant};
 
@@ -149,9 +149,9 @@ mod tests {
         configure_tun_interface, create_tun, IpCommandRunner, TunConfig, TunSetup,
     };
     use smoltcp::iface::{Config, Interface, SocketSet};
-    use smoltcp::socket::tcp;
+    use smoltcp::socket::{tcp, udp};
     use smoltcp::time::Instant;
-    use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
+    use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint};
 
     use super::*;
 
@@ -338,5 +338,102 @@ mod tests {
             status.success(),
             "curl should receive the bridged host response"
         );
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_ADMIN in a disposable network namespace"]
+    fn smoltcp_bridges_tun_udp_to_host_socket() {
+        Command::new("ip")
+            .args(["link", "set", "lo", "up"])
+            .status()
+            .unwrap();
+        let host_server = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let host_addr = host_server.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mut buffer = [0_u8; 1024];
+            let (n, peer) = host_server.recv_from(&mut buffer).unwrap();
+            assert_eq!(&buffer[..n], b"ping");
+            host_server.send_to(b"pong", peer).unwrap();
+        });
+
+        let tun = create_tun(&TunConfig::new("fp0").unwrap()).unwrap();
+        let setup = TunSetup::new("fp0", "10.0.0.1/24", "0.0.0.0/0", 1300).unwrap();
+        configure_tun_interface(&setup, &mut IpCommandRunner).unwrap();
+
+        let client = UdpSocket::bind("10.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(StdDuration::from_secs(3)))
+            .unwrap();
+        client.send_to(b"ping", "10.0.0.2:9000").unwrap();
+
+        let mut device = SmolTunDevice::new(tun, 1300).unwrap();
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = 0xfeed_beef;
+        let mut iface = Interface::new(config, &mut device, Instant::from_millis(0));
+        iface.update_ip_addrs(|addrs| {
+            addrs
+                .push(IpCidr::new(IpAddress::v4(10, 0, 0, 2), 24))
+                .unwrap();
+        });
+
+        let rx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 4096]);
+        let tx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 4096]);
+        let mut udp_socket = udp::Socket::new(rx_buffer, tx_buffer);
+        udp_socket.bind(9000).unwrap();
+        let mut sockets = SocketSet::new(vec![]);
+        let udp_handle = sockets.add(udp_socket);
+        let host_client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        host_client.set_nonblocking(true).unwrap();
+
+        let started = StdInstant::now();
+        let mut sandbox_peer: Option<IpEndpoint> = None;
+        let mut bridged_request = false;
+        let mut bridged_response = false;
+        let mut response_ready_at: Option<StdInstant> = None;
+        while started.elapsed() < StdDuration::from_secs(3) {
+            let now = Instant::from_millis(started.elapsed().as_millis() as i64);
+            iface.poll(now, &mut device, &mut sockets);
+            let socket = sockets.get_mut::<udp::Socket>(udp_handle);
+
+            if socket.can_recv() {
+                let (data, meta) = socket.recv().unwrap();
+                host_client.send_to(data, host_addr).unwrap();
+                sandbox_peer = Some(meta.endpoint);
+                bridged_request = true;
+            }
+
+            let mut buffer = [0_u8; 1024];
+            match host_client.recv_from(&mut buffer) {
+                Ok((n, _)) => {
+                    if let Some(peer) = sandbox_peer {
+                        socket.send_slice(&buffer[..n], peer).unwrap();
+                        bridged_response = true;
+                        response_ready_at = Some(StdInstant::now());
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("host UDP read failed: {error}"),
+            }
+
+            if response_ready_at
+                .is_some_and(|sent_at| sent_at.elapsed() > StdDuration::from_millis(50))
+            {
+                break;
+            }
+            std::thread::sleep(StdDuration::from_millis(5));
+        }
+
+        let mut response = [0_u8; 16];
+        let (n, _) = client.recv_from(&mut response).unwrap();
+        server.join().unwrap();
+        assert!(
+            bridged_request,
+            "expected sandbox UDP datagram to reach host socket"
+        );
+        assert!(
+            bridged_response,
+            "expected host UDP response to return through smoltcp"
+        );
+        assert_eq!(&response[..n], b"pong");
     }
 }

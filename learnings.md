@@ -245,3 +245,7 @@ For L3 TUN devices, configure smoltcp with `HardwareAddress::Ip`, `Medium::Ip`, 
 ## 2026-06-21 - TCP forwarding proof can bridge smoltcp sockets to ordinary TcpStream
 
 A minimal alpha TCP bridge can treat smoltcp as the sandbox-facing TCP endpoint and copy bytes to a broker-owned `TcpStream`, then send host bytes back through smoltcp. This proves the no-direct-host-socket boundary before adding async/backpressure and policy permits.
+
+## 2026-06-21 - smoltcp UDP sends need a follow-up poll to hit TUN
+
+Queueing a UDP response with `send_slice` is not enough; the event loop must continue polling the smoltcp interface so the datagram is emitted to the TUN fd. E2E tests should wait briefly after queueing before expecting the kernel client to receive data.

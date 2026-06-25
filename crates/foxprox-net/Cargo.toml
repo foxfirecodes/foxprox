@@ -12,7 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 foxprox-device = { path = "../foxprox-device" }
 libc = "0.2"
-smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp"] }
+smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp", "socket-udp"] }
 
 [dev-dependencies]
 foxprox-core = { path = "../foxprox-core" }

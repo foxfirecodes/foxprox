@@ -1322,3 +1322,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * response bytes return through smoltcp/TUN rather than a kernel NAT path.
 * Audit evidence: no lifecycle audit yet in the bridge loop; this remains a forwarding proof and not a full audited runtime.
 * Residual risk: bridge proof is local-loopback inside a disposable namespace; policy-gated egress permits, external host namespace fd handoff, flow lifecycle/error audit, and robust async/backpressure remain future work.
+
+## 2026-06-21 - smoltcp UDP host-socket bridge proof
+
+* Invariant under work: UDP datagrams from TUN must be bridgeable to broker-owned host UDP sockets with replies routed back through smoltcp/TUN and bounded packet buffers.
+* Threat or failure mode addressed: TCP forwarding proof does not cover UDP pseudo-flow behavior; without UDP bridge proof, DNS/QUIC/generic UDP forwarding could accidentally rely on direct kernel routing or unbounded ad hoc queues.
+* Planned verification: enable smoltcp UDP support, add an ignored disposable-namespace test with a kernel UDP client, smoltcp UDP socket, local host UDP echo server, bidirectional bridge, full checks, and the ignored test under `unshare -Urn`.
+
+## 2026-06-21 - smoltcp UDP host-socket bridge proof results
+
+* Tests added/updated:
+  * smoltcp UDP support enabled for the net crate.
+  * ignored network-namespace test sends a kernel UDP datagram from `10.0.0.1` to smoltcp at `10.0.0.2:9000`, bridges it to a broker-owned localhost UDP socket, bridges the host response back through smoltcp/TUN, and asserts the client receives `pong`.
+* Commands run:
+  * First ignored UDP bridge test failed because the test broke immediately after queuing the smoltcp response, before a subsequent poll transmitted it to TUN; added a short post-send poll window.
+  * `unshare -Urn bash -lc 'cargo test -p foxprox-net smoltcp_bridges_tun_udp_to_host_socket -- --ignored --nocapture'` — passed.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: core 161 tests, device 3 tests plus 2 ignored, integrations 3 tests, net 3 ignored tests, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * UDP datagrams can traverse the broker's smoltcp socket and a broker-owned host UDP socket without direct kernel routing from sandbox to host.
+  * response transmission requires continued polling after queueing data in smoltcp; tests now model that event-loop requirement.
+* Audit evidence: this is a UDP forwarding proof; policy/audit integration for live UDP flow creation/expiration remains to be wired around the bridge.
+* Residual risk: DNS-specific UDP broker service, pending-response correlation in a live loop, QUIC UDP flow integration, and bounded async backpressure remain future work.
