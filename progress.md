@@ -1715,3 +1715,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: host connect failure coverage is not yet explicit, hostname resolution is still out of scope, and no continuous live TUN fd loop owns sessions.
 - Exact next step: commit one-call allowed host session orchestration, then add explicit host-connect-failure coverage proving failed dialing resets the smoltcp attempt and emits the allow audit before returning a typed host-connect error.
+
+## 2026-06-25T03:02:40Z
+- Current objective: continue after one-call host session orchestration toward a TUN-read open-session step.
+- Git status summary: clean worktree after commit `85b56ad`.
+- Intended slice: add a helper that reads one TUN-like packet into smoltcp, writes emitted packets back to the TUN-like writer, then policy-gates and dials the next accepted TCP connect into an open host bridge session.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with loopback-only host sockets and in-memory TUN IO.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: this will open a session from a SYN packet but will not yet own subsequent ACK/data packets inside a continuous loop.
+- Exact next step: add `pump_tun_and_open_next_allowed_host_session` and a SYN-to-open-session regression.
+
+## 2026-06-25T03:04:05Z
+- Current objective: open a real host TCP bridge session from one TUN-like SYN packet.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on tuple return and open-flow assertion formatting; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 35 smoltcp adapter tests passed. `pump_tun_and_open_next_allowed_host_session` now reads one TUN-like packet, feeds/polls smoltcp, writes the emitted SYN/ACK to a TUN-like writer, evaluates the accepted connect through policy/audit, dials a real loopback host socket, and returns an open bridge session with the flow recorded.
+- Commit hash when committed: pending.
+- Remaining risks: subsequent ACK/data packets still require direct access to the adapter/session plumbing; the helper opens from SYN but does not yet provide a session method for later TUN packet ingestion and sandbox payload forwarding.
+- Exact next step: commit TUN-pump open-session helper, then add a session method that ingests a subsequent TUN packet, polls smoltcp, and forwards any resulting listener payload to host.

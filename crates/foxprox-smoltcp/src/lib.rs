@@ -245,6 +245,39 @@ impl SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>> {
         Ok((session, flow, decision))
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn pump_tun_and_open_next_allowed_host_session<
+        R: Read,
+        W: Write,
+        S: foxprox_core::AuditSink,
+    >(
+        mut adapter: SmoltcpIpLoopback,
+        reader: &mut R,
+        writer: &mut W,
+        buffer: &mut [u8],
+        components: &foxprox_runtime::BrokerRuntimeComponents,
+        kernel: &mut foxprox_core::VerificationKernel<S>,
+        sandbox_id: foxprox_core::SandboxId,
+        host_address: SocketAddr,
+        poll_millis: i64,
+        timestamp_millis: u128,
+    ) -> Result<
+        (Self, FlowKey, foxprox_core::Decision, SmoltcpTunPumpOutcome),
+        SmoltcpTcpBridgeSessionError,
+    > {
+        let pump = pump_one_tun_packet(&mut adapter, reader, writer, buffer, poll_millis)
+            .map_err(|_| SmoltcpTcpBridgeSessionError::TunWrite)?;
+        let (session, flow, decision) = Self::connect_next_allowed_host_session(
+            adapter,
+            components,
+            kernel,
+            sandbox_id,
+            host_address,
+            timestamp_millis,
+        )?;
+        Ok((session, flow, decision, pump))
+    }
+
     pub fn pump_host_to_sandbox_once<W: Write>(
         &mut self,
         flow: &FlowKey,
@@ -1526,6 +1559,97 @@ mod tests {
                 .action,
             DecisionAction::DenyDrop
         );
+    }
+
+    #[test]
+    fn tun_pump_can_open_policy_allowed_real_host_session_from_syn() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.set_packet_loopback(false);
+        adapter.set_connect_report_mode(TcpConnectReportMode::AcceptedListenerSockets);
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        let syn = ipv4_tcp_syn_packet(
+            Ipv4Addr::new(10, 66, 0, 2),
+            Ipv4Addr::new(10, 66, 0, 1),
+            50001,
+            8080,
+            7,
+        );
+        let mut rule = PolicyRule::allow("allow-pumped-open");
+        rule.protocol = Some(Protocol::Tcp);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (_stream, _) = listener.accept().unwrap();
+        });
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("pumped-open-components").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let mut reader = Cursor::new(syn);
+        let mut writer = Vec::new();
+        let mut buffer = vec![0; 1500];
+
+        let (session, flow, decision, pump) =
+            SmoltcpTcpBridgeSession::pump_tun_and_open_next_allowed_host_session(
+                adapter,
+                &mut reader,
+                &mut writer,
+                &mut buffer,
+                &components,
+                &mut kernel,
+                SandboxId::new("pumped-open").unwrap(),
+                listen_addr,
+                1,
+                6,
+            )
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(decision.action, DecisionAction::Allow);
+        assert_eq!(kernel.audit_sink().events().len(), 1);
+        assert_eq!(session.flow_runtime().bridge().open_flows().len(), 1);
+        assert!(session
+            .flow_runtime()
+            .bridge()
+            .open_flows()
+            .contains_key(&flow));
+        assert!(matches!(
+            pump,
+            SmoltcpTunPumpOutcome::PacketProcessed {
+                outbound_packets: 1,
+                ..
+            }
+        ));
+        match parse_ip_packet(&writer).unwrap() {
+            ParsedIpPacket::Tcpv4Segment(segment) => {
+                assert_eq!(segment.source, Ipv4Addr::new(10, 66, 0, 1));
+                assert_eq!(segment.destination, Ipv4Addr::new(10, 66, 0, 2));
+                assert!(segment.syn);
+                assert!(segment.ack);
+            }
+            other => panic!("expected SYN/ACK packet, got {other:?}"),
+        }
     }
 
     #[test]
