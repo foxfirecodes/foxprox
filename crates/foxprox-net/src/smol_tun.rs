@@ -145,6 +145,10 @@ mod tests {
     use std::process::Command;
     use std::time::{Duration as StdDuration, Instant as StdInstant};
 
+    use foxprox_core::{
+        parse_dns_address_response, BrokerDnsQueryContext, BrokerDnsQueryOutcome, Endpoint,
+        Frontend, PolicyConfig, SandboxId,
+    };
     use foxprox_device::{
         configure_tun_interface, create_tun, IpCommandRunner, TunConfig, TunSetup,
     };
@@ -435,5 +439,115 @@ mod tests {
             "expected host UDP response to return through smoltcp"
         );
         assert_eq!(&response[..n], b"pong");
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_ADMIN in a disposable network namespace"]
+    fn smoltcp_dns_broker_returns_policy_denial_response_over_tun() {
+        let tun = create_tun(&TunConfig::new("fp0").unwrap()).unwrap();
+        let setup = TunSetup::new("fp0", "10.0.0.1/24", "0.0.0.0/0", 1300).unwrap();
+        configure_tun_interface(&setup, &mut IpCommandRunner).unwrap();
+
+        let client = UdpSocket::bind("10.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(StdDuration::from_secs(3)))
+            .unwrap();
+        let query = dns_query("blocked.example", 1);
+        client.send_to(&query, "10.0.0.2:53").unwrap();
+
+        let mut device = SmolTunDevice::new(tun, 1300).unwrap();
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = 0xfeed_5300;
+        let mut iface = Interface::new(config, &mut device, Instant::from_millis(0));
+        iface.update_ip_addrs(|addrs| {
+            addrs
+                .push(IpCidr::new(IpAddress::v4(10, 0, 0, 2), 24))
+                .unwrap();
+        });
+
+        let rx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 4096]);
+        let tx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 4096]);
+        let mut udp_socket = udp::Socket::new(rx_buffer, tx_buffer);
+        udp_socket.bind(53).unwrap();
+        let mut sockets = SocketSet::new(vec![]);
+        let udp_handle = sockets.add(udp_socket);
+        let mut policy = PolicyConfig::default();
+        policy.broker_dns_servers.push("10.0.0.2".parse().unwrap());
+
+        let started = StdInstant::now();
+        let mut responded = false;
+        let mut response_ready_at: Option<StdInstant> = None;
+        while started.elapsed() < StdDuration::from_secs(3) {
+            let now = Instant::from_millis(started.elapsed().as_millis() as i64);
+            iface.poll(now, &mut device, &mut sockets);
+            let socket = sockets.get_mut::<udp::Socket>(udp_handle);
+
+            if socket.can_recv() {
+                let (data, meta) = socket.recv().unwrap();
+                let outcome = foxprox_core::handle_broker_dns_query(
+                    data,
+                    &policy,
+                    BrokerDnsQueryContext {
+                        timestamp_millis: 1,
+                        sandbox_id: SandboxId::new("dns-e2e"),
+                        frontend: Frontend::Tun,
+                        source: Some(Endpoint::udp(
+                            "10.0.0.1".parse().unwrap(),
+                            meta.endpoint.port,
+                        )),
+                        destination: Some(Endpoint::udp("10.0.0.2".parse().unwrap(), 53)),
+                        max_query_bytes: 512,
+                        max_response_bytes: 512,
+                    },
+                );
+                let BrokerDnsQueryOutcome::Respond {
+                    response, audit, ..
+                } = outcome
+                else {
+                    panic!("expected denied DNS query response");
+                };
+                assert_eq!(audit.reason, Some(foxprox_core::DenialReason::DefaultDeny));
+                socket.send_slice(&response, meta.endpoint).unwrap();
+                responded = true;
+                response_ready_at = Some(StdInstant::now());
+            }
+
+            if response_ready_at
+                .is_some_and(|sent_at| sent_at.elapsed() > StdDuration::from_millis(50))
+            {
+                break;
+            }
+            std::thread::sleep(StdDuration::from_millis(5));
+        }
+
+        let mut response = [0_u8; 512];
+        let (n, _) = client.recv_from(&mut response).unwrap();
+        let metadata = parse_dns_address_response(&response[..n], 512, 4).unwrap();
+        assert!(responded, "expected DNS broker to send a response");
+        assert_eq!(metadata.hostname.as_str(), "blocked.example");
+        assert_eq!(
+            metadata.response_code,
+            foxprox_core::DnsResponseCode::Refused
+        );
+        assert!(metadata.addresses.is_empty());
+    }
+
+    fn dns_query(name: &str, qtype: u16) -> Vec<u8> {
+        let mut bytes = vec![
+            0x12, 0x34, // transaction id
+            0x01, 0x00, // standard query, recursion desired
+            0x00, 0x01, // qdcount
+            0x00, 0x00, // ancount
+            0x00, 0x00, // nscount
+            0x00, 0x00, // arcount
+        ];
+        for label in name.split('.') {
+            bytes.push(label.len() as u8);
+            bytes.extend_from_slice(label.as_bytes());
+        }
+        bytes.push(0);
+        bytes.extend_from_slice(&qtype.to_be_bytes());
+        bytes.extend_from_slice(&1_u16.to_be_bytes());
+        bytes
     }
 }

@@ -1343,3 +1343,23 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * response transmission requires continued polling after queueing data in smoltcp; tests now model that event-loop requirement.
 * Audit evidence: this is a UDP forwarding proof; policy/audit integration for live UDP flow creation/expiration remains to be wired around the bridge.
 * Residual risk: DNS-specific UDP broker service, pending-response correlation in a live loop, QUIC UDP flow integration, and bounded async backpressure remain future work.
+
+## 2026-06-21 - Real TUN DNS broker denial proof
+
+* Invariant under work: the broker DNS service must be reachable through TUN and must return bounded audited denial responses for policy-denied DNS queries rather than letting sandbox DNS bypass policy.
+* Threat or failure mode addressed: UDP forwarding proof alone does not prove DNS-specific parsing, broker-DNS exemption, policy denial, and bounded REFUSED response behavior on a real TUN path.
+* Planned verification: add an ignored disposable-namespace test that sends a DNS A query to smoltcp UDP/53 through TUN, invokes the core DNS handler with default-deny policy and broker DNS destination configured, emits the response through smoltcp, validates REFUSED at the kernel client, run full checks, and run the ignored test under `unshare -Urn`.
+
+## 2026-06-21 - Real TUN DNS broker denial proof results
+
+* Tests added/updated:
+  * ignored network-namespace test sends a DNS A query from a kernel UDP client to smoltcp UDP/53, invokes the core broker DNS handler with default-deny policy and configured broker DNS destination, emits the bounded response through smoltcp, and parses a REFUSED response at the client.
+* Commands run:
+  * `cargo test -p foxprox-net --lib` and `cargo clippy -p foxprox-net --all-targets --all-features -- -D warnings` — passed for the DNS proof compilation.
+  * `unshare -Urn bash -lc 'cargo test -p foxprox-net smoltcp_dns_broker_returns_policy_denial_response_over_tun -- --ignored --nocapture'` — passed.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: core 161 tests, device 3 tests plus 2 ignored, integrations 3 tests, net 4 ignored tests, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * broker DNS traffic reaches the smoltcp/TUN service path and receives bounded policy denial rather than being forwarded directly.
+  * the core DNS handler preserves audit denial reason and produces a parseable REFUSED response with no answers.
+* Audit evidence: the test asserts the core DNS audit carries `DefaultDeny` before the response is emitted.
+* Residual risk: live allowed-query forwarding to upstream DNS, pending response correlation over real sockets, DNS cache mutation in the runtime loop, and resolver configuration inside setup helper remain future work.

@@ -249,3 +249,7 @@ A minimal alpha TCP bridge can treat smoltcp as the sandbox-facing TCP endpoint 
 ## 2026-06-21 - smoltcp UDP sends need a follow-up poll to hit TUN
 
 Queueing a UDP response with `send_slice` is not enough; the event loop must continue polling the smoltcp interface so the datagram is emitted to the TUN fd. E2E tests should wait briefly after queueing before expecting the kernel client to receive data.
+
+## 2026-06-21 - DNS denial over smoltcp needs broker IP configured in policy
+
+Real broker-DNS tests should configure the smoltcp service IP as a broker DNS server so port-53 traffic reaches normal DNS policy evaluation instead of direct-bypass denial. Default-deny then produces a bounded REFUSED response through the shared DNS handler.
