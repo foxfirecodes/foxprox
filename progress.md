@@ -1669,3 +1669,23 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 23d5e4c.
 - Remaining boundary risks: IPv6 extension headers/NDP and full production IPv6 stack behavior remain future work.
+
+## 2026-06-22 — Boundary objective: round-robin bridge readiness cursors
+
+- Boundary under work: scheduler-facing fairness for retained TCP/UDP bridge maintenance.
+- Allowed dependency direction: fairness cursors live in `foxprox-runtime` bridge tables; egress handles remain opaque, packet synthesis stays in packet/net boundaries, and policy/audit are not scheduler-aware.
+- Dependency-risk assessment: maintenance budgets currently cap work per tick, but repeatedly taking the first map entries can starve later flows. Round-robin cursors must be runtime-owned so readiness scheduling does not leak into egress, stack adapter, or policy contracts.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/audit.
+- Observed results: added runtime-owned round-robin read cursors to TCP and UDP bridge tables. Bounded TCP/UDP maintenance now selects a rotated set of retained flows instead of repeatedly taking the first map entries. Added tests proving single-flow budgets visit all retained TCP and UDP flows over successive ticks. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 145 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — fairness remains runtime-owned.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: cross-sandbox weighted fairness and byte-rate accounting remain.

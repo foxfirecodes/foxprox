@@ -228,6 +228,7 @@ impl Default for UdpBridgeLimits {
 pub struct UdpBridgeTable<U> {
     flows: HashMap<UdpFlowKey, UdpBridge<U>>,
     limits: UdpBridgeLimits,
+    read_cursor: usize,
 }
 
 struct UdpBridge<U> {
@@ -241,6 +242,7 @@ impl<U> Default for UdpBridgeTable<U> {
         Self {
             flows: HashMap::new(),
             limits: UdpBridgeLimits::default(),
+            read_cursor: 0,
         }
     }
 }
@@ -250,6 +252,7 @@ impl<U> UdpBridgeTable<U> {
         Self {
             flows: HashMap::new(),
             limits,
+            read_cursor: 0,
         }
     }
 
@@ -259,6 +262,10 @@ impl<U> UdpBridgeTable<U> {
 
     pub fn len(&self) -> usize {
         self.flows.len()
+    }
+
+    pub fn read_cursor(&self) -> usize {
+        self.read_cursor
     }
 
     pub fn is_empty(&self) -> bool {
@@ -377,7 +384,20 @@ where
 {
     let mut replies = Vec::new();
     let mut failed_flows = Vec::new();
-    for (key, bridge) in bridges.flows.iter_mut().take(max_flows) {
+    let mut keys: Vec<_> = bridges.flows.keys().cloned().collect();
+    keys.sort_by_key(|key| format!("{key:?}"));
+    let flow_count = keys.len();
+    let start = if flow_count == 0 {
+        0
+    } else {
+        bridges.read_cursor % flow_count
+    };
+    let limit = max_flows.min(flow_count);
+    for offset in 0..limit {
+        let key = keys[(start + offset) % flow_count].clone();
+        let Some(bridge) = bridges.flows.get_mut(&key) else {
+            continue;
+        };
         match bridge.flow.recv_to_sandbox(max_bytes_per_flow) {
             Ok(bytes) if !bytes.is_empty() => {
                 bridge.last_activity_millis = now_millis;
@@ -397,6 +417,9 @@ where
                 }
             }
         }
+    }
+    if flow_count > 0 {
+        bridges.read_cursor = (start + limit) % flow_count;
     }
 
     let udp_flows_read = replies.len();
@@ -953,6 +976,7 @@ impl Default for StackTcpBridgeLimits {
 pub struct StackTcpBridgeTable<T> {
     streams: HashMap<StackTcpFlowKey, StackTcpBridge<T>>,
     limits: StackTcpBridgeLimits,
+    read_cursor: usize,
 }
 
 struct StackTcpBridge<T> {
@@ -983,6 +1007,7 @@ impl<T> Default for StackTcpBridgeTable<T> {
         Self {
             streams: HashMap::new(),
             limits: StackTcpBridgeLimits::default(),
+            read_cursor: 0,
         }
     }
 }
@@ -992,6 +1017,7 @@ impl<T> StackTcpBridgeTable<T> {
         Self {
             streams: HashMap::new(),
             limits,
+            read_cursor: 0,
         }
     }
 
@@ -1001,6 +1027,10 @@ impl<T> StackTcpBridgeTable<T> {
 
     pub fn len(&self) -> usize {
         self.streams.len()
+    }
+
+    pub fn read_cursor(&self) -> usize {
+        self.read_cursor
     }
 
     pub fn is_empty(&self) -> bool {
@@ -1193,15 +1223,31 @@ where
     T: HostTcpStream,
 {
     let mut reads = Vec::new();
-    for (key, bridge) in bridges.streams.iter_mut().take(max_streams) {
+    let mut keys: Vec<_> = bridges.streams.keys().cloned().collect();
+    keys.sort_by_key(|key| format!("{key:?}"));
+    let stream_count = keys.len();
+    let start = if stream_count == 0 {
+        0
+    } else {
+        bridges.read_cursor % stream_count
+    };
+    let limit = max_streams.min(stream_count);
+    for offset in 0..limit {
+        let key = keys[(start + offset) % stream_count].clone();
+        let Some(bridge) = bridges.streams.get_mut(&key) else {
+            continue;
+        };
         let bytes = bridge
             .stream
             .read_to_sandbox(max_bytes_per_stream)
             .map_err(BrokerError::Egress)
             .map_err(RuntimeError::Broker)?;
         if !bytes.is_empty() {
-            reads.push((key.clone(), bytes));
+            reads.push((key, bytes));
         }
+    }
+    if stream_count > 0 {
+        bridges.read_cursor = (start + limit) % stream_count;
     }
 
     let tcp_streams_read = reads.len();
@@ -1909,6 +1955,75 @@ mod tests {
         assert_eq!(bridges.len(), 1);
         assert_eq!(bridges.expire_idle(130), 1);
         assert!(bridges.is_empty());
+    }
+
+    #[test]
+    fn tcp_bridge_read_budget_advances_round_robin_cursor() {
+        let cursor = Cursor::new(Vec::new());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let mut bridges = StackTcpBridgeTable::default();
+        for port in [50000, 50001, 50002] {
+            bridges.insert(
+                StackTcpFlowKey::new(
+                    SandboxId::new("s1").unwrap(),
+                    FrontendKind::Tun,
+                    format!("10.0.0.2:{port}").parse().unwrap(),
+                    "203.0.113.10:80".parse().unwrap(),
+                ),
+                ReadableTcpStream::new(vec![vec![port as u8]].into()),
+            );
+        }
+        let mut adapter = ReadBackStackAdapter {
+            writes: Vec::new(),
+            outbound: Vec::new(),
+        };
+
+        for _ in 0..3 {
+            let outcome = flush_tcp_bridge_reads_to_stack_device_with_limit(
+                &mut device,
+                &mut adapter,
+                &mut bridges,
+                1024,
+                1,
+            )
+            .unwrap();
+            assert_eq!(outcome.tcp_streams_read, 1);
+        }
+
+        let ports: std::collections::HashSet<_> = adapter
+            .writes
+            .iter()
+            .map(|write| write.source.port())
+            .collect();
+        assert_eq!(ports.len(), 3);
+        assert_eq!(bridges.read_cursor(), 0);
+    }
+
+    #[test]
+    fn udp_bridge_read_budget_advances_round_robin_cursor() {
+        let cursor = Cursor::new(Vec::new());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let mut bridges = UdpBridgeTable::default();
+        for port in [50000, 50001, 50002] {
+            bridges.insert(
+                UdpFlowKey {
+                    sandbox_id: SandboxId::new("s1").unwrap(),
+                    frontend: FrontendKind::Tun,
+                    source: format!("10.0.0.2:{port}").parse().unwrap(),
+                    destination: "203.0.113.10:12345".parse().unwrap(),
+                },
+                ReadableUdpFlow::new(vec![vec![port as u8]].into()),
+            );
+        }
+
+        for _ in 0..3 {
+            let outcome =
+                flush_udp_bridge_reads_to_device_with_limit(&mut device, &mut bridges, 1024, 1, 20)
+                    .unwrap();
+            assert_eq!(outcome.udp_flows_read, 1);
+        }
+
+        assert_eq!(bridges.read_cursor(), 0);
     }
 
     #[test]

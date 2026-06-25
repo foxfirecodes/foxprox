@@ -388,3 +388,8 @@
 
 - Keep IPv6 parsing and ICMPv6 synthesis paired in `foxprox-packet`; runtime should only choose IPv4 vs IPv6 behavior from normalized `SocketAddr` families and write opaque packet bytes.
 - IPv6 extension headers are a separate hardening boundary: failing closed for extension headers preserves alpha safety without leaking partial parser state into policy.
+
+## 2026-06-22 — bridge round-robin cursors
+
+- Flow-count budgets alone are not fair: if maintenance always starts at the first retained flow, later flows can starve under small budgets. Store read cursors in runtime bridge tables and advance them by visited flow count.
+- Keep cursor state independent from egress/adapter readiness. Runtime can rotate normalized bridge keys while egress and stack adapters remain opaque handles.
