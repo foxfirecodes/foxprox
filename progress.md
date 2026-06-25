@@ -5302,3 +5302,22 @@ Commit: ccb8d94
 - `cargo test --all-targets --all-features` — passed, including 33 CLI unit tests + 1 ignored privileged CLI unit test, 2 ignored bwrap E2E tests in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 109 egress tests, and 16 stack tests.
 - `cargo fmt --check` — passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+## 2026-06-24 — Fail closed host-session read-timeout setup
+
+Commit: a169975
+
+### Review
+- Round-158 reviewers confirmed the direct helper fix, then found the same timeout-install risk in the higher-level host setup session path: `run_host_setup_control_session_with_runner_and_timeouts(...)` ignored `UnixStream::set_read_timeout(...)` errors before calling `recv_tun_fd`, so a timeout-install failure could still degrade into an unbounded receive.
+
+### Fix
+- The host setup session path now treats read-timeout installation failure as fail-closed setup-control handoff evidence and returns before entering `recv_tun_fd`.
+- Rechecked that all `set_read_timeout` calls in `crates/foxprox-cli/src/lib.rs` are handled rather than ignored.
+
+### Commands run
+- `rg "set_read_timeout" crates/foxprox-cli/src/lib.rs` — confirmed both timeout installations are handled with `if let Err(...)`.
+- `cargo test -p foxprox-cli --all-targets --all-features read_timeout -- --nocapture` — passed direct handoff and host-session read-timeout tests.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed both ignored real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed, including 33 CLI unit tests + 1 ignored privileged CLI unit test, 2 ignored bwrap E2E tests in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 109 egress tests, and 16 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
