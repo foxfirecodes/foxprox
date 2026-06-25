@@ -681,7 +681,26 @@ fn run_host_setup_control_session_with_runner_and_timeouts<R: HostSetupProcessRu
         }
     };
     let _ = listener.set_nonblocking(false);
-    let _ = stream.set_read_timeout(Some(read_timeout));
+    if let Err(error) = stream.set_read_timeout(Some(read_timeout)) {
+        audit_records.push(setup_control_handoff_error_audit(
+            &config,
+            error.to_string(),
+        ));
+        let process_exit = runner.poll_setup_process().ok().flatten();
+        let handoff = HostSetupControlHandoffReport {
+            status: HostSetupControlHandoffStatus::Failed,
+            plan,
+            received: None,
+            failed_report: None,
+            audit_records: audit_records.clone(),
+        };
+        return HostSetupSessionReport {
+            status: HostSetupControlHandoffStatus::Failed,
+            handoff,
+            process_exit,
+            audit_records,
+        };
+    }
 
     let mut handoff = match foxprox_device::recv_tun_fd(&stream, &config.tun_name) {
         Ok(received) => {
