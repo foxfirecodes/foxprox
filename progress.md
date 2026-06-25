@@ -1382,5 +1382,5 @@
   - `cargo tree -p foxprox-runtime` — runtime selects packet crate synthesis through existing dependency.
   - `cargo tree -p foxprox-packet` — packet crate remains core-only.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 3e291f4.
 - Remaining boundary risks: IPv6 packet classification/input path and ICMPv6 errors remain.
