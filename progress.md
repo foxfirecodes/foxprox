@@ -1944,3 +1944,25 @@
 - Commit hash when committed: pending.
 - Remaining risks: live privileged TUN/bwrap smoke is still capability-gated; explicit proxy listener sockets are represented by runtimes/parsers but not by a long-running listener loop.
 - Exact next step: commit DNS-aware TCP host session helper, then either add deterministic explicit proxy listener-step harnesses or conclude alpha if listener loops are intentionally out of scope for the verified kernel slice.
+
+## 2026-06-25T03:47:25Z
+- Current objective: add deterministic explicit HTTP proxy connection-step IO coverage around the existing proxy runtime.
+- Git status summary: clean worktree after commit `4498c28`.
+- Intended slice: provide a one-connection HTTP proxy handler that reads a request line from a stream, runs shared policy/audit/egress logic, and writes explicit HTTP status responses for malformed, denied, failed, and CONNECT-open outcomes.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this is a deterministic stream-step harness, not a full long-running async listener or byte relay.
+- Exact next step: implement the HTTP proxy connection-step helper and tests.
+
+## 2026-06-25T03:51:20Z
+- Current objective: add deterministic explicit HTTP proxy connection-step IO coverage.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings` (initially caught `large_enum_variant`; fixed by boxing the large runtime outcome)
+  - `cargo test --all-targets --all-features` (initially caught an invalid malformed-line assumption; fixed the test to use an actually malformed request line)
+  - final `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 7 device tests, 3 integration tests, 6 launcher tests, 92 runtime tests, 7 setup tests, and 40 smoltcp adapter tests passed. Added `handle_http_proxy_connection_once` and typed connection outcomes; tests prove CONNECT success writes `200 Connection Established`, policy denial writes fail-closed `403`, and malformed request lines write `400` without host egress.
+- Commit hash when committed: pending.
+- Remaining risks: the helper is a stream-step harness, not a full async listener/relay; SOCKS has runtime/parser support but not a similar stream-step response helper yet.
+- Exact next step: commit HTTP proxy connection-step harness, then add a deterministic SOCKS5 connection-step helper for greeting/connect response behavior.

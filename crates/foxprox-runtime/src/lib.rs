@@ -19,7 +19,7 @@ use foxprox_core::{
     VerificationKernel,
 };
 use std::collections::HashMap;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpStream, UdpSocket};
 use std::time::Duration;
 
@@ -652,6 +652,55 @@ pub enum HttpProxyOutcome {
         event: NormalizedEvent,
         error: EgressError,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HttpProxyConnectionOutcome {
+    Empty,
+    ParseFailed(ProxyParseError),
+    Runtime(Box<HttpProxyOutcome>),
+}
+
+pub fn handle_http_proxy_connection_once<R, W, E, S>(
+    runtime: &mut HttpProxyRuntime<E, S>,
+    reader: &mut R,
+    writer: &mut W,
+    resolved_ip: IpAddr,
+    timestamp_millis: u128,
+) -> io::Result<HttpProxyConnectionOutcome>
+where
+    R: BufRead,
+    W: Write,
+    E: HostEgress,
+    S: AuditSink,
+{
+    let mut line = String::new();
+    let bytes = reader.read_line(&mut line)?;
+    if bytes == 0 {
+        return Ok(HttpProxyConnectionOutcome::Empty);
+    }
+    let line = line.trim_end_matches(['\r', '\n']);
+    let outcome = match runtime.handle_request_line(line, resolved_ip, timestamp_millis) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            writer.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")?;
+            return Ok(HttpProxyConnectionOutcome::ParseFailed(error));
+        }
+    };
+    match &outcome {
+        HttpProxyOutcome::Denied { .. } => {
+            writer.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n")?;
+        }
+        HttpProxyOutcome::HostConnectOpened { event, .. } => {
+            if matches!(event, NormalizedEvent::HttpsConnect { .. }) {
+                writer.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
+            }
+        }
+        HttpProxyOutcome::HostConnectFailed { .. } => {
+            writer.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")?;
+        }
+    }
+    Ok(HttpProxyConnectionOutcome::Runtime(Box::new(outcome)))
 }
 
 fn http_proxy_line_to_event_and_destination(
@@ -3509,6 +3558,106 @@ mod tests {
                 IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
                 80
             ))
+        );
+    }
+
+    #[test]
+    fn http_proxy_connection_step_writes_connect_success_response() {
+        let mut rules = RuleSet::default();
+        let mut rule = PolicyRule::allow("allow-connect-step");
+        rule.protocol = Some(Protocol::HttpsConnect);
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = HttpProxyRuntime::new(
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("connect-step").unwrap(),
+        );
+        let mut reader = std::io::BufReader::new(std::io::Cursor::new(
+            b"CONNECT example.com:443 HTTP/1.1\r\n".to_vec(),
+        ));
+        let mut writer = Vec::new();
+
+        let outcome = handle_http_proxy_connection_once(
+            &mut runtime,
+            &mut reader,
+            &mut writer,
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            100,
+        )
+        .unwrap();
+
+        let HttpProxyConnectionOutcome::Runtime(outcome) = outcome else {
+            panic!("expected runtime outcome");
+        };
+        assert!(matches!(
+            *outcome,
+            HttpProxyOutcome::HostConnectOpened { .. }
+        ));
+        assert_eq!(runtime.egress().tcp_attempts, 1);
+        assert_eq!(writer, b"HTTP/1.1 200 Connection Established\r\n\r\n");
+    }
+
+    #[test]
+    fn http_proxy_connection_step_writes_fail_closed_statuses() {
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = HttpProxyRuntime::new(
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("connect-step-deny").unwrap(),
+        );
+        let mut denied_reader = std::io::BufReader::new(std::io::Cursor::new(
+            b"CONNECT example.com:443 HTTP/1.1\r\n".to_vec(),
+        ));
+        let mut denied_writer = Vec::new();
+
+        let denied = handle_http_proxy_connection_once(
+            &mut runtime,
+            &mut denied_reader,
+            &mut denied_writer,
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            100,
+        )
+        .unwrap();
+
+        let HttpProxyConnectionOutcome::Runtime(denied) = denied else {
+            panic!("expected runtime denial");
+        };
+        assert!(matches!(*denied, HttpProxyOutcome::Denied { .. }));
+        assert_eq!(runtime.egress().tcp_attempts, 0);
+        assert_eq!(
+            denied_writer,
+            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"
+        );
+
+        let mut malformed_reader =
+            std::io::BufReader::new(std::io::Cursor::new(b"BROKEN\r\n".to_vec()));
+        let mut malformed_writer = Vec::new();
+        let malformed = handle_http_proxy_connection_once(
+            &mut runtime,
+            &mut malformed_reader,
+            &mut malformed_writer,
+            IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34)),
+            101,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            malformed,
+            HttpProxyConnectionOutcome::ParseFailed(_)
+        ));
+        assert_eq!(
+            malformed_writer,
+            b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
         );
     }
 
