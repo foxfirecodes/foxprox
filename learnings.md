@@ -265,3 +265,7 @@ A disposable `unshare -Urn` test can run the real setup helper with an inherited
 ## 2026-06-21 - smoltcp ingress must be behind the packet policy gate
 
 A TUN-backed smoltcp adapter should call the shared packet handler before yielding packets to smoltcp. Otherwise the TCP/IP stack can observe default-denied, malformed, or bypass traffic before audit and policy have a chance to drop it.
+
+## 2026-06-21 - Net crate host connects should require EgressPermit
+
+Even after TUN packets are policy-gated, host socket creation must require an allow-derived `EgressPermit`. This keeps bridge code from drifting back to raw endpoint `TcpStream::connect` calls and preserves rule provenance at the egress boundary.

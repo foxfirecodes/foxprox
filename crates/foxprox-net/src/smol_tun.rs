@@ -272,7 +272,8 @@ mod tests {
 
     use foxprox_core::{
         parse_dns_address_response, AuditDecision, BrokerDnsQueryContext, BrokerDnsQueryOutcome,
-        Cidr, Endpoint, Frontend, PolicyConfig, PolicyRule, SandboxId,
+        Cidr, Decision, EgressPermit, Endpoint, Frontend, PolicyConfig, PolicyRequest, PolicyRule,
+        Protocol, SandboxId,
     };
     use foxprox_device::{
         configure_tun_interface, create_tun, IpCommandRunner, TunConfig, TunSetup,
@@ -424,7 +425,16 @@ mod tests {
             if socket.can_recv() {
                 let data = socket.recv(|data| (data.len(), data.to_vec())).unwrap();
                 let stream = host_stream.get_or_insert_with(|| {
-                    let stream = TcpStream::connect(listener_addr).unwrap();
+                    let request = PolicyRequest::new(Protocol::Tcp)
+                        .with_destination(Endpoint::tcp(listener_addr.ip(), listener_addr.port()));
+                    let permit = EgressPermit::from_policy_decision(
+                        &request,
+                        &Decision::Allow {
+                            rule_id: Some("allow-host-bridge".into()),
+                        },
+                    )
+                    .unwrap();
+                    let stream = crate::connect_tcp_with_permit(&permit).unwrap();
                     stream.set_nonblocking(true).unwrap();
                     stream
                 });

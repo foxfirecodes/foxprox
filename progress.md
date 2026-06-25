@@ -1430,3 +1430,26 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * allowed TCP reaches smoltcp only after policy and audit evidence are produced.
 * Audit evidence: tests assert deny/default-deny JSON and allow audit decision/rule ID from the adapter's bounded audit buffer.
 * Residual risk: live bridge code still needs egress-permit checks at host socket open, flow lifecycle audit, DNS attribution lookup, and async backpressure integration.
+
+## 2026-06-21 - Host socket open requires egress permit in net crate
+
+* Invariant under work: network runtime code must open host TCP sockets only through an API that accepts an allow-derived `EgressPermit`, not raw endpoints.
+* Threat or failure mode addressed: bridge loops can otherwise preserve packet ingress policy but still bypass the shared egress boundary by calling `TcpStream::connect` directly with parser/runtime metadata.
+* Planned verification: add host egress helper functions in the net crate, require `EgressPermit` for TCP connect, cover real localhost connection through an allow-derived permit, ensure hostnames and missing ports are handled explicitly, update bridge proof to use the helper, then run full checks.
+
+## 2026-06-21 - Host socket open requires egress permit in net crate results
+
+* Tests added/updated:
+  * `connect_tcp_with_permit` opens TCP sockets only from an `EgressPermit`, supports IP and host permits, and fails before connect when required port metadata is missing.
+  * localhost TCP test verifies a permit derived from an allow decision can establish a broker-owned host socket and exchange bytes.
+  * smoltcp TCP bridge proof now opens the host-side `TcpStream` through `connect_tcp_with_permit` rather than raw `TcpStream::connect`.
+* Commands run:
+  * Initial net crate test compile failed because `TcpStream` is not `PartialEq` in a `Result`; switched the negative assertion to `matches!`.
+  * `cargo test -p foxprox-net --lib` and `cargo clippy -p foxprox-net --all-targets --all-features -- -D warnings` — passed.
+  * `unshare -Urn bash -lc 'cargo test -p foxprox-net smoltcp_bridges_tun_tcp_to_host_socket -- --ignored --nocapture'` — passed and printed `bridge`.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: CLI 2 tests plus 1 ignored, core 161 tests, device 3 tests plus 2 ignored, integrations 5 tests, net 2 tests plus 6 ignored, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * host TCP socket creation in the net crate now has an allow-derived permit boundary.
+  * malformed permit metadata fails closed before any connect syscall.
+* Audit evidence: permits carry rule provenance; this cycle did not add new audit events, but bridge and core tests preserve existing policy/audit evidence.
+* Residual risk: runtime bridge still needs automatic permit construction from live flow decisions and lifecycle/error audit around socket opens/closes.
