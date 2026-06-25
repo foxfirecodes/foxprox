@@ -342,7 +342,16 @@ pub trait UdpDatagramExchange {
         false
     }
 
+    fn handles_policy_for(&self, destination: NetworkEndpoint) -> bool {
+        let _ = destination;
+        self.handles_policy()
+    }
+
     fn on_datagram_delivered(&mut self) {}
+
+    fn datagram_decision(&self) -> Option<(Decision, Option<DenialReason>)> {
+        None
+    }
 
     fn audit_records(&self) -> Vec<AuditRecord> {
         Vec::new()
@@ -828,7 +837,7 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                 Some(DenialReason::MalformedPacket),
             )));
         };
-        if !egress.handles_policy() {
+        if !egress.handles_policy_for(parsed.destination_endpoint()) {
             let policy_decision = self.broker.evaluate(&request);
             if policy_decision.decision.is_deny() {
                 return Ok(Some(udp_datagram_evidence(
@@ -932,14 +941,17 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
             return Err(UdpExchangeError::SendFailed);
         }
         egress.on_datagram_delivered();
+        let (decision, reason) = egress
+            .datagram_decision()
+            .unwrap_or((Decision::Allow, None));
         Ok(Some(udp_datagram_evidence(
             ByteCounts {
                 from_sandbox: payload.len() as u64,
                 to_sandbox: response_payload.len() as u64,
             },
             true,
-            Decision::Allow,
-            None,
+            decision,
+            reason,
         )))
     }
 
@@ -1378,6 +1390,65 @@ mod tests {
                 && record.details.get("direction").map(String::as_str) == Some("to_sandbox")
                 && record.details.get("write_phase").map(String::as_str) == Some("attempt")
         }));
+    }
+
+    #[test]
+    fn udp_exchange_policy_owned_only_for_matching_destination_preserves_direct_dns_bypass() {
+        let packet = ipv4_udp_packet([10, 0, 2, 15], [8, 8, 8, 8], 50_000, 53, b"dns");
+        let device = InMemoryPacketDevice::with_inbound([packet]);
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16);
+        let stack = SmoltcpIpStack::new_ipv4([198, 51, 100, 1], 24, 1500);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+        let mut egress = PolicyOwnedUdpExchange::new(
+            NetworkEndpoint::socket("10.0.2.3".parse().unwrap(), 53),
+            b"refused".to_vec(),
+            Some((Decision::Allow, None)),
+        );
+
+        let evidence = bridge
+            .bridge_next_udp_datagram_to_egress(&mut egress, 6_050)
+            .unwrap()
+            .unwrap();
+
+        assert!(!evidence.exchanged);
+        assert_eq!(evidence.decision, Decision::DenyDrop);
+        assert_eq!(evidence.reason, Some(DenialReason::DirectDnsBypass));
+        assert!(egress.requests.is_empty());
+        let records: Vec<_> = bridge.broker().audit().records().collect();
+        assert!(records.iter().any(|record| {
+            record.kind == AuditKind::DnsQueryDecision
+                && record.decision == Some(Decision::DenyDrop)
+                && record.reason == Some(DenialReason::DirectDnsBypass)
+        }));
+    }
+
+    #[test]
+    fn udp_exchange_bridge_reports_policy_owned_denial_after_response_delivery() {
+        let packet = ipv4_udp_packet([10, 0, 2, 15], [10, 0, 2, 3], 50_000, 53, b"dns");
+        let device = InMemoryPacketDevice::with_inbound([packet]);
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 16);
+        let stack = SmoltcpIpStack::new_ipv4([198, 51, 100, 1], 24, 1500);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+        let mut egress = PolicyOwnedUdpExchange::new(
+            NetworkEndpoint::socket("10.0.2.3".parse().unwrap(), 53),
+            b"refused".to_vec(),
+            Some((Decision::DenyDrop, Some(DenialReason::DefaultDeny))),
+        );
+
+        let evidence = bridge
+            .bridge_next_udp_datagram_to_egress(&mut egress, 6_075)
+            .unwrap()
+            .unwrap();
+
+        assert!(evidence.exchanged);
+        assert_eq!(evidence.decision, Decision::DenyDrop);
+        assert_eq!(evidence.reason, Some(DenialReason::DefaultDeny));
+        assert_eq!(egress.requests, vec![b"dns".to_vec()]);
+        assert_eq!(&bridge.device().outbound()[0][28..], b"refused");
     }
 
     #[test]
@@ -2053,6 +2124,48 @@ mod tests {
         ) -> Result<Vec<u8>, UdpExchangeError> {
             self.requests.push(payload.to_vec());
             Ok(self.response.clone())
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct PolicyOwnedUdpExchange {
+        policy_destination: NetworkEndpoint,
+        response: Vec<u8>,
+        decision: Option<(Decision, Option<DenialReason>)>,
+        requests: Vec<Vec<u8>>,
+    }
+
+    impl PolicyOwnedUdpExchange {
+        fn new(
+            policy_destination: NetworkEndpoint,
+            response: Vec<u8>,
+            decision: Option<(Decision, Option<DenialReason>)>,
+        ) -> Self {
+            Self {
+                policy_destination,
+                response,
+                decision,
+                requests: Vec::new(),
+            }
+        }
+    }
+
+    impl UdpDatagramExchange for PolicyOwnedUdpExchange {
+        fn exchange_datagram(
+            &mut self,
+            _destination: NetworkEndpoint,
+            payload: &[u8],
+        ) -> Result<Vec<u8>, UdpExchangeError> {
+            self.requests.push(payload.to_vec());
+            Ok(self.response.clone())
+        }
+
+        fn handles_policy_for(&self, destination: NetworkEndpoint) -> bool {
+            destination == self.policy_destination
+        }
+
+        fn datagram_decision(&self) -> Option<(Decision, Option<DenialReason>)> {
+            self.decision
         }
     }
 

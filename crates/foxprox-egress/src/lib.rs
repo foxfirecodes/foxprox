@@ -117,6 +117,7 @@ pub struct DnsUdpExchange<U> {
     broker_dns_endpoint: NetworkEndpoint,
     now_ms: u64,
     pending_observation: Option<foxprox_core::DnsObservation>,
+    latest_decision: Option<(Decision, Option<DenialReason>)>,
 }
 
 impl<U: DnsUpstream> DnsUdpExchange<U> {
@@ -132,6 +133,7 @@ impl<U: DnsUpstream> DnsUdpExchange<U> {
             broker_dns_endpoint,
             now_ms,
             pending_observation: None,
+            latest_decision: None,
         }
     }
 
@@ -146,13 +148,15 @@ impl<U: DnsUpstream> foxprox_stack::UdpDatagramExchange for DnsUdpExchange<U> {
         destination: NetworkEndpoint,
         payload: &[u8],
     ) -> Result<Vec<u8>, foxprox_stack::UdpExchangeError> {
+        self.pending_observation = None;
+        self.latest_decision = None;
         if destination != self.broker_dns_endpoint {
             return Err(foxprox_stack::UdpExchangeError::SendFailed);
         }
-        self.pending_observation = None;
         let result = self
             .handler
             .handle_query(self.sandbox_id.clone(), payload, self.now_ms);
+        self.latest_decision = Some((result.decision.decision, result.decision.reason));
         self.pending_observation = result.observation.clone();
         result
             .response
@@ -163,10 +167,18 @@ impl<U: DnsUpstream> foxprox_stack::UdpDatagramExchange for DnsUdpExchange<U> {
         true
     }
 
+    fn handles_policy_for(&self, destination: NetworkEndpoint) -> bool {
+        destination == self.broker_dns_endpoint
+    }
+
     fn on_datagram_delivered(&mut self) {
         if let Some(observation) = self.pending_observation.take() {
             self.handler.commit_observation(observation);
         }
+    }
+
+    fn datagram_decision(&self) -> Option<(Decision, Option<DenialReason>)> {
+        self.latest_decision
     }
 
     fn audit_records(&self) -> Vec<AuditRecord> {
@@ -11675,12 +11687,49 @@ mod tests {
         assert!(response
             .windows([203, 0, 113, 7].len())
             .any(|w| w == [203, 0, 113, 7]));
+        assert_eq!(exchange.datagram_decision(), Some((Decision::Allow, None)));
         let records = exchange.audit_records();
         assert!(records.iter().any(|record| {
             record.kind == AuditKind::DnsQueryDecision
                 && record.decision == Some(Decision::Allow)
                 && record.rule_id.as_deref() == Some("allow-example-dns")
         }));
+    }
+
+    #[test]
+    fn dns_udp_exchange_reports_denial_decision_with_refused_response() {
+        let query = dns_query(0x4747, "blocked.test", 1);
+        let response = dns_a_response(&query, [203, 0, 113, 10], 30);
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16);
+        let handler = DnsBrokerHandler::new(
+            broker,
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let mut exchange = DnsUdpExchange::new(
+            "s1",
+            handler,
+            NetworkEndpoint::socket("10.0.2.3".parse().unwrap(), 53),
+            12_050,
+        );
+
+        let refused = exchange
+            .exchange_datagram(
+                NetworkEndpoint::socket("10.0.2.3".parse().unwrap(), 53),
+                &query,
+            )
+            .expect("denied DNS still returns fail-closed refused response");
+
+        assert!(!refused.is_empty());
+        assert_eq!(
+            exchange.datagram_decision(),
+            Some((Decision::DenyDrop, Some(DenialReason::DefaultDeny)))
+        );
+        assert!(exchange
+            .handler()
+            .cache()
+            .resolve_hostname("blocked.test", 12_051)
+            .is_none());
     }
 
     #[test]
@@ -11755,7 +11804,12 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error, foxprox_stack::UdpExchangeError::SendFailed);
-        assert!(exchange.audit_records().is_empty());
+        assert_eq!(exchange.datagram_decision(), None);
+        assert!(exchange
+            .handler()
+            .cache()
+            .resolve_hostname("example.test", 12_201)
+            .is_none());
     }
 
     fn dns_query(transaction_id: u16, hostname: &str, query_type: u16) -> Vec<u8> {

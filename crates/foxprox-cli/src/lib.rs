@@ -1732,6 +1732,7 @@ fn run_bwrap_udp_egress_args(args: &[String]) -> CliOutput {
     };
     let process_exit = runner.wait_setup_process_with_timeout(Duration::from_secs(5));
     let success = runtime_report.udp_bridge.exchanged
+        && runtime_report.udp_bridge.decision == Decision::Allow
         && matches!(
             process_exit,
             Ok(Some(HostSetupProcessExit { success: true, .. }))
@@ -1894,6 +1895,7 @@ fn run_bwrap_dns_egress_args(args: &[String]) -> CliOutput {
     };
     let process_exit = runner.wait_setup_process_with_timeout(Duration::from_secs(5));
     let success = runtime_report.udp_bridge.exchanged
+        && runtime_report.udp_bridge.decision == Decision::Allow
         && matches!(
             process_exit,
             Ok(Some(HostSetupProcessExit { success: true, .. }))
