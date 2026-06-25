@@ -1643,5 +1643,5 @@
   - `cargo tree -p foxprox-frontends` — frontends remains core-only.
   - `cargo tree -p foxprox-inspect` — inspect remains core-only.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 5992719.
 - Remaining boundary risks: coverage-guided fuzz harnesses remain future work.
