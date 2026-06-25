@@ -1340,5 +1340,5 @@
   - `cargo tree -p foxprox-runtime` — fairness/budgeting remains runtime-owned.
   - `cargo tree -p foxprox-device` — device contract unchanged.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 0aaf715.
 - Remaining boundary risks: true round-robin readiness cursors, per-sandbox fairness, and rate accounting remain.
