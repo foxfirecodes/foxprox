@@ -1406,3 +1406,27 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * setup argument errors fail before target execution.
 * Audit evidence: no audit sink is wired in the setup binary yet; runtime launcher should emit lifecycle/broker-error events around helper start, fd receipt, and target exit.
 * Residual risk: full bwrap launcher orchestration, seccomp/capability-set clearing beyond `NO_NEW_PRIVS`, DNS/proxy environment injection, and host-side broker event loop packaging remain future work.
+
+## 2026-06-21 - Policy-gated smoltcp TUN ingress adapter
+
+* Invariant under work: real TUN packets must pass through strict parse, shared policy, and bounded audit before smoltcp or host socket bridging can observe them.
+* Threat or failure mode addressed: the smoltcp bridge proofs currently read raw TUN packets directly into the stack; a runtime built that way could bypass core deny/default/malformed/direct-DNS checks before TCP/UDP stream handling.
+* Planned verification: add a mediated smoltcp device adapter that calls `handle_tun_packet`, pushes audit into bounded buffer, writes back allowed ICMP replies, drops denied/fail-closed packets before smoltcp, and add real namespace allow/deny TCP tests; run full checks and ignored e2e tests.
+
+## 2026-06-21 - Policy-gated smoltcp TUN ingress adapter results
+
+* Tests added/updated:
+  * `MediatedTunDevice` wraps a TUN fd as a smoltcp `Device` that calls `handle_tun_packet` before smoltcp sees inbound packets, records bounded audit, writes back allowed ICMP replies, and drops denied/fail-closed packets.
+  * ignored namespace test proves default-denied TCP packets do not reach the smoltcp listener and produce deny/default-deny audit JSON.
+  * ignored namespace test proves an explicit IP/port allow rule lets TCP reach smoltcp and records an allow audit with the matching rule ID before stack ingress.
+* Commands run:
+  * `cargo test -p foxprox-net --lib` and `cargo clippy -p foxprox-net --all-targets --all-features -- -D warnings` — passed.
+  * `unshare -Urn bash -lc 'cargo test -p foxprox-net mediated_tun_drops_default_denied_tcp_before_smoltcp -- --ignored --nocapture'` — passed; curl timed out as expected.
+  * `unshare -Urn bash -lc 'cargo test -p foxprox-net mediated_tun_allows_tcp_to_smoltcp_with_audit -- --ignored --nocapture'` — passed and printed `mediated`.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: CLI 2 tests plus 1 ignored, core 161 tests, device 3 tests plus 2 ignored, integrations 5 tests, net 6 ignored tests, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * raw TUN packets are no longer required to enter smoltcp directly; the mediated adapter enforces parse-policy-audit first.
+  * default denied TCP never establishes a smoltcp connection.
+  * allowed TCP reaches smoltcp only after policy and audit evidence are produced.
+* Audit evidence: tests assert deny/default-deny JSON and allow audit decision/rule ID from the adapter's bounded audit buffer.
+* Residual risk: live bridge code still needs egress-permit checks at host socket open, flow lifecycle audit, DNS attribution lookup, and async backpressure integration.

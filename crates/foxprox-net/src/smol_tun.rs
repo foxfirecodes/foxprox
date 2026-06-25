@@ -2,6 +2,10 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::os::fd::{AsRawFd, RawFd};
 
+use foxprox_core::{
+    handle_tun_packet, BoundedAuditBuffer, PolicyConfig, PushOutcome, SandboxId, TunPacketContext,
+    TunPacketOutcome,
+};
 use foxprox_device::TunDevice;
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
 use smoltcp::time::Instant;
@@ -33,6 +37,127 @@ impl SmolTunDevice {
 
     pub fn raw_fd(&self) -> RawFd {
         self.file.as_raw_fd()
+    }
+}
+
+pub struct MediatedTunDevice {
+    file: File,
+    mtu: usize,
+    config: PolicyConfig,
+    sandbox_id: SandboxId,
+    audit: BoundedAuditBuffer,
+    dropped_audit_events: usize,
+}
+
+impl MediatedTunDevice {
+    pub fn new(
+        device: TunDevice,
+        mtu: usize,
+        config: PolicyConfig,
+        sandbox_id: SandboxId,
+        audit_capacity: usize,
+    ) -> Result<Self, SmolTunError> {
+        let file = device.into_file();
+        set_nonblocking(file.as_raw_fd())?;
+        Ok(Self {
+            file,
+            mtu,
+            config,
+            sandbox_id,
+            audit: BoundedAuditBuffer::new(audit_capacity),
+            dropped_audit_events: 0,
+        })
+    }
+
+    pub fn raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
+
+    pub fn audit(&self) -> &BoundedAuditBuffer {
+        &self.audit
+    }
+
+    pub fn audit_mut(&mut self) -> &mut BoundedAuditBuffer {
+        &mut self.audit
+    }
+
+    pub fn dropped_audit_events(&self) -> usize {
+        self.dropped_audit_events
+    }
+
+    fn push_audit(&mut self, event: foxprox_core::AuditEvent) {
+        if matches!(self.audit.push(event), PushOutcome::Backpressure { .. }) {
+            self.dropped_audit_events = self.dropped_audit_events.saturating_add(1);
+        }
+    }
+}
+
+impl Device for MediatedTunDevice {
+    type RxToken<'a>
+        = TunRxToken
+    where
+        Self: 'a;
+    type TxToken<'a>
+        = TunTxToken
+    where
+        Self: 'a;
+
+    fn receive(&mut self, _timestamp: Instant) -> Option<(Self::RxToken<'_>, Self::TxToken<'_>)> {
+        for _ in 0..16 {
+            let mut buffer = vec![0_u8; self.mtu];
+            match self.file.read(&mut buffer) {
+                Ok(0) => return None,
+                Ok(n) => {
+                    buffer.truncate(n);
+                    let outcome = handle_tun_packet(
+                        &buffer,
+                        &self.config,
+                        TunPacketContext {
+                            timestamp_millis: 0,
+                            sandbox_id: self.sandbox_id.clone(),
+                            dns_attribution: None,
+                        },
+                    );
+                    match outcome {
+                        TunPacketOutcome::Forward { wire, audit, .. } => {
+                            self.push_audit(*audit);
+                            return Some((
+                                TunRxToken { buffer: wire },
+                                TunTxToken {
+                                    fd: self.file.as_raw_fd(),
+                                },
+                            ));
+                        }
+                        TunPacketOutcome::WriteBack {
+                            response, audit, ..
+                        } => {
+                            self.push_audit(*audit);
+                            write_all_fd(self.file.as_raw_fd(), &response);
+                        }
+                        TunPacketOutcome::Drop { audit, .. } => {
+                            self.push_audit(*audit);
+                        }
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return None,
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
+    fn transmit(&mut self, _timestamp: Instant) -> Option<Self::TxToken<'_>> {
+        Some(TunTxToken {
+            fd: self.file.as_raw_fd(),
+        })
+    }
+
+    fn capabilities(&self) -> DeviceCapabilities {
+        let mut caps = DeviceCapabilities::default();
+        caps.medium = Medium::Ip;
+        caps.max_transmission_unit = self.mtu;
+        caps.max_burst_size = Some(1);
+        caps
     }
 }
 
@@ -146,8 +271,8 @@ mod tests {
     use std::time::{Duration as StdDuration, Instant as StdInstant};
 
     use foxprox_core::{
-        parse_dns_address_response, BrokerDnsQueryContext, BrokerDnsQueryOutcome, Endpoint,
-        Frontend, PolicyConfig, SandboxId,
+        parse_dns_address_response, AuditDecision, BrokerDnsQueryContext, BrokerDnsQueryOutcome,
+        Cidr, Endpoint, Frontend, PolicyConfig, PolicyRule, SandboxId,
     };
     use foxprox_device::{
         configure_tun_interface, create_tun, IpCommandRunner, TunConfig, TunSetup,
@@ -530,6 +655,142 @@ mod tests {
             foxprox_core::DnsResponseCode::Refused
         );
         assert!(metadata.addresses.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_ADMIN in a disposable network namespace"]
+    fn mediated_tun_drops_default_denied_tcp_before_smoltcp() {
+        let tun = create_tun(&TunConfig::new("fp0").unwrap()).unwrap();
+        let setup = TunSetup::new("fp0", "10.0.0.1/24", "0.0.0.0/0", 1300).unwrap();
+        configure_tun_interface(&setup, &mut IpCommandRunner).unwrap();
+
+        let mut device = MediatedTunDevice::new(
+            tun,
+            1300,
+            PolicyConfig::default(),
+            SandboxId::new("mediated-deny"),
+            8,
+        )
+        .unwrap();
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = 0x1111_2222;
+        let mut iface = Interface::new(config, &mut device, Instant::from_millis(0));
+        iface.update_ip_addrs(|addrs| {
+            addrs
+                .push(IpCidr::new(IpAddress::v4(10, 0, 0, 2), 24))
+                .unwrap();
+        });
+        let rx_buffer = tcp::SocketBuffer::new(vec![0; 4096]);
+        let tx_buffer = tcp::SocketBuffer::new(vec![0; 4096]);
+        let mut tcp_socket = tcp::Socket::new(rx_buffer, tx_buffer);
+        tcp_socket.listen(8080).unwrap();
+        let mut sockets = SocketSet::new(vec![]);
+        sockets.add(tcp_socket);
+
+        let mut curl = Command::new("curl")
+            .args([
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "1",
+                "http://10.0.0.2:8080/",
+            ])
+            .spawn()
+            .unwrap();
+        let started = StdInstant::now();
+        while started.elapsed() < StdDuration::from_secs(1) {
+            let now = Instant::from_millis(started.elapsed().as_millis() as i64);
+            iface.poll(now, &mut device, &mut sockets);
+            std::thread::sleep(StdDuration::from_millis(5));
+        }
+        let status = curl.wait().unwrap();
+        assert!(
+            !status.success(),
+            "default-denied TCP should not reach smoltcp"
+        );
+        let batch = device.audit_mut().drain_json_lines(8);
+        assert!(batch
+            .lines
+            .iter()
+            .any(|line| line.contains("\"decision\":\"deny\"")
+                && line.contains("\"reason\":\"default_deny\"")));
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_ADMIN in a disposable network namespace"]
+    fn mediated_tun_allows_tcp_to_smoltcp_with_audit() {
+        let tun = create_tun(&TunConfig::new("fp0").unwrap()).unwrap();
+        let setup = TunSetup::new("fp0", "10.0.0.1/24", "0.0.0.0/0", 1300).unwrap();
+        configure_tun_interface(&setup, &mut IpCommandRunner).unwrap();
+
+        let mut policy = PolicyConfig::default();
+        policy.rules.push(PolicyRule::allow_ip(
+            "allow-smoltcp-http",
+            Cidr::host("10.0.0.2".parse().unwrap()),
+            Some(8080),
+        ));
+        let mut device =
+            MediatedTunDevice::new(tun, 1300, policy, SandboxId::new("mediated-allow"), 16)
+                .unwrap();
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = 0x3333_4444;
+        let mut iface = Interface::new(config, &mut device, Instant::from_millis(0));
+        iface.update_ip_addrs(|addrs| {
+            addrs
+                .push(IpCidr::new(IpAddress::v4(10, 0, 0, 2), 24))
+                .unwrap();
+        });
+        let rx_buffer = tcp::SocketBuffer::new(vec![0; 4096]);
+        let tx_buffer = tcp::SocketBuffer::new(vec![0; 4096]);
+        let mut tcp_socket = tcp::Socket::new(rx_buffer, tx_buffer);
+        tcp_socket.listen(8080).unwrap();
+        let mut sockets = SocketSet::new(vec![]);
+        let tcp_handle = sockets.add(tcp_socket);
+
+        let mut curl = Command::new("curl")
+            .args([
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "3",
+                "http://10.0.0.2:8080/",
+            ])
+            .spawn()
+            .unwrap();
+
+        let started = StdInstant::now();
+        let response =
+            b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\nConnection: close\r\n\r\nmediated\n";
+        let mut served = false;
+        while started.elapsed() < StdDuration::from_secs(3) {
+            let now = Instant::from_millis(started.elapsed().as_millis() as i64);
+            iface.poll(now, &mut device, &mut sockets);
+            let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
+            if socket.can_recv() {
+                let _ = socket.recv(|data| (data.len(), data.len())).unwrap();
+            }
+            if socket.may_send() && !served && socket.send_slice(response).is_ok() {
+                socket.close();
+                served = true;
+            }
+            if served && socket.state() == tcp::State::Closed {
+                break;
+            }
+            std::thread::sleep(StdDuration::from_millis(5));
+        }
+        let status = curl.wait().unwrap();
+        assert!(status.success(), "allowed TCP should reach smoltcp");
+        let mut saw_allow = false;
+        while let Some(event) = device.audit_mut().pop() {
+            if event.decision == Some(AuditDecision::Allow)
+                && event.rule_id.as_deref() == Some("allow-smoltcp-http")
+            {
+                saw_allow = true;
+                break;
+            }
+        }
+        assert!(saw_allow, "expected allow audit before smoltcp ingress");
     }
 
     fn dns_query(name: &str, qtype: u16) -> Vec<u8> {

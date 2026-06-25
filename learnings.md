@@ -261,3 +261,7 @@ Setup helpers should send the TUN fd over a Unix control socket and the broker s
 ## 2026-06-21 - foxproxsetup e2e can validate fd handoff without bwrap first
 
 A disposable `unshare -Urn` test can run the real setup helper with an inherited Unix control fd, verify target exec, and confirm the broker side still reads packets from the handed-off TUN fd. This isolates helper correctness before adding bwrap command orchestration.
+
+## 2026-06-21 - smoltcp ingress must be behind the packet policy gate
+
+A TUN-backed smoltcp adapter should call the shared packet handler before yielding packets to smoltcp. Otherwise the TCP/IP stack can observe default-denied, malformed, or bypass traffic before audit and policy have a chance to drop it.
