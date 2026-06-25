@@ -1450,5 +1450,5 @@
   - `cargo tree -p foxprox-inspect` — inspect remains core-only.
   - `cargo tree -p foxprox-net` — net owns policy/audit orchestration.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: ac2d86f.
 - Remaining boundary risks: full stream reassembly and deferred host connect before HTTP/TLS allow remain.
