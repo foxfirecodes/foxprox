@@ -383,3 +383,8 @@
 
 - Corpus-style unit tests are a lightweight fallback before coverage-guided fuzzing is wired in; they prove malformed packet/proxy/TLS inputs normalize to unsupported events instead of panicking.
 - Keep malformed corpus tests in boundary crates (`packet`, `frontends`, `inspect`) so policy/audit never see parser-specific error objects.
+
+## 2026-06-22 — IPv6 packet boundary
+
+- Keep IPv6 parsing and ICMPv6 synthesis paired in `foxprox-packet`; runtime should only choose IPv4 vs IPv6 behavior from normalized `SocketAddr` families and write opaque packet bytes.
+- IPv6 extension headers are a separate hardening boundary: failing closed for extension headers preserves alpha safety without leaking partial parser state into policy.

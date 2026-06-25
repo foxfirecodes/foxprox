@@ -24,7 +24,8 @@ use foxprox_egress::{
     dispatch_allowed_event, DispatchOutcome, EgressError, EgressOutcome, HostEgress, HostUdpFlow,
 };
 use foxprox_packet::{
-    inspect_ipv4_packet, synthesize_ipv4_denial_response, synthesize_udp_ipv4_response,
+    inspect_ipv4_packet, inspect_ipv6_packet, synthesize_ipv4_denial_response,
+    synthesize_ipv6_denial_response, synthesize_udp_ipv4_response, synthesize_udp_ipv6_response,
 };
 use foxprox_policy::PolicyEngine;
 
@@ -438,6 +439,15 @@ pub struct InboundIpv4Packet<'a> {
     pub bytes: &'a [u8],
 }
 
+/// One inbound IPv6 packet plus the normalized session/frontend labels needed
+/// to keep raw device bytes out of policy and audit APIs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InboundIpv6Packet<'a> {
+    pub sandbox_id: &'a SandboxId,
+    pub frontend: FrontendKind,
+    pub bytes: &'a [u8],
+}
+
 /// Result of handling one inbound IPv4 packet at the packet-policy boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PacketBrokerOutcome {
@@ -550,10 +560,95 @@ where
     })
 }
 
+/// Normalize one inbound IPv6 packet, run policy/audit/egress, and return any
+/// opaque packets that should be written back to the device frontend.
+pub fn handle_ipv6_packet<E, A>(
+    packet: InboundIpv6Packet<'_>,
+    policy: &PolicyEngine,
+    egress: &mut E,
+    audit: &mut A,
+    sequence: u64,
+    timestamp_millis: u64,
+) -> Result<PacketBrokerOutcome, BrokerError>
+where
+    E: HostEgress,
+    A: AuditSink,
+{
+    handle_ipv6_packet_with_egress(packet, policy, egress, audit, sequence, timestamp_millis)
+        .map(PacketBrokerResult::into_outcome)
+}
+
+/// Normalize one inbound IPv6 packet, run policy/audit/egress, and preserve any
+/// egress handle opened for runtime bridge retention.
+pub fn handle_ipv6_packet_with_egress<E, A>(
+    packet: InboundIpv6Packet<'_>,
+    policy: &PolicyEngine,
+    egress: &mut E,
+    audit: &mut A,
+    sequence: u64,
+    timestamp_millis: u64,
+) -> Result<PacketBrokerResult<E>, BrokerError>
+where
+    E: HostEgress,
+    A: AuditSink,
+{
+    let inspection = inspect_ipv6_packet(packet.sandbox_id.clone(), packet.frontend, packet.bytes);
+    let mut evaluated = handle_normalized_event_with_decision(
+        &inspection.event,
+        policy,
+        egress,
+        audit,
+        sequence,
+        timestamp_millis,
+    )?;
+    let mut outbound_packets = Vec::new();
+    let mut udp_bytes_sent = 0;
+
+    if evaluated.decision.is_allowed() {
+        if let (Some(payload), Some(EgressOutcome::UdpOpened(udp))) =
+            (&inspection.udp_payload, evaluated.egress_outcome.take())
+        {
+            let mut udp = udp;
+            udp_bytes_sent = udp
+                .send_from_sandbox(payload)
+                .map_err(BrokerError::Egress)?;
+            evaluated.egress_outcome = Some(EgressOutcome::UdpOpened(udp));
+        }
+        if let Some(reply) = inspection.synthetic_reply {
+            outbound_packets
+                .push(OutboundIpPacket::new(reply.bytes().to_vec()).map_err(BrokerError::Stack)?);
+        }
+    } else if let Some(reply) = synthesize_ipv6_denial_response(packet.bytes, &evaluated.decision)
+        .map_err(BrokerError::Packet)?
+    {
+        outbound_packets
+            .push(OutboundIpPacket::new(reply.bytes().to_vec()).map_err(BrokerError::Stack)?);
+    }
+
+    Ok(PacketBrokerResult {
+        event: inspection.event,
+        decision: evaluated.decision,
+        outcome: evaluated.outcome,
+        udp_bytes_sent,
+        outbound_packets,
+        egress_outcome: evaluated.egress_outcome,
+    })
+}
+
 /// IPv4 packet handling input for broker DNS service interception.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Ipv4DnsServiceRequest<'a> {
     pub packet: InboundIpv4Packet<'a>,
+    pub broker_dns_addrs: &'a [IpAddr],
+    pub response_ttl: Duration,
+    pub sequence: u64,
+    pub timestamp_millis: u64,
+}
+
+/// IPv6 packet handling input for broker DNS service interception.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Ipv6DnsServiceRequest<'a> {
+    pub packet: InboundIpv6Packet<'a>,
     pub broker_dns_addrs: &'a [IpAddr],
     pub response_ttl: Duration,
     pub sequence: u64,
@@ -617,6 +712,82 @@ where
     if let Some(response) = &dns.response {
         cache_records = parse_address_records(response).unwrap_or_default();
         let packet = synthesize_udp_ipv4_response(flow.source, flow.destination, response)
+            .map_err(BrokerError::Packet)?;
+        outbound_packets
+            .push(OutboundIpPacket::new(packet.bytes().to_vec()).map_err(BrokerError::Stack)?);
+    }
+
+    let outcome = if dns.decision.is_allowed() {
+        BrokerEventOutcome::Forwarded
+    } else {
+        BrokerEventOutcome::Denied(decision_denial_action(&dns.decision))
+    };
+
+    Ok(Some((
+        PacketBrokerOutcome {
+            event: dns.event,
+            decision: dns.decision,
+            outcome,
+            udp_bytes_sent: 0,
+            outbound_packets,
+        },
+        DnsCacheUpdate {
+            records: cache_records,
+        },
+    )))
+}
+
+/// Handle a broker-addressed IPv6 UDP/53 packet as DNS service traffic. Non-DNS
+/// packets return `Ok(None)` so callers can fall back to generic packet handling.
+pub fn handle_ipv6_dns_service_packet<E, A>(
+    request: Ipv6DnsServiceRequest<'_>,
+    policy: &PolicyEngine,
+    egress: &mut E,
+    audit: &mut A,
+) -> Result<Option<(PacketBrokerOutcome, DnsCacheUpdate)>, BrokerError>
+where
+    E: HostEgress,
+    A: AuditSink,
+{
+    let inspection = inspect_ipv6_packet(
+        request.packet.sandbox_id.clone(),
+        request.packet.frontend,
+        request.packet.bytes,
+    );
+    let NormalizedEvent::UdpFlowAttempt(flow) = &inspection.event else {
+        return Ok(None);
+    };
+    if flow.classification != UdpClassification::Dns
+        || !request.broker_dns_addrs.contains(&flow.destination.ip())
+    {
+        return Ok(None);
+    }
+    let Some(payload) = inspection.udp_payload.as_deref() else {
+        return Ok(None);
+    };
+
+    let dns = handle_dns_packet(
+        DnsPacketRequest {
+            sandbox_id: request.packet.sandbox_id,
+            frontend: request.packet.frontend,
+            source: flow.source,
+            destination: flow.destination,
+            broker_dns_addrs: request.broker_dns_addrs,
+            packet: payload,
+            response_ttl: request.response_ttl,
+            sequence: request.sequence,
+            timestamp_millis: request.timestamp_millis,
+        },
+        policy,
+        egress,
+        audit,
+    )?;
+
+    let mut outbound_packets = Vec::new();
+    let mut cache_records = Vec::new();
+    if let Some(response) = &dns.response {
+        cache_records = parse_address_records(response).unwrap_or_default();
+        let packet = synthesize_udp_ipv6_response(flow.source, flow.destination, response)
             .map_err(BrokerError::Packet)?;
         outbound_packets
             .push(OutboundIpPacket::new(packet.bytes().to_vec()).map_err(BrokerError::Stack)?);
@@ -1196,6 +1367,58 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_broker_dns_packet_returns_udp_response_and_cache_records() {
+        let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
+        let mut egress = MockEgress {
+            dns_results: vec!["[2001:db8::20]:0".parse().unwrap()],
+            ..MockEgress::default()
+        };
+        let mut audit = BoundedAuditSink::new(8);
+        let sandbox_id = SandboxId::new("s1").unwrap();
+        let dns_payload = dns_query_packet(0x1234, "example.com", 28);
+        let packet = udp_ipv6_packet_to(
+            "2001:db8::2".parse().unwrap(),
+            53000,
+            "fd00::1".parse().unwrap(),
+            53,
+            &dns_payload,
+        );
+
+        let (outcome, cache_update) = handle_ipv6_dns_service_packet(
+            Ipv6DnsServiceRequest {
+                packet: InboundIpv6Packet {
+                    sandbox_id: &sandbox_id,
+                    frontend: FrontendKind::Tun,
+                    bytes: &packet,
+                },
+                broker_dns_addrs: &["fd00::1".parse().unwrap()],
+                response_ttl: Duration::from_secs(60),
+                sequence: 4,
+                timestamp_millis: 4000,
+            },
+            &policy,
+            &mut egress,
+            &mut audit,
+        )
+        .unwrap()
+        .expect("expected broker DNS handling");
+
+        assert_eq!(outcome.outcome, BrokerEventOutcome::Forwarded);
+        assert_eq!(outcome.outbound_packets.len(), 1);
+        assert_eq!(cache_update.records.len(), 1);
+        assert_eq!(cache_update.records[0].hostname.as_str(), "example.com");
+        assert_eq!(
+            cache_update.records[0].addr,
+            "2001:db8::20".parse::<IpAddr>().unwrap()
+        );
+        let bytes = outcome.outbound_packets[0].bytes();
+        assert_eq!(bytes[0] >> 4, 6);
+        assert_eq!(bytes[6], 17);
+        assert_eq!(u16::from_be_bytes([bytes[40], bytes[41]]), 53);
+        assert_eq!(u16::from_be_bytes([bytes[42], bytes[43]]), 53000);
+    }
+
+    #[test]
     fn denied_dns_packet_returns_refused_without_egress() {
         let policy = PolicyEngine::new(RuntimeConfig::deny_by_default());
         let mut egress = MockEgress::default();
@@ -1289,6 +1512,87 @@ mod tests {
         assert_eq!(outcome.outcome, BrokerEventOutcome::Forwarded);
         assert_eq!(outcome.udp_bytes_sent, 4);
         assert_eq!(egress.udp_flows.len(), 1);
+        assert_eq!(audit.records().len(), 1);
+    }
+
+    #[test]
+    fn allowed_ipv6_udp_packet_sends_payload_through_shared_egress() {
+        let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(8);
+        let sandbox_id = SandboxId::new("s1").unwrap();
+        let packet = udp_ipv6_packet_to(
+            "2001:db8::2".parse().unwrap(),
+            53000,
+            "2001:db8::10".parse().unwrap(),
+            12345,
+            b"ping",
+        );
+
+        let outcome = handle_ipv6_packet(
+            InboundIpv6Packet {
+                sandbox_id: &sandbox_id,
+                frontend: FrontendKind::Tun,
+                bytes: &packet,
+            },
+            &policy,
+            &mut egress,
+            &mut audit,
+            5,
+            5000,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.outcome, BrokerEventOutcome::Forwarded);
+        assert_eq!(outcome.udp_bytes_sent, 4);
+        assert_eq!(egress.udp_flows.len(), 1);
+        assert_eq!(audit.records().len(), 1);
+    }
+
+    #[test]
+    fn denied_ipv6_udp_packet_can_synthesize_policy_icmpv6_unreachable() {
+        let mut config = RuntimeConfig::allow_by_default();
+        let mut rule = PolicyRule::deny(
+            RuleId::new("udp-admin-deny").unwrap(),
+            DenialAction::IcmpUnreachable,
+        );
+        rule.protocol = ProtocolMatcher::Exact(Protocol::Udp);
+        rule.port = PortMatcher::Exact(12345);
+        config.rules.push(rule);
+        let policy = PolicyEngine::new(config);
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(8);
+        let packet = udp_ipv6_packet_to(
+            "2001:db8::2".parse().unwrap(),
+            53000,
+            "2001:db8::10".parse().unwrap(),
+            12345,
+            &[1, 2, 3, 4],
+        );
+
+        let sandbox_id = SandboxId::new("s1").unwrap();
+        let outcome = handle_ipv6_packet(
+            InboundIpv6Packet {
+                sandbox_id: &sandbox_id,
+                frontend: FrontendKind::Tun,
+                bytes: &packet,
+            },
+            &policy,
+            &mut egress,
+            &mut audit,
+            2,
+            2000,
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.outcome,
+            BrokerEventOutcome::Denied(Some(DenialAction::IcmpUnreachable))
+        );
+        assert_eq!(outcome.outbound_packets.len(), 1);
+        assert_eq!(outcome.outbound_packets[0].bytes()[40], 1);
+        assert_eq!(outcome.outbound_packets[0].bytes()[41], 1);
+        assert!(egress.udp_flows.is_empty());
         assert_eq!(audit.records().len(), 1);
     }
 
@@ -1396,6 +1700,28 @@ mod tests {
         packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
         packet[28..].copy_from_slice(payload);
         finish_ipv4_packet(packet)
+    }
+
+    fn udp_ipv6_packet_to(
+        source_ip: std::net::Ipv6Addr,
+        source_port: u16,
+        destination_ip: std::net::Ipv6Addr,
+        destination_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let udp_len = 8 + payload.len();
+        let mut packet = vec![0_u8; 40 + udp_len];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[6] = 17;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&source_ip.octets());
+        packet[24..40].copy_from_slice(&destination_ip.octets());
+        packet[40..42].copy_from_slice(&source_port.to_be_bytes());
+        packet[42..44].copy_from_slice(&destination_port.to_be_bytes());
+        packet[44..46].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[48..].copy_from_slice(payload);
+        packet
     }
 
     fn finish_ipv4_packet(mut packet: Vec<u8>) -> Vec<u8> {

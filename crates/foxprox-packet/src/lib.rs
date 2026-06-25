@@ -43,6 +43,14 @@ struct Ipv4Header {
     destination: Ipv4Addr,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Ipv6Header {
+    payload_len: usize,
+    next_header: u8,
+    source: Ipv6Addr,
+    destination: Ipv6Addr,
+}
+
 /// Inspect an IPv4 packet and normalize the policy-relevant alpha metadata.
 ///
 /// The packet boundary exposes TCP connect attempts, UDP flow attempts, ICMP
@@ -85,6 +93,47 @@ fn inspect_ipv4_packet_inner(
     }
 }
 
+/// Inspect an IPv6 packet and normalize the policy-relevant alpha metadata.
+///
+/// Extension headers are intentionally fail-closed in alpha; support can be
+/// widened inside this packet boundary without changing policy/audit contracts.
+pub fn inspect_ipv6_packet(
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    bytes: &[u8],
+) -> PacketInspection {
+    match inspect_ipv6_packet_inner(sandbox_id.clone(), frontend, bytes) {
+        Ok(inspection) => inspection,
+        Err(error) => PacketInspection {
+            event: NormalizedEvent::UnsupportedNetworkEvent(UnsupportedNetworkEvent {
+                sandbox_id,
+                frontend,
+                reason: error.reason,
+                safe_metadata: error.safe_metadata,
+            }),
+            synthetic_reply: None,
+            udp_payload: None,
+        },
+    }
+}
+
+fn inspect_ipv6_packet_inner(
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    bytes: &[u8],
+) -> Result<PacketInspection, PacketError> {
+    let header = parse_ipv6_header(bytes)?;
+    match header.next_header {
+        6 => inspect_tcp_ipv6_packet(sandbox_id, frontend, bytes, header),
+        17 => inspect_udp_ipv6_packet(sandbox_id, frontend, bytes, header),
+        58 => inspect_icmpv6_packet(sandbox_id, frontend, bytes, header),
+        next_header => Err(PacketError {
+            reason: UnsupportedReason::UnsupportedIpProtocol(next_header),
+            safe_metadata: Some(format!("ipv6 next_header {next_header}")),
+        }),
+    }
+}
+
 fn parse_ipv4_header(bytes: &[u8]) -> Result<Ipv4Header, PacketError> {
     if bytes.len() < 20 {
         return Err(PacketError::malformed("short IPv4 header"));
@@ -112,6 +161,37 @@ fn parse_ipv4_header(bytes: &[u8]) -> Result<Ipv4Header, PacketError> {
         protocol: bytes[9],
         source: Ipv4Addr::new(bytes[12], bytes[13], bytes[14], bytes[15]),
         destination: Ipv4Addr::new(bytes[16], bytes[17], bytes[18], bytes[19]),
+    })
+}
+
+fn parse_ipv6_header(bytes: &[u8]) -> Result<Ipv6Header, PacketError> {
+    if bytes.len() < 40 {
+        return Err(PacketError::malformed("short IPv6 header"));
+    }
+    if bytes[0] >> 4 != 6 {
+        return Err(PacketError::malformed("invalid IPv6 header"));
+    }
+    let payload_len = usize::from(u16::from_be_bytes([bytes[4], bytes[5]]));
+    if bytes.len() < 40 + payload_len {
+        return Err(PacketError::malformed("invalid IPv6 payload length"));
+    }
+    let next_header = bytes[6];
+    if matches!(next_header, 0 | 43 | 44 | 50 | 51 | 60) {
+        return Err(PacketError {
+            reason: if next_header == 44 {
+                UnsupportedReason::UnsupportedFragmentation
+            } else {
+                UnsupportedReason::UnsupportedIpProtocol(next_header)
+            },
+            safe_metadata: Some(format!("ipv6 extension header {next_header}")),
+        });
+    }
+
+    Ok(Ipv6Header {
+        payload_len,
+        next_header,
+        source: Ipv6Addr::from(<[u8; 16]>::try_from(&bytes[8..24]).unwrap()),
+        destination: Ipv6Addr::from(<[u8; 16]>::try_from(&bytes[24..40]).unwrap()),
     })
 }
 
@@ -203,19 +283,139 @@ fn inspect_udp_packet(
     if udp.len() < 8 {
         return Err(PacketError::malformed("short UDP header"));
     }
-    let source_port = u16::from_be_bytes([udp[0], udp[1]]);
-    let destination_port = u16::from_be_bytes([udp[2], udp[3]]);
+    inspect_udp_segment(
+        sandbox_id,
+        frontend,
+        SocketAddr::new(
+            IpAddr::V4(header.source),
+            u16::from_be_bytes([udp[0], udp[1]]),
+        ),
+        SocketAddr::new(
+            IpAddr::V4(header.destination),
+            u16::from_be_bytes([udp[2], udp[3]]),
+        ),
+        udp,
+    )
+}
+
+fn inspect_icmpv6_packet(
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    bytes: &[u8],
+    header: Ipv6Header,
+) -> Result<PacketInspection, PacketError> {
+    let icmp = &bytes[40..40 + header.payload_len];
+    if icmp.len() < 8 {
+        return Err(PacketError::malformed("short ICMPv6 message"));
+    }
+    let icmp_type = icmp[0];
+    let icmp_code = icmp[1];
+    let event = NormalizedEvent::IcmpMessage(IcmpMessage {
+        sandbox_id,
+        frontend,
+        icmp_type,
+        icmp_code,
+        source: IpAddr::V6(header.source),
+        destination: IpAddr::V6(header.destination),
+    });
+    let synthetic_reply = if icmp_type == 128 && icmp_code == 0 {
+        Some(SyntheticIpPacket {
+            bytes: synthesize_icmpv6_echo_reply(bytes, header),
+        })
+    } else {
+        None
+    };
+    Ok(PacketInspection {
+        event,
+        synthetic_reply,
+        udp_payload: None,
+    })
+}
+
+fn inspect_tcp_ipv6_packet(
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    bytes: &[u8],
+    header: Ipv6Header,
+) -> Result<PacketInspection, PacketError> {
+    let tcp = &bytes[40..40 + header.payload_len];
+    if tcp.len() < 20 {
+        return Err(PacketError::malformed("short TCP header"));
+    }
+    let data_offset = usize::from(tcp[12] >> 4) * 4;
+    if data_offset < 20 || tcp.len() < data_offset {
+        return Err(PacketError::malformed("invalid TCP data offset"));
+    }
+    let flags = tcp[13];
+    let syn = flags & 0x02 != 0;
+    let ack = flags & 0x10 != 0;
+    if !syn || ack {
+        return Err(PacketError {
+            reason: UnsupportedReason::Other(
+                "tcp packet requires stack adapter flow handling".into(),
+            ),
+            safe_metadata: Some(format!("tcp flags=0x{flags:02x}")),
+        });
+    }
+    let source_port = u16::from_be_bytes([tcp[0], tcp[1]]);
+    let destination_port = u16::from_be_bytes([tcp[2], tcp[3]]);
+    Ok(PacketInspection {
+        event: NormalizedEvent::TcpConnectAttempt(TcpConnectAttempt {
+            sandbox_id,
+            frontend,
+            source: SocketAddr::new(IpAddr::V6(header.source), source_port),
+            destination: SocketAddr::new(IpAddr::V6(header.destination), destination_port),
+            hostname: None,
+        }),
+        synthetic_reply: None,
+        udp_payload: None,
+    })
+}
+
+fn inspect_udp_ipv6_packet(
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    bytes: &[u8],
+    header: Ipv6Header,
+) -> Result<PacketInspection, PacketError> {
+    let udp = &bytes[40..40 + header.payload_len];
+    if udp.len() < 8 {
+        return Err(PacketError::malformed("short UDP header"));
+    }
+    inspect_udp_segment(
+        sandbox_id,
+        frontend,
+        SocketAddr::new(
+            IpAddr::V6(header.source),
+            u16::from_be_bytes([udp[0], udp[1]]),
+        ),
+        SocketAddr::new(
+            IpAddr::V6(header.destination),
+            u16::from_be_bytes([udp[2], udp[3]]),
+        ),
+        udp,
+    )
+}
+
+fn inspect_udp_segment(
+    sandbox_id: SandboxId,
+    frontend: FrontendKind,
+    source: SocketAddr,
+    destination: SocketAddr,
+    udp: &[u8],
+) -> Result<PacketInspection, PacketError> {
+    if udp.len() < 8 {
+        return Err(PacketError::malformed("short UDP header"));
+    }
     let udp_len = usize::from(u16::from_be_bytes([udp[4], udp[5]]));
     if udp_len < 8 || udp_len > udp.len() {
         return Err(PacketError::malformed("invalid UDP length"));
     }
-    let destination = SocketAddr::new(IpAddr::V4(header.destination), destination_port);
-
     Ok(PacketInspection {
         event: NormalizedEvent::UdpFlowAttempt(UdpFlowAttempt {
             sandbox_id,
             frontend,
-            source: SocketAddr::new(IpAddr::V4(header.source), source_port),
+            source,
             destination,
             hostname: None,
             classification: classify_udp_destination(destination),
@@ -337,6 +537,77 @@ pub fn synthesize_udp_ipv6_response(
     Ok(SyntheticIpPacket { bytes: packet })
 }
 
+/// Synthesize an IPv6 ICMPv6 destination-unreachable response for a failed UDP
+/// flow using only normalized flow endpoints.
+pub fn synthesize_udp_ipv6_unreachable_from_flow(
+    original_source: SocketAddr,
+    original_destination: SocketAddr,
+    code: u8,
+) -> Result<SyntheticIpPacket, PacketError> {
+    let (source_ip, destination_ip) = match (original_source.ip(), original_destination.ip()) {
+        (IpAddr::V6(source), IpAddr::V6(destination)) => (source, destination),
+        _ => {
+            return Err(PacketError::unsupported(
+                "udp ipv6 unreachable requires IPv6 socket addresses",
+            ));
+        }
+    };
+    let mut original = vec![0_u8; 48];
+    original[0] = 0x60;
+    original[4..6].copy_from_slice(&8_u16.to_be_bytes());
+    original[6] = 17;
+    original[7] = 64;
+    original[8..24].copy_from_slice(&source_ip.octets());
+    original[24..40].copy_from_slice(&destination_ip.octets());
+    original[40..42].copy_from_slice(&original_source.port().to_be_bytes());
+    original[42..44].copy_from_slice(&original_destination.port().to_be_bytes());
+    original[44..46].copy_from_slice(&8_u16.to_be_bytes());
+    let udp_checksum = udp_checksum_ipv6(source_ip, destination_ip, &original[40..]);
+    original[46..48].copy_from_slice(&udp_checksum.to_be_bytes());
+    synthesize_ipv6_icmp_unreachable(&original, code)
+}
+
+/// Synthesize an ICMPv6 destination-unreachable response for denied traffic.
+pub fn synthesize_ipv6_icmp_unreachable(
+    original_packet: &[u8],
+    code: u8,
+) -> Result<SyntheticIpPacket, PacketError> {
+    let header = parse_ipv6_header(original_packet)?;
+    let original_len = (40 + header.payload_len).min(1232);
+    let icmp_len = 8 + original_len;
+    let total_len = 40 + icmp_len;
+    if icmp_len > u16::MAX as usize {
+        return Err(PacketError::malformed("ICMPv6 error too large"));
+    }
+    let mut packet = vec![0_u8; total_len];
+    packet[0] = 0x60;
+    packet[4..6].copy_from_slice(&(icmp_len as u16).to_be_bytes());
+    packet[6] = 58;
+    packet[7] = 64;
+    packet[8..24].copy_from_slice(&header.destination.octets());
+    packet[24..40].copy_from_slice(&header.source.octets());
+    packet[40] = 1;
+    packet[41] = code;
+    packet[48..].copy_from_slice(&original_packet[..original_len]);
+    let checksum = icmpv6_checksum(header.destination, header.source, &packet[40..]);
+    packet[42..44].copy_from_slice(&checksum.to_be_bytes());
+    Ok(SyntheticIpPacket { bytes: packet })
+}
+
+/// Synthesize a packet-level IPv6 denial response when policy requests an ICMP
+/// unreachable. Drop/reset decisions intentionally produce no packet here.
+pub fn synthesize_ipv6_denial_response(
+    original_packet: &[u8],
+    decision: &PolicyDecision,
+) -> Result<Option<SyntheticIpPacket>, PacketError> {
+    match decision {
+        PolicyDecision::Deny(deny) if deny.action == DenialAction::IcmpUnreachable => {
+            synthesize_ipv6_icmp_unreachable(original_packet, 1).map(Some)
+        }
+        _ => Ok(None),
+    }
+}
+
 fn udp_checksum_ipv4(source: Ipv4Addr, destination: Ipv4Addr, udp_segment: &[u8]) -> u16 {
     let mut pseudo = Vec::with_capacity(12 + udp_segment.len() + 1);
     pseudo.extend_from_slice(&source.octets());
@@ -357,12 +628,25 @@ fn udp_checksum_ipv4(source: Ipv4Addr, destination: Ipv4Addr, udp_segment: &[u8]
 }
 
 fn udp_checksum_ipv6(source: Ipv6Addr, destination: Ipv6Addr, udp_segment: &[u8]) -> u16 {
-    let mut pseudo = Vec::with_capacity(40 + udp_segment.len() + 1);
+    checksum_ipv6_next_header(source, destination, 17, udp_segment)
+}
+
+fn icmpv6_checksum(source: Ipv6Addr, destination: Ipv6Addr, icmp_segment: &[u8]) -> u16 {
+    checksum_ipv6_next_header(source, destination, 58, icmp_segment)
+}
+
+fn checksum_ipv6_next_header(
+    source: Ipv6Addr,
+    destination: Ipv6Addr,
+    next_header: u8,
+    segment: &[u8],
+) -> u16 {
+    let mut pseudo = Vec::with_capacity(40 + segment.len() + 1);
     pseudo.extend_from_slice(&source.octets());
     pseudo.extend_from_slice(&destination.octets());
-    pseudo.extend_from_slice(&(udp_segment.len() as u32).to_be_bytes());
-    pseudo.extend_from_slice(&[0, 0, 0, 17]);
-    pseudo.extend_from_slice(udp_segment);
+    pseudo.extend_from_slice(&(segment.len() as u32).to_be_bytes());
+    pseudo.extend_from_slice(&[0, 0, 0, next_header]);
+    pseudo.extend_from_slice(segment);
     if pseudo.len() % 2 == 1 {
         pseudo.push(0);
     }
@@ -395,6 +679,20 @@ fn synthesize_echo_reply(bytes: &[u8], header: Ipv4Header) -> Vec<u8> {
     let ip_checksum = internet_checksum(&reply[..header.ihl]);
     reply[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
 
+    reply
+}
+
+fn synthesize_icmpv6_echo_reply(bytes: &[u8], header: Ipv6Header) -> Vec<u8> {
+    let total_len = 40 + header.payload_len;
+    let mut reply = bytes[..total_len].to_vec();
+    reply[7] = 64;
+    reply[8..24].copy_from_slice(&header.destination.octets());
+    reply[24..40].copy_from_slice(&header.source.octets());
+    reply[40] = 129;
+    reply[42] = 0;
+    reply[43] = 0;
+    let checksum = icmpv6_checksum(header.destination, header.source, &reply[40..total_len]);
+    reply[42..44].copy_from_slice(&checksum.to_be_bytes());
     reply
 }
 
@@ -675,6 +973,72 @@ mod tests {
     }
 
     #[test]
+    fn ipv6_udp_packet_returns_classified_flow_attempt() {
+        let packet = udp_ipv6_packet(53000, 443, &[1, 2, 3, 4]);
+        let inspection = inspect_ipv6_packet(sandbox(), FrontendKind::Tun, &packet);
+        let NormalizedEvent::UdpFlowAttempt(event) = inspection.event else {
+            panic!("expected UDP flow attempt");
+        };
+        assert_eq!(event.source, "[2001:db8::2]:53000".parse().unwrap());
+        assert_eq!(event.destination, "[2001:db8::10]:443".parse().unwrap());
+        assert_eq!(event.classification, UdpClassification::QuicCandidate);
+        assert_eq!(
+            inspection.udp_payload.as_deref(),
+            Some([1, 2, 3, 4].as_slice())
+        );
+    }
+
+    #[test]
+    fn icmpv6_echo_request_returns_normalized_event_and_synthetic_reply() {
+        let request = icmpv6_echo_request_packet();
+        let inspection = inspect_ipv6_packet(sandbox(), FrontendKind::Tun, &request);
+        let NormalizedEvent::IcmpMessage(event) = inspection.event else {
+            panic!("expected ICMPv6 event");
+        };
+        assert_eq!(event.icmp_type, 128);
+        assert_eq!(event.source, "2001:db8::2".parse::<IpAddr>().unwrap());
+        assert_eq!(event.destination, "2001:db8::1".parse::<IpAddr>().unwrap());
+
+        let reply = inspection.synthetic_reply.unwrap();
+        assert_eq!(reply.bytes()[6], 58);
+        assert_eq!(reply.bytes()[40], 129);
+        assert_eq!(reply.bytes()[41], 0);
+        assert_eq!(
+            &reply.bytes()[8..24],
+            &"2001:db8::1".parse::<Ipv6Addr>().unwrap().octets()
+        );
+        assert_eq!(
+            &reply.bytes()[24..40],
+            &"2001:db8::2".parse::<Ipv6Addr>().unwrap().octets()
+        );
+        assert_eq!(
+            icmpv6_checksum(
+                "2001:db8::1".parse().unwrap(),
+                "2001:db8::2".parse().unwrap(),
+                &reply.bytes()[40..]
+            ),
+            0xffff
+        );
+    }
+
+    #[test]
+    fn udp_ipv6_unreachable_from_flow_quotes_minimal_udp_packet() {
+        let packet = synthesize_udp_ipv6_unreachable_from_flow(
+            "[2001:db8::2]:53000".parse().unwrap(),
+            "[2001:db8::10]:12345".parse().unwrap(),
+            4,
+        )
+        .unwrap();
+        let bytes = packet.bytes();
+
+        assert_eq!(bytes[6], 58);
+        assert_eq!(bytes[40], 1);
+        assert_eq!(bytes[41], 4);
+        assert_eq!(u16::from_be_bytes([bytes[88], bytes[89]]), 53000);
+        assert_eq!(u16::from_be_bytes([bytes[90], bytes[91]]), 12345);
+    }
+
+    #[test]
     fn udp_ipv6_response_synthesis_swaps_original_flow_endpoints() {
         let packet = synthesize_udp_ipv6_response(
             "[2001:db8::2]:53000".parse().unwrap(),
@@ -809,6 +1173,45 @@ mod tests {
         ];
         packet.extend_from_slice(payload);
         finish_ipv4_checksum(&mut packet);
+        packet
+    }
+
+    fn udp_ipv6_packet(source_port: u16, destination_port: u16, payload: &[u8]) -> Vec<u8> {
+        let source = "2001:db8::2".parse::<Ipv6Addr>().unwrap();
+        let destination = "2001:db8::10".parse::<Ipv6Addr>().unwrap();
+        let udp_len = 8 + payload.len();
+        let mut packet = vec![0_u8; 40 + udp_len];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[6] = 17;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&source.octets());
+        packet[24..40].copy_from_slice(&destination.octets());
+        packet[40..42].copy_from_slice(&source_port.to_be_bytes());
+        packet[42..44].copy_from_slice(&destination_port.to_be_bytes());
+        packet[44..46].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[48..].copy_from_slice(payload);
+        let checksum = udp_checksum_ipv6(source, destination, &packet[40..]);
+        packet[46..48].copy_from_slice(&checksum.to_be_bytes());
+        packet
+    }
+
+    fn icmpv6_echo_request_packet() -> Vec<u8> {
+        let source = "2001:db8::2".parse::<Ipv6Addr>().unwrap();
+        let destination = "2001:db8::1".parse::<Ipv6Addr>().unwrap();
+        let mut packet = vec![0_u8; 48];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&8_u16.to_be_bytes());
+        packet[6] = 58;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&source.octets());
+        packet[24..40].copy_from_slice(&destination.octets());
+        packet[40] = 128;
+        packet[42..44].copy_from_slice(&0xabcd_u16.to_be_bytes());
+        packet[44..46].copy_from_slice(&1_u16.to_be_bytes());
+        packet[46..48].copy_from_slice(&2_u16.to_be_bytes());
+        let checksum = icmpv6_checksum(source, destination, &packet[40..]);
+        packet[42..44].copy_from_slice(&checksum.to_be_bytes());
         packet
     }
 

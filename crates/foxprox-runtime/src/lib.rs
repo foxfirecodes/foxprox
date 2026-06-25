@@ -21,10 +21,12 @@ use foxprox_device::{DeviceError, DevicePacket, PacketDevice, TryPacketDevice};
 use foxprox_egress::{EgressError, EgressOutcome, HostEgress, HostTcpStream, HostUdpFlow};
 use foxprox_net::{
     apply_dns_attribution, handle_ipv4_dns_service_packet, handle_ipv4_packet,
-    handle_ipv4_packet_with_egress, handle_normalized_event_with_egress,
+    handle_ipv4_packet_with_egress, handle_ipv6_dns_service_packet, handle_ipv6_packet,
+    handle_ipv6_packet_with_egress, handle_normalized_event_with_egress,
     handle_normalized_event_without_egress, udp_timeout, BrokerError, BrokerEventOutcome,
-    DnsAttributionCache, FlowProtocol, InboundIpv4Packet, Ipv4DnsServiceRequest, OutboundIpPacket,
-    PacketBrokerOutcome, StackAdapter, StackEvent, StackTcpData, StackTcpWrite,
+    DnsAttributionCache, FlowProtocol, InboundIpv4Packet, InboundIpv6Packet, Ipv4DnsServiceRequest,
+    Ipv6DnsServiceRequest, OutboundIpPacket, PacketBrokerOutcome, StackAdapter, StackEvent,
+    StackTcpData, StackTcpWrite,
 };
 use foxprox_policy::PolicyEngine;
 
@@ -85,6 +87,67 @@ where
 {
     let outcome = handle_ipv4_packet(
         InboundIpv4Packet {
+            sandbox_id: ctx.sandbox_id,
+            frontend: ctx.frontend,
+            bytes: packet.bytes(),
+        },
+        ctx.policy,
+        ctx.egress,
+        ctx.audit,
+        ctx.sequence,
+        ctx.timestamp_millis,
+    )
+    .map_err(RuntimeError::Broker)?;
+
+    write_outbound_packets(device, &outcome.outbound_packets)?;
+
+    Ok(outcome)
+}
+
+/// Read one IPv6 packet from `device`, run it through the normalized
+/// packet/policy/audit/egress boundary, and write any returned opaque outbound
+/// packets back to the same device.
+pub fn process_one_ipv6_device_packet<D, E, A>(
+    device: &mut D,
+    ctx: DevicePacketStep<'_, E, A>,
+) -> Result<PacketBrokerOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    E: HostEgress,
+    A: AuditSink,
+{
+    let packet = device.read_packet().map_err(RuntimeError::Device)?;
+    process_ipv6_device_packet(device, packet, ctx)
+}
+
+/// Try to process one IPv6 packet without blocking on an idle device.
+pub fn process_one_ipv6_device_packet_if_ready<D, E, A>(
+    device: &mut D,
+    ctx: DevicePacketStep<'_, E, A>,
+) -> Result<Option<PacketBrokerOutcome>, RuntimeError>
+where
+    D: TryPacketDevice,
+    E: HostEgress,
+    A: AuditSink,
+{
+    let Some(packet) = device.try_read_packet().map_err(RuntimeError::Device)? else {
+        return Ok(None);
+    };
+    process_ipv6_device_packet(device, packet, ctx).map(Some)
+}
+
+fn process_ipv6_device_packet<D, E, A>(
+    device: &mut D,
+    packet: DevicePacket,
+    ctx: DevicePacketStep<'_, E, A>,
+) -> Result<PacketBrokerOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    E: HostEgress,
+    A: AuditSink,
+{
+    let outcome = handle_ipv6_packet(
+        InboundIpv6Packet {
             sandbox_id: ctx.sandbox_id,
             frontend: ctx.frontend,
             bytes: packet.bytes(),
@@ -313,7 +376,7 @@ where
     U: HostUdpFlow,
 {
     let mut replies = Vec::new();
-    let mut failed_ipv4_flows = Vec::new();
+    let mut failed_flows = Vec::new();
     for (key, bridge) in bridges.flows.iter_mut().take(max_flows) {
         match bridge.flow.recv_to_sandbox(max_bytes_per_flow) {
             Ok(bytes) if !bytes.is_empty() => {
@@ -322,11 +385,13 @@ where
             }
             Ok(_) => {}
             Err(error) => {
-                if matches!(
+                let same_family = matches!(
                     (key.source.ip(), key.destination.ip()),
                     (std::net::IpAddr::V4(_), std::net::IpAddr::V4(_))
-                ) {
-                    failed_ipv4_flows.push(key.clone());
+                        | (std::net::IpAddr::V6(_), std::net::IpAddr::V6(_))
+                );
+                if same_family {
+                    failed_flows.push(key.clone());
                 } else {
                     return Err(RuntimeError::Broker(BrokerError::Egress(error)));
                 }
@@ -335,7 +400,7 @@ where
     }
 
     let udp_flows_read = replies.len();
-    let udp_flows_removed_on_error = failed_ipv4_flows.len();
+    let udp_flows_removed_on_error = failed_flows.len();
     let mut udp_bytes_read_from_egress = 0;
     let mut outbound_packets_written = 0;
     for (key, bytes) in replies {
@@ -358,13 +423,27 @@ where
         write_outbound_packets(device, &[outbound])?;
         outbound_packets_written += 1;
     }
-    for key in failed_ipv4_flows {
+    for key in failed_flows {
         bridges.remove(&key);
-        let packet = foxprox_packet::synthesize_udp_ipv4_unreachable_from_flow(
-            key.source,
-            key.destination,
-            3,
-        )
+        let packet = match (key.source.ip(), key.destination.ip()) {
+            (std::net::IpAddr::V4(_), std::net::IpAddr::V4(_)) => {
+                foxprox_packet::synthesize_udp_ipv4_unreachable_from_flow(
+                    key.source,
+                    key.destination,
+                    3,
+                )
+            }
+            (std::net::IpAddr::V6(_), std::net::IpAddr::V6(_)) => {
+                foxprox_packet::synthesize_udp_ipv6_unreachable_from_flow(
+                    key.source,
+                    key.destination,
+                    4,
+                )
+            }
+            _ => Err(foxprox_packet::PacketError::unsupported(
+                "udp bridge error address families differ",
+            )),
+        }
         .map_err(BrokerError::Packet)
         .map_err(RuntimeError::Broker)?;
         let outbound =
@@ -661,6 +740,120 @@ where
 {
     let mut result = handle_ipv4_packet_with_egress(
         InboundIpv4Packet {
+            sandbox_id: ctx.sandbox_id,
+            frontend: ctx.frontend,
+            bytes: packet.bytes(),
+        },
+        ctx.policy,
+        ctx.egress,
+        ctx.audit,
+        ctx.sequence,
+        ctx.timestamp_millis,
+    )
+    .map_err(RuntimeError::Broker)?;
+
+    if let (NormalizedEvent::UdpFlowAttempt(event), Some(EgressOutcome::UdpOpened(flow))) =
+        (&result.event, result.egress_outcome.take())
+    {
+        ctx.udp_bridges
+            .try_insert_with_timeout(
+                UdpFlowKey::from_attempt(event),
+                flow,
+                ctx.timestamp_millis,
+                udp_timeout(event.classification, &ctx.udp_timeouts).as_millis() as u64,
+            )
+            .map_err(BrokerError::Egress)
+            .map_err(RuntimeError::Broker)?;
+    }
+
+    write_outbound_packets(device, &result.outbound_packets)?;
+
+    Ok(result.into_outcome())
+}
+
+/// Process one IPv6 packet, servicing broker DNS packets before falling back to
+/// generic UDP bridge retention.
+pub fn process_one_ipv6_device_packet_with_dns_and_udp_bridges<D, E, A>(
+    device: &mut D,
+    ctx: DevicePacketStepWithDnsAndUdp<'_, E, A>,
+) -> Result<PacketBrokerOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    E: HostEgress,
+    E::UdpHandle: HostUdpFlow,
+    A: AuditSink,
+{
+    let packet = device.read_packet().map_err(RuntimeError::Device)?;
+    if let Some((outcome, cache_update)) = handle_ipv6_dns_service_packet(
+        Ipv6DnsServiceRequest {
+            packet: InboundIpv6Packet {
+                sandbox_id: ctx.sandbox_id,
+                frontend: ctx.frontend,
+                bytes: packet.bytes(),
+            },
+            broker_dns_addrs: ctx.broker_dns_addrs,
+            response_ttl: ctx.dns_response_ttl,
+            sequence: ctx.sequence,
+            timestamp_millis: ctx.timestamp_millis,
+        },
+        ctx.policy,
+        ctx.egress,
+        ctx.audit,
+    )
+    .map_err(RuntimeError::Broker)?
+    {
+        ctx.dns_cache
+            .observe_address_records(cache_update.records, ctx.cache_now);
+        write_outbound_packets(device, &outcome.outbound_packets)?;
+        return Ok(outcome);
+    }
+
+    process_ipv6_device_packet_with_udp_bridges(
+        device,
+        packet,
+        DevicePacketStepWithUdp {
+            sandbox_id: ctx.sandbox_id,
+            frontend: ctx.frontend,
+            policy: ctx.policy,
+            egress: ctx.egress,
+            audit: ctx.audit,
+            udp_bridges: ctx.udp_bridges,
+            udp_timeouts: ctx.udp_timeouts,
+            sequence: ctx.sequence,
+            timestamp_millis: ctx.timestamp_millis,
+        },
+    )
+}
+
+/// Process one IPv6 packet and retain any opened UDP flow handle for later
+/// response routing.
+pub fn process_one_ipv6_device_packet_with_udp_bridges<D, E, A>(
+    device: &mut D,
+    ctx: DevicePacketStepWithUdp<'_, E, A>,
+) -> Result<PacketBrokerOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    E: HostEgress,
+    E::UdpHandle: HostUdpFlow,
+    A: AuditSink,
+{
+    let packet = device.read_packet().map_err(RuntimeError::Device)?;
+    process_ipv6_device_packet_with_udp_bridges(device, packet, ctx)
+}
+
+fn process_ipv6_device_packet_with_udp_bridges<D, E, A>(
+    device: &mut D,
+    packet: DevicePacket,
+    ctx: DevicePacketStepWithUdp<'_, E, A>,
+) -> Result<PacketBrokerOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    E: HostEgress,
+    E::UdpHandle: HostUdpFlow,
+    A: AuditSink,
+{
+    let mut result = handle_ipv6_packet_with_egress(
+        InboundIpv6Packet {
             sandbox_id: ctx.sandbox_id,
             frontend: ctx.frontend,
             bytes: packet.bytes(),
@@ -1482,6 +1675,47 @@ mod tests {
     }
 
     #[test]
+    fn one_step_ipv6_runtime_retains_allowed_udp_bridge() {
+        let inbound = udp_ipv6_packet(53000, 12345, b"ping");
+        let cursor = Cursor::new(inbound);
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
+        let writes = Rc::new(RefCell::new(Vec::new()));
+        let mut egress = RecordingUdpEgress::new(Rc::clone(&writes));
+        let mut audit = BoundedAuditSink::new(4);
+        let mut udp_bridges = UdpBridgeTable::default();
+        let sandbox_id = SandboxId::new("s1").unwrap();
+
+        let outcome = process_one_ipv6_device_packet_with_udp_bridges(
+            &mut device,
+            DevicePacketStepWithUdp {
+                sandbox_id: &sandbox_id,
+                frontend: FrontendKind::Tun,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                udp_bridges: &mut udp_bridges,
+                udp_timeouts: UdpTimeouts::default(),
+                sequence: 2,
+                timestamp_millis: 2000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.outcome, BrokerEventOutcome::Forwarded);
+        assert_eq!(outcome.udp_bytes_sent, 4);
+        assert_eq!(udp_bridges.len(), 1);
+        assert!(udp_bridges.contains_key(&UdpFlowKey {
+            sandbox_id,
+            frontend: FrontendKind::Tun,
+            source: "[2001:db8::2]:53000".parse().unwrap(),
+            destination: "[2001:db8::1]:12345".parse().unwrap(),
+        }));
+        assert_eq!(writes.borrow().as_slice(), &[b"ping".to_vec()]);
+        assert_eq!(audit.records().len(), 1);
+    }
+
+    #[test]
     fn stack_runtime_tick_runs_maintenance_when_device_not_ready() {
         let mut device = PreopenedTunDevice::from_io(WouldBlockIo, 1500).unwrap();
         let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
@@ -1791,6 +2025,32 @@ mod tests {
         assert_eq!(bytes[21], 3);
         assert_eq!(&bytes[12..16], &[203, 0, 113, 10]);
         assert_eq!(&bytes[16..20], &[10, 0, 0, 2]);
+    }
+
+    #[test]
+    fn udp_bridge_host_error_writes_ipv6_icmp_unreachable_and_removes_flow() {
+        let cursor = Cursor::new(Vec::new());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let key = UdpFlowKey {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "[2001:db8::2]:53000".parse().unwrap(),
+            destination: "[2001:db8::10]:12345".parse().unwrap(),
+        };
+        let mut bridges = UdpBridgeTable::default();
+        bridges.insert(key, FailingUdpFlow);
+
+        let outcome =
+            flush_udp_bridge_reads_to_device(&mut device, &mut bridges, 1024, 20).unwrap();
+
+        assert_eq!(outcome.udp_flows_read, 0);
+        assert_eq!(outcome.udp_flows_removed_on_error, 1);
+        assert_eq!(outcome.outbound_packets_written, 1);
+        assert!(bridges.is_empty());
+        let bytes = device.into_inner().into_inner();
+        assert_eq!(bytes[6], 58);
+        assert_eq!(bytes[40], 1);
+        assert_eq!(bytes[41], 4);
     }
 
     #[test]
@@ -2728,6 +2988,24 @@ mod tests {
         packet[28..].copy_from_slice(payload);
         let ip_checksum = foxprox_packet::internet_checksum(&packet[..20]);
         packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+        packet
+    }
+
+    fn udp_ipv6_packet(source_port: u16, destination_port: u16, payload: &[u8]) -> Vec<u8> {
+        let source = "2001:db8::2".parse::<std::net::Ipv6Addr>().unwrap();
+        let destination = "2001:db8::1".parse::<std::net::Ipv6Addr>().unwrap();
+        let udp_len = 8 + payload.len();
+        let mut packet = vec![0_u8; 40 + udp_len];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[6] = 17;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&source.octets());
+        packet[24..40].copy_from_slice(&destination.octets());
+        packet[40..42].copy_from_slice(&source_port.to_be_bytes());
+        packet[42..44].copy_from_slice(&destination_port.to_be_bytes());
+        packet[44..46].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[48..].copy_from_slice(payload);
         packet
     }
 

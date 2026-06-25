@@ -1645,3 +1645,27 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 5992719.
 - Remaining boundary risks: coverage-guided fuzz harnesses remain future work.
+
+## 2026-06-22 — Boundary objective: IPv6 packet input and ICMPv6 error synthesis
+
+- Boundary under work: IPv6 packet normalization/write-back for TUN packet paths.
+- Allowed dependency direction: `foxprox-packet` owns IPv6 header parsing and ICMPv6/UDP wire synthesis; `foxprox-net` may orchestrate packet/policy/audit/egress; runtime/device still handle opaque IP packets only. Policy/audit consume normalized events and decisions only.
+- Dependency-risk assessment: IPv6 UDP replies existed but inbound IPv6 classification was still missing. Adding IPv6 by copying header details into runtime/policy would break the raw-packet boundary, so packet-owned parsing plus net-owned orchestration is required.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for packet/net/runtime/audit.
+- Observed results: added packet-owned IPv6 classification for TCP SYN, UDP payloads, and ICMPv6 messages; IPv6 ICMP echo write-back; IPv6 ICMP unreachable synthesis for policy denials and UDP host failures; IPv6 packet and broker-DNS orchestration in `foxprox-net`; and runtime IPv6 UDP bridge retention. All verification passed.
+- Changed files:
+  - `crates/foxprox-packet/src/lib.rs`
+  - `crates/foxprox-net/src/lib.rs`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 143 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-packet` — packet remains core-only.
+  - `cargo tree -p foxprox-net` — net orchestrates packet/DNS/policy/audit/egress boundaries.
+  - `cargo tree -p foxprox-runtime` — runtime depends on packet only for opaque synthesis helpers and keeps policy/audit normalized.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: IPv6 extension headers/NDP and full production IPv6 stack behavior remain future work.
