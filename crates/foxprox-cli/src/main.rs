@@ -58,6 +58,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("setup-smoke");
             println!("handoff-smoke");
             println!("writeback-smoke");
+            println!("ping-smoke");
             println!("udp-forward-smoke");
             println!("udp-deny-smoke");
             println!("dns-smoke");
@@ -91,6 +92,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         handoff_smoke_records()
     } else if scenario == "writeback-smoke" {
         writeback_smoke_records()
+    } else if scenario == "ping-smoke" {
+        ping_smoke_records()
     } else if scenario == "udp-forward-smoke" {
         udp_forward_smoke_records()
     } else if scenario == "udp-deny-smoke" {
@@ -608,6 +611,190 @@ fn run_writeback_smoke() -> Result<AuditRecord, String> {
     .with_metadata("status", output.status.to_string())
     .with_metadata("packets_read", packets_read.to_string())
     .with_metadata("reply_written", replied.to_string());
+    if !stdout.is_empty() {
+        record = record.with_metadata("stdout", stdout);
+    }
+    if !stderr.is_empty() {
+        record = record.with_metadata("stderr", stderr);
+    }
+    Ok(record)
+}
+
+#[cfg(unix)]
+fn ping_smoke_records() -> Vec<AuditRecord> {
+    match run_ping_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::IcmpMessage,
+            "ping-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::Harness)
+        .with_protocol(Protocol::Icmp)],
+    }
+}
+
+#[cfg(not(unix))]
+fn ping_smoke_records() -> Vec<AuditRecord> {
+    vec![AuditRecord::new(
+        EventKind::IcmpMessage,
+        "ping-smoke",
+        Decision::FailClosed,
+        "ping smoke is only supported on Unix",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Icmp)]
+}
+
+#[cfg(unix)]
+fn run_ping_smoke() -> Result<AuditRecord, String> {
+    let helper = setup_helper_path()?;
+    let target_dir = helper
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| {
+            format!(
+                "could not derive target directory from {}",
+                helper.display()
+            )
+        })?
+        .to_path_buf();
+    let socket_dir = target_dir.join(format!("foxprox-ping-smoke-{}", std::process::id()));
+    let socket_path = socket_dir.join("setup.sock");
+    let _ = std::fs::remove_file(&socket_path);
+    std::fs::create_dir_all(&socket_dir)
+        .map_err(|err| format!("failed to create ping smoke socket dir: {err}"))?;
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|err| format!("failed to bind ping smoke socket: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make ping listener nonblocking: {err}"))?;
+
+    let mut child = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--cap-add",
+            "CAP_NET_RAW",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--ro-bind",
+        ])
+        .arg(&target_dir)
+        .arg(&target_dir)
+        .args(["--bind"])
+        .arg(&socket_dir)
+        .arg(&socket_dir)
+        .args(["--proc", "/proc", "--"])
+        .env("FOXPROX_SETUP_SOCKET", &socket_path)
+        .arg(&helper)
+        .args(["--", "/usr/bin/ping", "-c", "1", "-W", "3", "10.0.2.1"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn bwrap ping smoke: {err}"))?;
+
+    let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
+    fd.set_nonblocking()?;
+    let mut broker = TransparentBroker::new(
+        "10.0.2.1:53".parse().expect("static broker DNS addr valid"),
+        [],
+        PolicyEngine::new(PolicyConfig::deny_by_default()),
+        MockEgressBackend::new(),
+        PolicyEngine::new(PolicyConfig::deny_by_default()),
+        MockEgressBackend::new(),
+        PolicyEngine::new(PolicyConfig::deny_by_default().allow_ping(true)),
+    );
+    let mut buf = [0_u8; 2048];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut packets_read = 0_u64;
+    let mut reply_written = false;
+    while Instant::now() < deadline {
+        match fd.read_packet(&mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                packets_read += 1;
+                let step = broker.handle_ipv4_packet("ping-smoke", &buf[..n])?;
+                for reply in step.packets_to_device {
+                    fd.write_packet(&reply)?;
+                    reply_written = true;
+                }
+                if reply_written {
+                    break;
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(format!("failed to read TUN fd during ping smoke: {err}")),
+        }
+        if child
+            .try_wait()
+            .map_err(|err| format!("failed to poll bwrap ping smoke: {err}"))?
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !reply_written {
+        return Err("timed out waiting for ICMP echo request on handed-off TUN fd".to_string());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for bwrap ping smoke: {err}"))?;
+    fd.close();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir(&socket_dir);
+    let runtime_audit = broker
+        .audit
+        .iter()
+        .rev()
+        .find(|audit| audit.kind == EventKind::IcmpMessage)
+        .cloned();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut record = AuditRecord::new(
+        EventKind::IcmpMessage,
+        "ping-smoke",
+        if output.status.success() {
+            Decision::Allow
+        } else {
+            Decision::FailClosed
+        },
+        if output.status.success() {
+            "sandbox ping received a synthetic ICMP echo reply through handed-off TUN fd"
+        } else {
+            "ICMP echo reply was written but sandbox ping command failed"
+        },
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Icmp)
+    .with_metadata("status", output.status.to_string())
+    .with_metadata("packets_read", packets_read.to_string())
+    .with_metadata("reply_written", reply_written.to_string());
+    if let Some(audit) = runtime_audit {
+        record = record
+            .with_metadata("policy_decision", audit.decision.as_str())
+            .with_metadata("policy_reason", audit.reason.clone())
+            .with_metadata("runtime_audit", audit.to_json_line());
+    }
     if !stdout.is_empty() {
         record = record.with_metadata("stdout", stdout);
     }

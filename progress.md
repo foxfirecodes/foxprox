@@ -1132,3 +1132,16 @@
 - Recent broker ICMP coverage commit hash: `e48cfce`.
 - Next verification gap: commit TCP broker coverage. Further production work is the larger TCP byte-bridge orchestration path or async lifecycle integration.
 - Commit hash after commit: pending.
+
+## 2026-06-22T12:35:00Z — Real sandbox ping write-back smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-setup --bin foxproxsetup && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run ping-smoke`
+- Environment assumptions: Linux bwrap/TUN fd handoff is available; `/usr/bin/ping` exists; this smoke grants bwrap `CAP_NET_RAW` in addition to setup-time `CAP_NET_ADMIN` so the target ping can create ICMP sockets after `foxproxsetup` drops `CAP_NET_ADMIN`.
+- Expected result: real sandbox `ping -c 1 10.0.2.1` emits an ICMP echo request through the broker-owned TUN fd, `foxprox-broker::TransparentBroker` routes it to the ICMP runtime, the broker writes a synthetic echo reply back to the fd, and ping reports success.
+- Observed result: pass. Workspace tests passed (`foxprox-broker` 4, `foxprox-core` 64, `foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). `ping-smoke` emitted `"decision":"allow"`, `"reply_written":"true"`, and ping stdout showed `1 packets transmitted, 1 received, 0% packet loss`.
+- Relevant output excerpt: `"reason":"sandbox ping received a synthetic ICMP echo reply through handed-off TUN fd"`; `"policy_reason":"ICMP ping allowed by configuration"`; ping stdout `64 bytes from 10.0.2.1`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `progress.md`, `learnings.md`.
+- Interpretation: Milestone 1 now has the requested real end-to-end sandbox ping validation, replacing the previous deterministic-only ICMP proof for this path while preserving capability isolation notes.
+- Recent broker TCP coverage commit hash: `1a413a2`.
+- Next verification gap: commit ping smoke; continue with real transparent HTTP/TCP or HTTPS/SNI environment coverage if still needed for alpha completion.
+- Commit hash after commit: pending.

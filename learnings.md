@@ -55,3 +55,9 @@
 ## 2026-06-22 — TCP RST denial pattern
 
 - For denied TCP SYNs read from TUN, reversing IPs/ports and sending RST+ACK with acknowledgment `client_seq + 1` gives the sandbox an immediate closed-path signal. This supersedes the earlier timeout-only deny smoke for TCP connect denial.
+
+## 2026-06-22T12:35:00Z — Real ping smoke capability requirement
+
+- Real sandbox `/usr/bin/ping` can be validated through the handed-off TUN fd when the bwrap wrapper grants temporary `CAP_NET_RAW` in addition to `CAP_NET_ADMIN`.
+- `foxproxsetup` still drops `CAP_NET_ADMIN` before target exec; the ping smoke intentionally leaves `CAP_NET_RAW` available to the target so ping can create ICMP sockets.
+- This makes the ping smoke suitable for the Milestone 1 real end-to-end write-back proof, while ordinary non-ping smokes can continue without `CAP_NET_RAW`.
