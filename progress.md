@@ -1909,3 +1909,16 @@
 - Commit hash when committed: pending.
 - Remaining risks: live TUN fd smoke remains unavailable without CAP_NET_ADMIN; DNS hostname attribution for real host dialing is still socket-address only for TCP and IP-only for UDP.
 - Exact next step: commit UDP cleanup/accounting, then assess remaining alpha scope against docs and add an explicit live-TUN capability-gated smoke/skip path if no code path already records the CAP_NET_ADMIN blocker.
+
+## 2026-06-25T03:40:05Z
+- Current objective: add an explicit live-TUN smoke/skip verification path for the known CAP_NET_ADMIN boundary.
+- Files changed: `crates/foxprox-device/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+  - `cargo test -p foxprox-device live_tun_create_smoke_runs_only_when_cap_net_admin_is_available -- --nocapture`
+- Observed result: verification passed; 55 core tests, 7 device tests, 3 integration tests, 6 launcher tests, 90 runtime tests, 7 setup tests, and 39 smoltcp adapter tests passed. The focused live-TUN smoke test passed by explicitly skipping because `/dev/net/tun` exists but `CAP_NET_ADMIN` is not effective in this environment (`skipping live TUN smoke: CAP_NET_ADMIN is not effective`). If run with the capability, the same test attempts real `create_tun("fpxsmoke0")`.
+- Commit hash when committed: pending.
+- Remaining risks: no privileged end-to-end bwrap/TUN smoke has executed in this unprivileged worktree; TCP/UDP real host tests remain loopback-only and deterministic.
+- Exact next step: commit live-TUN smoke/skip harness, then reassess docs for any remaining alpha feature gap that can be advanced without privileged namespace execution.

@@ -599,6 +599,38 @@ mod tests {
     }
 
     #[cfg(target_os = "linux")]
+    fn effective_cap_net_admin() -> bool {
+        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+            return false;
+        };
+        let Some(line) = status.lines().find(|line| line.starts_with("CapEff:\t")) else {
+            return false;
+        };
+        let Some(hex) = line.split_whitespace().nth(1) else {
+            return false;
+        };
+        let Ok(bits) = u64::from_str_radix(hex, 16) else {
+            return false;
+        };
+        bits & (1 << 12) != 0
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn live_tun_create_smoke_runs_only_when_cap_net_admin_is_available() {
+        if !std::path::Path::new("/dev/net/tun").exists() {
+            eprintln!("skipping live TUN smoke: /dev/net/tun is not available");
+            return;
+        }
+        if !effective_cap_net_admin() {
+            eprintln!("skipping live TUN smoke: CAP_NET_ADMIN is not effective");
+            return;
+        }
+
+        let _tun = create_tun("fpxsmoke0").unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn create_tun_rejects_invalid_name_before_opening_device() {
         let error = create_tun("sixteen-byte-iface").unwrap_err();
