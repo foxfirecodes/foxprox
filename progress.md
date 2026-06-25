@@ -1406,3 +1406,24 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 0443a31.
 - Remaining boundary risks: TCP reset/error signaling and ICMPv6 errors remain.
+
+## 2026-06-22 — Boundary objective: Linux TUN setup helper command plan
+
+- Boundary under work: privileged setup-helper contract for concrete Linux TUN commands.
+- Allowed dependency direction: `foxprox-integrations` owns Linux helper command details; runtime/device/net/policy/audit still receive only preopened devices and normalized events.
+- Dependency-risk assessment: bwrap planning already names `foxproxsetup`, but the helper-side TUN setup steps are not represented. A command-plan contract makes the privileged helper boundary testable without moving ioctl/iproute details into broker core.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for integrations/device/audit.
+- Observed results: added data-only `TunSetupCommand`, `TunSetupCommandPlan`, and `LinuxIpTunSetup::plan_commands` in `foxprox-integrations`. The plan produces concrete Linux `ip tuntap add`, `ip addr add ... peer ...`, and `ip link set ... mtu ... up` commands while keeping privileged details outside runtime/device/net/policy/audit. Added validation for mismatched TUN address families and tests for the generated command plan. All verification passed.
+- Changed files:
+  - `crates/foxprox-integrations/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 121 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-integrations` — integrations remains core-only.
+  - `cargo tree -p foxprox-device` — device remains independent/preopened boundary.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: executing these commands, fd handoff, and OS-specific error mapping remain.

@@ -75,6 +75,89 @@ pub trait IntegrationBackend {
     fn plan(&self, request: NetworkSetupRequest) -> Result<NetworkSetupPlan, IntegrationError>;
 }
 
+/// One privileged helper command needed to configure a TUN device. The command
+/// plan is intentionally data-only so tests can validate the Linux boundary
+/// without executing privileged operations in broker core.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TunSetupCommand {
+    pub program: String,
+    pub args: Vec<String>,
+}
+
+/// Concrete Linux helper-side command plan for creating/configuring TUN.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TunSetupCommandPlan {
+    pub commands: Vec<TunSetupCommand>,
+    pub broker_dns: IpAddr,
+}
+
+/// Linux `ip`-based TUN setup planner for the privileged `foxproxsetup` helper.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LinuxIpTunSetup;
+
+impl LinuxIpTunSetup {
+    pub fn plan_commands(
+        request: &NetworkSetupRequest,
+    ) -> Result<TunSetupCommandPlan, IntegrationError> {
+        validate_request(request)?;
+        let family_flag = if request.tun.broker_ip.is_ipv6() {
+            Some("-6")
+        } else {
+            None
+        };
+        if request.tun.broker_ip.is_ipv4() != request.tun.sandbox_ip.is_ipv4() {
+            return Err(IntegrationError::MismatchedTunAddressFamilies);
+        }
+
+        let mut addr_args = Vec::new();
+        if let Some(flag) = family_flag {
+            addr_args.push(flag.to_string());
+        }
+        addr_args.extend([
+            "addr".to_string(),
+            "add".to_string(),
+            request.tun.broker_ip.to_string(),
+            "peer".to_string(),
+            request.tun.sandbox_ip.to_string(),
+            "dev".to_string(),
+            request.tun.name.clone(),
+        ]);
+
+        Ok(TunSetupCommandPlan {
+            broker_dns: request.broker_dns,
+            commands: vec![
+                TunSetupCommand {
+                    program: "ip".to_string(),
+                    args: vec![
+                        "tuntap".to_string(),
+                        "add".to_string(),
+                        "dev".to_string(),
+                        request.tun.name.clone(),
+                        "mode".to_string(),
+                        "tun".to_string(),
+                    ],
+                },
+                TunSetupCommand {
+                    program: "ip".to_string(),
+                    args: addr_args,
+                },
+                TunSetupCommand {
+                    program: "ip".to_string(),
+                    args: vec![
+                        "link".to_string(),
+                        "set".to_string(),
+                        "dev".to_string(),
+                        request.tun.name.clone(),
+                        "mtu".to_string(),
+                        request.tun.mtu.to_string(),
+                        "up".to_string(),
+                    ],
+                },
+            ],
+        })
+    }
+}
+
 /// bwrap-compatible alpha backend. It constructs the command convention where
 /// bwrap runs `foxproxsetup -- target args...` with temporary CAP_NET_ADMIN.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -161,6 +244,7 @@ fn validate_request(request: &NetworkSetupRequest) -> Result<(), IntegrationErro
 pub enum IntegrationError {
     InvalidTunName,
     InvalidMtu(u16),
+    MismatchedTunAddressFamilies,
 }
 
 impl fmt::Display for IntegrationError {
@@ -168,6 +252,9 @@ impl fmt::Display for IntegrationError {
         match self {
             Self::InvalidTunName => f.write_str("TUN name must not be empty"),
             Self::InvalidMtu(mtu) => write!(f, "invalid MTU {mtu}"),
+            Self::MismatchedTunAddressFamilies => {
+                f.write_str("TUN broker and sandbox address families must match")
+            }
         }
     }
 }
@@ -208,6 +295,45 @@ mod tests {
         assert!(backend
             .bwrap_prefix_args()
             .contains(&"--unshare-net".to_string()));
+    }
+
+    #[test]
+    fn linux_tun_setup_plan_owns_privileged_ip_commands() {
+        let plan = LinuxIpTunSetup::plan_commands(&request()).unwrap();
+
+        assert_eq!(plan.broker_dns, "10.255.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(plan.commands[0].program, "ip");
+        assert_eq!(
+            plan.commands[0].args,
+            vec!["tuntap", "add", "dev", "foxprox0", "mode", "tun"]
+        );
+        assert_eq!(
+            plan.commands[1].args,
+            vec![
+                "addr",
+                "add",
+                "10.255.0.1",
+                "peer",
+                "10.255.0.2",
+                "dev",
+                "foxprox0"
+            ]
+        );
+        assert_eq!(
+            plan.commands[2].args,
+            vec!["link", "set", "dev", "foxprox0", "mtu", "1500", "up"]
+        );
+    }
+
+    #[test]
+    fn linux_tun_setup_rejects_mismatched_address_families() {
+        let mut request = request();
+        request.tun.sandbox_ip = "2001:db8::2".parse().unwrap();
+
+        assert_eq!(
+            LinuxIpTunSetup::plan_commands(&request).unwrap_err(),
+            IntegrationError::MismatchedTunAddressFamilies
+        );
     }
 
     #[test]

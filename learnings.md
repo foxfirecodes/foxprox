@@ -328,3 +328,8 @@
 
 - Runtime can turn IPv4 UDP bridge read failures into ICMP port-unreachable write-back by using only normalized flow keys; packet crate should synthesize the quoted IPv4/UDP bytes.
 - Remove failed UDP bridges after emitting the error response so maintenance ticks do not repeatedly report the same host-side failure.
+
+## 2026-06-22 — Linux TUN helper command planning
+
+- Keep privileged Linux setup as data-only command planning in `foxprox-integrations`; broker runtime/device crates should only consume preopened device handles.
+- Validate TUN broker/sandbox address families before producing helper commands so the helper boundary fails before invoking privileged `ip` operations.
