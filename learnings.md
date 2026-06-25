@@ -324,3 +324,7 @@ For TUN/smoltcp TCP forwarding, expose a low-level smoltcp recv/send seam so the
 ## 2026-06-22 — freshly written fake executables can transiently return ETXTBSY
 
 Workspace tests occasionally hit `Text file busy` when executing a just-created fake `ip` script. Retrying ETXTBSY once after a short delay in the integration command runner removes the flake without weakening command failure diagnostics.
+
+## 2026-06-22 — denial paths must still return audit evidence to the CLI
+
+When a live policy denial occurs inside `run_bwrap_tcp_once`, return a summary containing the audit JSON lines and failed target status instead of only returning an error. The CLI can then print denial audit to stdout and fail the command afterward.

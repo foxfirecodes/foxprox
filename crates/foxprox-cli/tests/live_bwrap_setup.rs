@@ -600,6 +600,108 @@ fn live_cli_bwrap_tcp_once_curl_emits_audit_json() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 
+#[test]
+#[ignore = "requires bwrap, /dev/net/tun, user namespaces, curl, and Python in the sandbox"]
+fn live_cli_bwrap_tcp_once_denies_http_policy_before_upstream() {
+    let Some(bwrap) = existing_path("/usr/bin/bwrap") else {
+        eprintln!("skipping live CLI HTTP deny smoke: /usr/bin/bwrap missing");
+        return;
+    };
+    if !Path::new("/dev/net/tun").exists() {
+        eprintln!("skipping live CLI HTTP deny smoke: /dev/net/tun missing");
+        return;
+    }
+    let Some(curl) = existing_path("/usr/bin/curl") else {
+        eprintln!("skipping live CLI HTTP deny smoke: /usr/bin/curl missing");
+        return;
+    };
+    let setup = foxproxsetup_path();
+    let cli = foxprox_cli_path();
+    let dir = unique_test_dir("live-cli-http-deny");
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket_path = dir.join("broker.sock");
+    let resolv_conf = dir.join("resolv.conf");
+    let policy = dir.join("policy.toml");
+    std::fs::write(
+        &policy,
+        r#"
+        default_policy = "allow"
+
+        [[rules]]
+        id = "deny-root-http"
+        action = "deny"
+        protocol = "http"
+        http_methods = ["GET"]
+        http_path_prefixes = ["/"]
+        "#,
+    )
+    .unwrap();
+    let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+
+    let output = Command::new(cli)
+        .arg("bwrap-tcp-once")
+        .arg("--bwrap")
+        .arg(bwrap)
+        .arg("--setup")
+        .arg(setup)
+        .arg("--broker-socket")
+        .arg(&socket_path)
+        .args([
+            "--tun-name",
+            "fpxdeny0",
+            "--address-cidr",
+            "10.133.0.2/24",
+            "--mtu",
+            "1400",
+        ])
+        .arg("--resolv-conf")
+        .arg(&resolv_conf)
+        .args([
+            "--broker-dns",
+            "10.133.0.1",
+            "--ip-program",
+            "/usr/bin/ip",
+            "--listen-ip",
+            "10.133.0.1",
+            "--listen-port",
+            "8080",
+        ])
+        .arg("--upstream")
+        .arg(upstream_addr.to_string())
+        .args(["--sandbox", "live-cli-http-deny", "--config"])
+        .arg(&policy)
+        .args([
+            "--max-packets",
+            "32",
+            "--extra-bwrap-arg",
+            "--dev-bind",
+            "--extra-bwrap-arg",
+            "/",
+            "--extra-bwrap-arg",
+            "/",
+            "--",
+        ])
+        .arg(curl)
+        .args([
+            "--max-time",
+            "5",
+            "--silent",
+            "--show-error",
+            "http://10.133.0.1:8080/",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"kind\":\"tcp_connect\""));
+    assert!(stdout.contains("\"kind\":\"http_request\""));
+    assert!(stdout.contains("\"decision\":\"denied\""));
+    assert!(stdout.contains("deny-root-http"));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 fn dns_a_query(hostname: &str) -> Vec<u8> {
     let mut query = vec![
         0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,

@@ -417,8 +417,18 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                 open_audited = true;
                 if !allowed {
                     let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(CliError::Core("bwrap-tcp-once-policy-denied".to_owned()));
+                    let status = child.wait().map_err(|error| CliError::Io {
+                        context: "wait-bwrap-target-after-policy-deny".to_owned(),
+                        error,
+                    })?;
+                    return Ok(BwrapTcpOnceSummary {
+                        packets_read,
+                        sandbox_to_host_bytes: 0,
+                        host_to_sandbox_bytes: 0,
+                        audit_json_lines,
+                        target_status_code: status.code(),
+                        target_status_success: status.success(),
+                    });
                 }
             }
         }
@@ -446,10 +456,18 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                     audit_json_lines.push(audit_record_to_json_line(&evaluation.audit)?);
                     if !allowed {
                         let _ = child.kill();
-                        let _ = child.wait();
-                        return Err(CliError::Core(
-                            "bwrap-tcp-once-http-policy-denied".to_owned(),
-                        ));
+                        let status = child.wait().map_err(|error| CliError::Io {
+                            context: "wait-bwrap-target-after-http-policy-deny".to_owned(),
+                            error,
+                        })?;
+                        return Ok(BwrapTcpOnceSummary {
+                            packets_read,
+                            sandbox_to_host_bytes: 0,
+                            host_to_sandbox_bytes: 0,
+                            audit_json_lines,
+                            target_status_code: status.code(),
+                            target_status_success: status.success(),
+                        });
                     }
                 }
             }
@@ -680,6 +698,7 @@ where
     let mut listen_port = None;
     let mut upstream_addr = None;
     let mut sandbox_id = None;
+    let mut config_path = None;
     let mut max_packet_len = Some(4096_usize);
     let mut max_packets = Some(64_usize);
     let mut sandbox_buffer_len = Some(8192_usize);
@@ -737,6 +756,7 @@ where
                 )?)
             }
             "--sandbox" => sandbox_id = args.next().map(path_to_string),
+            "--config" => config_path = args.next(),
             "--max-packet-len" => {
                 max_packet_len = Some(parse_usize_arg(
                     "--max-packet-len",
@@ -774,6 +794,19 @@ where
         return Err(bwrap_tcp_once_usage());
     }
 
+    let policy = if let Some(config_path) = config_path {
+        let config_toml = fs::read_to_string(&config_path).map_err(|error| CliError::Io {
+            context: format!("read-config {}", config_path.display()),
+            error,
+        })?;
+        policy_config_from_toml(&config_toml)?
+    } else {
+        PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        }
+    };
+
     Ok(BwrapTcpOnceConfig {
         bwrap_program: bwrap_program.ok_or_else(bwrap_tcp_once_usage)?,
         setup_program: setup_program.ok_or_else(bwrap_tcp_once_usage)?,
@@ -787,10 +820,7 @@ where
         extra_bwrap_args,
         target_argv,
         sandbox_id: sandbox_id.ok_or_else(bwrap_tcp_once_usage)?,
-        policy: PolicyConfig {
-            default_policy: DefaultPolicy::Allow,
-            ..PolicyConfig::default()
-        },
+        policy,
         smoltcp_ip: listen_ip.ok_or_else(bwrap_tcp_once_usage)?,
         smoltcp_prefix_len: listen_prefix.ok_or_else(bwrap_tcp_once_usage)?,
         listen_port: listen_port.ok_or_else(bwrap_tcp_once_usage)?,
@@ -922,7 +952,7 @@ fn bwrap_tcp_once_usage() -> CliError {
 
 #[cfg(unix)]
 fn bwrap_tcp_once_usage_text() -> &'static str {
-    "usage: foxprox-cli bwrap-tcp-once --bwrap PROGRAM --setup PROGRAM --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP --listen-ip IP --listen-port PORT --upstream IP:PORT --sandbox ID [--ip-program PATH] [--listen-prefix N] [--extra-bwrap-arg ARG ...] -- TARGET [ARGS...]"
+    "usage: foxprox-cli bwrap-tcp-once --bwrap PROGRAM --setup PROGRAM --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP --listen-ip IP --listen-port PORT --upstream IP:PORT --sandbox ID [--config policy.toml] [--ip-program PATH] [--listen-prefix N] [--extra-bwrap-arg ARG ...] -- TARGET [ARGS...]"
 }
 
 #[cfg(unix)]
@@ -999,7 +1029,7 @@ fn run_packet_once_command(
 
 fn usage() -> CliError {
     CliError::Usage(
-        "usage: foxprox-cli packet-once --config <policy.toml> --sandbox <id> [--outbound <packet.bin>] < packet.bin\n       foxprox-cli bwrap-tcp-once --bwrap PROGRAM --setup PROGRAM --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP --listen-ip IP --listen-port PORT --upstream IP:PORT --sandbox ID [--ip-program PATH] [--listen-prefix N] [--extra-bwrap-arg ARG ...] -- TARGET [ARGS...]\n       foxprox-cli setup --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP [--tun-device PATH] [--ip-program PATH] -- TARGET [ARGS...]"
+        "usage: foxprox-cli packet-once --config <policy.toml> --sandbox <id> [--outbound <packet.bin>] < packet.bin\n       foxprox-cli bwrap-tcp-once --bwrap PROGRAM --setup PROGRAM --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP --listen-ip IP --listen-port PORT --upstream IP:PORT --sandbox ID [--config policy.toml] [--ip-program PATH] [--listen-prefix N] [--extra-bwrap-arg ARG ...] -- TARGET [ARGS...]\n       foxprox-cli setup --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP [--tun-device PATH] [--ip-program PATH] -- TARGET [ARGS...]"
             .to_owned(),
     )
 }

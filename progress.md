@@ -1706,3 +1706,18 @@
 - What failed or surprised the agent: full workspace verification briefly hit `Text file busy (os error 26)` executing a just-written fake `ip` script; a short ETXTBSY retry at the integration command boundary is a safe robustness improvement for both tests and production helper execution.
 - What remains unproven: live policy-denied transparent HTTP in the bwrap command path. Static policy/config/parser tests cover denial, and live path now proves allowed HTTP inspection/audit across TUN/smoltcp.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — live transparent HTTP deny before upstream
+
+- Slice attempted: prove the user-facing bwrap TCP command can enforce a configured transparent HTTP denial before opening host upstream egress.
+- Why next: the previous slice logged allowed live HTTP requests through TUN/smoltcp. `docs/initial-impl.md` success criteria also require direct plaintext HTTP to be allowed/denied/logged by host/method/path, so denial needed live command-path evidence too.
+- What changed: `bwrap-tcp-once` now accepts optional `--config policy.toml` and loads the same TOML policy schema used elsewhere. `run_bwrap_tcp_once` now returns audit evidence on policy denial instead of discarding it in an error path. A new ignored live CLI smoke uses a policy with default allow plus a `deny-root-http` HTTP GET `/` rule, runs curl inside bwrap, verifies the command exits unsuccessfully, and asserts stdout contains `tcp_connect`, a denied `http_request`, and the deny rule id. The host upstream listener is never connected because denial happens before host egress.
+- Verification:
+  - Focused live denial check passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_cli_bwrap_tcp_once_denies -- --ignored --nocapture`.
+  - All explicit live smokes passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, now 7/7 including live HTTP allow and deny command paths.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; denied live curl takes about five seconds because curl waits for its configured timeout after the broker kills the target-side network path.
+- What remains unproven: long-running multi-flow daemon ergonomics. The alpha transparent HTTP allow/deny/logging requirement is now covered in the live CLI command path.
+- Commit: this commit.
