@@ -353,3 +353,8 @@
 
 - Broker-addressed UDP/53 packets should be intercepted in `foxprox-net` before generic UDP forwarding so the DNS subsystem can audit/resolve/refuse and packet code can synthesize the UDP response.
 - Return parsed DNS address records as a cache update rather than mutating hidden global state; runtime can decide how to apply them to its attribution cache.
+
+## 2026-06-22 — runtime DNS service cache update
+
+- Runtime should call broker DNS interception before generic UDP bridge handling, otherwise broker-addressed DNS becomes ordinary UDP forwarding and never updates attribution.
+- Return DNS cache updates from net and apply them in runtime with an explicit cache timestamp to keep DNS parsing, packet synthesis, and cache ownership separated.

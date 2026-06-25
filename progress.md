@@ -1518,3 +1518,25 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: e7b538e.
 - Remaining boundary risks: TCP DNS and live runtime DNS service scheduling remain.
+
+## 2026-06-22 — Boundary objective: runtime DNS service and attribution cache update
+
+- Boundary under work: runtime packet step that services broker DNS packets before generic UDP forwarding and updates DNS attribution cache.
+- Allowed dependency direction: runtime coordinates net DNS-service outcomes, device writes, UDP bridges, and DNS cache updates; DNS parsing and packet synthesis remain in net/dns/packet crates; policy/audit see normalized DNS events only.
+- Dependency-risk assessment: net can intercept broker DNS packets, but a device runtime must invoke it before generic UDP bridge retention or DNS traffic will be forwarded as ordinary UDP and attribution will not feed later stack policy.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/net/dns/audit.
+- Observed results: added `DevicePacketStepWithDnsAndUdp` and `process_one_ipv4_device_packet_with_dns_and_udp_bridges` in runtime. The step reads one packet, services broker-addressed DNS through `foxprox-net`, writes opaque DNS response packets to the device, updates `DnsAttributionCache` with returned address records, and falls back to generic UDP bridge retention for non-DNS packets. Added a runtime test proving broker DNS produces no UDP bridge, writes a DNS response, audits once, and updates attribution. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 128 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime coordinates net/dns/audit contracts.
+  - `cargo tree -p foxprox-net` — net owns DNS packet interception.
+  - `cargo tree -p foxprox-dns` — DNS remains core-only.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: TCP DNS and async DNS serving remain.

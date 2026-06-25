@@ -8,8 +8,8 @@
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
-    net::SocketAddr,
-    time::Instant,
+    net::{IpAddr, SocketAddr},
+    time::{Duration, Instant},
 };
 
 use foxprox_audit::{AuditRecord, AuditSink, FlowClosedAudit};
@@ -20,10 +20,11 @@ use foxprox_core::{
 use foxprox_device::{DeviceError, DevicePacket, PacketDevice, TryPacketDevice};
 use foxprox_egress::{EgressError, EgressOutcome, HostEgress, HostTcpStream, HostUdpFlow};
 use foxprox_net::{
-    apply_dns_attribution, handle_ipv4_packet, handle_ipv4_packet_with_egress,
-    handle_normalized_event_with_egress, handle_normalized_event_without_egress, udp_timeout,
-    BrokerError, BrokerEventOutcome, DnsAttributionCache, FlowProtocol, InboundIpv4Packet,
-    OutboundIpPacket, PacketBrokerOutcome, StackAdapter, StackEvent, StackTcpData, StackTcpWrite,
+    apply_dns_attribution, handle_ipv4_dns_service_packet, handle_ipv4_packet,
+    handle_ipv4_packet_with_egress, handle_normalized_event_with_egress,
+    handle_normalized_event_without_egress, udp_timeout, BrokerError, BrokerEventOutcome,
+    DnsAttributionCache, FlowProtocol, InboundIpv4Packet, Ipv4DnsServiceRequest, OutboundIpPacket,
+    PacketBrokerOutcome, StackAdapter, StackEvent, StackTcpData, StackTcpWrite,
 };
 use foxprox_policy::PolicyEngine;
 
@@ -558,6 +559,79 @@ where
     pub timestamp_millis: u64,
 }
 
+pub struct DevicePacketStepWithDnsAndUdp<'a, E, A>
+where
+    E: HostEgress,
+{
+    pub sandbox_id: &'a SandboxId,
+    pub frontend: FrontendKind,
+    pub policy: &'a PolicyEngine,
+    pub egress: &'a mut E,
+    pub audit: &'a mut A,
+    pub udp_bridges: &'a mut UdpBridgeTable<E::UdpHandle>,
+    pub udp_timeouts: UdpTimeouts,
+    pub broker_dns_addrs: &'a [IpAddr],
+    pub dns_response_ttl: Duration,
+    pub dns_cache: &'a mut DnsAttributionCache,
+    pub cache_now: Instant,
+    pub sequence: u64,
+    pub timestamp_millis: u64,
+}
+
+/// Process one IPv4 packet, servicing broker DNS packets before falling back to
+/// generic UDP bridge retention.
+pub fn process_one_ipv4_device_packet_with_dns_and_udp_bridges<D, E, A>(
+    device: &mut D,
+    ctx: DevicePacketStepWithDnsAndUdp<'_, E, A>,
+) -> Result<PacketBrokerOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    E: HostEgress,
+    E::UdpHandle: HostUdpFlow,
+    A: AuditSink,
+{
+    let packet = device.read_packet().map_err(RuntimeError::Device)?;
+    if let Some((outcome, cache_update)) = handle_ipv4_dns_service_packet(
+        Ipv4DnsServiceRequest {
+            packet: InboundIpv4Packet {
+                sandbox_id: ctx.sandbox_id,
+                frontend: ctx.frontend,
+                bytes: packet.bytes(),
+            },
+            broker_dns_addrs: ctx.broker_dns_addrs,
+            response_ttl: ctx.dns_response_ttl,
+            sequence: ctx.sequence,
+            timestamp_millis: ctx.timestamp_millis,
+        },
+        ctx.policy,
+        ctx.egress,
+        ctx.audit,
+    )
+    .map_err(RuntimeError::Broker)?
+    {
+        ctx.dns_cache
+            .observe_address_records(cache_update.records, ctx.cache_now);
+        write_outbound_packets(device, &outcome.outbound_packets)?;
+        return Ok(outcome);
+    }
+
+    process_ipv4_device_packet_with_udp_bridges(
+        device,
+        packet,
+        DevicePacketStepWithUdp {
+            sandbox_id: ctx.sandbox_id,
+            frontend: ctx.frontend,
+            policy: ctx.policy,
+            egress: ctx.egress,
+            audit: ctx.audit,
+            udp_bridges: ctx.udp_bridges,
+            udp_timeouts: ctx.udp_timeouts,
+            sequence: ctx.sequence,
+            timestamp_millis: ctx.timestamp_millis,
+        },
+    )
+}
+
 /// Process one IPv4 packet and retain any opened UDP flow handle for later
 /// response routing.
 pub fn process_one_ipv4_device_packet_with_udp_bridges<D, E, A>(
@@ -571,6 +645,20 @@ where
     A: AuditSink,
 {
     let packet = device.read_packet().map_err(RuntimeError::Device)?;
+    process_ipv4_device_packet_with_udp_bridges(device, packet, ctx)
+}
+
+fn process_ipv4_device_packet_with_udp_bridges<D, E, A>(
+    device: &mut D,
+    packet: DevicePacket,
+    ctx: DevicePacketStepWithUdp<'_, E, A>,
+) -> Result<PacketBrokerOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    E: HostEgress,
+    E::UdpHandle: HostUdpFlow,
+    A: AuditSink,
+{
     let mut result = handle_ipv4_packet_with_egress(
         InboundIpv4Packet {
             sandbox_id: ctx.sandbox_id,
@@ -1293,6 +1381,63 @@ mod tests {
         assert!(outcome.is_none());
         assert!(audit.records().is_empty());
         assert!(egress.tcp_connects.is_empty());
+    }
+
+    #[test]
+    fn one_step_ipv4_runtime_services_broker_dns_and_updates_cache() {
+        let dns_payload = dns_query_packet(0x1234, "example.com", 1);
+        let inbound = udp_packet(53000, 53, &dns_payload);
+        let cursor = Cursor::new(inbound);
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
+        let mut egress = MockEgress {
+            dns_results: vec!["203.0.113.10:0".parse().unwrap()],
+            ..MockEgress::default()
+        };
+        let mut audit = BoundedAuditSink::new(4);
+        let mut udp_bridges = UdpBridgeTable::default();
+        let sandbox_id = SandboxId::new("s1").unwrap();
+        let mut dns_cache = DnsAttributionCache::default();
+        let now = Instant::now();
+
+        let outcome = process_one_ipv4_device_packet_with_dns_and_udp_bridges(
+            &mut device,
+            DevicePacketStepWithDnsAndUdp {
+                sandbox_id: &sandbox_id,
+                frontend: FrontendKind::Tun,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                udp_bridges: &mut udp_bridges,
+                udp_timeouts: UdpTimeouts::default(),
+                broker_dns_addrs: &["10.0.0.1".parse().unwrap()],
+                dns_response_ttl: Duration::from_secs(60),
+                dns_cache: &mut dns_cache,
+                cache_now: now,
+                sequence: 2,
+                timestamp_millis: 2000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.outcome, BrokerEventOutcome::Forwarded);
+        assert_eq!(outcome.outbound_packets.len(), 1);
+        assert_eq!(udp_bridges.len(), 0);
+        assert_eq!(egress.dns_queries.len(), 1);
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(
+            dns_cache
+                .attribution_for("203.0.113.10".parse().unwrap(), now)
+                .unwrap()
+                .hostname()
+                .as_str(),
+            "example.com"
+        );
+        let bytes = device.into_inner().into_inner();
+        let response = &bytes[28 + dns_payload.len()..];
+        assert_eq!(response[9], 17);
+        assert_eq!(&response[12..16], &[10, 0, 0, 1]);
+        assert_eq!(&response[16..20], &[10, 0, 0, 2]);
     }
 
     #[test]
@@ -2547,6 +2692,24 @@ mod tests {
             destination: "203.0.113.10:80".parse().unwrap(),
             hostname: None,
         }
+    }
+
+    fn dns_query_packet(id: u16, hostname: &str, qtype: u16) -> Vec<u8> {
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&id.to_be_bytes());
+        packet.extend_from_slice(&0x0100_u16.to_be_bytes());
+        packet.extend_from_slice(&1_u16.to_be_bytes());
+        packet.extend_from_slice(&0_u16.to_be_bytes());
+        packet.extend_from_slice(&0_u16.to_be_bytes());
+        packet.extend_from_slice(&0_u16.to_be_bytes());
+        for label in hostname.split('.') {
+            packet.push(label.len() as u8);
+            packet.extend_from_slice(label.as_bytes());
+        }
+        packet.push(0);
+        packet.extend_from_slice(&qtype.to_be_bytes());
+        packet.extend_from_slice(&1_u16.to_be_bytes());
+        packet
     }
 
     fn udp_packet(source_port: u16, destination_port: u16, payload: &[u8]) -> Vec<u8> {
