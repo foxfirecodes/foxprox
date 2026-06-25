@@ -298,3 +298,8 @@
 
 - Device readiness belongs in `foxprox-device`: map OS `WouldBlock` into a device-level `Ok(None)` through `TryPacketDevice` so runtime loops do not inspect IO error kinds.
 - Keep blocking `PacketDevice` APIs for existing one-step tests, but add optional-read APIs for future maintenance-first loops.
+
+## 2026-06-22 — nonblocking stack packet step
+
+- Stack/TCP forwarding needs the same optional-read device semantics as raw IPv4 handling; otherwise an idle TUN read can block bridge maintenance.
+- Factoring packet bytes into a private runtime helper keeps the public blocking and nonblocking stack steps aligned without duplicating policy/audit/egress handling.

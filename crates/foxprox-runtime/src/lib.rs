@@ -739,6 +739,38 @@ where
     A: AuditSink,
 {
     let packet = device.read_packet().map_err(RuntimeError::Device)?;
+    process_stack_device_packet(device, packet, ctx)
+}
+
+/// Try to process one stack packet without blocking on an idle device. `Ok(None)`
+/// means callers can proceed with bridge maintenance only.
+pub fn process_one_stack_device_packet_if_ready<D, S, E, A>(
+    device: &mut D,
+    ctx: StackDevicePacketStep<'_, S, E, A>,
+) -> Result<Option<StackDevicePacketOutcome>, RuntimeError>
+where
+    D: TryPacketDevice,
+    S: StackAdapter,
+    E: HostEgress,
+    A: AuditSink,
+{
+    let Some(packet) = device.try_read_packet().map_err(RuntimeError::Device)? else {
+        return Ok(None);
+    };
+    process_stack_device_packet(device, packet, ctx).map(Some)
+}
+
+fn process_stack_device_packet<D, S, E, A>(
+    device: &mut D,
+    packet: DevicePacket,
+    ctx: StackDevicePacketStep<'_, S, E, A>,
+) -> Result<StackDevicePacketOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    S: StackAdapter,
+    E: HostEgress,
+    A: AuditSink,
+{
     let events = ctx
         .adapter
         .ingest_ip_packet(packet.bytes())
@@ -1127,6 +1159,35 @@ mod tests {
         assert_eq!(u16::from_be_bytes([bytes[20], bytes[21]]), 12345);
         assert_eq!(u16::from_be_bytes([bytes[22], bytes[23]]), 53000);
         assert_eq!(&bytes[28..], b"pong");
+    }
+
+    #[test]
+    fn one_step_stack_runtime_returns_none_when_device_not_ready() {
+        let mut device = PreopenedTunDevice::from_io(WouldBlockIo, 1500).unwrap();
+        let mut adapter = MockStackAdapter::new();
+        let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(4);
+        let mut tcp_bridges = StackTcpBridgeTable::default();
+
+        let outcome = process_one_stack_device_packet_if_ready(
+            &mut device,
+            StackDevicePacketStep {
+                adapter: &mut adapter,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                tcp_bridges: &mut tcp_bridges,
+                sequence_start: 20,
+                timestamp_millis: 3000,
+            },
+        )
+        .unwrap();
+
+        assert!(outcome.is_none());
+        assert!(adapter.ingested.is_empty());
+        assert!(audit.records().is_empty());
+        assert!(tcp_bridges.is_empty());
     }
 
     #[test]

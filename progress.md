@@ -1277,3 +1277,25 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 8a7cce0.
 - Remaining boundary risks: full async readiness registration, blocking production fd configuration, and fair loop scheduling remain.
+
+## 2026-06-22 — Boundary objective: nonblocking stack device packet step
+
+- Boundary under work: optional-read stack packet ingestion for the smoltcp/TUN path.
+- Allowed dependency direction: runtime consumes `TryPacketDevice` and `StackAdapter` contracts only; stack-specific smoltcp behavior remains in adapter crate; policy/audit still see only normalized stack events.
+- Dependency-risk assessment: IPv4 one-step processing now has a nonblocking readiness path, but stack/TCP forwarding still blocks on device reads. Adding a stack optional-read step lets future loops run bridge maintenance when no TUN packet is ready.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/device/smoltcp/audit.
+- Observed results: factored stack packet processing so both blocking and optional-read entry points use the same stack-event policy/audit/egress handling. Added `process_one_stack_device_packet_if_ready`, using `TryPacketDevice` to return `Ok(None)` when no TUN packet is ready, and added a runtime test proving no adapter/policy/audit/bridge side effects occur on would-block. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 111 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — optional stack step consumes device/stack contracts only.
+  - `cargo tree -p foxprox-device` — readiness stays in device crate.
+  - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated behind adapter.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: full loop scheduling, readiness registration, and fairness budgets remain.
