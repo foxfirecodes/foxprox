@@ -6,17 +6,24 @@
 
 #![forbid(unsafe_code)]
 
-use foxprox_device::{DeviceError, SetupControlSocket};
+use foxprox_device::{DeviceError, SetupControlSocket, SetupControlSocketListener};
 use foxprox_integrations::{BwrapSetupCommand, IntegrationError, SetupPlan};
 use foxprox_runtime::{
     build_runtime_components, BrokerRuntimeComponents, BrokerRuntimeConfig, RuntimeConfigError,
 };
 use std::fs::File;
+use std::path::Path;
 
 #[derive(Debug)]
 pub struct PreparedBwrapLaunch {
     pub command: BwrapSetupCommand,
     control: SetupControlSocket,
+}
+
+#[derive(Debug)]
+pub struct PreparedBwrapSocketLaunch {
+    pub command: BwrapSetupCommand,
+    control: SetupControlSocketListener,
 }
 
 impl PreparedBwrapLaunch {
@@ -29,6 +36,24 @@ impl PreparedBwrapLaunch {
             program: self.command.program.clone(),
             args: self.command.args.clone(),
             preserve_fds: vec![self.helper_fd()],
+        }
+    }
+
+    pub fn receive_tun_file(&self) -> Result<File, LauncherError> {
+        self.control.receive_file().map_err(LauncherError::Device)
+    }
+}
+
+impl PreparedBwrapSocketLaunch {
+    pub fn socket_path(&self) -> &Path {
+        self.control.path()
+    }
+
+    pub fn spawn_spec(&self) -> BwrapSpawnSpec {
+        BwrapSpawnSpec {
+            program: self.command.program.clone(),
+            args: self.command.args.clone(),
+            preserve_fds: Vec::new(),
         }
     }
 
@@ -101,6 +126,18 @@ pub fn prepare_bwrap_launch(
     plan.tun_handoff_fd = helper_fd as u32;
     let command = BwrapSetupCommand::build(&plan, target)?;
     Ok(PreparedBwrapLaunch { command, control })
+}
+
+pub fn prepare_bwrap_launch_with_socket_path(
+    mut plan: SetupPlan,
+    target: &[String],
+    socket_path: impl AsRef<Path>,
+) -> Result<PreparedBwrapSocketLaunch, LauncherError> {
+    let socket_path = socket_path.as_ref();
+    let control = SetupControlSocketListener::bind(socket_path)?;
+    plan.tun_handoff_fd = 0;
+    let command = BwrapSetupCommand::build_with_handoff_socket(&plan, target, socket_path)?;
+    Ok(PreparedBwrapSocketLaunch { command, control })
 }
 
 #[cfg(test)]
@@ -203,6 +240,26 @@ mod tests {
             prepared.command.args.last().map(String::as_str),
             Some("curl")
         );
+    }
+
+    #[test]
+    fn prepared_bwrap_socket_launch_uses_path_handoff_without_preserved_fds() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-launcher-{}-socket.sock",
+            std::process::id()
+        ));
+        let prepared =
+            prepare_bwrap_launch_with_socket_path(plan(), &["true".to_string()], &path).unwrap();
+        let spec = prepared.spawn_spec();
+
+        assert_eq!(prepared.socket_path(), path.as_path());
+        assert!(spec.preserve_fds.is_empty());
+        assert!(spec
+            .args
+            .windows(2)
+            .any(|pair| pair == ["--handoff-socket", path.to_string_lossy().as_ref()]));
+        assert!(!spec.args.iter().any(|arg| arg == "--handoff-fd"));
+        assert!(prepared.command.contains_required_network_isolation());
     }
 
     #[test]

@@ -2047,3 +2047,23 @@
 - Commit hash when committed: pending.
 - Remaining risks: launcher still lacks a high-level socket-handoff execution helper; live setup smoke proves TUN setup but does not yet run the broker loop against the handed-off fd.
 - Exact next step: commit rootless bwrap setup fixes, then add launcher support for socket-handoff bwrap execution and a live smoke that receives the TUN fd via launcher-owned path.
+
+## 2026-06-25T14:47:30Z
+- Current objective: expose socket-handoff bwrap setup through launcher preparation so the live rootless path is not only manual.
+- Git status summary: clean worktree after commit `b8f0f74`.
+- Intended slice: add launcher-owned socket control path preparation, bwrap command generation with `--handoff-socket`, and tests proving no inherited fd preservation is needed for rootless bwrap.
+- Verification plan: run focused launcher/integration/device checks plus full workspace verification if the slice passes.
+- Files expected to change: `crates/foxprox-launcher/src/lib.rs`, `progress.md`.
+- Exact next step: implement socket-handoff launcher preparation and regression.
+
+## 2026-06-25T14:52:30Z
+- Current objective: expose rootless socket handoff through launcher APIs and verify a live sandbox-visible packet path.
+- Files changed: `crates/foxprox-launcher/src/lib.rs`, `progress.md`.
+- Verification commands run so far:
+  - `cargo fmt --check`
+  - `cargo clippy -p foxprox-launcher --all-targets --all-features -- -D warnings`
+  - `cargo test -p foxprox-launcher --all-targets --all-features`
+  - Manual live bwrap UDP/TUN smoke: sandbox Python sent UDP `ping` to broker TUN IP `10.66.0.1:9999`; host received the packet on the handed-off TUN fd, wrote a synthesized UDP reply, and sandbox received `pong` with process exit code 0.
+- Observed result: launcher now prepares socket-handoff bwrap commands without preserved fds; live manual UDP/TUN smoke proves traffic crosses the rootless bwrap-created TUN fd bidirectionally when the host keeps the handed-off fd open.
+- Remaining risks: the live UDP reply smoke used a small Python packet responder rather than a checked-in Rust broker loop; next slice should move this into Rust product/test code using existing packet synthesis/runtime boundaries.
+- Exact next step: run full workspace verification, commit launcher socket handoff, then add a checked-in Rust live smoke harness or broker loop for the same UDP/TUN path.
