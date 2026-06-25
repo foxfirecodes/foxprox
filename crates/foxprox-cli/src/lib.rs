@@ -32,6 +32,8 @@ use foxprox_core::{
 use foxprox_device::{TunIoError, TunPacketIo};
 use foxprox_egress::{EgressError, UdpEgress, UdpTarget};
 use foxprox_flow::ClosedTcpFlow;
+#[cfg(unix)]
+use foxprox_inspect::parse_plaintext_http_request;
 use foxprox_packet::{
     parse_ipv4_packet, parse_ipv4_udp_datagram, synthesize_ipv4_udp_response, PacketContext,
 };
@@ -424,13 +426,51 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
             tun.write_packet(&outbound)?;
         }
         if tcp.can_recv() {
+            let sandbox_payload = tcp
+                .recv_payload(config.sandbox_buffer_len)
+                .map_err(|error| CliError::Core(error.to_string()))?;
+            if looks_like_http_request(&sandbox_payload) {
+                if let (Some(source), Some(destination)) = (tcp_source, tcp_destination) {
+                    let http = parse_plaintext_http_request(
+                        sandbox_id.clone(),
+                        FrontendKind::Tun,
+                        Some(source),
+                        Some(destination),
+                        &sandbox_payload,
+                    )
+                    .map_err(|error| {
+                        CliError::Core(format!("transparent-http-inspect-error: {error}"))
+                    })?;
+                    let evaluation = policy.evaluate(&http);
+                    let allowed = evaluation.decision.is_allowed();
+                    audit_json_lines.push(audit_record_to_json_line(&evaluation.audit)?);
+                    if !allowed {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return Err(CliError::Core(
+                            "bwrap-tcp-once-http-policy-denied".to_owned(),
+                        ));
+                    }
+                }
+            }
             let mut host =
                 TcpStream::connect(config.upstream_addr).map_err(|error| CliError::Io {
                     context: format!("connect-tcp-upstream {}", config.upstream_addr),
                     error,
                 })?;
-            let stats = tcp
-                .relay_once(&mut host, config.sandbox_buffer_len, config.host_buffer_len)
+            host.write_all(&sandbox_payload)
+                .map_err(|error| CliError::Io {
+                    context: format!("write-tcp-upstream {}", config.upstream_addr),
+                    error,
+                })?;
+            let mut host_payload = vec![0_u8; config.host_buffer_len];
+            let host_to_sandbox_bytes =
+                host.read(&mut host_payload).map_err(|error| CliError::Io {
+                    context: format!("read-tcp-upstream {}", config.upstream_addr),
+                    error,
+                })?;
+            host_payload.truncate(host_to_sandbox_bytes);
+            tcp.send_payload(&host_payload)
                 .map_err(|error| CliError::Core(error.to_string()))?;
             for outbound in tcp.poll() {
                 tun.write_packet(&outbound)?;
@@ -446,8 +486,8 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                 destination: tcp_destination,
                 attribution: None,
                 closed_at: SystemTime::now(),
-                client_to_target_bytes: stats.sandbox_to_host_bytes as u64,
-                target_to_client_bytes: stats.host_to_sandbox_bytes as u64,
+                client_to_target_bytes: sandbox_payload.len() as u64,
+                target_to_client_bytes: host_to_sandbox_bytes as u64,
                 reason: if status.success() {
                     "target-exited-success".to_owned()
                 } else {
@@ -457,8 +497,8 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
             audit_json_lines.push(audit_record_to_json_line(&close.audit_record())?);
             return Ok(BwrapTcpOnceSummary {
                 packets_read,
-                sandbox_to_host_bytes: stats.sandbox_to_host_bytes,
-                host_to_sandbox_bytes: stats.host_to_sandbox_bytes,
+                sandbox_to_host_bytes: sandbox_payload.len(),
+                host_to_sandbox_bytes,
                 audit_json_lines,
                 target_status_code: status.code(),
                 target_status_success: status.success(),
@@ -471,6 +511,21 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
     Err(CliError::Core(
         "bwrap-tcp-once-no-sandbox-payload-before-packet-limit".to_owned(),
     ))
+}
+
+#[cfg(unix)]
+fn looks_like_http_request(payload: &[u8]) -> bool {
+    [
+        b"GET ".as_slice(),
+        b"POST ",
+        b"PUT ",
+        b"PATCH ",
+        b"DELETE ",
+        b"HEAD ",
+        b"OPTIONS ",
+    ]
+    .iter()
+    .any(|prefix| payload.starts_with(prefix))
 }
 
 /// Run setup command work with an already-created TUN-like fd.

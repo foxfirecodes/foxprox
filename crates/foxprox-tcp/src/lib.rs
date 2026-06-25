@@ -196,6 +196,17 @@ impl SmoltcpTcpServer {
         )
     }
 
+    pub fn recv_payload(&mut self, sandbox_buffer_len: usize) -> Result<Vec<u8>, TcpRelayError> {
+        recv_tcp_socket_payload(
+            self.sockets.get_mut::<tcp::Socket>(self.handle),
+            sandbox_buffer_len,
+        )
+    }
+
+    pub fn send_payload(&mut self, payload: &[u8]) -> Result<usize, TcpRelayError> {
+        send_tcp_socket_payload(self.sockets.get_mut::<tcp::Socket>(self.handle), payload)
+    }
+
     pub fn can_recv(&mut self) -> bool {
         self.sockets.get_mut::<tcp::Socket>(self.handle).can_recv()
     }
@@ -208,6 +219,29 @@ impl SmoltcpTcpServer {
     }
 }
 
+/// Receive one available smoltcp TCP payload without writing it to host egress.
+pub fn recv_tcp_socket_payload(
+    socket: &mut tcp::Socket<'_>,
+    sandbox_buffer_len: usize,
+) -> Result<Vec<u8>, TcpRelayError> {
+    let mut sandbox_payload = vec![0_u8; sandbox_buffer_len];
+    let sandbox_to_host_bytes = socket
+        .recv_slice(&mut sandbox_payload)
+        .map_err(|error| TcpRelayError::SmoltcpRecv(format!("{error:?}")))?;
+    sandbox_payload.truncate(sandbox_to_host_bytes);
+    Ok(sandbox_payload)
+}
+
+/// Send one payload into the smoltcp TCP socket for TUN write-back.
+pub fn send_tcp_socket_payload(
+    socket: &mut tcp::Socket<'_>,
+    payload: &[u8],
+) -> Result<usize, TcpRelayError> {
+    socket
+        .send_slice(payload)
+        .map_err(|error| TcpRelayError::SmoltcpSend(format!("{error:?}")))
+}
+
 /// Relay one available smoltcp TCP payload to a host stream and one host
 /// response back into the smoltcp socket.
 pub fn relay_tcp_socket_once<H: Read + Write>(
@@ -216,11 +250,8 @@ pub fn relay_tcp_socket_once<H: Read + Write>(
     sandbox_buffer_len: usize,
     host_buffer_len: usize,
 ) -> Result<TcpRelayOnceStats, TcpRelayError> {
-    let mut sandbox_payload = vec![0_u8; sandbox_buffer_len];
-    let sandbox_to_host_bytes = socket
-        .recv_slice(&mut sandbox_payload)
-        .map_err(|error| TcpRelayError::SmoltcpRecv(format!("{error:?}")))?;
-    sandbox_payload.truncate(sandbox_to_host_bytes);
+    let sandbox_payload = recv_tcp_socket_payload(socket, sandbox_buffer_len)?;
+    let sandbox_to_host_bytes = sandbox_payload.len();
     host.write_all(&sandbox_payload)
         .map_err(|error| TcpRelayError::HostWrite(error.to_string()))?;
 
@@ -229,9 +260,7 @@ pub fn relay_tcp_socket_once<H: Read + Write>(
         .read(&mut host_payload)
         .map_err(|error| TcpRelayError::HostRead(error.to_string()))?;
     host_payload.truncate(host_to_sandbox_bytes);
-    socket
-        .send_slice(&host_payload)
-        .map_err(|error| TcpRelayError::SmoltcpSend(format!("{error:?}")))?;
+    send_tcp_socket_payload(socket, &host_payload)?;
 
     Ok(TcpRelayOnceStats {
         sandbox_to_host_bytes,

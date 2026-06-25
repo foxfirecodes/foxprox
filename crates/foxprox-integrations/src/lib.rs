@@ -11,6 +11,8 @@ use std::fs;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::thread;
+use std::time::Duration;
 
 /// Proxy listener addresses that callers can inject into the sandbox process.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -378,13 +380,25 @@ fn run_ip_command(
     let mut command_vec = Vec::with_capacity(args.len() + 1);
     command_vec.push(config.ip_program.display().to_string());
     command_vec.extend(args.iter().map(|arg| (*arg).to_owned()));
-    let output = Command::new(&config.ip_program)
-        .args(args)
-        .output()
-        .map_err(|error| TunInterfaceSetupError::Io {
-            command: command_vec.clone(),
-            error: error.to_string(),
-        })?;
+    let output = match Command::new(&config.ip_program).args(args).output() {
+        Ok(output) => output,
+        Err(error) if error.raw_os_error() == Some(libc::ETXTBSY) => {
+            thread::sleep(Duration::from_millis(10));
+            Command::new(&config.ip_program)
+                .args(args)
+                .output()
+                .map_err(|error| TunInterfaceSetupError::Io {
+                    command: command_vec.clone(),
+                    error: error.to_string(),
+                })?
+        }
+        Err(error) => {
+            return Err(TunInterfaceSetupError::Io {
+                command: command_vec.clone(),
+                error: error.to_string(),
+            });
+        }
+    };
     if !output.status.success() {
         return Err(TunInterfaceSetupError::CommandFailed {
             command: command_vec,

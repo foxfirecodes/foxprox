@@ -1691,3 +1691,18 @@
 - What failed or surprised the agent: unprivileged ICMP datagram sockets are denied inside this bwrap namespace, even though they work on the host. Adding `CAP_NET_RAW` for the target validation and using a raw ICMP socket produced the expected live packet while preserving the required `CAP_NET_ADMIN` drop.
 - What remains unproven: no remaining Milestone 1 ICMP write-back gap; longer-running daemon behavior remains a future productionization concern rather than the narrow alpha validation proof.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — live transparent HTTP audit in TCP launcher
+
+- Slice attempted: integrate transparent plaintext HTTP inspection into the live TUN/smoltcp TCP launcher instead of only proving the HTTP parser in isolation.
+- Why next: `docs/initial-impl.md` success criteria require direct plaintext HTTP to be allowed/denied/logged by host/method/path. Parser/config/policy tests covered this statically, but live curl through TUN previously emitted only TCP open/close audit.
+- What changed: `foxprox-tcp` now exposes lower-level receive/send helpers so callers can inspect sandbox payload bytes before forwarding them to host egress. `run_bwrap_tcp_once` now detects HTTP request payloads, parses them with `parse_plaintext_http_request`, evaluates them through the shared policy engine, records an `http_request` audit JSON line, and only then forwards allowed bytes to the host TCP stream. The live curl launcher and CLI smokes now assert `http_request` audit appears between `tcp_connect` and `tcp_flow_closed`. `foxprox-integrations` also retries a transient `ETXTBSY` when executing freshly-created fake setup scripts; this removes a workspace-test flake observed during verification.
+- Verification:
+  - Focused checks passed: `cargo test -p foxprox-tcp -- --nocapture`, `cargo test -p foxprox-cli --test live_bwrap_setup live_bwrap_curl -- --ignored --nocapture`, `cargo test -p foxprox-cli --test live_bwrap_setup live_cli_bwrap_tcp_once -- --ignored --nocapture`, and `cargo test -p foxprox-integrations setup_sequence_configures -- --nocapture`.
+  - All explicit live smokes passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, 6/6.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed after the ETXTBSY retry fix.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: full workspace verification briefly hit `Text file busy (os error 26)` executing a just-written fake `ip` script; a short ETXTBSY retry at the integration command boundary is a safe robustness improvement for both tests and production helper execution.
+- What remains unproven: live policy-denied transparent HTTP in the bwrap command path. Static policy/config/parser tests cover denial, and live path now proves allowed HTTP inspection/audit across TUN/smoltcp.
+- Commit: this commit.

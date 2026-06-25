@@ -19,6 +19,7 @@ foxprox-tcp = { path = "../foxprox-tcp" }
 
 [target.'cfg(unix)'.dependencies]
 foxprox-integrations = { path = "../foxprox-integrations" }
+foxprox-inspect = { path = "../foxprox-inspect" }
 
 [[bin]]
 name = "foxproxsetup"
@@ -26,5 +27,4 @@ path = "src/bin/foxproxsetup.rs"
 
 [dev-dependencies]
 foxprox-dns = { path = "../foxprox-dns" }
-foxprox-inspect = { path = "../foxprox-inspect" }
 serde_json = { workspace = true }

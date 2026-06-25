@@ -488,7 +488,11 @@ fn live_bwrap_curl_fetches_http_through_smoltcp_launcher() {
         .expect("host HTTP server receives curl request");
 
     assert!(summary.target_status_success);
-    assert_eq!(summary.audit_json_lines.len(), 2);
+    assert_eq!(summary.audit_json_lines.len(), 3);
+    assert!(summary
+        .audit_json_lines
+        .iter()
+        .any(|line| line.contains("http_request")));
     assert!(summary.sandbox_to_host_bytes > 0);
     assert!(summary.host_to_sandbox_bytes > 0);
     assert!(String::from_utf8_lossy(&request).starts_with("GET / HTTP/1.1"));
@@ -591,6 +595,7 @@ fn live_cli_bwrap_tcp_once_curl_emits_audit_json() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"kind\":\"tcp_connect\""));
+    assert!(stdout.contains("\"kind\":\"http_request\""));
     assert!(stdout.contains("\"kind\":\"tcp_flow_closed\""));
     std::fs::remove_dir_all(dir).unwrap();
 }

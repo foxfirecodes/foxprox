@@ -316,3 +316,11 @@ For alpha robustness without introducing a separate fuzz runner, add determinist
 ## 2026-06-22 — live ICMP validation may need CAP_NET_RAW even after NET_ADMIN drop
 
 Inside bwrap user/network namespaces, Linux ping/datagram ICMP sockets may be denied despite working on the host. For ICMP write-back validation, grant `CAP_NET_RAW` to the target while still dropping `CAP_NET_ADMIN`; then use a raw ICMP socket with an explicit checksum.
+
+## 2026-06-22 — inspect transparent HTTP before host relay
+
+For TUN/smoltcp TCP forwarding, expose a low-level smoltcp recv/send seam so the launcher can inspect plaintext HTTP request bytes before writing them to host egress. This lets live curl produce `tcp_connect`, `http_request`, and `tcp_flow_closed` audit lines in order.
+
+## 2026-06-22 — freshly written fake executables can transiently return ETXTBSY
+
+Workspace tests occasionally hit `Text file busy` when executing a just-created fake `ip` script. Retrying ETXTBSY once after a short delay in the integration command runner removes the flake without weakening command failure diagnostics.
