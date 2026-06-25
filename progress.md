@@ -1558,5 +1558,5 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-integrations` — integrations remains core-only.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: e0bc5fc.
 - Remaining boundary risks: command execution, fd handoff, and privilege drop enforcement remain.
