@@ -1667,5 +1667,5 @@
   - `cargo tree -p foxprox-net` — net orchestrates packet/DNS/policy/audit/egress boundaries.
   - `cargo tree -p foxprox-runtime` — runtime depends on packet only for opaque synthesis helpers and keeps policy/audit normalized.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 23d5e4c.
 - Remaining boundary risks: IPv6 extension headers/NDP and full production IPv6 stack behavior remain future work.
