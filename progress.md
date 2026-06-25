@@ -1619,5 +1619,5 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-integrations` — lifecycle remains integrations/core-only.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: ec95775.
 - Remaining boundary risks: OS-specific capability drop implementation and SCM_RIGHTS fd passing remain.
