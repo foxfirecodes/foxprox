@@ -1518,3 +1518,28 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * oversized inputs fail closed according to configured bounds.
 * Audit evidence: no audit events in parser-only fuzz smoke; parser failures feed existing fail-closed audit builders in handler tests.
 * Residual risk: this is deterministic in-repo fuzz smoke, not coverage-guided fuzzing; cargo-fuzz/libFuzzer harnesses remain future robustness work.
+
+## 2026-06-21 - Real TUN DNS allowed-forward/cache proof
+
+* Invariant under work: allowed broker DNS queries over TUN must be forwarded to an upstream socket, correlated on response, update bounded DNS attribution cache, and return the exact response bytes to the sandbox client.
+* Threat or failure mode addressed: denied DNS response proof does not prove the allowed path, pending transaction state, replay prevention, or cache mutation needed for transparent hostname attribution.
+* Planned verification: add ignored namespace test with smoltcp UDP/53, local upstream UDP resolver, `handle_broker_dns_query_with_pending`, `handle_broker_dns_response`, DNS cache lookup, full checks, and the ignored test under `unshare -Urn`.
+
+## 2026-06-21 - Real TUN DNS allowed-forward/cache proof results
+
+* Tests added/updated:
+  * ignored real namespace test `smoltcp_dns_broker_forwards_allowed_response_and_updates_cache` sends a DNS A query from a kernel UDP client through TUN to smoltcp UDP/53.
+  * the broker path uses `handle_broker_dns_query_with_pending` to allow and forward the exact query wire to a local upstream UDP resolver.
+  * the upstream resolver returns a bounded synthesized answer; the broker uses `handle_broker_dns_response` to validate pending correlation, update `DnsAttributionCache`, and forward exact response wire back through smoltcp/TUN.
+  * test asserts sandbox client receives `198.51.100.5` for `allowed.example` and cache `lookup_unique` returns the expected hostname attribution.
+* Commands run:
+  * `cargo test -p foxprox-net --lib` and `cargo clippy -p foxprox-net --all-targets --all-features -- -D warnings` — passed.
+  * First ignored run failed because loopback was down inside `unshare -Urn`, producing `AddrNotAvailable`; fixed by bringing `lo` up before binding localhost upstream sockets.
+  * `unshare -Urn bash -lc 'cargo test -p foxprox-net smoltcp_dns_broker_forwards_allowed_response_and_updates_cache -- --ignored --nocapture'` — passed.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: CLI 2 tests plus 2 ignored, core 161 unit tests plus 2 parser fuzz-smoke tests, device 3 tests plus 2 ignored, integrations 5 tests, net 2 tests plus 7 ignored, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * allowed DNS queries create pending state only after policy allow.
+  * response forwarding requires source/destination pending correlation before cache mutation.
+  * cache attribution becomes available only after a correlated allowed response.
+* Audit evidence: query and response audit events both carry `AuditDecision::Allow`; replay/mismatch fail-closed behavior remains covered by core DNS handler tests.
+* Residual risk: this is still test-loop orchestration; production runtime needs to package this path into supervised async/bounded broker tasks.

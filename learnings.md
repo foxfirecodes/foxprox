@@ -281,3 +281,7 @@ A bwrap command that runs `foxproxsetup -- target...` is structurally incomplete
 ## 2026-06-21 - Parser fuzz smoke should cover all exposed ingress parsers
 
 A lightweight deterministic fuzz-smoke integration test can exercise packet, DNS, HTTP, CONNECT, TLS, QUIC, and SOCKS parsers on arbitrary bounded byte sequences to catch panics or accidental permissive fallbacks before adding full coverage-guided fuzzing.
+
+## 2026-06-21 - Real namespace DNS upstream tests need loopback up
+
+Inside `unshare -Urn`, binding a localhost upstream UDP resolver can fail with `AddrNotAvailable` until `ip link set lo up` has been run. DNS forwarding e2e tests should bring loopback up before binding `127.0.0.1` sockets.

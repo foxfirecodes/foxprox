@@ -271,9 +271,11 @@ mod tests {
     use std::time::{Duration as StdDuration, Instant as StdInstant};
 
     use foxprox_core::{
-        parse_dns_address_response, AuditDecision, BrokerDnsQueryContext, BrokerDnsQueryOutcome,
-        Cidr, Decision, EgressPermit, Endpoint, Frontend, PolicyConfig, PolicyRequest, PolicyRule,
-        Protocol, SandboxId,
+        build_dns_address_response, parse_dns_address_response, parse_dns_query, AuditDecision,
+        BrokerDnsQueryContext, BrokerDnsQueryOutcome, BrokerDnsResponseContext,
+        BrokerDnsResponseOutcome, Cidr, Decision, DnsAttributionCache, DnsAttributionLookup,
+        EgressPermit, Endpoint, Frontend, HostMatcher, PendingDnsQueryTable, PolicyConfig,
+        PolicyRequest, PolicyRule, Protocol, SandboxId,
     };
     use foxprox_device::{
         configure_tun_interface, create_tun, IpCommandRunner, TunConfig, TunSetup,
@@ -665,6 +667,162 @@ mod tests {
             foxprox_core::DnsResponseCode::Refused
         );
         assert!(metadata.addresses.is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_ADMIN in a disposable network namespace"]
+    fn smoltcp_dns_broker_forwards_allowed_response_and_updates_cache() {
+        Command::new("ip")
+            .args(["link", "set", "lo", "up"])
+            .status()
+            .unwrap();
+        let upstream = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let upstream_server = std::thread::spawn(move || {
+            let mut buffer = [0_u8; 512];
+            let (n, peer) = upstream.recv_from(&mut buffer).unwrap();
+            let query = parse_dns_query(&buffer[..n], 512).unwrap();
+            let response =
+                build_dns_address_response(&query, ["198.51.100.5".parse().unwrap()], 30, 512, 4)
+                    .unwrap();
+            upstream.send_to(&response, peer).unwrap();
+        });
+
+        let tun = create_tun(&TunConfig::new("fp0").unwrap()).unwrap();
+        let setup = TunSetup::new("fp0", "10.0.0.1/24", "0.0.0.0/0", 1300).unwrap();
+        configure_tun_interface(&setup, &mut IpCommandRunner).unwrap();
+
+        let client = UdpSocket::bind("10.0.0.1:0").unwrap();
+        client
+            .set_read_timeout(Some(StdDuration::from_secs(3)))
+            .unwrap();
+        let query = dns_query("allowed.example", 1);
+        client.send_to(&query, "10.0.0.2:53").unwrap();
+
+        let mut device = SmolTunDevice::new(tun, 1300).unwrap();
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = 0xfeed_5301;
+        let mut iface = Interface::new(config, &mut device, Instant::from_millis(0));
+        iface.update_ip_addrs(|addrs| {
+            addrs
+                .push(IpCidr::new(IpAddress::v4(10, 0, 0, 2), 24))
+                .unwrap();
+        });
+
+        let rx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 4096]);
+        let tx_buffer = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 4], vec![0; 4096]);
+        let mut udp_socket = udp::Socket::new(rx_buffer, tx_buffer);
+        udp_socket.bind(53).unwrap();
+        let mut sockets = SocketSet::new(vec![]);
+        let udp_handle = sockets.add(udp_socket);
+        let host_client = UdpSocket::bind("127.0.0.1:0").unwrap();
+        host_client.set_nonblocking(true).unwrap();
+        let upstream_endpoint = Endpoint::udp(upstream_addr.ip(), upstream_addr.port());
+        let mut pending = PendingDnsQueryTable::new(8, 5_000);
+        let mut cache = DnsAttributionCache::new(8, 60_000);
+        let mut policy = PolicyConfig::default();
+        policy.broker_dns_servers.push("10.0.0.2".parse().unwrap());
+        policy.rules.push(PolicyRule::allow_domain(
+            "allow-dns-query",
+            HostMatcher::exact("allowed.example").unwrap(),
+            Some(53),
+        ));
+
+        let started = StdInstant::now();
+        let mut sandbox_peer: Option<IpEndpoint> = None;
+        let mut forwarded_query = false;
+        let mut forwarded_response = false;
+        let mut response_ready_at: Option<StdInstant> = None;
+        while started.elapsed() < StdDuration::from_secs(3) {
+            let now = Instant::from_millis(started.elapsed().as_millis() as i64);
+            iface.poll(now, &mut device, &mut sockets);
+            let socket = sockets.get_mut::<udp::Socket>(udp_handle);
+
+            if socket.can_recv() {
+                let (data, meta) = socket.recv().unwrap();
+                let client_endpoint =
+                    Endpoint::udp("10.0.0.1".parse().unwrap(), meta.endpoint.port);
+                let outcome = foxprox_core::handle_broker_dns_query_with_pending(
+                    data,
+                    &policy,
+                    BrokerDnsQueryContext {
+                        timestamp_millis: 1,
+                        sandbox_id: SandboxId::new("dns-allow-e2e"),
+                        frontend: Frontend::Tun,
+                        source: Some(client_endpoint),
+                        destination: Some(Endpoint::udp("10.0.0.2".parse().unwrap(), 53)),
+                        max_query_bytes: 512,
+                        max_response_bytes: 512,
+                    },
+                    &mut pending,
+                    upstream_endpoint,
+                    10,
+                );
+                let BrokerDnsQueryOutcome::Forward { wire, audit, .. } = outcome else {
+                    panic!("expected allowed DNS query forward");
+                };
+                assert_eq!(audit.decision, Some(AuditDecision::Allow));
+                host_client.send_to(&wire, upstream_addr).unwrap();
+                sandbox_peer = Some(meta.endpoint);
+                forwarded_query = true;
+            }
+
+            let mut upstream_response = [0_u8; 512];
+            match host_client.recv_from(&mut upstream_response) {
+                Ok((n, _)) => {
+                    let client_endpoint =
+                        Endpoint::udp("10.0.0.1".parse().unwrap(), sandbox_peer.unwrap().port);
+                    let outcome = foxprox_core::handle_broker_dns_response(
+                        &upstream_response[..n],
+                        &mut pending,
+                        &mut cache,
+                        BrokerDnsResponseContext {
+                            timestamp_millis: 2,
+                            sandbox_id: SandboxId::new("dns-allow-e2e"),
+                            frontend: Frontend::Tun,
+                            source: Some(upstream_endpoint),
+                            destination: Some(client_endpoint),
+                            max_response_bytes: 512,
+                            max_answers: 4,
+                            now_millis: 20,
+                        },
+                    );
+                    let BrokerDnsResponseOutcome::Forward { wire, audit, .. } = outcome else {
+                        panic!("expected correlated DNS response forward");
+                    };
+                    assert_eq!(audit.decision, Some(AuditDecision::Allow));
+                    socket.send_slice(&wire, sandbox_peer.unwrap()).unwrap();
+                    forwarded_response = true;
+                    response_ready_at = Some(StdInstant::now());
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => panic!("upstream response read failed: {error}"),
+            }
+
+            if response_ready_at
+                .is_some_and(|sent_at| sent_at.elapsed() > StdDuration::from_millis(50))
+            {
+                break;
+            }
+            std::thread::sleep(StdDuration::from_millis(5));
+        }
+
+        let mut response = [0_u8; 512];
+        let (n, _) = client.recv_from(&mut response).unwrap();
+        let metadata = parse_dns_address_response(&response[..n], 512, 4).unwrap();
+        upstream_server.join().unwrap();
+        assert!(forwarded_query);
+        assert!(forwarded_response);
+        assert_eq!(metadata.hostname.as_str(), "allowed.example");
+        assert_eq!(
+            metadata.addresses,
+            vec!["198.51.100.5".parse::<std::net::IpAddr>().unwrap()]
+        );
+        assert!(matches!(
+            cache.lookup_unique("198.51.100.5".parse().unwrap(), 21),
+            DnsAttributionLookup::Unique(attribution)
+                if attribution.hostname.as_ref().unwrap().as_str() == "allowed.example"
+        ));
     }
 
     #[test]
