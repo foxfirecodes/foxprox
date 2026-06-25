@@ -1755,5 +1755,5 @@
   - `cargo tree -p foxprox-packet` — packet remains core-only.
   - `cargo tree -p foxprox-net` — net orchestrates reset bytes without exposing TCP headers to policy/audit.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: d789581.
 - Remaining boundary risks: stack-adapter-native reset signaling for established smoltcp flows remains.
