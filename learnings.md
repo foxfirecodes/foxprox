@@ -237,3 +237,7 @@ The broker DNS server allowlist is for broker-controlled DNS service on port 53.
 ## 2026-06-21 - Real TUN tests may see non-target packets before the expected flow
 
 End-to-end TUN tests should loop until the expected policy-gated outcome appears rather than assuming the first packet read from the fd is the target protocol. Only write back after the core handler returns an explicit write-back outcome with an allow audit decision.
+
+## 2026-06-21 - smoltcp can run directly over IFF_TUN with Medium::Ip
+
+For L3 TUN devices, configure smoltcp with `HardwareAddress::Ip`, `Medium::Ip`, and an IP address representing the userspace stack peer. A real namespace curl-to-TUN proof can validate ingress and egress without introducing TAP/Ethernet concerns.

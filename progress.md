@@ -1280,3 +1280,25 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * the test tolerates unrelated transient packets but only writes a response for an explicit `TunPacketOutcome::WriteBack`.
 * Audit evidence: the real TUN test asserts the write-back outcome carries an allow audit decision before writing to the fd.
 * Residual risk: this proves ICMP write-back only; TCP/UDP forwarding through a userspace stack and host sockets is still future work.
+
+## 2026-06-21 - smoltcp TUN TCP accept proof
+
+* Invariant under work: a real TUN fd must feed a userspace TCP/IP stack that can observe sandbox TCP connection attempts and emit response packets back through TUN before transparent TCP forwarding is trusted.
+* Threat or failure mode addressed: packet-level parsing and ICMP write-back do not prove that TCP stream state is mediated by the broker; without a stack adapter proof, TCP traffic might require unsafe kernel forwarding or bypass shared policy/audit boundaries.
+* Planned verification: add a smoltcp-based TUN device adapter, an ignored network-namespace test where curl connects through TUN to a smoltcp TCP listener and receives an HTTP response, run full checks and the ignored test under `unshare -Urn`.
+
+## 2026-06-21 - smoltcp TUN TCP accept proof results
+
+* Tests added/updated:
+  * new `foxprox-net` crate exposes a smoltcp `Device` adapter for IFF_TUN/IFF_NO_PI file descriptors using Medium::Ip.
+  * ignored network-namespace test configures a real TUN, creates a smoltcp interface at `10.0.0.2`, listens on TCP/8080, runs curl through the TUN path, and returns a small HTTP response.
+* Commands run:
+  * `cargo test -p foxprox-net --lib` initially compiled with an unused import warning; removed the unused import before clippy.
+  * Full check initially failed clippy on a collapsible nested `if`; collapsed the condition.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: core 161 tests, device 3 tests plus 2 ignored, integrations 3 tests, net 1 ignored test, doc tests, and clippy completed cleanly.
+  * `unshare -Urn bash -lc 'cargo test -p foxprox-net smoltcp_accepts_tcp_from_real_tun -- --ignored --nocapture'` — passed and printed `foxok` from curl receiving the smoltcp-generated HTTP response.
+* Observed allow/deny/fail-closed behavior:
+  * a disposable namespace can route TCP traffic through the broker-owned TUN fd into smoltcp and receive packets emitted back through the same fd.
+  * the adapter uses L3/IP medium and does not introduce TAP/Ethernet assumptions into the stack boundary.
+* Audit evidence: this proof does not yet emit flow lifecycle audit; it validates the stack/device path that future audited forwarding will use.
+* Residual risk: host TCP socket bridging, policy-gated connect permits inside the smoltcp loop, DNS/UDP forwarding, and lifecycle/error audit around the loop remain future work.
