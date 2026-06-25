@@ -543,3 +543,194 @@ fn foxprox_run_bwrap_tcp_egress_command_bridges_target_bytes() {
     assert!(stdout.contains("smoltcp"), "{stdout}");
     assert!(stdout.contains("host_setup_control_handoff"), "{stdout}");
 }
+
+#[test]
+#[ignore = "requires rootless bwrap, /dev/net/tun, CAP_NET_ADMIN inside bwrap, and real UDP egress"]
+fn bwrap_foxproxsetup_received_tun_fd_bridges_udp_datagram_to_host_socket() {
+    let setup_helper = env!("CARGO_BIN_EXE_foxproxsetup");
+    assert!(std::path::Path::new(setup_helper).exists());
+    assert!(std::path::Path::new("/dev/net/tun").exists());
+
+    let host_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let host_addr = host_socket.local_addr().unwrap();
+    let (server_tx, server_rx) = std::sync::mpsc::channel();
+    let host_server = std::thread::spawn(move || {
+        let mut request = [0u8; 128];
+        let (len, peer) = host_socket.recv_from(&mut request).unwrap();
+        host_socket.send_to(b"pong", peer).unwrap();
+        server_tx.send(request[..len].to_vec()).unwrap();
+    });
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let socket_path = std::env::temp_dir().join(format!(
+        "foxprox-bwrap-udp-egress-e2e-{}-{unique}.sock",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = std::os::unix::net::UnixListener::bind(&socket_path).unwrap();
+
+    let mut config = NetworkSetupConfig::alpha_default(format!("bwrap-udp-egress-e2e-{unique}"));
+    config.tun_name = format!("fxu{:x}", std::process::id() % 0x00ff_ffff);
+    config.setup_control_socket_path = Some(socket_path.to_string_lossy().to_string());
+
+    let target = vec![
+        "python3".to_string(),
+        "-c".to_string(),
+        concat!(
+            "import socket; ",
+            "s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); ",
+            "s.settimeout(3.0); ",
+            "s.sendto(b\"ping\", (\"198.51.100.1\", 5353)); ",
+            "data,_=s.recvfrom(4); ",
+            "assert data == b\"pong\", data; ",
+            "s.close()"
+        )
+        .to_string(),
+    ];
+    let mut runner = RewritingBwrapRunner::new(setup_helper);
+    let plan = BwrapSetupPlan::new(config.clone(), &target);
+    runner.start_setup_process(&plan).unwrap();
+
+    let mut handoff = accept_setup_control_tun_handoff_with_timeouts(
+        &listener,
+        config,
+        &target,
+        Some(Duration::from_secs(3)),
+        Some(Duration::from_secs(3)),
+    );
+    let _ = std::fs::remove_file(&socket_path);
+    assert_eq!(handoff.status, HostSetupControlHandoffStatus::Complete);
+    let received = handoff.received.take().unwrap();
+
+    let stack = foxprox_stack::SmoltcpIpStack::new_ipv4([198, 51, 100, 1], 24, 1500);
+    let policy = PolicyConfig {
+        default_decision: Decision::Allow,
+        ..PolicyConfig::default()
+    };
+    let broker = BrokerCore::new(PolicyEngine::new(policy), 128);
+    let egress =
+        foxprox_egress::BlockingMappedUdpExchange::new(host_addr, Duration::from_secs(1), 1024);
+    let mut fan_in = RuntimeAuditFanIn::new("bwrap-udp-egress-e2e", 256);
+    let mut audit_output = Vec::new();
+    let mut sink = JsonLineAuditSink::new(&mut audit_output);
+    let cancellation = foxprox_egress::AsyncRuntimeCancellationToken::uncancelled();
+    let report = foxprox_egress::run_received_tun_fd_udp_exchange_and_drain(
+        foxprox_egress::ReceivedTunUdpExchangeSession {
+            setup_source: "host_setup_session".to_string(),
+            setup_records: &handoff.audit_records,
+            received,
+            sandbox_id: "bwrap-udp-egress-e2e".to_string(),
+            broker,
+            stack,
+            egress,
+            now_ms: 20_000,
+            max_attempts: 300,
+            attempt_sleep: Duration::from_millis(10),
+        },
+        &mut fan_in,
+        &mut sink,
+        &cancellation,
+    )
+    .expect("received TUN fd bridges UDP datagram to host socket");
+
+    assert!(report.udp_bridge.exchanged, "{report:?}");
+    assert_eq!(report.udp_bridge.byte_counts.from_sandbox, 4);
+    assert_eq!(report.udp_bridge.byte_counts.to_sandbox, 4);
+    let host_request = server_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("host UDP socket receives sandbox datagram");
+    assert_eq!(host_request, b"ping");
+    host_server.join().unwrap();
+
+    let exit = runner
+        .wait_setup_process_with_timeout(Duration::from_secs(3))
+        .expect("target process wait succeeds")
+        .expect("target process exits after UDP response");
+    assert!(exit.success, "target exchanged UDP datagram: {exit:?}");
+
+    let audit_text = String::from_utf8(audit_output).unwrap();
+    assert!(audit_text.contains("udp_exchange"), "{audit_text}");
+    assert!(audit_text.contains("from_sandbox"), "{audit_text}");
+    assert!(audit_text.contains("to_sandbox"), "{audit_text}");
+}
+
+#[test]
+#[ignore = "requires rootless bwrap, /dev/net/tun, CAP_NET_ADMIN inside bwrap, and foxprox launcher UDP egress"]
+fn foxprox_run_bwrap_udp_egress_command_bridges_target_datagram() {
+    let foxprox = env!("CARGO_BIN_EXE_foxprox");
+    let setup_helper = env!("CARGO_BIN_EXE_foxproxsetup");
+    assert!(std::path::Path::new(foxprox).exists());
+    assert!(std::path::Path::new(setup_helper).exists());
+    assert!(std::path::Path::new("/dev/net/tun").exists());
+
+    let host_socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let host_addr = host_socket.local_addr().unwrap();
+    let (server_tx, server_rx) = std::sync::mpsc::channel();
+    let host_server = std::thread::spawn(move || {
+        let mut request = [0u8; 128];
+        let (len, peer) = host_socket.recv_from(&mut request).unwrap();
+        host_socket.send_to(b"pong", peer).unwrap();
+        server_tx.send(request[..len].to_vec()).unwrap();
+    });
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_path =
+        std::env::temp_dir().join(format!("foxprox-run-bwrap-udp-egress-{unique}.json"));
+    let mut config = BrokerRuntimeConfig::alpha_default(format!("foxprox-udp-cli-e2e-{unique}"));
+    config.setup.tun_name = format!("fxd{:x}", std::process::id() % 0x00ff_ffff);
+    config.policy = PolicyConfig {
+        default_decision: Decision::Allow,
+        ..PolicyConfig::default()
+    };
+    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+
+    let target = [
+        "python3",
+        "-c",
+        concat!(
+            "import socket; ",
+            "s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); ",
+            "s.settimeout(3.0); ",
+            "s.sendto(b\"ping\", (\"198.51.100.1\", 5353)); ",
+            "data,_=s.recvfrom(4); ",
+            "assert data == b\"pong\", data; ",
+            "s.close()"
+        ),
+    ];
+    let setup_dir = std::path::Path::new(setup_helper).parent().unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!("{}:{}", setup_dir.display(), path.to_string_lossy());
+    let output = Command::new(foxprox)
+        .env("PATH", path)
+        .arg("run-bwrap-udp-egress")
+        .arg(&config_path)
+        .arg(host_addr.to_string())
+        .arg("--")
+        .args(target)
+        .output()
+        .expect("foxprox UDP launcher command runs");
+    let _ = std::fs::remove_file(&config_path);
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let host_request = server_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("host UDP socket receives datagram through CLI launcher");
+    assert_eq!(host_request, b"ping");
+    host_server.join().unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("udp_exchange"), "{stdout}");
+    assert!(stdout.contains("host_setup_control_handoff"), "{stdout}");
+    assert!(stdout.contains("to_sandbox"), "{stdout}");
+}

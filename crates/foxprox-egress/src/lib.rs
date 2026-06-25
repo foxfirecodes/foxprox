@@ -58,6 +58,104 @@ impl Default for BlockingTcpEgress {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct BlockingUdpExchange {
+    io_timeout: Duration,
+    max_response_bytes: usize,
+}
+
+impl BlockingUdpExchange {
+    pub fn new(io_timeout: Duration, max_response_bytes: usize) -> Self {
+        Self {
+            io_timeout,
+            max_response_bytes,
+        }
+    }
+}
+
+impl Default for BlockingUdpExchange {
+    fn default() -> Self {
+        Self::new(Duration::from_secs(5), 64 * 1024)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BlockingMappedUdpExchange {
+    destination: SocketAddr,
+    io_timeout: Duration,
+    max_response_bytes: usize,
+}
+
+impl BlockingMappedUdpExchange {
+    pub fn new(destination: SocketAddr, io_timeout: Duration, max_response_bytes: usize) -> Self {
+        Self {
+            destination,
+            io_timeout,
+            max_response_bytes,
+        }
+    }
+}
+
+impl foxprox_stack::UdpDatagramExchange for BlockingMappedUdpExchange {
+    fn exchange_datagram(
+        &mut self,
+        _destination: NetworkEndpoint,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, foxprox_stack::UdpExchangeError> {
+        exchange_udp_with_socket(
+            self.destination,
+            self.io_timeout,
+            self.max_response_bytes,
+            payload,
+        )
+    }
+}
+
+impl foxprox_stack::UdpDatagramExchange for BlockingUdpExchange {
+    fn exchange_datagram(
+        &mut self,
+        destination: NetworkEndpoint,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, foxprox_stack::UdpExchangeError> {
+        let destination =
+            socket_addr(destination).ok_or(foxprox_stack::UdpExchangeError::SendFailed)?;
+        exchange_udp_with_socket(
+            destination,
+            self.io_timeout,
+            self.max_response_bytes,
+            payload,
+        )
+    }
+}
+
+fn exchange_udp_with_socket(
+    destination: SocketAddr,
+    io_timeout: Duration,
+    max_response_bytes: usize,
+    payload: &[u8],
+) -> Result<Vec<u8>, foxprox_stack::UdpExchangeError> {
+    let socket = UdpSocket::bind(match destination {
+        SocketAddr::V4(_) => "0.0.0.0:0",
+        SocketAddr::V6(_) => "[::]:0",
+    })
+    .map_err(|_| foxprox_stack::UdpExchangeError::SendFailed)?;
+    socket
+        .set_read_timeout(Some(io_timeout))
+        .map_err(|_| foxprox_stack::UdpExchangeError::ReceiveFailed)?;
+    socket
+        .set_write_timeout(Some(io_timeout))
+        .map_err(|_| foxprox_stack::UdpExchangeError::SendFailed)?;
+    socket
+        .send_to(payload, destination)
+        .map_err(|_| foxprox_stack::UdpExchangeError::SendFailed)?;
+    let mut response = vec![0u8; max_response_bytes.max(1)];
+    let len = socket
+        .recv(&mut response)
+        .map_err(|_| foxprox_stack::UdpExchangeError::ReceiveFailed)?;
+    response.truncate(len);
+    Ok(response)
+}
+
 impl TcpEgress for BlockingTcpEgress {
     fn connect_and_exchange(
         &mut self,
@@ -2956,6 +3054,38 @@ pub enum ReceivedTunSmoltcpTcpEgressDrainError {
 }
 
 #[cfg(unix)]
+pub struct ReceivedTunUdpExchangeSession<'a, E> {
+    pub setup_source: String,
+    pub setup_records: &'a [AuditRecord],
+    pub received: foxprox_device::ReceivedTunFd,
+    pub sandbox_id: String,
+    pub broker: BrokerCore,
+    pub stack: foxprox_stack::SmoltcpIpStack,
+    pub egress: E,
+    pub now_ms: i64,
+    pub max_attempts: usize,
+    pub attempt_sleep: Duration,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct ReceivedTunUdpExchangeDrainReport {
+    pub setup_ingest: RuntimeAuditIngestReport,
+    pub udp_bridge: foxprox_stack::UdpDatagramBridgeEvidence,
+    pub broker_ingest: RuntimeAuditIngestReport,
+    pub final_drain: RuntimeAuditDrainReport,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum ReceivedTunUdpExchangeDrainError {
+    Ingest(RuntimeAuditFanInError),
+    Fd(std::io::Error),
+    Udp(foxprox_stack::UdpExchangeError),
+    Drain(RuntimeAuditDrainError),
+}
+
+#[cfg(unix)]
 pub async fn drain_setup_audits_and_read_packet_fd_once<F, W>(
     setup_source: impl Into<String>,
     setup_records: &[AuditRecord],
@@ -3261,6 +3391,102 @@ where
         setup_ingest,
         bridge_reports,
         tcp_bridge,
+        broker_ingest,
+        final_drain,
+    })
+}
+
+#[cfg(unix)]
+pub fn run_received_tun_fd_udp_exchange_and_drain<E, W>(
+    session: ReceivedTunUdpExchangeSession<'_, E>,
+    fan_in: &mut RuntimeAuditFanIn,
+    sink: &mut JsonLineAuditSink<W>,
+    cancellation: &AsyncRuntimeCancellationToken,
+) -> Result<ReceivedTunUdpExchangeDrainReport, ReceivedTunUdpExchangeDrainError>
+where
+    E: foxprox_stack::UdpDatagramExchange,
+    W: Write,
+{
+    let ReceivedTunUdpExchangeSession {
+        setup_source,
+        setup_records,
+        received,
+        sandbox_id,
+        broker,
+        stack,
+        mut egress,
+        now_ms,
+        max_attempts,
+        attempt_sleep,
+    } = session;
+    let setup_ingest = match ingest_resequenced_records(setup_source, setup_records, fan_in) {
+        Ok(report) => report,
+        Err(error) => {
+            fan_in
+                .drain_to_sink(sink)
+                .map_err(ReceivedTunUdpExchangeDrainError::Drain)?;
+            return Err(ReceivedTunUdpExchangeDrainError::Ingest(error));
+        }
+    };
+    if let Err(error) = foxprox_device::set_fd_nonblocking(&received.fd, true) {
+        fan_in
+            .drain_to_sink(sink)
+            .map_err(ReceivedTunUdpExchangeDrainError::Drain)?;
+        return Err(ReceivedTunUdpExchangeDrainError::Fd(error));
+    }
+    let mtu = stack.mtu();
+    let (device, _handoff) = received.into_file_device(mtu);
+    let mut bridge = foxprox_stack::SmoltcpTunBridge::new(sandbox_id, broker, stack, device);
+    let mut udp_bridge = foxprox_stack::UdpDatagramBridgeEvidence {
+        byte_counts: ByteCounts::ZERO,
+        exchanged: false,
+        decision: Decision::Allow,
+        reason: None,
+    };
+    for attempt in 0..max_attempts.max(1) {
+        if cancellation.is_cancelled() {
+            break;
+        }
+        match bridge
+            .bridge_next_udp_datagram_to_egress(&mut egress, now_ms.saturating_add(attempt as i64))
+        {
+            Ok(Some(evidence)) => {
+                let exchanged = evidence.exchanged;
+                udp_bridge = evidence;
+                if exchanged {
+                    break;
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let broker_records: Vec<_> = bridge.broker().audit().records().cloned().collect();
+                let _ = ingest_resequenced_records("udp_exchange", &broker_records, fan_in);
+                fan_in
+                    .drain_to_sink(sink)
+                    .map_err(ReceivedTunUdpExchangeDrainError::Drain)?;
+                return Err(ReceivedTunUdpExchangeDrainError::Udp(error));
+            }
+        }
+        if attempt_sleep > Duration::ZERO {
+            std::thread::sleep(attempt_sleep);
+        }
+    }
+    let broker_records: Vec<_> = bridge.broker().audit().records().cloned().collect();
+    let broker_ingest = match ingest_resequenced_records("udp_exchange", &broker_records, fan_in) {
+        Ok(report) => report,
+        Err(error) => {
+            fan_in
+                .drain_to_sink(sink)
+                .map_err(ReceivedTunUdpExchangeDrainError::Drain)?;
+            return Err(ReceivedTunUdpExchangeDrainError::Ingest(error));
+        }
+    };
+    let final_drain = fan_in
+        .drain_to_sink(sink)
+        .map_err(ReceivedTunUdpExchangeDrainError::Drain)?;
+    Ok(ReceivedTunUdpExchangeDrainReport {
+        setup_ingest,
+        udp_bridge,
         broker_ingest,
         final_drain,
     })

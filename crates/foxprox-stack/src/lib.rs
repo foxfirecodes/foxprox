@@ -8,10 +8,10 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    AuditKind, AuditRecord, BrokerCore, ByteCounts, Decision, DenialReason, DeviceIoError,
-    Frontend, NetworkEndpoint, PacketDevice, ParsedIpPacket, PolicyDecision, PolicyRequest,
-    RuntimeComponent, RuntimeTaskExpectation, RuntimeTaskOutcome, RuntimeTaskReadiness,
-    RuntimeTaskStatus, TcpEgress, TcpEgressError,
+    checksum, AuditKind, AuditRecord, BrokerCore, ByteCounts, Decision, DenialReason,
+    DeviceIoError, Frontend, NetworkEndpoint, PacketDevice, ParsedIpPacket, PolicyDecision,
+    PolicyRequest, RuntimeComponent, RuntimeTaskExpectation, RuntimeTaskOutcome,
+    RuntimeTaskReadiness, RuntimeTaskStatus, TcpEgress, TcpEgressError,
 };
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -327,6 +327,28 @@ pub struct TcpStreamBridgeEvidence {
     pub byte_counts: ByteCounts,
     pub stack: StackPollEvidence,
     pub opened_egress: bool,
+    pub decision: Decision,
+    pub reason: Option<DenialReason>,
+}
+
+pub trait UdpDatagramExchange {
+    fn exchange_datagram(
+        &mut self,
+        destination: NetworkEndpoint,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, UdpExchangeError>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UdpExchangeError {
+    SendFailed,
+    ReceiveFailed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UdpDatagramBridgeEvidence {
+    pub byte_counts: ByteCounts,
+    pub exchanged: bool,
     pub decision: Decision,
     pub reason: Option<DenialReason>,
 }
@@ -690,6 +712,161 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         &self.device
     }
 
+    pub fn bridge_next_udp_datagram_to_egress<E: UdpDatagramExchange>(
+        &mut self,
+        egress: &mut E,
+        now_ms: i64,
+    ) -> Result<Option<UdpDatagramBridgeEvidence>, UdpExchangeError> {
+        let packet = match self.device.read_packet() {
+            Ok(Some(packet)) => packet,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                self.record_device_read_failure(now_ms);
+                return Err(match error {
+                    DeviceIoError::ReadFailed => UdpExchangeError::ReceiveFailed,
+                    DeviceIoError::WriteFailed => UdpExchangeError::SendFailed,
+                });
+            }
+        };
+        let parsed = match ParsedIpPacket::parse(&packet) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                let request = PolicyRequest::unsupported(
+                    self.sandbox_id.clone(),
+                    Frontend::Tun,
+                    error.denial_reason(),
+                );
+                let audit = error
+                    .audit_record(self.sandbox_id.clone())
+                    .with_timestamp_ms(now_ms as u128);
+                let decision = match self.broker.append_audit_for(&request, audit) {
+                    Ok(_) => PolicyDecision {
+                        decision: Decision::FailClosed,
+                        reason: Some(error.denial_reason()),
+                        rule_id: None,
+                        audit_kind: AuditKind::PacketMalformedDenied,
+                    },
+                    Err(decision) => decision,
+                };
+                return Ok(Some(udp_datagram_evidence(
+                    ByteCounts::ZERO,
+                    false,
+                    decision.decision,
+                    decision.reason,
+                )));
+            }
+        };
+        if parsed.protocol != foxprox_core::Protocol::Udp {
+            return Ok(Some(udp_datagram_evidence(
+                ByteCounts::ZERO,
+                false,
+                Decision::Allow,
+                None,
+            )));
+        }
+        let Some((payload, response_template)) = udp_payload_and_response_template(&packet) else {
+            return Ok(Some(udp_datagram_evidence(
+                ByteCounts::ZERO,
+                false,
+                Decision::FailClosed,
+                Some(DenialReason::MalformedPacket),
+            )));
+        };
+        let request = request_for_packet(&self.sandbox_id, &parsed);
+        let inbound_audit = packet_audit(
+            &self.sandbox_id,
+            &parsed,
+            now_ms,
+            packet.len(),
+            "from_sandbox",
+        )
+        .with_detail("stack", "udp_exchange");
+        if let Err(decision) = self.broker.append_audit_for(&request, inbound_audit) {
+            return Ok(Some(udp_datagram_evidence(
+                ByteCounts::ZERO,
+                false,
+                decision.decision,
+                decision.reason,
+            )));
+        }
+        let policy_decision = self.broker.evaluate(&request);
+        if policy_decision.decision.is_deny() {
+            return Ok(Some(udp_datagram_evidence(
+                ByteCounts::ZERO,
+                false,
+                policy_decision.decision,
+                policy_decision.reason,
+            )));
+        }
+        let response_payload =
+            match egress.exchange_datagram(parsed.destination_endpoint(), payload) {
+                Ok(response) => response,
+                Err(error) => {
+                    let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
+                        .with_frontend(Frontend::Tun)
+                        .with_protocol(foxprox_core::Protocol::Udp)
+                        .with_source(parsed.source_endpoint())
+                        .with_destination(parsed.destination_endpoint())
+                        .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+                        .with_detail("stack", "udp_exchange")
+                        .with_detail("error", udp_exchange_error_detail(&error));
+                    let _ = self.broker.append_audit_for(&request, audit);
+                    return Err(error);
+                }
+            };
+        let response = response_packet(&response_template, &response_payload)
+            .ok_or(UdpExchangeError::SendFailed)?;
+        let response_parsed =
+            ParsedIpPacket::parse(&response).map_err(|_| UdpExchangeError::SendFailed)?;
+        let response_request = request_for_packet(&self.sandbox_id, &response_parsed);
+        let outbound_audit = packet_audit(
+            &self.sandbox_id,
+            &response_parsed,
+            now_ms,
+            response.len(),
+            "to_sandbox",
+        )
+        .with_detail("stack", "udp_exchange")
+        .with_detail("write_phase", "attempt");
+        if let Err(decision) = self
+            .broker
+            .append_audit_for(&response_request, outbound_audit)
+        {
+            return Ok(Some(udp_datagram_evidence(
+                ByteCounts::ZERO,
+                false,
+                decision.decision,
+                decision.reason,
+            )));
+        }
+        if self.device.write_packet(&response).is_err() {
+            let error_audit = AuditRecord::new_at(
+                AuditKind::BrokerError,
+                self.sandbox_id.clone(),
+                now_ms as u128,
+            )
+            .with_frontend(Frontend::Tun)
+            .with_protocol(foxprox_core::Protocol::Udp)
+            .with_source(response_parsed.source_endpoint())
+            .with_destination(response_parsed.destination_endpoint())
+            .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+            .with_detail("stack", "udp_exchange")
+            .with_detail("direction", "to_sandbox")
+            .with_detail("device_io_error", "write_failed");
+            let _ = self.broker.append_audit_for(&response_request, error_audit);
+            return Err(UdpExchangeError::SendFailed);
+        }
+        Ok(Some(udp_datagram_evidence(
+            ByteCounts {
+                from_sandbox: payload.len() as u64,
+                to_sandbox: response_payload.len() as u64,
+            },
+            true,
+            Decision::Allow,
+            None,
+        )))
+    }
+
     pub fn bridge_first_tcp_stream_to_egress<E: TcpEgress>(
         &mut self,
         egress: &mut E,
@@ -879,10 +1056,85 @@ fn tcp_stream_evidence(
     }
 }
 
+fn udp_datagram_evidence(
+    byte_counts: ByteCounts,
+    exchanged: bool,
+    decision: Decision,
+    reason: Option<DenialReason>,
+) -> UdpDatagramBridgeEvidence {
+    UdpDatagramBridgeEvidence {
+        byte_counts,
+        exchanged,
+        decision,
+        reason,
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct UdpResponseTemplate {
+    source: [u8; 4],
+    destination: [u8; 4],
+    source_port: u16,
+    destination_port: u16,
+}
+
+fn udp_payload_and_response_template(packet: &[u8]) -> Option<(&[u8], UdpResponseTemplate)> {
+    if packet.len() < 28 || packet[0] >> 4 != 4 || packet[9] != 17 {
+        return None;
+    }
+    let ihl = ((packet[0] & 0x0f) as usize) * 4;
+    if ihl < 20 || packet.len() < ihl + 8 {
+        return None;
+    }
+    let total_len = u16::from_be_bytes([packet[2], packet[3]]) as usize;
+    let udp_len = u16::from_be_bytes([packet[ihl + 4], packet[ihl + 5]]) as usize;
+    if total_len > packet.len() || udp_len < 8 || ihl + udp_len > total_len {
+        return None;
+    }
+    let payload = &packet[ihl + 8..ihl + udp_len];
+    let template = UdpResponseTemplate {
+        source: [packet[16], packet[17], packet[18], packet[19]],
+        destination: [packet[12], packet[13], packet[14], packet[15]],
+        source_port: u16::from_be_bytes([packet[ihl + 2], packet[ihl + 3]]),
+        destination_port: u16::from_be_bytes([packet[ihl], packet[ihl + 1]]),
+    };
+    Some((payload, template))
+}
+
+fn response_packet(template: &UdpResponseTemplate, payload: &[u8]) -> Option<Vec<u8>> {
+    let udp_len = 8usize.checked_add(payload.len())?;
+    let total_len = 20usize.checked_add(udp_len)?;
+    if total_len > u16::MAX as usize {
+        return None;
+    }
+    let mut packet = vec![0u8; total_len];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 17;
+    packet[12..16].copy_from_slice(&template.source);
+    packet[16..20].copy_from_slice(&template.destination);
+    packet[20..22].copy_from_slice(&template.source_port.to_be_bytes());
+    packet[22..24].copy_from_slice(&template.destination_port.to_be_bytes());
+    packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    // IPv4 UDP checksum of zero is allowed and means no UDP checksum.
+    packet[28..].copy_from_slice(payload);
+    let header_checksum = checksum(&packet[..20]);
+    packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
+    Some(packet)
+}
+
 fn tcp_egress_error_detail(error: &TcpEgressError) -> &'static str {
     match error {
         TcpEgressError::ConnectFailed => "connect_failed",
         TcpEgressError::BridgeFailed => "bridge_failed",
+    }
+}
+
+fn udp_exchange_error_detail(error: &UdpExchangeError) -> &'static str {
+    match error {
+        UdpExchangeError::SendFailed => "send_failed",
+        UdpExchangeError::ReceiveFailed => "receive_failed",
     }
 }
 
@@ -1004,6 +1256,50 @@ mod tests {
         let reply = &bridge.device().outbound()[0];
         let parsed = ParsedIpPacket::parse_ipv4(reply).unwrap();
         assert_eq!(parsed.icmp_type, Some(0));
+    }
+
+    #[test]
+    fn udp_exchange_bridge_sends_host_response_back_to_tun() {
+        let packet = ipv4_udp_packet([10, 0, 2, 15], [198, 51, 100, 1], 50_000, 5353, b"ping");
+        let device = InMemoryPacketDevice::with_inbound([packet]);
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 16);
+        let stack = SmoltcpIpStack::new_ipv4([198, 51, 100, 1], 24, 1500);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+        let mut egress = MockUdpExchange::new(b"pong".to_vec());
+
+        let evidence = bridge
+            .bridge_next_udp_datagram_to_egress(&mut egress, 6_000)
+            .unwrap()
+            .unwrap();
+
+        assert!(evidence.exchanged);
+        assert_eq!(evidence.byte_counts.from_sandbox, 4);
+        assert_eq!(evidence.byte_counts.to_sandbox, 4);
+        assert_eq!(egress.requests, vec![b"ping".to_vec()]);
+        let outbound = &bridge.device().outbound()[0];
+        let parsed = ParsedIpPacket::parse(outbound).unwrap();
+        assert_eq!(parsed.protocol, foxprox_core::Protocol::Udp);
+        assert_eq!(parsed.source.to_string(), "198.51.100.1");
+        assert_eq!(parsed.destination.to_string(), "10.0.2.15");
+        assert_eq!(parsed.source_port, Some(5353));
+        assert_eq!(parsed.destination_port, Some(50_000));
+        assert_eq!(&outbound[28..], b"pong");
+        let records: Vec<_> = bridge.broker().audit().records().collect();
+        assert!(records.iter().any(|record| {
+            record.kind == AuditKind::PacketObserved
+                && record.details.get("stack").map(String::as_str) == Some("udp_exchange")
+                && record.details.get("direction").map(String::as_str) == Some("from_sandbox")
+        }));
+        assert!(records.iter().any(|record| {
+            record.kind == AuditKind::PacketObserved
+                && record.details.get("stack").map(String::as_str) == Some("udp_exchange")
+                && record.details.get("direction").map(String::as_str) == Some("to_sandbox")
+                && record.details.get("write_phase").map(String::as_str) == Some("attempt")
+        }));
     }
 
     #[test]
@@ -1580,6 +1876,32 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Debug)]
+    struct MockUdpExchange {
+        response: Vec<u8>,
+        requests: Vec<Vec<u8>>,
+    }
+
+    impl MockUdpExchange {
+        fn new(response: Vec<u8>) -> Self {
+            Self {
+                response,
+                requests: Vec::new(),
+            }
+        }
+    }
+
+    impl UdpDatagramExchange for MockUdpExchange {
+        fn exchange_datagram(
+            &mut self,
+            _destination: NetworkEndpoint,
+            payload: &[u8],
+        ) -> Result<Vec<u8>, UdpExchangeError> {
+            self.requests.push(payload.to_vec());
+            Ok(self.response.clone())
+        }
+    }
+
     #[derive(Clone, Copy)]
     struct TcpPacketSpec<'a> {
         source: [u8; 4],
@@ -1641,6 +1963,31 @@ mod tests {
         let ip_header_len = ((packet[0] & 0x0f) as usize) * 4;
         let tcp_header_len = ((packet[ip_header_len + 12] >> 4) as usize) * 4;
         &packet[ip_header_len + tcp_header_len..]
+    }
+
+    fn ipv4_udp_packet(
+        source: [u8; 4],
+        destination: [u8; 4],
+        source_port: u16,
+        destination_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let udp_len = 8 + payload.len();
+        let total_len = 20 + udp_len;
+        let mut packet = vec![0u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&source);
+        packet[16..20].copy_from_slice(&destination);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[28..].copy_from_slice(payload);
+        let header_checksum = checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
+        packet
     }
 
     fn ipv4_tcp_packet(spec: TcpPacketSpec<'_>) -> Vec<u8> {
