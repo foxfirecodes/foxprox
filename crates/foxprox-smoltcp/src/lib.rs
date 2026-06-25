@@ -100,6 +100,60 @@ pub struct SmoltcpBidirectionalTickOutcome {
     pub host: SmoltcpHostToSandboxPumpOutcome,
 }
 
+impl SmoltcpBidirectionalTickOutcome {
+    pub fn sandbox_bytes_forwarded(&self) -> usize {
+        self.sandbox
+            .forwarded
+            .as_ref()
+            .map_or(0, |forwarded| forwarded.bytes_forwarded)
+    }
+
+    pub fn host_bytes_read(&self) -> usize {
+        match self.host.host_read {
+            foxprox_runtime::TcpHostReadOutcome::Bytes { count } => count,
+            foxprox_runtime::TcpHostReadOutcome::Eof
+            | foxprox_runtime::TcpHostReadOutcome::WouldBlock => 0,
+        }
+    }
+
+    pub fn made_progress(&self) -> bool {
+        self.sandbox_bytes_forwarded() > 0
+            || self.host_bytes_read() > 0
+            || self.host.outbound_packets > 0
+            || matches!(
+                self.sandbox.pump,
+                SmoltcpTunPumpOutcome::PacketProcessed {
+                    outbound_packets,
+                    ..
+                } if outbound_packets > 0
+            )
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SmoltcpTcpBridgeLoopState {
+    pub ticks: u64,
+    pub progress_ticks: u64,
+    pub idle_ticks: u64,
+}
+
+impl SmoltcpTcpBridgeLoopState {
+    fn record(&mut self, made_progress: bool) {
+        self.ticks += 1;
+        if made_progress {
+            self.progress_ticks += 1;
+        } else {
+            self.idle_ticks += 1;
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SmoltcpTcpBridgeLoopStep {
+    pub tick: SmoltcpBidirectionalTickOutcome,
+    pub made_progress: bool,
+}
+
 pub struct SmoltcpTcpBridgeSession<B> {
     adapter: SmoltcpIpLoopback,
     flow_runtime: TcpFlowRuntime<B>,
@@ -388,6 +442,37 @@ impl SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>> {
         )?;
         let host = self.pump_host_to_sandbox_once(flow, max_host_bytes, writer, now_millis + 1)?;
         Ok(SmoltcpBidirectionalTickOutcome { sandbox, host })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_loop_tick<R: Read, W: Write>(
+        &mut self,
+        state: &mut SmoltcpTcpBridgeLoopState,
+        reader: &mut R,
+        writer: &mut W,
+        buffer: &mut [u8],
+        listener_port: u16,
+        max_sandbox_payload_bytes: usize,
+        flow: &FlowKey,
+        max_host_bytes: usize,
+        now_millis: i64,
+    ) -> Result<SmoltcpTcpBridgeLoopStep, SmoltcpTcpBridgeSessionError> {
+        let tick = self.pump_bidirectional_once(
+            reader,
+            writer,
+            buffer,
+            listener_port,
+            max_sandbox_payload_bytes,
+            flow,
+            max_host_bytes,
+            now_millis,
+        )?;
+        let made_progress = tick.made_progress();
+        state.record(made_progress);
+        Ok(SmoltcpTcpBridgeLoopStep {
+            tick,
+            made_progress,
+        })
     }
 }
 
@@ -1994,6 +2079,146 @@ mod tests {
             matches!(
                 parse_ip_packet(packet),
                 Ok(ParsedIpPacket::Tcpv4Segment(segment)) if segment.payload == b"tick-reply"
+            )
+        }));
+    }
+
+    #[test]
+    fn loop_state_tracks_idle_wouldblock_and_later_host_progress() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.set_packet_loopback(false);
+        adapter.set_connect_report_mode(TcpConnectReportMode::AcceptedListenerSockets);
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        let source = Ipv4Addr::new(10, 66, 0, 2);
+        let destination = Ipv4Addr::new(10, 66, 0, 1);
+        let syn = ipv4_tcp_syn_packet(source, destination, 50001, 8080, 7);
+        let mut rule = PolicyRule::allow("allow-loop-state");
+        rule.protocol = Some(Protocol::Tcp);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let (send_reply, receive_reply) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            receive_reply.recv().unwrap();
+            stream.write_all(b"loop-reply").unwrap();
+        });
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("loop-state-components").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let mut reader = Cursor::new(syn);
+        let mut writer = Vec::new();
+        let mut buffer = vec![0; 1500];
+        let (mut session, flow, _, _) =
+            SmoltcpTcpBridgeSession::pump_tun_and_open_next_allowed_host_session(
+                adapter,
+                &mut reader,
+                &mut writer,
+                &mut buffer,
+                &components,
+                &mut kernel,
+                SandboxId::new("loop-state").unwrap(),
+                listen_addr,
+                1,
+                6,
+            )
+            .unwrap();
+        let syn_ack = match parse_ip_packet(&writer).unwrap() {
+            ParsedIpPacket::Tcpv4Segment(segment) => segment,
+            other => panic!("expected SYN/ACK, got {other:?}"),
+        };
+        let server_ack = syn_ack.sequence + 1;
+        writer.clear();
+        let ack = ipv4_tcp_packet(source, destination, 50001, 8080, 8, server_ack, 0x10, &[]);
+        session
+            .pump_tun_packet_and_forward_sandbox_payload(
+                &mut Cursor::new(ack),
+                &mut writer,
+                &mut buffer,
+                8080,
+                64,
+                2,
+            )
+            .unwrap();
+        let mut state = SmoltcpTcpBridgeLoopState::default();
+        let mut recording_writer = RecordingWriter::default();
+
+        let idle = session
+            .run_loop_tick(
+                &mut state,
+                &mut Cursor::new(Vec::new()),
+                &mut recording_writer,
+                &mut buffer,
+                8080,
+                64,
+                &flow,
+                64,
+                3,
+            )
+            .unwrap();
+        send_reply.send(()).unwrap();
+        let mut progress = None;
+        for millis in 4..40 {
+            let step = session
+                .run_loop_tick(
+                    &mut state,
+                    &mut Cursor::new(Vec::new()),
+                    &mut recording_writer,
+                    &mut buffer,
+                    8080,
+                    64,
+                    &flow,
+                    64,
+                    millis,
+                )
+                .unwrap();
+            if step.made_progress {
+                progress = Some(step);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let progress = progress.expect("host reply should eventually make loop progress");
+        server.join().unwrap();
+
+        assert!(!idle.made_progress);
+        assert!(state.idle_ticks >= 1);
+        assert!(state.progress_ticks >= 1);
+        assert!(matches!(
+            idle.tick.host.host_read,
+            TcpHostReadOutcome::WouldBlock
+        ));
+        assert!(matches!(
+            progress.tick.host.host_read,
+            TcpHostReadOutcome::Bytes {
+                count
+            } if count == b"loop-reply".len()
+        ));
+        assert!(recording_writer.writes.iter().any(|packet| {
+            matches!(
+                parse_ip_packet(packet),
+                Ok(ParsedIpPacket::Tcpv4Segment(segment)) if segment.payload == b"loop-reply"
             )
         }));
     }

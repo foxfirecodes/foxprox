@@ -1799,3 +1799,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: repeated polling is still test-local rather than an owned production event loop; live TUN fd smoke remains blocked by missing `CAP_NET_ADMIN` in this environment.
 - Exact next step: commit nonblocking host dialing, then introduce a small session-loop state type that can repeat bidirectional ticks and report `WouldBlock`/progress outcomes without blocking.
+
+## 2026-06-25T03:14:20Z
+- Current objective: continue toward complete alpha scope by turning one-shot bidirectional smoltcp ticks into a repeatable nonblocking session-loop step.
+- Git status summary: clean worktree after commit `8c1cac0`.
+- Intended slice: add a small session-loop outcome/state helper that runs one bidirectional tick, reports whether sandbox bytes, host bytes, or outbound packets made progress, and treats nonblocking `WouldBlock` as a normal no-progress host-read outcome.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with in-memory TUN IO and loopback host sockets.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: this is still deterministic in-process IO, not a live TUN fd smoke; live TUN remains blocked by missing CAP_NET_ADMIN in this environment.
+- Exact next step: implement a progress-classified bidirectional session step and regression tests for WouldBlock and eventual reply progress.
+
+## 2026-06-25T03:18:10Z
+- Current objective: add progress-classified session loop ticks for transparent TCP smoltcp sessions.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features` (initially failed because the loop-state test assumed exactly one idle tick before progress; fixed to allow bounded nonblocking retries)
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 38 smoltcp adapter tests passed. Added `SmoltcpTcpBridgeLoopState`, `SmoltcpTcpBridgeLoopStep`, and progress classification on bidirectional tick outcomes; regression proves an idle `WouldBlock` tick increments idle state and a later host reply increments progress while emitting a sandbox-bound TCP/IP packet.
+- Commit hash when committed: pending.
+- Remaining risks: the loop state is still driven by tests/callers rather than a broker-owned continuous fd loop; live TUN smoke remains unavailable without CAP_NET_ADMIN.
+- Exact next step: commit loop tick state, then add a live-session wrapper that owns the TUN-like IO buffer and session state so repeated ticks do not require callers to pass all plumbing each time.
