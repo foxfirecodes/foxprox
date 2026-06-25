@@ -567,6 +567,178 @@ pub struct StackRuntimeTickOutcome {
     pub maintenance: BridgeMaintenanceOutcome,
 }
 
+impl StackRuntimeTickOutcome {
+    pub fn made_progress(&self) -> bool {
+        self.stack_packet.is_some()
+            || self.maintenance.tcp_pending_bytes_written_to_egress > 0
+            || self.maintenance.tcp_streams_read > 0
+            || self.maintenance.udp_flows_read > 0
+            || self.maintenance.udp_flows_removed_on_error > 0
+            || self.maintenance.udp_flows_expired > 0
+            || self.maintenance.outbound_packets_written > 0
+    }
+
+    pub fn sequence_slots_used(&self) -> u64 {
+        let Some(packet) = &self.stack_packet else {
+            return 0;
+        };
+        let audited_events = packet
+            .broker_outcomes
+            .len()
+            .saturating_add(packet.transparent_inspection_events)
+            .saturating_add(packet.flow_closed_events);
+        audited_events as u64
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StackRuntimeLoopConfig {
+    pub max_ticks: usize,
+    pub max_idle_ticks: Option<usize>,
+    pub tick_millis: u64,
+    pub max_tcp_read_bytes_per_stream: usize,
+    pub max_udp_read_bytes_per_flow: usize,
+    pub budget: BridgeMaintenanceBudget,
+}
+
+impl Default for StackRuntimeLoopConfig {
+    fn default() -> Self {
+        Self {
+            max_ticks: 1024,
+            max_idle_ticks: None,
+            tick_millis: 10,
+            max_tcp_read_bytes_per_stream: 16 * 1024,
+            max_udp_read_bytes_per_flow: 2048,
+            budget: BridgeMaintenanceBudget::default(),
+        }
+    }
+}
+
+pub struct StackRuntimeLoopStep<'a, S, E, A, U>
+where
+    E: HostEgress,
+{
+    pub adapter: &'a mut S,
+    pub policy: &'a PolicyEngine,
+    pub egress: &'a mut E,
+    pub audit: &'a mut A,
+    pub tcp_bridges: &'a mut StackTcpBridgeTable<E::TcpStream>,
+    pub udp_bridges: &'a mut UdpBridgeTable<U>,
+    pub dns_attribution: Option<StackDnsAttribution<'a>>,
+    pub config: StackRuntimeLoopConfig,
+    pub sequence_start: u64,
+    pub timestamp_millis: u64,
+    pub now_millis: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StackRuntimeLoopOutcome {
+    pub ticks_run: usize,
+    pub progress_ticks: usize,
+    pub idle_ticks: usize,
+    pub next_sequence: u64,
+    pub next_timestamp_millis: u64,
+    pub next_now_millis: u64,
+    pub device_packets_processed: usize,
+    pub maintenance: BridgeMaintenanceOutcome,
+}
+
+/// Run a bounded nonblocking stack runtime loop. This is the production-facing
+/// scheduler primitive: it repeatedly checks device readiness via
+/// `TryPacketDevice`, always runs bridge maintenance, advances audit sequence
+/// numbers, and can return after a configured idle streak for cooperative
+/// shutdown or outer OS-readiness waits.
+pub fn run_stack_runtime_loop<D, S, E, A, U>(
+    device: &mut D,
+    step: StackRuntimeLoopStep<'_, S, E, A, U>,
+) -> Result<StackRuntimeLoopOutcome, RuntimeError>
+where
+    D: TryPacketDevice,
+    S: StackAdapter,
+    E: HostEgress,
+    E::TcpStream: HostTcpStream,
+    A: AuditSink,
+    U: HostUdpFlow,
+{
+    let StackRuntimeLoopStep {
+        adapter,
+        policy,
+        egress,
+        audit,
+        tcp_bridges,
+        udp_bridges,
+        dns_attribution,
+        config,
+        mut sequence_start,
+        mut timestamp_millis,
+        mut now_millis,
+    } = step;
+
+    let mut outcome = StackRuntimeLoopOutcome {
+        ticks_run: 0,
+        progress_ticks: 0,
+        idle_ticks: 0,
+        next_sequence: sequence_start,
+        next_timestamp_millis: timestamp_millis,
+        next_now_millis: now_millis,
+        device_packets_processed: 0,
+        maintenance: BridgeMaintenanceOutcome::default(),
+    };
+
+    for tick_index in 0..config.max_ticks {
+        let tick_dns = dns_attribution.map(|attribution| StackDnsAttribution {
+            cache: attribution.cache,
+            now: attribution.now + Duration::from_millis(config.tick_millis * tick_index as u64),
+        });
+        let tick = process_stack_runtime_tick(
+            device,
+            StackRuntimeTickStep {
+                adapter,
+                policy,
+                egress,
+                audit,
+                tcp_bridges,
+                udp_bridges,
+                sequence_start,
+                timestamp_millis,
+                dns_attribution: tick_dns,
+                max_tcp_read_bytes_per_stream: config.max_tcp_read_bytes_per_stream,
+                max_udp_read_bytes_per_flow: config.max_udp_read_bytes_per_flow,
+                budget: config.budget,
+                now_millis,
+            },
+        )?;
+
+        outcome.ticks_run += 1;
+        if tick.stack_packet.is_some() {
+            outcome.device_packets_processed += 1;
+        }
+        outcome.maintenance.accumulate(&tick.maintenance);
+        let sequence_slots = tick.sequence_slots_used().max(1);
+        sequence_start = sequence_start.saturating_add(sequence_slots);
+        timestamp_millis = timestamp_millis.saturating_add(config.tick_millis);
+        now_millis = now_millis.saturating_add(config.tick_millis);
+        outcome.next_sequence = sequence_start;
+        outcome.next_timestamp_millis = timestamp_millis;
+        outcome.next_now_millis = now_millis;
+
+        if tick.made_progress() {
+            outcome.progress_ticks += 1;
+            outcome.idle_ticks = 0;
+        } else {
+            outcome.idle_ticks += 1;
+            if config
+                .max_idle_ticks
+                .is_some_and(|max_idle| outcome.idle_ticks >= max_idle)
+            {
+                break;
+            }
+        }
+    }
+
+    Ok(outcome)
+}
+
 /// Run one nonblocking stack runtime tick: optionally ingest one device packet,
 /// then always flush bridge maintenance.
 pub fn process_stack_runtime_tick<D, S, E, A, U>(
@@ -639,7 +811,7 @@ pub struct BridgeMaintenanceStep<'a, S, T, U> {
     pub now_millis: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BridgeMaintenanceOutcome {
     pub tcp_pending_bytes_written_to_egress: usize,
     pub tcp_streams_read: usize,
@@ -650,6 +822,20 @@ pub struct BridgeMaintenanceOutcome {
     pub udp_flows_removed_on_error: usize,
     pub udp_flows_expired: usize,
     pub outbound_packets_written: usize,
+}
+
+impl BridgeMaintenanceOutcome {
+    pub fn accumulate(&mut self, other: &Self) {
+        self.tcp_pending_bytes_written_to_egress += other.tcp_pending_bytes_written_to_egress;
+        self.tcp_streams_read += other.tcp_streams_read;
+        self.tcp_bytes_read_from_egress += other.tcp_bytes_read_from_egress;
+        self.tcp_bytes_enqueued_to_stack += other.tcp_bytes_enqueued_to_stack;
+        self.udp_flows_read += other.udp_flows_read;
+        self.udp_bytes_read_from_egress += other.udp_bytes_read_from_egress;
+        self.udp_flows_removed_on_error += other.udp_flows_removed_on_error;
+        self.udp_flows_expired += other.udp_flows_expired;
+        self.outbound_packets_written += other.outbound_packets_written;
+    }
 }
 
 /// Flush bridge state once without reading a new device packet or invoking
@@ -1857,6 +2043,65 @@ mod tests {
         }));
         assert_eq!(writes.borrow().as_slice(), &[b"ping".to_vec()]);
         assert_eq!(audit.records().len(), 1);
+    }
+
+    #[test]
+    fn stack_runtime_loop_runs_until_idle_after_progress() {
+        let mut device = PreopenedTunDevice::from_io(WouldBlockIo, 1500).unwrap();
+        let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
+        let mut egress = MaintenanceEgress;
+        let mut audit = BoundedAuditSink::new(4);
+        let mut adapter = ReadBackStackAdapter {
+            writes: Vec::new(),
+            outbound: vec![OutboundIpPacket::new(vec![0x45, 0, 0, 20]).unwrap()],
+        };
+        let mut tcp_bridges = StackTcpBridgeTable::default();
+        tcp_bridges.insert(
+            StackTcpFlowKey::new(
+                SandboxId::new("s1").unwrap(),
+                FrontendKind::Tun,
+                "10.0.0.2:49152".parse().unwrap(),
+                "203.0.113.10:80".parse().unwrap(),
+            ),
+            ReadableTcpStream::new(vec![b"abc".to_vec()].into()),
+        );
+        let mut udp_bridges = UdpBridgeTable::<MockUdpHandle>::default();
+
+        let outcome = run_stack_runtime_loop(
+            &mut device,
+            StackRuntimeLoopStep {
+                adapter: &mut adapter,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                tcp_bridges: &mut tcp_bridges,
+                udp_bridges: &mut udp_bridges,
+                dns_attribution: None,
+                config: StackRuntimeLoopConfig {
+                    max_ticks: 4,
+                    max_idle_ticks: Some(1),
+                    tick_millis: 5,
+                    max_tcp_read_bytes_per_stream: 1024,
+                    max_udp_read_bytes_per_flow: 1024,
+                    budget: BridgeMaintenanceBudget::default(),
+                },
+                sequence_start: 10,
+                timestamp_millis: 1000,
+                now_millis: 2000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.ticks_run, 2);
+        assert_eq!(outcome.progress_ticks, 1);
+        assert_eq!(outcome.idle_ticks, 1);
+        assert_eq!(outcome.next_sequence, 12);
+        assert_eq!(outcome.next_timestamp_millis, 1010);
+        assert_eq!(outcome.next_now_millis, 2010);
+        assert_eq!(outcome.maintenance.tcp_streams_read, 1);
+        assert_eq!(outcome.maintenance.tcp_bytes_read_from_egress, 3);
+        assert_eq!(outcome.maintenance.outbound_packets_written, 1);
+        assert_eq!(adapter.writes.len(), 1);
     }
 
     #[test]

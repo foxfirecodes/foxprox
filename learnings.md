@@ -418,3 +418,8 @@
 
 - Per-sandbox fairness should include byte caps as well as flow caps; otherwise one sandbox can monopolize a tick with large reads even when flow counts are balanced.
 - Enforce byte caps by reducing each host-read max before data enters stack/device write-back, keeping accounting in runtime scheduler code.
+
+## 2026-06-22 — bounded runtime loop
+
+- The runtime loop should be a thin scheduler around the nonblocking tick: it advances sequence/timestamps and idleness state, while device readiness and bridge maintenance remain separately testable.
+- Use idle-streak stopping as a portable readiness boundary before adding OS-specific epoll/tokio adapters.

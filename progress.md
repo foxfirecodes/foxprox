@@ -1797,3 +1797,24 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: d842c3a.
 - Remaining boundary risks: wall-clock token-bucket refill policy remains future scheduler work.
+
+## 2026-06-22 — Boundary objective: production runtime loop contract
+
+- Boundary under work: bounded nonblocking stack runtime loop around the tick primitive.
+- Allowed dependency direction: runtime owns loop sequencing/idleness/readiness policy while device, stack adapter, egress, policy, and audit remain behind existing traits; no OS readiness API leaks into policy/audit.
+- Dependency-risk assessment: single-tick orchestration is not enough for alpha operation. A loop contract must repeatedly run nonblocking device ingest and maintenance, advance audit sequences safely, and expose shutdown/idleness behavior without hardwiring epoll/tokio into lower layers.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/device/audit.
+- Observed results: added `StackRuntimeLoopConfig`, `StackRuntimeLoopStep`, `StackRuntimeLoopOutcome`, and `run_stack_runtime_loop`. The loop repeatedly runs nonblocking stack ticks, always runs maintenance, advances audit sequence/timestamps, aggregates maintenance counters, and stops on a configured idle streak. Added a test proving the loop makes maintenance progress on an idle device, then exits after the next idle tick. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 155 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime loop coordinates existing boundary crates only.
+  - `cargo tree -p foxprox-device` — device remains readiness boundary.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: OS-specific readiness registration adapters remain.
