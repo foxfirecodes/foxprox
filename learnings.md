@@ -403,3 +403,8 @@
 
 - The only Linux TUN ioctl in alpha should live in `foxprox-device::PreopenedTunDevice<File>::open_linux_tun`; runtime still accepts just packet device traits.
 - Validate TUN names before opening `/dev/net/tun` or issuing ioctl so malformed setup-helper input fails before privileged kernel calls.
+
+## 2026-06-22 — TCP reset denial synthesis
+
+- Deny/reset must be a packet-boundary feature: policy selects `DenialAction::Reset`, while packet code formats RST+ACK bytes and recomputes TCP/IP checksums.
+- Raw SYN packet reset synthesis is separate from stack-adapter reset signaling; established smoltcp-managed flows need a later adapter-native close/reset contract.

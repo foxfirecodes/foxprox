@@ -1488,6 +1488,43 @@ mod tests {
     }
 
     #[test]
+    fn denied_tcp_packet_can_synthesize_policy_reset() {
+        let mut config = RuntimeConfig::allow_by_default();
+        let mut rule = PolicyRule::deny(RuleId::new("tcp-reset").unwrap(), DenialAction::Reset);
+        rule.protocol = ProtocolMatcher::Exact(Protocol::Tcp);
+        rule.port = PortMatcher::Exact(443);
+        config.rules.push(rule);
+        let policy = PolicyEngine::new(config);
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(8);
+        let packet = tcp_syn_packet();
+        let sandbox_id = SandboxId::new("s1").unwrap();
+
+        let outcome = handle_ipv4_packet(
+            InboundIpv4Packet {
+                sandbox_id: &sandbox_id,
+                frontend: FrontendKind::Tun,
+                bytes: &packet,
+            },
+            &policy,
+            &mut egress,
+            &mut audit,
+            5,
+            5000,
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.outcome,
+            BrokerEventOutcome::Denied(Some(DenialAction::Reset))
+        );
+        assert_eq!(outcome.outbound_packets.len(), 1);
+        assert_eq!(outcome.outbound_packets[0].bytes()[33], 0x14);
+        assert!(egress.tcp_connects.is_empty());
+        assert_eq!(audit.records().len(), 1);
+    }
+
+    #[test]
     fn allowed_udp_packet_sends_payload_through_shared_egress() {
         let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
         let mut egress = MockEgress::default();
@@ -1666,6 +1703,23 @@ mod tests {
         packet[20] = 8;
         packet[24..26].copy_from_slice(&0x1234_u16.to_be_bytes());
         packet[26..28].copy_from_slice(&1_u16.to_be_bytes());
+        finish_ipv4_packet(packet)
+    }
+
+    fn tcp_syn_packet() -> Vec<u8> {
+        let mut packet = vec![0_u8; 40];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&40_u16.to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 6;
+        packet[12..16].copy_from_slice(&[10, 0, 0, 2]);
+        packet[16..20].copy_from_slice(&[203, 0, 113, 10]);
+        packet[20..22].copy_from_slice(&49152_u16.to_be_bytes());
+        packet[22..24].copy_from_slice(&443_u16.to_be_bytes());
+        packet[24..28].copy_from_slice(&1_u32.to_be_bytes());
+        packet[32] = 0x50;
+        packet[33] = 0x02;
+        packet[34..36].copy_from_slice(&0x7210_u16.to_be_bytes());
         finish_ipv4_packet(packet)
     }
 

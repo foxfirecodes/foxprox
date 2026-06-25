@@ -594,8 +594,8 @@ pub fn synthesize_ipv6_icmp_unreachable(
     Ok(SyntheticIpPacket { bytes: packet })
 }
 
-/// Synthesize a packet-level IPv6 denial response when policy requests an ICMP
-/// unreachable. Drop/reset decisions intentionally produce no packet here.
+/// Synthesize a packet-level IPv6 denial response when policy requests one.
+/// Drop decisions intentionally produce no packet here.
 pub fn synthesize_ipv6_denial_response(
     original_packet: &[u8],
     decision: &PolicyDecision,
@@ -604,18 +604,69 @@ pub fn synthesize_ipv6_denial_response(
         PolicyDecision::Deny(deny) if deny.action == DenialAction::IcmpUnreachable => {
             synthesize_ipv6_icmp_unreachable(original_packet, 1).map(Some)
         }
+        PolicyDecision::Deny(deny) if deny.action == DenialAction::Reset => {
+            synthesize_ipv6_tcp_reset(original_packet).map(Some)
+        }
         _ => Ok(None),
     }
 }
 
+/// Synthesize a minimal IPv6 TCP RST+ACK for a denied inbound TCP segment.
+pub fn synthesize_ipv6_tcp_reset(original_packet: &[u8]) -> Result<SyntheticIpPacket, PacketError> {
+    let header = parse_ipv6_header(original_packet)?;
+    if header.next_header != 6 {
+        return Err(PacketError::unsupported(
+            "tcp reset requires original TCP packet",
+        ));
+    }
+    let tcp = &original_packet[40..40 + header.payload_len];
+    if tcp.len() < 20 {
+        return Err(PacketError::malformed("short TCP header"));
+    }
+    let source_port = u16::from_be_bytes([tcp[0], tcp[1]]);
+    let destination_port = u16::from_be_bytes([tcp[2], tcp[3]]);
+    let seq = u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]);
+    let flags = tcp[13];
+    let ack = seq.wrapping_add(if flags & 0x02 != 0 { 1 } else { 0 });
+
+    let mut packet = vec![0_u8; 60];
+    packet[0] = 0x60;
+    packet[4..6].copy_from_slice(&20_u16.to_be_bytes());
+    packet[6] = 6;
+    packet[7] = 64;
+    packet[8..24].copy_from_slice(&header.destination.octets());
+    packet[24..40].copy_from_slice(&header.source.octets());
+    packet[40..42].copy_from_slice(&destination_port.to_be_bytes());
+    packet[42..44].copy_from_slice(&source_port.to_be_bytes());
+    packet[48..52].copy_from_slice(&ack.to_be_bytes());
+    packet[52] = 0x50;
+    packet[53] = 0x14; // RST + ACK
+    let checksum = tcp_checksum_ipv6(header.destination, header.source, &packet[40..]);
+    packet[56..58].copy_from_slice(&checksum.to_be_bytes());
+    Ok(SyntheticIpPacket { bytes: packet })
+}
+
 fn udp_checksum_ipv4(source: Ipv4Addr, destination: Ipv4Addr, udp_segment: &[u8]) -> u16 {
-    let mut pseudo = Vec::with_capacity(12 + udp_segment.len() + 1);
+    checksum_ipv4_next_header(source, destination, 17, udp_segment)
+}
+
+fn tcp_checksum_ipv4(source: Ipv4Addr, destination: Ipv4Addr, tcp_segment: &[u8]) -> u16 {
+    checksum_ipv4_next_header(source, destination, 6, tcp_segment)
+}
+
+fn checksum_ipv4_next_header(
+    source: Ipv4Addr,
+    destination: Ipv4Addr,
+    protocol: u8,
+    segment: &[u8],
+) -> u16 {
+    let mut pseudo = Vec::with_capacity(12 + segment.len() + 1);
     pseudo.extend_from_slice(&source.octets());
     pseudo.extend_from_slice(&destination.octets());
     pseudo.push(0);
-    pseudo.push(17);
-    pseudo.extend_from_slice(&(udp_segment.len() as u16).to_be_bytes());
-    pseudo.extend_from_slice(udp_segment);
+    pseudo.push(protocol);
+    pseudo.extend_from_slice(&(segment.len() as u16).to_be_bytes());
+    pseudo.extend_from_slice(segment);
     if pseudo.len() % 2 == 1 {
         pseudo.push(0);
     }
@@ -629,6 +680,10 @@ fn udp_checksum_ipv4(source: Ipv4Addr, destination: Ipv4Addr, udp_segment: &[u8]
 
 fn udp_checksum_ipv6(source: Ipv6Addr, destination: Ipv6Addr, udp_segment: &[u8]) -> u16 {
     checksum_ipv6_next_header(source, destination, 17, udp_segment)
+}
+
+fn tcp_checksum_ipv6(source: Ipv6Addr, destination: Ipv6Addr, tcp_segment: &[u8]) -> u16 {
+    checksum_ipv6_next_header(source, destination, 6, tcp_segment)
 }
 
 fn icmpv6_checksum(source: Ipv6Addr, destination: Ipv6Addr, icmp_segment: &[u8]) -> u16 {
@@ -699,8 +754,8 @@ fn synthesize_icmpv6_echo_reply(bytes: &[u8], header: Ipv6Header) -> Vec<u8> {
 /// Synthesize a packet-level denial response when the normalized policy decision
 /// requests one.
 ///
-/// Policy chooses the denial action; packet code owns the raw IPv4/ICMP bytes.
-/// Drop/reset decisions intentionally produce no packet response here.
+/// Policy chooses the denial action; packet code owns the raw IPv4/ICMP/TCP
+/// bytes. Drop decisions intentionally produce no packet response here.
 pub fn synthesize_ipv4_denial_response(
     original_packet: &[u8],
     decision: &PolicyDecision,
@@ -709,8 +764,49 @@ pub fn synthesize_ipv4_denial_response(
         PolicyDecision::Deny(deny) if deny.action == DenialAction::IcmpUnreachable => {
             synthesize_ipv4_icmp_unreachable(original_packet, 13).map(Some)
         }
+        PolicyDecision::Deny(deny) if deny.action == DenialAction::Reset => {
+            synthesize_ipv4_tcp_reset(original_packet).map(Some)
+        }
         _ => Ok(None),
     }
+}
+
+/// Synthesize a minimal IPv4 TCP RST+ACK for a denied inbound TCP segment.
+pub fn synthesize_ipv4_tcp_reset(original_packet: &[u8]) -> Result<SyntheticIpPacket, PacketError> {
+    let header = parse_ipv4_header(original_packet)?;
+    if header.protocol != 6 {
+        return Err(PacketError::unsupported(
+            "tcp reset requires original TCP packet",
+        ));
+    }
+    let tcp = &original_packet[header.ihl..header.total_len];
+    if tcp.len() < 20 {
+        return Err(PacketError::malformed("short TCP header"));
+    }
+    let source_port = u16::from_be_bytes([tcp[0], tcp[1]]);
+    let destination_port = u16::from_be_bytes([tcp[2], tcp[3]]);
+    let seq = u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]);
+    let flags = tcp[13];
+    let ack = seq.wrapping_add(if flags & 0x02 != 0 { 1 } else { 0 });
+
+    let mut packet = vec![0_u8; 40];
+    packet[0] = 0x45;
+    packet[2..4].copy_from_slice(&40_u16.to_be_bytes());
+    packet[8] = 64;
+    packet[9] = 6;
+    packet[12..16].copy_from_slice(&header.destination.octets());
+    packet[16..20].copy_from_slice(&header.source.octets());
+    packet[20..22].copy_from_slice(&destination_port.to_be_bytes());
+    packet[22..24].copy_from_slice(&source_port.to_be_bytes());
+    packet[28..32].copy_from_slice(&ack.to_be_bytes());
+    packet[32] = 0x50;
+    packet[33] = 0x14; // RST + ACK
+    packet[34..36].copy_from_slice(&0_u16.to_be_bytes());
+    let checksum = tcp_checksum_ipv4(header.destination, header.source, &packet[20..]);
+    packet[36..38].copy_from_slice(&checksum.to_be_bytes());
+    let ip_checksum = internet_checksum(&packet[..20]);
+    packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+    Ok(SyntheticIpPacket { bytes: packet })
 }
 
 /// Synthesize an IPv4 ICMP destination-unreachable response for denied traffic.
@@ -864,6 +960,44 @@ mod tests {
         assert_eq!(event.destination, "203.0.113.10:443".parse().unwrap());
         assert!(event.hostname.is_none());
         assert!(inspection.synthetic_reply.is_none());
+    }
+
+    #[test]
+    fn denied_ipv4_tcp_reset_swaps_endpoints_and_acks_syn() {
+        let packet = tcp_syn_packet();
+        let reset = synthesize_ipv4_tcp_reset(&packet).unwrap();
+        let bytes = reset.bytes();
+
+        assert_eq!(bytes[9], 6);
+        assert_eq!(&bytes[12..16], &[203, 0, 113, 10]);
+        assert_eq!(&bytes[16..20], &[10, 0, 0, 2]);
+        assert_eq!(u16::from_be_bytes([bytes[20], bytes[21]]), 443);
+        assert_eq!(u16::from_be_bytes([bytes[22], bytes[23]]), 49152);
+        assert_eq!(
+            u32::from_be_bytes([bytes[28], bytes[29], bytes[30], bytes[31]]),
+            2
+        );
+        assert_eq!(bytes[33], 0x14);
+        assert_eq!(internet_checksum(&bytes[..20]), 0);
+        assert_ne!(u16::from_be_bytes([bytes[36], bytes[37]]), 0);
+    }
+
+    #[test]
+    fn denied_ipv6_tcp_reset_swaps_endpoints_and_acks_syn() {
+        let packet = tcp_ipv6_syn_packet();
+        let reset = synthesize_ipv6_tcp_reset(&packet).unwrap();
+        let bytes = reset.bytes();
+
+        assert_eq!(bytes[0] >> 4, 6);
+        assert_eq!(bytes[6], 6);
+        assert_eq!(u16::from_be_bytes([bytes[40], bytes[41]]), 443);
+        assert_eq!(u16::from_be_bytes([bytes[42], bytes[43]]), 49152);
+        assert_eq!(
+            u32::from_be_bytes([bytes[48], bytes[49], bytes[50], bytes[51]]),
+            2
+        );
+        assert_eq!(bytes[53], 0x14);
+        assert_ne!(u16::from_be_bytes([bytes[56], bytes[57]]), 0);
     }
 
     #[test]
@@ -1135,6 +1269,27 @@ mod tests {
             0, 0, 0, 0, // checksum, urgent
         ];
         finish_ipv4_checksum(&mut packet);
+        packet
+    }
+
+    fn tcp_ipv6_syn_packet() -> Vec<u8> {
+        let source = "2001:db8::2".parse::<Ipv6Addr>().unwrap();
+        let destination = "2001:db8::10".parse::<Ipv6Addr>().unwrap();
+        let mut packet = vec![0_u8; 60];
+        packet[0] = 0x60;
+        packet[4..6].copy_from_slice(&20_u16.to_be_bytes());
+        packet[6] = 6;
+        packet[7] = 64;
+        packet[8..24].copy_from_slice(&source.octets());
+        packet[24..40].copy_from_slice(&destination.octets());
+        packet[40..42].copy_from_slice(&49152_u16.to_be_bytes());
+        packet[42..44].copy_from_slice(&443_u16.to_be_bytes());
+        packet[44..48].copy_from_slice(&1_u32.to_be_bytes());
+        packet[52] = 0x50;
+        packet[53] = 0x02;
+        packet[54..56].copy_from_slice(&0x7210_u16.to_be_bytes());
+        let checksum = tcp_checksum_ipv6(source, destination, &packet[40..]);
+        packet[56..58].copy_from_slice(&checksum.to_be_bytes());
         packet
     }
 

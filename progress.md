@@ -1735,3 +1735,25 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 300fc45.
 - Remaining boundary risks: privileged end-to-end namespace smoke tests remain.
+
+## 2026-06-22 — Boundary objective: TCP reset denial synthesis
+
+- Boundary under work: packet-owned TCP reset write-back for deny/reset policy decisions.
+- Allowed dependency direction: `foxprox-packet` owns TCP/IP reset packet formatting and checksums; `foxprox-net` only maps normalized policy decisions to opaque outbound packets; policy/audit never handle raw TCP headers.
+- Dependency-risk assessment: policy has a deny/reset action, but packet denial synthesis only handled ICMP unreachable. Implementing reset outside the packet crate would leak TCP wire details into orchestration/runtime.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for packet/net/audit.
+- Observed results: added packet-owned IPv4 and IPv6 TCP RST+ACK synthesis for deny/reset decisions, including endpoint swapping, SYN acknowledgement, and TCP/IP checksums. `foxprox-net` now returns opaque reset packets for denied TCP SYN packet paths. All verification passed.
+- Changed files:
+  - `crates/foxprox-packet/src/lib.rs`
+  - `crates/foxprox-net/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 150 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-packet` — packet remains core-only.
+  - `cargo tree -p foxprox-net` — net orchestrates reset bytes without exposing TCP headers to policy/audit.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: stack-adapter-native reset signaling for established smoltcp flows remains.
