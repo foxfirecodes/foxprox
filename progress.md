@@ -1158,3 +1158,16 @@
 - Recent real ping commit hash: `011062c`.
 - Next verification gap: commit HTTP deny smoke; continue with real transparent TLS SNI or QUIC environment checks if alpha success criteria still need end-to-end proof.
 - Commit hash after commit: pending.
+
+## 2026-06-22T13:20:00Z — Real sandbox QUIC candidate smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run quic-smoke`
+- Environment assumptions: Linux bwrap/TUN fd handoff works; sandbox Python sends a UDP/443 datagram with the QUIC long-header bit set; host egress is a loopback UDP fixture.
+- Expected result: the broker classifies sandbox UDP/443 payload as a QUIC candidate, applies configurable QUIC policy, forwards through host UDP egress, writes the reply back over TUN, and emits a `quic_candidate_flow` audit record.
+- Observed result: pass. Workspace tests passed (`foxprox-broker` 4, `foxprox-core` 64, `foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). `quic-smoke` emitted `"event":"quic_candidate_flow"`, `"decision":"allow"`, `"forwarded":"true"`, and `"egress_calls":"1"`.
+- Relevant output excerpt: nested runtime audit `"protocol":"quic"`, `"destination":"203.0.113.30:443"`, `"rule_id":"allow-quic-smoke"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: direct QUIC-over-UDP now has a real sandbox/TUN allow/forward/log smoke in addition to deterministic policy/audit coverage.
+- Recent transparent HTTP deny commit hash: `100fdf1`.
+- Next verification gap: commit QUIC smoke; continue with real transparent TLS SNI deny/logging if alpha success criteria still need end-to-end HTTPS metadata proof.
+- Commit hash after commit: pending.

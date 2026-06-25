@@ -61,6 +61,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("ping-smoke");
             println!("udp-forward-smoke");
             println!("udp-deny-smoke");
+            println!("quic-smoke");
             println!("dns-smoke");
             println!("dns-attribution-smoke");
             println!("tcp-syn-smoke");
@@ -99,6 +100,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         udp_forward_smoke_records()
     } else if scenario == "udp-deny-smoke" {
         udp_deny_smoke_records()
+    } else if scenario == "quic-smoke" {
+        quic_smoke_records()
     } else if scenario == "dns-smoke" {
         dns_smoke_records()
     } else if scenario == "dns-attribution-smoke" {
@@ -1045,6 +1048,228 @@ fn run_udp_forward_smoke() -> Result<AuditRecord, String> {
             .with_metadata("policy_decision", audit.decision.as_str())
             .with_metadata("policy_reason", audit.reason.clone())
             .with_metadata("runtime_audit", runtime_audit_json);
+        if let Some(rule_id) = audit.rule_id {
+            record = record.with_metadata("rule_id", rule_id);
+        }
+    }
+    if !stdout.is_empty() {
+        record = record.with_metadata("stdout", stdout);
+    }
+    if !stderr.is_empty() {
+        record = record.with_metadata("stderr", stderr);
+    }
+    Ok(record)
+}
+
+#[cfg(unix)]
+fn quic_smoke_records() -> Vec<AuditRecord> {
+    match run_quic_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::QuicCandidateFlow,
+            "quic-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::Harness)
+        .with_protocol(Protocol::Quic)],
+    }
+}
+
+#[cfg(not(unix))]
+fn quic_smoke_records() -> Vec<AuditRecord> {
+    vec![AuditRecord::new(
+        EventKind::QuicCandidateFlow,
+        "quic-smoke",
+        Decision::FailClosed,
+        "QUIC smoke is only supported on Unix",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Quic)]
+}
+
+#[cfg(unix)]
+fn run_quic_smoke() -> Result<AuditRecord, String> {
+    let echo = UdpSocket::bind("127.0.0.1:0")
+        .map_err(|err| format!("failed to bind QUIC UDP fixture: {err}"))?;
+    let echo_addr = echo
+        .local_addr()
+        .map_err(|err| format!("failed to inspect QUIC UDP fixture: {err}"))?;
+    echo.set_read_timeout(Some(Duration::from_secs(10)))
+        .map_err(|err| format!("failed to set QUIC fixture timeout: {err}"))?;
+    let echo_thread = std::thread::spawn(move || -> Result<(), String> {
+        let mut buf = [0_u8; 1500];
+        let (n, peer) = echo
+            .recv_from(&mut buf)
+            .map_err(|err| format!("QUIC UDP fixture failed to receive datagram: {err}"))?;
+        if n == 0 || buf[0] & 0x80 == 0 {
+            return Err("QUIC fixture received a non-QUIC-candidate datagram".to_string());
+        }
+        echo.send_to(b"quic-reply", peer)
+            .map_err(|err| format!("QUIC UDP fixture failed to send reply: {err}"))?;
+        Ok(())
+    });
+
+    let helper = setup_helper_path()?;
+    let target_dir = helper
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| {
+            format!(
+                "could not derive target directory from {}",
+                helper.display()
+            )
+        })?
+        .to_path_buf();
+    let socket_dir = target_dir.join(format!("foxprox-quic-smoke-{}", std::process::id()));
+    let socket_path = socket_dir.join("setup.sock");
+    let _ = std::fs::remove_file(&socket_path);
+    std::fs::create_dir_all(&socket_dir)
+        .map_err(|err| format!("failed to create QUIC smoke socket dir: {err}"))?;
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|err| format!("failed to bind QUIC smoke socket: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make QUIC listener nonblocking: {err}"))?;
+
+    let mut child = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--ro-bind",
+        ])
+        .arg(&target_dir)
+        .arg(&target_dir)
+        .args(["--bind"])
+        .arg(&socket_dir)
+        .arg(&socket_dir)
+        .args(["--proc", "/proc", "--"])
+        .env("FOXPROX_SETUP_SOCKET", &socket_path)
+        .arg(&helper)
+        .args([
+            "--",
+            "/usr/bin/python3",
+            "-c",
+            "import socket,sys; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.settimeout(5); s.sendto(b'\\xc3\\x00\\x00\\x00probe',('203.0.113.30',443)); data,_=s.recvfrom(64); sys.exit(0 if data==b'quic-reply' else 3)",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn bwrap QUIC smoke: {err}"))?;
+
+    let fd = accept_handoff_fd(&listener, &mut child, Duration::from_secs(10))?;
+    fd.set_nonblocking()?;
+    let policy = PolicyEngine::new(
+        PolicyConfig::deny_by_default().allow_quic(true).with_rule(
+            PolicyRule::new("allow-quic-smoke", RuleAction::Allow)
+                .protocol(Protocol::Quic)
+                .port(443),
+        ),
+    );
+    let mut broker = TransparentBroker::new(
+        "10.0.2.1:53".parse().expect("static broker DNS addr valid"),
+        [],
+        policy,
+        LocalUdpEgress::new(echo_addr)?,
+        PolicyEngine::new(PolicyConfig::deny_by_default()),
+        MockEgressBackend::new(),
+        PolicyEngine::new(PolicyConfig::deny_by_default()),
+    );
+    let mut buf = [0_u8; 2048];
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut packets_read = 0_u64;
+    let mut forwarded = false;
+    while Instant::now() < deadline {
+        match fd.read_packet(&mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                packets_read += 1;
+                let step = broker.handle_ipv4_packet("quic-smoke", &buf[..n])?;
+                for reply in step.packets_to_device {
+                    fd.write_packet(&reply)?;
+                    forwarded = true;
+                }
+                if forwarded {
+                    break;
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(format!("failed to read TUN fd during QUIC smoke: {err}")),
+        }
+        if child
+            .try_wait()
+            .map_err(|err| format!("failed to poll bwrap QUIC smoke: {err}"))?
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if !forwarded {
+        return Err("timed out waiting for QUIC candidate flow".to_string());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for bwrap QUIC smoke: {err}"))?;
+    fd.close();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir(&socket_dir);
+    echo_thread
+        .join()
+        .map_err(|_| "QUIC UDP fixture thread panicked".to_string())??;
+    let runtime_audit = broker
+        .audit
+        .iter()
+        .rev()
+        .find(|audit| audit.kind == EventKind::QuicCandidateFlow)
+        .cloned();
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut record = AuditRecord::new(
+        EventKind::QuicCandidateFlow,
+        "quic-smoke",
+        if output.status.success() {
+            Decision::Allow
+        } else {
+            Decision::FailClosed
+        },
+        if output.status.success() {
+            "sandbox UDP/443 QUIC candidate was allowed, forwarded, and returned over TUN"
+        } else {
+            "QUIC candidate reply was written but sandbox command failed"
+        },
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Quic)
+    .with_metadata("status", output.status.to_string())
+    .with_metadata("packets_read", packets_read.to_string())
+    .with_metadata("forwarded", forwarded.to_string())
+    .with_metadata("egress_fixture", echo_addr.to_string())
+    .with_metadata("egress_calls", broker.udp.egress.calls().to_string());
+    if let Some(audit) = runtime_audit {
+        record = record
+            .with_metadata("policy_decision", audit.decision.as_str())
+            .with_metadata("policy_reason", audit.reason.clone())
+            .with_metadata("runtime_audit", audit.to_json_line());
         if let Some(rule_id) = audit.rule_id {
             record = record.with_metadata("rule_id", rule_id);
         }
