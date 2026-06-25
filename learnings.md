@@ -338,3 +338,8 @@
 
 - Transparent HTTP/TLS payload policy must use a policy/audit-only path after the TCP bridge exists; dispatching normalized HTTP events through the normal egress path would duplicate forwarding and create a proxy bypass shape.
 - Runtime can gate first TCP payloads by destination port using only normalized `StackTcpData`; parser-specific HTTP/TLS details remain in `foxprox-inspect`, and policy/audit still consume normalized events.
+
+## 2026-06-22 — DNS attribution enrichment
+
+- DNS correlation should be an explicit net-layer enrichment step over normalized TCP/UDP events; policy should never need DNS cache internals or wire-parser records.
+- Preserve existing hostname attribution when present so high-confidence proxy/SNI/HTTP metadata is not overwritten by medium-confidence DNS cache entries.

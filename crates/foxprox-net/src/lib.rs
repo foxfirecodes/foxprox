@@ -250,6 +250,25 @@ impl DnsAttributionCache {
     }
 }
 
+/// Enrich a transparent TCP/UDP event with DNS-correlated hostname attribution
+/// when the destination IP is present in the broker DNS cache. The event remains
+/// normalized; DNS parser records and cache internals do not reach policy.
+pub fn apply_dns_attribution(
+    event: &mut NormalizedEvent,
+    cache: &DnsAttributionCache,
+    now: Instant,
+) {
+    match event {
+        NormalizedEvent::TcpConnectAttempt(event) if event.hostname.is_none() => {
+            event.hostname = cache.attribution_for(event.destination.ip(), now);
+        }
+        NormalizedEvent::UdpFlowAttempt(event) if event.hostname.is_none() => {
+            event.hostname = cache.attribution_for(event.destination.ip(), now);
+        }
+        _ => {}
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum FlowLimitError {
     ZeroLimit,
@@ -697,6 +716,44 @@ mod tests {
         UdpFlowAttempt,
     };
     use foxprox_egress::MockEgress;
+
+    #[test]
+    fn dns_attribution_enriches_transparent_tcp_and_udp_events() {
+        let now = Instant::now();
+        let mut cache = DnsAttributionCache::default();
+        cache.observe(
+            Hostname::new("example.com").unwrap(),
+            ["203.0.113.10".parse().unwrap()],
+            now,
+            Duration::from_secs(60),
+        );
+        let sandbox_id = SandboxId::new("s1").unwrap();
+        let mut tcp = NormalizedEvent::TcpConnectAttempt(foxprox_core::TcpConnectAttempt {
+            sandbox_id: sandbox_id.clone(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:49152".parse().unwrap(),
+            destination: "203.0.113.10:443".parse().unwrap(),
+            hostname: None,
+        });
+        let mut udp = NormalizedEvent::UdpFlowAttempt(foxprox_core::UdpFlowAttempt {
+            sandbox_id,
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:53000".parse().unwrap(),
+            destination: "203.0.113.10:443".parse().unwrap(),
+            hostname: None,
+            classification: UdpClassification::QuicCandidate,
+        });
+
+        apply_dns_attribution(&mut tcp, &cache, now + Duration::from_secs(1));
+        apply_dns_attribution(&mut udp, &cache, now + Duration::from_secs(1));
+
+        assert_eq!(tcp.explicit_hostname().unwrap().as_str(), "example.com");
+        assert_eq!(udp.explicit_hostname().unwrap().as_str(), "example.com");
+        assert_eq!(
+            tcp.hostname_attribution().unwrap().confidence(),
+            HostnameConfidence::Medium
+        );
+    }
 
     #[test]
     fn dns_attribution_cache_returns_medium_confidence_until_expiry() {

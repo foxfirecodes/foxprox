@@ -1452,3 +1452,25 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: ac2d86f.
 - Remaining boundary risks: full stream reassembly and deferred host connect before HTTP/TLS allow remain.
+
+## 2026-06-22 — Boundary objective: DNS attribution enrichment contract
+
+- Boundary under work: DNS-to-flow correlation for transparent TCP/UDP events.
+- Allowed dependency direction: `foxprox-net` owns flow/event enrichment using normalized DNS cache entries; packet parsers and policy still exchange only normalized events with typed hostname attribution.
+- Dependency-risk assessment: DNS cache shape exists, but flow events can remain IP-only unless attribution is applied at the net boundary. The enrichment contract must avoid letting DNS parser records or cache internals leak into policy.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for net/dns/policy/audit.
+- Observed results: added `apply_dns_attribution` in `foxprox-net`, which enriches normalized TCP and UDP events with medium-confidence hostname attribution from `DnsAttributionCache` when no higher-confidence hostname is already present. Added a test proving transparent TCP and QUIC-candidate UDP events receive DNS-correlated hostnames without exposing DNS wire/parser data. All verification passed.
+- Changed files:
+  - `crates/foxprox-net/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 125 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-net` — net owns DNS attribution orchestration.
+  - `cargo tree -p foxprox-dns` — DNS remains core-only.
+  - `cargo tree -p foxprox-policy` — policy remains core-only.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: wiring the cache into long-running stack runtime state remains.
