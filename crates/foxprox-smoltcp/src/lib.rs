@@ -159,6 +159,86 @@ pub struct SmoltcpTcpBridgeSession<B> {
     flow_runtime: TcpFlowRuntime<B>,
 }
 
+pub struct SmoltcpTcpBridgeIoSession<T> {
+    session: SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>>,
+    tun_io: T,
+    buffer: Vec<u8>,
+    state: SmoltcpTcpBridgeLoopState,
+    flow: FlowKey,
+    listener_port: u16,
+    max_sandbox_payload_bytes: usize,
+    max_host_bytes: usize,
+}
+
+impl<T> SmoltcpTcpBridgeIoSession<T> {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        session: SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>>,
+        tun_io: T,
+        buffer_bytes: usize,
+        flow: FlowKey,
+        listener_port: u16,
+        max_sandbox_payload_bytes: usize,
+        max_host_bytes: usize,
+    ) -> Self {
+        Self {
+            session,
+            tun_io,
+            buffer: vec![0; buffer_bytes],
+            state: SmoltcpTcpBridgeLoopState::default(),
+            flow,
+            listener_port,
+            max_sandbox_payload_bytes,
+            max_host_bytes,
+        }
+    }
+
+    pub fn state(&self) -> &SmoltcpTcpBridgeLoopState {
+        &self.state
+    }
+
+    pub fn flow(&self) -> &FlowKey {
+        &self.flow
+    }
+
+    pub fn tun_io(&self) -> &T {
+        &self.tun_io
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>>,
+        T,
+        SmoltcpTcpBridgeLoopState,
+    ) {
+        (self.session, self.tun_io, self.state)
+    }
+}
+
+impl<T: Read + Write> SmoltcpTcpBridgeIoSession<T> {
+    pub fn run_tick(
+        &mut self,
+        now_millis: i64,
+    ) -> Result<SmoltcpTcpBridgeLoopStep, SmoltcpTcpBridgeSessionError> {
+        let tick = self.session.pump_bidirectional_io_once(
+            &mut self.tun_io,
+            &mut self.buffer,
+            self.listener_port,
+            self.max_sandbox_payload_bytes,
+            &self.flow,
+            self.max_host_bytes,
+            now_millis,
+        )?;
+        let made_progress = tick.made_progress();
+        self.state.record(made_progress);
+        Ok(SmoltcpTcpBridgeLoopStep {
+            tick,
+            made_progress,
+        })
+    }
+}
+
 impl<B> SmoltcpTcpBridgeSession<B> {
     pub fn new(adapter: SmoltcpIpLoopback, flow_runtime: TcpFlowRuntime<B>) -> Self {
         Self {
@@ -441,6 +521,40 @@ impl SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>> {
             now_millis,
         )?;
         let host = self.pump_host_to_sandbox_once(flow, max_host_bytes, writer, now_millis + 1)?;
+        Ok(SmoltcpBidirectionalTickOutcome { sandbox, host })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn pump_bidirectional_io_once<T: Read + Write>(
+        &mut self,
+        io: &mut T,
+        buffer: &mut [u8],
+        listener_port: u16,
+        max_sandbox_payload_bytes: usize,
+        flow: &FlowKey,
+        max_host_bytes: usize,
+        now_millis: i64,
+    ) -> Result<SmoltcpBidirectionalTickOutcome, SmoltcpTcpBridgeSessionError> {
+        let pump = pump_one_tun_packet_io(&mut self.adapter, io, buffer, now_millis)
+            .map_err(|_| SmoltcpTcpBridgeSessionError::TunWrite)?;
+        let forwarded = match self
+            .adapter
+            .recv_on_listener_port_with_flow(listener_port, max_sandbox_payload_bytes)
+        {
+            Ok(payload) if !payload.bytes.is_empty() => {
+                self.flow_runtime
+                    .send_sandbox_payload_to_host(&payload.flow, &payload.bytes)
+                    .map_err(SmoltcpTcpBridgeSessionError::Bridge)?;
+                Some(SmoltcpTcpBridgeSessionOutcome {
+                    flow: payload.flow,
+                    bytes_forwarded: payload.bytes.len(),
+                })
+            }
+            Ok(_) | Err(SmoltcpAdapterError::TcpRecvRejected) => None,
+            Err(error) => return Err(SmoltcpTcpBridgeSessionError::Adapter(error)),
+        };
+        let sandbox = SmoltcpSandboxPacketStepOutcome { pump, forwarded };
+        let host = self.pump_host_to_sandbox_once(flow, max_host_bytes, io, now_millis + 1)?;
         Ok(SmoltcpBidirectionalTickOutcome { sandbox, host })
     }
 
@@ -933,11 +1047,30 @@ pub fn pump_one_tun_packet<R: Read, W: Write>(
     now_millis: i64,
 ) -> io::Result<SmoltcpTunPumpOutcome> {
     let bytes_read = reader.read(buffer)?;
-    if bytes_read == 0 {
+    pump_read_tun_packet(adapter, writer, &buffer[..bytes_read], now_millis)
+}
+
+pub fn pump_one_tun_packet_io<T: Read + Write>(
+    adapter: &mut SmoltcpIpLoopback,
+    io: &mut T,
+    buffer: &mut [u8],
+    now_millis: i64,
+) -> io::Result<SmoltcpTunPumpOutcome> {
+    let bytes_read = io.read(buffer)?;
+    pump_read_tun_packet(adapter, io, &buffer[..bytes_read], now_millis)
+}
+
+fn pump_read_tun_packet<W: Write>(
+    adapter: &mut SmoltcpIpLoopback,
+    writer: &mut W,
+    packet: &[u8],
+    now_millis: i64,
+) -> io::Result<SmoltcpTunPumpOutcome> {
+    if packet.is_empty() {
         return Ok(SmoltcpTunPumpOutcome::NoPacket);
     }
     adapter
-        .ingest_ip_packet(buffer[..bytes_read].to_vec())
+        .ingest_ip_packet(packet.to_vec())
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, format!("{error:?}")))?;
     adapter.poll_once(now_millis);
 
@@ -983,6 +1116,42 @@ mod tests {
     #[derive(Default)]
     struct RecordingWriter {
         writes: Vec<Vec<u8>>,
+    }
+
+    struct ScriptedTunIo {
+        reads: VecDeque<Vec<u8>>,
+        writes: Vec<Vec<u8>>,
+    }
+
+    impl ScriptedTunIo {
+        fn new(reads: Vec<Vec<u8>>) -> Self {
+            Self {
+                reads: reads.into(),
+                writes: Vec::new(),
+            }
+        }
+    }
+
+    impl Read for ScriptedTunIo {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let Some(packet) = self.reads.pop_front() else {
+                return Ok(0);
+            };
+            assert!(packet.len() <= buf.len());
+            buf[..packet.len()].copy_from_slice(&packet);
+            Ok(packet.len())
+        }
+    }
+
+    impl Write for ScriptedTunIo {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes.push(buf.to_vec());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     impl Write for RecordingWriter {
@@ -2219,6 +2388,114 @@ mod tests {
             matches!(
                 parse_ip_packet(packet),
                 Ok(ParsedIpPacket::Tcpv4Segment(segment)) if segment.payload == b"loop-reply"
+            )
+        }));
+    }
+
+    #[test]
+    fn io_session_owns_buffer_state_and_tun_like_io_across_ticks() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.set_packet_loopback(false);
+        adapter.set_connect_report_mode(TcpConnectReportMode::AcceptedListenerSockets);
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        let source = Ipv4Addr::new(10, 66, 0, 2);
+        let destination = Ipv4Addr::new(10, 66, 0, 1);
+        let syn = ipv4_tcp_syn_packet(source, destination, 50001, 8080, 7);
+        let mut rule = PolicyRule::allow("allow-io-session");
+        rule.protocol = Some(Protocol::Tcp);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = vec![0; b"owned-io".len()];
+            stream.read_exact(&mut received).unwrap();
+            stream.write_all(b"owned-reply").unwrap();
+            received
+        });
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("io-session-components").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let mut reader = Cursor::new(syn);
+        let mut writer = Vec::new();
+        let mut buffer = vec![0; 1500];
+        let (session, flow, _, _) =
+            SmoltcpTcpBridgeSession::pump_tun_and_open_next_allowed_host_session(
+                adapter,
+                &mut reader,
+                &mut writer,
+                &mut buffer,
+                &components,
+                &mut kernel,
+                SandboxId::new("io-session").unwrap(),
+                listen_addr,
+                1,
+                6,
+            )
+            .unwrap();
+        let syn_ack = match parse_ip_packet(&writer).unwrap() {
+            ParsedIpPacket::Tcpv4Segment(segment) => segment,
+            other => panic!("expected SYN/ACK, got {other:?}"),
+        };
+        let server_ack = syn_ack.sequence + 1;
+        let ack = ipv4_tcp_packet(source, destination, 50001, 8080, 8, server_ack, 0x10, &[]);
+        let data = ipv4_tcp_packet(
+            source,
+            destination,
+            50001,
+            8080,
+            8,
+            server_ack,
+            0x18,
+            b"owned-io",
+        );
+        let tun = ScriptedTunIo::new(vec![ack, data]);
+        let mut io_session = SmoltcpTcpBridgeIoSession::new(session, tun, 1500, flow, 8080, 64, 64);
+
+        let first = io_session.run_tick(2).unwrap();
+        let second = io_session.run_tick(3).unwrap();
+        let mut saw_reply = false;
+        for millis in 4..40 {
+            let step = io_session.run_tick(millis).unwrap();
+            if matches!(step.tick.host.host_read, TcpHostReadOutcome::Bytes { .. }) {
+                saw_reply = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (_, tun, state) = io_session.into_parts();
+
+        assert_eq!(server.join().unwrap(), b"owned-io".to_vec());
+        assert!(!first.made_progress);
+        assert!(second.made_progress);
+        assert!(saw_reply);
+        assert!(state.ticks >= 3);
+        assert!(state.progress_ticks >= 2);
+        assert!(tun.writes.iter().any(|packet| {
+            matches!(
+                parse_ip_packet(packet),
+                Ok(ParsedIpPacket::Tcpv4Segment(segment)) if segment.payload == b"owned-reply"
             )
         }));
     }

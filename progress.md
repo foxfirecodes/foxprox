@@ -1820,3 +1820,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: the loop state is still driven by tests/callers rather than a broker-owned continuous fd loop; live TUN smoke remains unavailable without CAP_NET_ADMIN.
 - Exact next step: commit loop tick state, then add a live-session wrapper that owns the TUN-like IO buffer and session state so repeated ticks do not require callers to pass all plumbing each time.
+
+## 2026-06-25T03:19:45Z
+- Current objective: continue after loop progress tracking by owning TUN-like IO and loop state in a live-session wrapper.
+- Git status summary: clean worktree after commit `25633ce`.
+- Intended slice: add a `SmoltcpTcpBridgeIoSession` wrapper that owns the bridge session, TUN-like IO object, buffer, flow, listener port, byte limits, and loop state, plus a one-call tick method for repeated nonblocking operation.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with a deterministic in-memory TUN object and loopback host socket.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: this remains in-memory TUN-like IO; real fd smoke requires CAP_NET_ADMIN.
+- Exact next step: implement the IO-session wrapper and request/reply regression.
+
+## 2026-06-25T03:24:10Z
+- Current objective: wrap transparent TCP bridge state with owned TUN-like IO and reusable loop state.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 39 smoltcp adapter tests passed. Added `SmoltcpTcpBridgeIoSession`, which owns the smoltcp bridge session, TUN-like IO, buffer, flow key, listener/byte limits, and loop state; regression proves repeated ticks consume scripted ACK/data packets, forward sandbox bytes to a real loopback host, read a host reply nonblocking, emit a sandbox-bound TCP/IP packet into owned TUN-like writes, and update progress state.
+- Commit hash when committed: pending.
+- Remaining risks: live TUN fd smoke remains unavailable without CAP_NET_ADMIN; TCP close/FIN detection from packets is not automatic; UDP/QUIC still need equivalent real forwarding loops.
+- Exact next step: commit owned TCP IO session wrapper, then advance UDP alpha by adding a real nonblocking UDP socket flow session that sends allowed datagrams and receives host replies into synthesized TUN packets.
