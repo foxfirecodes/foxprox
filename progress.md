@@ -1721,3 +1721,17 @@
 - What failed or surprised the agent: no behavior failures; denied live curl takes about five seconds because curl waits for its configured timeout after the broker kills the target-side network path.
 - What remains unproven: long-running multi-flow daemon ergonomics. The alpha transparent HTTP allow/deny/logging requirement is now covered in the live CLI command path.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — audit attribution source and duration fields
+
+- Slice attempted: close the remaining audit-schema gap flagged by review: hostname attribution source and flow duration were absent from structured JSON audit output.
+- Why next: `docs/initial-impl.md` requires clear audit distinctions between IP/port, DNS-correlated, HTTP Host/path, HTTPS SNI, and QUIC-candidate decisions, and also lists flow duration in audit fields.
+- What changed: `AuditRecord` now includes `hostname_attribution_source` and `duration_ms`. Core policy evaluations populate attribution source from normalized event type or attached attribution. Flow audit helpers populate source for DNS/flow attribution and duration for expired UDP flows / closed TCP flows. JSON audit output serializes `hostname_attribution_source` and `duration_ms`. The live TCP launcher records closed-flow duration. Existing flow tests now assert explicit-proxy attribution source and duration fields in JSON.
+- Verification:
+  - Focused checks passed: `cargo test -p foxprox-audit -- --nocapture` and `cargo test -p foxprox-flow closed_tcp -- --nocapture`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; adding the field at the core audit record boundary kept all downstream audit sinks consistent.
+- What remains unproven: live HTTPS/SNI and DNS-correlated transparent TCP audit in the bwrap path; static event/audit coverage exists and the schema can now distinguish the source when those live events are emitted.
+- Commit: this commit.

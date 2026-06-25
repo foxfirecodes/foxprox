@@ -300,6 +300,20 @@ impl NormalizedEvent {
         }
     }
 
+    pub fn attribution_source(&self) -> Option<AttributionSource> {
+        match self {
+            Self::TcpConnectAttempt(event) => event.attribution.as_ref().map(|value| value.source),
+            Self::UdpFlowAttempt(event) => event.attribution.as_ref().map(|value| value.source),
+            Self::DnsQuery(_) => Some(AttributionSource::DnsCache),
+            Self::HttpRequest(_) => Some(AttributionSource::HttpHostHeader),
+            Self::HttpsConnect(_) | Self::SocksConnect(_) => {
+                Some(AttributionSource::ExplicitProxyHost)
+            }
+            Self::TlsClientHello(event) => event.sni.as_ref().map(|_| AttributionSource::TlsSni),
+            Self::IcmpMessage(_) | Self::Unsupported(_) => None,
+        }
+    }
+
     pub fn http_method(&self) -> Option<&str> {
         match self {
             Self::HttpRequest(event) => Some(event.method.as_str()),
@@ -1031,6 +1045,7 @@ pub struct AuditRecord {
     pub destination: Option<Endpoint>,
     pub hostname: Option<String>,
     pub hostname_confidence: Option<AttributionConfidence>,
+    pub hostname_attribution_source: Option<AttributionSource>,
     pub http_method: Option<String>,
     pub http_scheme: Option<String>,
     pub http_path_query: Option<String>,
@@ -1041,6 +1056,7 @@ pub struct AuditRecord {
     pub byte_count: Option<u64>,
     pub client_to_target_bytes: Option<u64>,
     pub target_to_client_bytes: Option<u64>,
+    pub duration_ms: Option<u128>,
 }
 
 impl AuditRecord {
@@ -1074,6 +1090,7 @@ impl AuditRecord {
             destination: event.destination(),
             hostname: event.hostname().map(ToOwned::to_owned),
             hostname_confidence: event.attribution_confidence(),
+            hostname_attribution_source: event.attribution_source(),
             http_method: event.http_method().map(ToOwned::to_owned),
             http_scheme: event.http_scheme().map(ToOwned::to_owned),
             http_path_query: event.http_path_query().map(ToOwned::to_owned),
@@ -1084,6 +1101,7 @@ impl AuditRecord {
             byte_count: None,
             client_to_target_bytes: None,
             target_to_client_bytes: None,
+            duration_ms: None,
         }
     }
 }

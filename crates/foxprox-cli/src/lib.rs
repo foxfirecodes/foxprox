@@ -391,6 +391,7 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
         SandboxId::new(&config.sandbox_id).map_err(|error| CliError::Core(error.to_string()))?;
     let packet_context = PacketContext::new(sandbox_id.clone(), FrontendKind::Tun);
     let policy = PolicyEngine::new(config.policy.clone());
+    let flow_started_at = SystemTime::now();
     let mut audit_json_lines = Vec::new();
     let mut tcp_source = None;
     let mut tcp_destination = None;
@@ -504,6 +505,10 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                 destination: tcp_destination,
                 attribution: None,
                 closed_at: SystemTime::now(),
+                duration_ms: SystemTime::now()
+                    .duration_since(flow_started_at)
+                    .ok()
+                    .map(|duration| duration.as_millis()),
                 client_to_target_bytes: sandbox_payload.len() as u64,
                 target_to_client_bytes: host_to_sandbox_bytes as u64,
                 reason: if status.success() {

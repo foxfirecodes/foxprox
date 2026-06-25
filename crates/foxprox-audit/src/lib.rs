@@ -12,8 +12,8 @@ use std::net::IpAddr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use foxprox_core::{
-    AttributionConfidence, AuditDecision, AuditKind, AuditRecord, DenialBehavior, Endpoint,
-    FrontendKind, Protocol,
+    AttributionConfidence, AttributionSource, AuditDecision, AuditKind, AuditRecord,
+    DenialBehavior, Endpoint, FrontendKind, Protocol,
 };
 use serde::Serialize;
 
@@ -95,6 +95,7 @@ struct JsonAuditRecord<'a> {
     destination: Option<JsonEndpoint>,
     hostname: Option<&'a str>,
     hostname_confidence: Option<&'static str>,
+    hostname_attribution_source: Option<&'static str>,
     http_method: Option<&'a str>,
     http_scheme: Option<&'a str>,
     http_path_query: Option<&'a str>,
@@ -105,6 +106,7 @@ struct JsonAuditRecord<'a> {
     byte_count: Option<u64>,
     client_to_target_bytes: Option<u64>,
     target_to_client_bytes: Option<u64>,
+    duration_ms: Option<u128>,
 }
 
 impl<'a> From<&'a AuditRecord> for JsonAuditRecord<'a> {
@@ -119,6 +121,7 @@ impl<'a> From<&'a AuditRecord> for JsonAuditRecord<'a> {
             destination: record.destination.map(JsonEndpoint::from),
             hostname: record.hostname.as_deref(),
             hostname_confidence: record.hostname_confidence.map(attribution_confidence),
+            hostname_attribution_source: record.hostname_attribution_source.map(attribution_source),
             http_method: record.http_method.as_deref(),
             http_scheme: record.http_scheme.as_deref(),
             http_path_query: record.http_path_query.as_deref(),
@@ -129,6 +132,7 @@ impl<'a> From<&'a AuditRecord> for JsonAuditRecord<'a> {
             byte_count: record.byte_count,
             client_to_target_bytes: record.client_to_target_bytes,
             target_to_client_bytes: record.target_to_client_bytes,
+            duration_ms: record.duration_ms,
         }
     }
 }
@@ -205,6 +209,17 @@ fn attribution_confidence(value: AttributionConfidence) -> &'static str {
         AttributionConfidence::Low => "low",
         AttributionConfidence::Medium => "medium",
         AttributionConfidence::High => "high",
+    }
+}
+
+fn attribution_source(value: AttributionSource) -> &'static str {
+    match value {
+        AttributionSource::ExplicitProxyHost => "explicit_proxy_host",
+        AttributionSource::HttpHostHeader => "http_host_header",
+        AttributionSource::TlsSni => "tls_sni",
+        AttributionSource::DnsCache => "dns_cache",
+        AttributionSource::QuicMetadata => "quic_metadata",
+        AttributionSource::IpOnly => "ip_only",
     }
 }
 

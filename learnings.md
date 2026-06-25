@@ -328,3 +328,7 @@ Workspace tests occasionally hit `Text file busy` when executing a just-created 
 ## 2026-06-22 — denial paths must still return audit evidence to the CLI
 
 When a live policy denial occurs inside `run_bwrap_tcp_once`, return a summary containing the audit JSON lines and failed target status instead of only returning an error. The CLI can then print denial audit to stdout and fail the command afterward.
+
+## 2026-06-22 — audit source belongs in core records
+
+To distinguish DNS-cache, HTTP Host, TLS SNI, explicit proxy host, and QUIC metadata in audit JSON, add `hostname_attribution_source` to the core `AuditRecord` rather than only to serialization code. Flow helpers can then preserve the source for lifecycle records.

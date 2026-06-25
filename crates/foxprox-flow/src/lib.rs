@@ -108,6 +108,7 @@ impl UdpFlowLimitRejection {
                 .as_ref()
                 .map(|attribution| attribution.hostname.clone()),
             hostname_confidence: self.attribution.as_ref().map(|attr| attr.confidence),
+            hostname_attribution_source: self.attribution.as_ref().map(|attr| attr.source),
             http_method: None,
             http_scheme: None,
             http_path_query: None,
@@ -121,6 +122,7 @@ impl UdpFlowLimitRejection {
             byte_count: Some(self.byte_count),
             client_to_target_bytes: None,
             target_to_client_bytes: None,
+            duration_ms: None,
         }
     }
 }
@@ -141,6 +143,7 @@ impl ExpiredUdpFlow {
                 .as_ref()
                 .map(|attribution| attribution.hostname.clone()),
             hostname_confidence: self.state.attribution.as_ref().map(|attr| attr.confidence),
+            hostname_attribution_source: self.state.attribution.as_ref().map(|attr| attr.source),
             http_method: None,
             http_scheme: None,
             http_path_query: None,
@@ -151,6 +154,11 @@ impl ExpiredUdpFlow {
             byte_count: Some(self.state.byte_count),
             client_to_target_bytes: None,
             target_to_client_bytes: None,
+            duration_ms: self
+                .expired_at
+                .duration_since(self.state.created_at)
+                .ok()
+                .map(|duration| duration.as_millis()),
         }
     }
 }
@@ -164,6 +172,7 @@ pub struct ClosedTcpFlow {
     pub destination: Option<Endpoint>,
     pub attribution: Option<HostnameAttribution>,
     pub closed_at: SystemTime,
+    pub duration_ms: Option<u128>,
     pub client_to_target_bytes: u64,
     pub target_to_client_bytes: u64,
     pub reason: String,
@@ -184,6 +193,7 @@ impl ClosedTcpFlow {
                 .as_ref()
                 .map(|attribution| attribution.hostname.clone()),
             hostname_confidence: self.attribution.as_ref().map(|attr| attr.confidence),
+            hostname_attribution_source: self.attribution.as_ref().map(|attr| attr.source),
             http_method: None,
             http_scheme: None,
             http_path_query: None,
@@ -194,6 +204,7 @@ impl ClosedTcpFlow {
             byte_count: Some(self.client_to_target_bytes + self.target_to_client_bytes),
             client_to_target_bytes: Some(self.client_to_target_bytes),
             target_to_client_bytes: Some(self.target_to_client_bytes),
+            duration_ms: self.duration_ms,
         }
     }
 }
@@ -478,6 +489,7 @@ mod tests {
                 AttributionConfidence::High,
             )),
             closed_at: SystemTime::UNIX_EPOCH + Duration::from_secs(2_000),
+            duration_ms: Some(250),
             client_to_target_bytes: 123,
             target_to_client_bytes: 456,
             reason: "eof".to_owned(),
@@ -496,9 +508,11 @@ mod tests {
         assert_eq!(value["kind"], "tcp_flow_closed");
         assert_eq!(value["decision"], "observed");
         assert_eq!(value["hostname"], "api.example.com");
+        assert_eq!(value["hostname_attribution_source"], "explicit_proxy_host");
         assert_eq!(value["byte_count"], 579);
         assert_eq!(value["client_to_target_bytes"], 123);
         assert_eq!(value["target_to_client_bytes"], 456);
+        assert_eq!(value["duration_ms"], 250);
         assert_eq!(value["reason"], "eof");
     }
 
