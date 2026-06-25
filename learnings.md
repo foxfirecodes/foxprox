@@ -269,3 +269,7 @@ A TUN-backed smoltcp adapter should call the shared packet handler before yieldi
 ## 2026-06-21 - Net crate host connects should require EgressPermit
 
 Even after TUN packets are policy-gated, host socket creation must require an allow-derived `EgressPermit`. This keeps bridge code from drifting back to raw endpoint `TcpStream::connect` calls and preserves rule provenance at the egress boundary.
+
+## 2026-06-21 - bwrap fd handoff works better through a control socket path
+
+Passing an inherited control fd through bwrap with `--sync-fd` conflicted with owned-fd lifetime assumptions. For the bwrap-compatible path, a Unix control socket path is a safer setup-helper handoff mechanism; the helper connects to it and sends the TUN fd with SCM_RIGHTS.

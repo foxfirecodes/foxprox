@@ -1453,3 +1453,26 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * malformed permit metadata fails closed before any connect syscall.
 * Audit evidence: permits carry rule provenance; this cycle did not add new audit events, but bridge and core tests preserve existing policy/audit evidence.
 * Residual risk: runtime bridge still needs automatic permit construction from live flow decisions and lifecycle/error audit around socket opens/closes.
+
+## 2026-06-21 - bwrap foxproxsetup handoff e2e
+
+* Invariant under work: the documented bwrap-compatible setup path must run the real `foxproxsetup` helper inside a bwrap-created user/network namespace with `/dev/net/tun`, hand the TUN fd back to the broker, and execute the target only after setup.
+* Threat or failure mode addressed: unshare-based helper tests do not prove the bwrap command shape preserves the control fd, device access, temporary CAP_NET_ADMIN, and target sequencing expected by alpha users.
+* Planned verification: add an ignored bwrap e2e test using `--ro-bind / /`, `--unshare-user`, `--unshare-net`, `--cap-add CAP_NET_ADMIN`, `/dev/net/tun`, and `foxproxsetup`; verify target execution and broker-side TUN fd packet observation; run full checks and the ignored bwrap test.
+
+## 2026-06-21 - bwrap foxproxsetup handoff e2e results
+
+* Tests added/updated:
+  * ignored e2e runs real `bwrap` with read-only root bind, user/network namespace isolation, temporary `CAP_NET_ADMIN`, `/dev/net/tun`, and the real `foxproxsetup` helper.
+  * helper connects to a Unix control socket path, sends the TUN fd to the broker side, configures `fp0`, executes a target shell command inside bwrap, and the broker side observes target-generated TCP traffic through the handed-off TUN fd.
+* Commands run:
+  * First bwrap attempt using inherited `--control-fd` plus `--sync-fd` failed with a Rust IO safety abort because bwrap fd lifetime semantics conflicted with treating that fd as an owned UnixStream in the helper.
+  * Second bwrap attempt with control socket path and target output file failed because `/` was read-only and `/dev/null` access was not writable in that bwrap shape.
+  * `cargo test -p foxprox-cli bwrap_runs_foxproxsetup_and_hands_off_tun_fd -- --ignored --nocapture` — passed after switching to `--control-socket` and a target command that verifies `fp0` and generates TCP traffic without writable filesystem output.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: CLI 2 tests plus 2 ignored, core 161 tests, device 3 tests plus 2 ignored, integrations 5 tests, net 2 tests plus 6 ignored, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * bwrap target execution is sequenced after helper setup and fd handoff.
+  * socket-path control avoids ambiguous inherited-fd ownership through bwrap.
+  * the handed-off fd remains live for broker-side packet observation after the helper execs the target.
+* Audit evidence: no runtime audit sink yet; setup lifecycle/error events are still core builders awaiting launcher integration.
+* Residual risk: production bwrap launcher still needs configurable filesystem policy, proxy/DNS environment injection, and lifecycle audit around child process management.

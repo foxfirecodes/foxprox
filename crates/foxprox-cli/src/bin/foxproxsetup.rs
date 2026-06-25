@@ -32,9 +32,17 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
     configure_tun_interface(&setup, &mut IpCommandRunner)
         .map_err(|error| format!("configure tun: {error:?}"))?;
 
-    // SAFETY: `control_fd` is provided by the trusted launcher as an inherited
-    // Unix stream fd. Ownership is transferred here so it is closed before exec.
-    let control = unsafe { UnixStream::from_raw_fd(config.control_fd) };
+    let control = match config.control {
+        ControlChannel::Fd(control_fd) => {
+            // SAFETY: `control_fd` is provided by the trusted launcher as an
+            // inherited Unix stream fd. Ownership is transferred here so it is
+            // closed before exec.
+            unsafe { UnixStream::from_raw_fd(control_fd) }
+        }
+        ControlChannel::SocketPath(path) => {
+            UnixStream::connect(path).map_err(|error| format!("connect control socket: {error}"))?
+        }
+    };
     send_fd(&control, tun.raw_fd()).map_err(|error| format!("send tun fd: {error:?}"))?;
     drop(tun);
     drop(control);
@@ -48,7 +56,7 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
 
 #[derive(Debug, Eq, PartialEq)]
 struct SetupArgs {
-    control_fd: RawFd,
+    control: ControlChannel,
     tun_name: String,
     address_cidr: String,
     route_cidr: String,
@@ -56,9 +64,15 @@ struct SetupArgs {
     target: Vec<OsString>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum ControlChannel {
+    Fd(RawFd),
+    SocketPath(OsString),
+}
+
 impl SetupArgs {
     fn parse(args: Vec<OsString>) -> Result<Self, String> {
-        let mut control_fd = None;
+        let mut control: Option<ControlChannel> = None;
         let mut tun_name = Some("fp0".to_string());
         let mut address_cidr = Some("10.0.0.1/24".to_string());
         let mut route_cidr = Some("0.0.0.0/0".to_string());
@@ -72,7 +86,7 @@ impl SetupArgs {
                     return Err("missing target after --".into());
                 }
                 return Ok(Self {
-                    control_fd: control_fd.ok_or("missing --control-fd")?,
+                    control: control.ok_or("missing --control-fd or --control-socket")?,
                     tun_name: tun_name.take().ok_or("missing --tun-name")?,
                     address_cidr: address_cidr.take().ok_or("missing --address")?,
                     route_cidr: route_cidr.take().ok_or("missing --route")?,
@@ -92,7 +106,10 @@ impl SetupArgs {
                     if parsed < 0 {
                         return Err("invalid --control-fd".into());
                     }
-                    control_fd = Some(parsed);
+                    control = Some(ControlChannel::Fd(parsed));
+                }
+                "--control-socket" => {
+                    control = Some(ControlChannel::SocketPath(value.clone()));
                 }
                 "--tun-name" => tun_name = Some(value.to_string_lossy().into_owned()),
                 "--address" => address_cidr = Some(value.to_string_lossy().into_owned()),
@@ -145,7 +162,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(parsed.control_fd, 7);
+        assert_eq!(parsed.control, ControlChannel::Fd(7));
         assert_eq!(parsed.tun_name, "fp-test");
         assert_eq!(parsed.mtu, 1400);
         assert_eq!(parsed.target, vec![OsString::from("true")]);
