@@ -1,7 +1,8 @@
 //! Synchronous local host egress adapters for harnesses and future broker integration.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpStream, UdpSocket};
+use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
 use std::time::Duration;
 
 use foxprox_core::egress::{EgressBackend, EgressOutcome, EgressRequest};
@@ -131,6 +132,82 @@ impl EgressBackend for LocalUdpEgress {
             message: "local UDP fixture egress".to_string(),
             response_payload: reply_payload[..reply_len].to_vec(),
         })
+    }
+}
+
+#[derive(Debug)]
+pub struct HostUdpEgress {
+    socket: UdpSocket,
+    address_map: BTreeMap<IpAddr, IpAddr>,
+    calls: usize,
+}
+
+impl HostUdpEgress {
+    pub fn new(address_map: BTreeMap<IpAddr, IpAddr>) -> Result<Self, String> {
+        let socket = UdpSocket::bind("0.0.0.0:0")
+            .map_err(|err| format!("failed to bind host UDP egress socket: {err}"))?;
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .map_err(|err| format!("failed to set host UDP egress timeout: {err}"))?;
+        Ok(Self {
+            socket,
+            address_map,
+            calls: 0,
+        })
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls
+    }
+
+    fn mapped_destination(&self, destination: SocketAddr) -> SocketAddr {
+        SocketAddr::new(
+            self.address_map
+                .get(&destination.ip())
+                .copied()
+                .unwrap_or(destination.ip()),
+            destination.port(),
+        )
+    }
+}
+
+impl EgressBackend for HostUdpEgress {
+    fn execute(&mut self, request: &EgressRequest) -> Result<EgressOutcome, String> {
+        let EgressRequest::UdpDatagram { destination, bytes } = request else {
+            return Err("host UDP egress only supports UDP datagrams".to_string());
+        };
+        self.calls += 1;
+        let mapped = self.mapped_destination(*destination);
+        self.socket
+            .send_to(bytes, mapped)
+            .map_err(|err| format!("host UDP egress send to {mapped} failed: {err}"))?;
+        let mut reply_payload = [0_u8; 4096];
+        match self.socket.recv_from(&mut reply_payload) {
+            Ok((reply_len, _)) => Ok(EgressOutcome {
+                connected: true,
+                bytes_sent: bytes.len() as u64,
+                bytes_received: reply_len as u64,
+                message: format!("host UDP egress to {mapped}"),
+                response_payload: reply_payload[..reply_len].to_vec(),
+            }),
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                Ok(EgressOutcome {
+                    connected: true,
+                    bytes_sent: bytes.len() as u64,
+                    bytes_received: 0,
+                    message: format!("host UDP egress to {mapped} without reply"),
+                    response_payload: Vec::new(),
+                })
+            }
+            Err(err) => Err(format!(
+                "host UDP egress receive from {mapped} failed: {err}"
+            )),
+        }
     }
 }
 

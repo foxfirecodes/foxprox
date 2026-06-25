@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
 use std::env;
+use std::fs;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::Path;
-use std::process::{Command, ExitCode, Stdio};
+use std::process::{Child, Command, ExitCode, Stdio};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
@@ -22,11 +24,12 @@ use foxprox_core::frontend::{
 use foxprox_core::origin::parse_socks5_connect_request;
 use foxprox_core::policy::{Cidr, PolicyConfig, PolicyEngine, PolicyRule, RuleAction};
 use foxprox_core::runtime::{
-    ExplicitProxyRuntime, TransparentDnsRuntime, TransparentTcpBridgeRuntime, TransparentTcpRuntime,
+    ExplicitProxyRuntime, TransparentDnsRuntime, TransparentInspectionRuntime,
+    TransparentTcpBridgeRuntime, TransparentTcpRuntime,
 };
 use foxprox_core::scenario::{run_scenario, ScenarioName};
 use foxprox_core::smoltcp_gate::feed_tcp_syn_to_smoltcp_listener;
-use foxprox_egress::{LocalTcpConnectEgress, LocalTcpStreamEgress, LocalUdpEgress};
+use foxprox_egress::{HostUdpEgress, LocalTcpConnectEgress, LocalTcpStreamEgress, LocalUdpEgress};
 
 fn main() -> ExitCode {
     match run(env::args().skip(1).collect()) {
@@ -49,6 +52,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             usage();
             Ok(())
         }
+        [cmd, rest @ ..] if cmd == "sandbox" => run_sandbox_command(rest.to_vec()),
         [cmd] if cmd == "list" => {
             for name in ScenarioName::list() {
                 println!("{name}");
@@ -144,9 +148,842 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke|tcp-bridge-smoke|tcp-bridge-deny-smoke|http-proxy-smoke|https-connect-smoke|socks5-smoke|proxy-deny-smoke>",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke|tcp-bridge-smoke|tcp-bridge-deny-smoke|http-proxy-smoke|https-connect-smoke|socks5-smoke|proxy-deny-smoke> | sandbox [--allow-all] [--dns-answer host=ip] [--upstream-dns ip:port|--no-upstream-dns] [--egress-map sandbox_ip=host_ip] [--timeout-secs n] -- target args...",
         ScenarioName::list().join("|")
     );
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SandboxCommandOptions {
+    allow_all: bool,
+    allow_ping: bool,
+    timeout: Duration,
+    dns_answers: Vec<(String, Ipv4Addr)>,
+    upstream_dns: Option<SocketAddr>,
+    egress_ip_map: BTreeMap<IpAddr, IpAddr>,
+    proxy_env: bool,
+    audit_stdout: bool,
+    target_argv: Vec<String>,
+}
+
+impl SandboxCommandOptions {
+    fn parse(args: Vec<String>) -> Result<Self, String> {
+        let mut allow_all = false;
+        let mut allow_ping = false;
+        let mut timeout = Duration::from_secs(300);
+        let mut dns_answers = Vec::new();
+        let mut upstream_dns = system_resolver();
+        let mut egress_ip_map = BTreeMap::new();
+        let mut proxy_env = false;
+        let mut audit_stdout = false;
+        let mut target_argv = Vec::new();
+        let mut iter = args.into_iter().peekable();
+        while let Some(arg) = iter.next() {
+            if arg == "--" {
+                target_argv.extend(iter);
+                break;
+            }
+            match arg.as_str() {
+                "--help" | "-h" => return Err(sandbox_usage()),
+                "--allow-all" => {
+                    allow_all = true;
+                    allow_ping = true;
+                }
+                "--allow-ping" => allow_ping = true,
+                "--proxy-env" => proxy_env = true,
+                "--audit-stdout" => audit_stdout = true,
+                "--no-upstream-dns" => upstream_dns = None,
+                "--upstream-dns" => {
+                    upstream_dns = Some(
+                        next_arg(&mut iter, "--upstream-dns")?
+                            .parse()
+                            .map_err(|err| format!("invalid --upstream-dns: {err}"))?,
+                    );
+                }
+                "--timeout-secs" => {
+                    let value = next_arg(&mut iter, "--timeout-secs")?;
+                    let seconds = value
+                        .parse::<u64>()
+                        .map_err(|err| format!("invalid --timeout-secs: {err}"))?;
+                    timeout = Duration::from_secs(seconds);
+                }
+                "--dns-answer" => {
+                    let value = next_arg(&mut iter, "--dns-answer")?;
+                    let (host, ip) = value
+                        .split_once('=')
+                        .ok_or_else(|| "--dns-answer must be host=ipv4".to_string())?;
+                    dns_answers.push((
+                        host.to_ascii_lowercase(),
+                        ip.parse()
+                            .map_err(|err| format!("invalid --dns-answer IPv4 address: {err}"))?,
+                    ));
+                }
+                "--egress-map" => {
+                    let value = next_arg(&mut iter, "--egress-map")?;
+                    let (sandbox_ip, host_ip) = value
+                        .split_once('=')
+                        .ok_or_else(|| "--egress-map must be sandbox_ip=host_ip".to_string())?;
+                    egress_ip_map.insert(
+                        sandbox_ip
+                            .parse()
+                            .map_err(|err| format!("invalid sandbox IP in --egress-map: {err}"))?,
+                        host_ip
+                            .parse()
+                            .map_err(|err| format!("invalid host IP in --egress-map: {err}"))?,
+                    );
+                }
+                other => {
+                    return Err(format!(
+                        "unknown sandbox argument '{other}'\n{}",
+                        sandbox_usage()
+                    ))
+                }
+            }
+        }
+        if target_argv.is_empty() {
+            return Err(format!("sandbox target argv required\n{}", sandbox_usage()));
+        }
+        Ok(Self {
+            allow_all,
+            allow_ping,
+            timeout,
+            dns_answers,
+            upstream_dns,
+            egress_ip_map,
+            proxy_env,
+            audit_stdout,
+            target_argv,
+        })
+    }
+
+    fn policy(&self) -> PolicyConfig {
+        if self.allow_all {
+            PolicyConfig::allow_by_default()
+                .allow_ping(self.allow_ping)
+                .allow_quic(true)
+        } else {
+            PolicyConfig::deny_by_default().allow_ping(self.allow_ping)
+        }
+    }
+}
+
+fn sandbox_usage() -> String {
+    "usage: foxprox-lab sandbox [--allow-all] [--allow-ping] [--dns-answer host=ipv4] [--upstream-dns ip:port|--no-upstream-dns] [--egress-map sandbox_ip=host_ip] [--proxy-env] [--audit-stdout] [--timeout-secs n] -- target args...".to_string()
+}
+
+fn system_resolver() -> Option<SocketAddr> {
+    let text = fs::read_to_string("/etc/resolv.conf").ok()?;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with("nameserver ") {
+            let addr = line.split_whitespace().nth(1)?;
+            if let Ok(ip) = addr.parse::<IpAddr>() {
+                return Some(SocketAddr::new(ip, 53));
+            }
+        }
+    }
+    None
+}
+
+fn next_arg(iter: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
+    iter.next()
+        .ok_or_else(|| format!("{flag} requires a value"))
+}
+
+#[cfg(not(unix))]
+fn run_sandbox_command(_args: Vec<String>) -> Result<(), String> {
+    Err("foxprox sandbox launcher is only supported on Unix".to_string())
+}
+
+#[cfg(unix)]
+fn run_sandbox_command(args: Vec<String>) -> Result<(), String> {
+    let options = SandboxCommandOptions::parse(args)?;
+    run_sandbox_session(options)
+}
+
+#[cfg(unix)]
+struct SandboxTcpFlow {
+    destination: SocketAddr,
+    bridge: TransparentTcpBridgeRuntime,
+    kind: SandboxTcpKind,
+    host_stream: Option<TcpStream>,
+    bytes_to_host: u64,
+    bytes_to_sandbox: u64,
+}
+
+#[cfg(unix)]
+enum SandboxTcpKind {
+    Transparent,
+    HttpProxy {
+        runtime: ExplicitProxyRuntime,
+        request_done: bool,
+    },
+    Socks5 {
+        runtime: ExplicitProxyRuntime,
+        stage: SocksStage,
+    },
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SocksStage {
+    Greeting,
+    Request,
+    Tunnel,
+}
+
+#[cfg(unix)]
+fn run_sandbox_session(options: SandboxCommandOptions) -> Result<(), String> {
+    let setup = foxprox_core::integration::TunSetupConfig::alpha_default();
+    let helper = setup_helper_path()?;
+    let target_dir = helper
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| {
+            format!(
+                "could not derive target directory from {}",
+                helper.display()
+            )
+        })?
+        .to_path_buf();
+    let session_dir = target_dir.join(format!("foxprox-session-{}", std::process::id()));
+    let socket_path = session_dir.join("setup.sock");
+    let resolv_path = session_dir.join("resolv.conf");
+    fs::create_dir_all(&session_dir)
+        .map_err(|err| format!("failed to create foxprox session dir: {err}"))?;
+    fs::write(
+        &resolv_path,
+        format!(
+            "nameserver {}\noptions timeout:1 attempts:1 ndots:0\n",
+            setup.broker_ip
+        ),
+    )
+    .map_err(|err| format!("failed to write sandbox resolv.conf: {err}"))?;
+    let _ = fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(&socket_path)
+        .map_err(|err| format!("failed to bind setup handoff socket: {err}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make setup handoff listener nonblocking: {err}"))?;
+
+    let mut child = spawn_sandbox_bwrap(
+        &options,
+        &setup,
+        &helper,
+        &target_dir,
+        &session_dir,
+        &socket_path,
+        &resolv_path,
+    )?;
+    let device = match accept_handoff_fd(&listener, &mut child, Duration::from_secs(15)) {
+        Ok(fd) => fd,
+        Err(err) => {
+            let _ = cleanup_session_dir(&session_dir);
+            return Err(err);
+        }
+    };
+    device.set_nonblocking()?;
+
+    let start = AuditRecord::new(
+        EventKind::BrokerStarted,
+        "foxprox-sandbox",
+        Decision::Allow,
+        "host broker started for bwrap sandbox session",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Unsupported)
+    .with_metadata("target", options.target_argv.join(" "));
+    emit_audit(&start, options.audit_stdout);
+
+    let udp_egress = HostUdpEgress::new(options.egress_ip_map.clone())?;
+    let mut broker = TransparentBroker::new(
+        setup.dns_listener,
+        options.dns_answers.clone(),
+        PolicyEngine::new(options.policy()),
+        udp_egress,
+        PolicyEngine::new(PolicyConfig::deny_by_default()),
+        MockEgressBackend::new(),
+        PolicyEngine::new(options.policy()),
+    );
+    broker.dns.upstream_dns = options.upstream_dns;
+    let tcp_policy = PolicyEngine::new(options.policy());
+    let mut tcp_flows: BTreeMap<SocketAddr, SandboxTcpFlow> = BTreeMap::new();
+    let deadline = Instant::now() + options.timeout;
+    let mut buf = [0_u8; 8192];
+    let mut tick = 1_u64;
+
+    let final_status = loop {
+        tick = tick.saturating_add(1);
+        broker.set_tick(tick);
+        match device.read_packet(&mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                if is_tcp_packet(&buf[..n]) {
+                    handle_sandbox_tcp_packet(
+                        &device,
+                        &buf[..n],
+                        &mut tcp_flows,
+                        &tcp_policy,
+                        &options,
+                        setup.http_proxy_listener,
+                        setup.socks_proxy_listener,
+                    )?;
+                } else {
+                    let step = broker.handle_ipv4_packet("foxprox-sandbox", &buf[..n])?;
+                    for packet in step.packets_to_device {
+                        device.write_packet(&packet)?;
+                    }
+                    drain_audit_records(&mut broker.audit, options.audit_stdout);
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(format!("failed to read sandbox TUN fd: {err}")),
+        }
+
+        poll_sandbox_tcp_flows(&device, &mut tcp_flows, options.audit_stdout)?;
+        drain_audit_records(&mut broker.audit, options.audit_stdout);
+
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|err| format!("failed to poll sandbox target: {err}"))?
+        {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let status = child
+                .wait()
+                .map_err(|err| format!("failed to wait for timed-out sandbox target: {err}"))?;
+            let timeout_record = AuditRecord::new(
+                EventKind::BrokerError,
+                "foxprox-sandbox",
+                Decision::FailClosed,
+                "sandbox session timed out and target was killed",
+            )
+            .with_frontend(Frontend::Harness)
+            .with_protocol(Protocol::Unsupported);
+            emit_audit(&timeout_record, options.audit_stdout);
+            break status;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+
+    for (_, mut flow) in tcp_flows {
+        drain_audit_records(&mut flow.bridge.audit, options.audit_stdout);
+    }
+    device.close();
+    cleanup_session_dir(&session_dir)?;
+
+    let exit = AuditRecord::new(
+        EventKind::SandboxExited,
+        "foxprox-sandbox",
+        if final_status.success() {
+            Decision::Allow
+        } else {
+            Decision::FailClosed
+        },
+        "sandbox network session exited",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Unsupported)
+    .with_metadata("status", final_status.to_string());
+    emit_audit(&exit, options.audit_stdout);
+
+    if final_status.success() {
+        Ok(())
+    } else {
+        Err(format!("sandbox target exited with {final_status}"))
+    }
+}
+
+#[cfg(unix)]
+fn spawn_sandbox_bwrap(
+    options: &SandboxCommandOptions,
+    setup: &foxprox_core::integration::TunSetupConfig,
+    helper: &Path,
+    target_dir: &Path,
+    session_dir: &Path,
+    socket_path: &Path,
+    resolv_path: &Path,
+) -> Result<Child, String> {
+    let cwd = env::current_dir().map_err(|err| format!("failed to inspect cwd: {err}"))?;
+    let mut command = Command::new("bwrap");
+    command
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--cap-add",
+            "CAP_NET_RAW",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--dir",
+            "/etc",
+            "--ro-bind-try",
+            "/etc/hosts",
+            "/etc/hosts",
+            "--ro-bind",
+        ])
+        .arg(resolv_path)
+        .arg("/etc/resolv.conf")
+        .args(["--tmpfs", "/tmp", "--proc", "/proc", "--bind"])
+        .arg(&cwd)
+        .arg(&cwd)
+        .args(["--ro-bind"])
+        .arg(target_dir)
+        .arg(target_dir)
+        .args(["--bind"])
+        .arg(session_dir)
+        .arg(session_dir)
+        .args(["--chdir"])
+        .arg(&cwd)
+        .args(["--"])
+        .env("FOXPROX_SETUP_SOCKET", socket_path);
+    command.arg(helper);
+    command.args([
+        "--tun-name",
+        &setup.tun_name,
+        "--sandbox-ip",
+        &format!("{}/{}", setup.sandbox_ip, setup.prefix_len),
+        "--broker-ip",
+        &setup.broker_ip.to_string(),
+        "--mtu",
+        &setup.mtu.to_string(),
+        "--dns-listener",
+        &setup.dns_listener.to_string(),
+        "--http-proxy-listener",
+        &setup.http_proxy_listener.to_string(),
+        "--socks-proxy-listener",
+        &setup.socks_proxy_listener.to_string(),
+        "--handoff-env",
+        "FOXPROX_SETUP_SOCKET",
+        "--",
+    ]);
+    command.args(&options.target_argv);
+    if options.proxy_env {
+        for (key, value) in setup.proxy_environment() {
+            command.env(key, value);
+        }
+    }
+    command
+        .spawn()
+        .map_err(|err| format!("failed to spawn bwrap sandbox: {err}"))
+}
+
+#[cfg(unix)]
+fn is_tcp_packet(packet: &[u8]) -> bool {
+    foxprox_core::packet::parse_ipv4(packet)
+        .map(|parsed| parsed.protocol_number == 6)
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn handle_sandbox_tcp_packet(
+    device: &fd_handoff::DeviceFd,
+    packet: &[u8],
+    flows: &mut BTreeMap<SocketAddr, SandboxTcpFlow>,
+    tcp_policy: &PolicyEngine,
+    options: &SandboxCommandOptions,
+    http_proxy_listener: SocketAddr,
+    socks_proxy_listener: SocketAddr,
+) -> Result<(), String> {
+    let parsed = foxprox_core::packet::parse_ipv4(packet)?;
+    let tcp = foxprox_core::packet::parse_tcp(parsed.payload)?;
+    let destination = SocketAddr::new(IpAddr::V4(parsed.destination), tcp.destination_port);
+    if !flows.contains_key(&destination) {
+        let (kind, inspection) = if destination == http_proxy_listener {
+            (
+                SandboxTcpKind::HttpProxy {
+                    runtime: ExplicitProxyRuntime::new(PolicyEngine::new(options.policy())),
+                    request_done: false,
+                },
+                false,
+            )
+        } else if destination == socks_proxy_listener {
+            (
+                SandboxTcpKind::Socks5 {
+                    runtime: ExplicitProxyRuntime::new(PolicyEngine::new(options.policy())),
+                    stage: SocksStage::Greeting,
+                },
+                false,
+            )
+        } else {
+            (
+                SandboxTcpKind::Transparent,
+                matches!(tcp.destination_port, 80 | 443),
+            )
+        };
+        let mut bridge = TransparentTcpBridgeRuntime::listen(
+            parsed.destination,
+            tcp.destination_port,
+            tcp_policy.clone(),
+        )?;
+        if inspection {
+            let inspection_policy = PolicyEngine::new(PolicyConfig::allow_by_default());
+            bridge = bridge.with_inspection(TransparentInspectionRuntime::new(inspection_policy));
+        }
+        flows.insert(
+            destination,
+            SandboxTcpFlow {
+                destination,
+                bridge,
+                kind,
+                host_stream: None,
+                bytes_to_host: 0,
+                bytes_to_sandbox: 0,
+            },
+        );
+    }
+    let Some(flow) = flows.get_mut(&destination) else {
+        return Err("TCP flow disappeared after insertion".to_string());
+    };
+    let step = flow.bridge.handle_ipv4_packet("foxprox-sandbox", packet)?;
+    for emitted in step.emitted_packets {
+        device.write_packet(&emitted)?;
+    }
+    if let Some(bytes) = step.egress_payload {
+        if !bytes.is_empty() {
+            handle_tcp_flow_payload(device, flow, &bytes, options)?;
+        }
+    }
+    drain_audit_records(&mut flow.bridge.audit, options.audit_stdout);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn handle_tcp_flow_payload(
+    device: &fd_handoff::DeviceFd,
+    flow: &mut SandboxTcpFlow,
+    bytes: &[u8],
+    options: &SandboxCommandOptions,
+) -> Result<(), String> {
+    let kind = std::mem::replace(&mut flow.kind, SandboxTcpKind::Transparent);
+    let result: Result<SandboxTcpKind, String> = match kind {
+        SandboxTcpKind::Transparent => {
+            ensure_host_stream(flow, &options.egress_ip_map)?;
+            write_host_stream(flow, bytes)?;
+            Ok(SandboxTcpKind::Transparent)
+        }
+        SandboxTcpKind::HttpProxy {
+            mut runtime,
+            mut request_done,
+        } => {
+            if flow.host_stream.is_some() && request_done {
+                write_host_stream(flow, bytes)?;
+            } else if bytes.starts_with(b"CONNECT ") {
+                let target = foxprox_core::origin::parse_connect_request(bytes)?;
+                let destination = resolve_proxy_destination(
+                    &target.host,
+                    target.port,
+                    &options.dns_answers,
+                    &options.egress_ip_map,
+                )?;
+                if runtime
+                    .evaluate_https_connect_request("foxprox-sandbox", bytes, destination)?
+                    .is_none()
+                {
+                    for emitted in flow
+                        .bridge
+                        .send_egress_response(HTTP_FORBIDDEN_CLOSE_RESPONSE)?
+                    {
+                        device.write_packet(&emitted)?;
+                    }
+                    drain_audit_records(&mut runtime.audit, options.audit_stdout);
+                    flow.kind = SandboxTcpKind::HttpProxy {
+                        runtime,
+                        request_done,
+                    };
+                    return Ok(());
+                }
+                connect_host_stream(flow, destination)?;
+                for emitted in flow
+                    .bridge
+                    .send_egress_response(HTTP_CONNECT_ESTABLISHED_RESPONSE)?
+                {
+                    device.write_packet(&emitted)?;
+                }
+                request_done = true;
+            } else {
+                let meta = foxprox_core::origin::parse_http_request(bytes)?;
+                let destination = resolve_proxy_destination(
+                    &meta.host,
+                    meta.port,
+                    &options.dns_answers,
+                    &options.egress_ip_map,
+                )?;
+                if runtime
+                    .evaluate_http_request("foxprox-sandbox", bytes, destination)?
+                    .is_none()
+                {
+                    for emitted in flow
+                        .bridge
+                        .send_egress_response(HTTP_FORBIDDEN_CLOSE_RESPONSE)?
+                    {
+                        device.write_packet(&emitted)?;
+                    }
+                    drain_audit_records(&mut runtime.audit, options.audit_stdout);
+                    flow.kind = SandboxTcpKind::HttpProxy {
+                        runtime,
+                        request_done,
+                    };
+                    return Ok(());
+                }
+                connect_host_stream(flow, destination)?;
+                let request = build_http_origin_request(&meta);
+                write_host_stream(flow, &request)?;
+                request_done = true;
+            }
+            drain_audit_records(&mut runtime.audit, options.audit_stdout);
+            Ok(SandboxTcpKind::HttpProxy {
+                runtime,
+                request_done,
+            })
+        }
+        SandboxTcpKind::Socks5 {
+            mut runtime,
+            mut stage,
+        } => {
+            match stage {
+                SocksStage::Greeting => {
+                    parse_socks5_no_auth_greeting(bytes)?;
+                    for emitted in flow.bridge.send_egress_response(SOCKS5_NO_AUTH_RESPONSE)? {
+                        device.write_packet(&emitted)?;
+                    }
+                    stage = SocksStage::Request;
+                }
+                SocksStage::Request => {
+                    let parsed = parse_socks5_connect_request(bytes)?;
+                    let destination = resolve_proxy_destination(
+                        &parsed.destination_host,
+                        parsed.destination_port,
+                        &options.dns_answers,
+                        &options.egress_ip_map,
+                    )?;
+                    if runtime
+                        .evaluate_socks5_connect("foxprox-sandbox", bytes, destination)?
+                        .is_none()
+                    {
+                        drain_audit_records(&mut runtime.audit, options.audit_stdout);
+                        flow.kind = SandboxTcpKind::Socks5 { runtime, stage };
+                        return Ok(());
+                    }
+                    connect_host_stream(flow, destination)?;
+                    let bound = flow
+                        .host_stream
+                        .as_ref()
+                        .and_then(|stream| stream.local_addr().ok())
+                        .unwrap_or_else(|| "0.0.0.0:0".parse().expect("static socket valid"));
+                    let response = socks5_connect_success_response(bound);
+                    for emitted in flow.bridge.send_egress_response(&response)? {
+                        device.write_packet(&emitted)?;
+                    }
+                    stage = SocksStage::Tunnel;
+                    drain_audit_records(&mut runtime.audit, options.audit_stdout);
+                }
+                SocksStage::Tunnel => write_host_stream(flow, bytes)?,
+            }
+            Ok(SandboxTcpKind::Socks5 { runtime, stage })
+        }
+    };
+    flow.kind = result?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_host_stream(flow: &mut SandboxTcpFlow, bytes: &[u8]) -> Result<(), String> {
+    if let Some(stream) = flow.host_stream.as_mut() {
+        stream.write_all(bytes).map_err(|err| {
+            format!(
+                "host TCP egress write to {} failed: {err}",
+                flow.destination
+            )
+        })?;
+        flow.bytes_to_host += bytes.len() as u64;
+        Ok(())
+    } else {
+        Err(format!(
+            "host TCP egress stream for {} was not established",
+            flow.destination
+        ))
+    }
+}
+
+#[cfg(unix)]
+fn poll_sandbox_tcp_flows(
+    device: &fd_handoff::DeviceFd,
+    flows: &mut BTreeMap<SocketAddr, SandboxTcpFlow>,
+    audit_stdout: bool,
+) -> Result<(), String> {
+    let mut closed = Vec::new();
+    for (destination, flow) in flows.iter_mut() {
+        for emitted in flow.bridge.poll()? {
+            device.write_packet(&emitted)?;
+        }
+        let mut host_closed = false;
+        if let Some(stream) = flow.host_stream.as_mut() {
+            let mut buf = [0_u8; 8192];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) => {
+                        host_closed = true;
+                        break;
+                    }
+                    Ok(n) => {
+                        flow.bytes_to_sandbox += n as u64;
+                        for emitted in flow.bridge.send_egress_response(&buf[..n])? {
+                            device.write_packet(&emitted)?;
+                        }
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(err) => {
+                        host_closed = true;
+                        let record = AuditRecord::new(
+                            EventKind::BrokerError,
+                            "foxprox-sandbox",
+                            Decision::FailClosed,
+                            format!(
+                                "host TCP egress read from {} failed: {err}",
+                                flow.destination
+                            ),
+                        )
+                        .with_frontend(Frontend::Tun)
+                        .with_protocol(Protocol::Tcp)
+                        .with_addresses(None, Some(flow.destination));
+                        emit_audit(&record, audit_stdout);
+                        break;
+                    }
+                }
+            }
+        }
+        drain_audit_records(&mut flow.bridge.audit, audit_stdout);
+        if host_closed {
+            let record = AuditRecord::new(
+                EventKind::TcpFlowClosed,
+                "foxprox-sandbox",
+                Decision::Allow,
+                "transparent TCP host stream closed",
+            )
+            .with_frontend(Frontend::Tun)
+            .with_protocol(Protocol::Tcp)
+            .with_addresses(None, Some(flow.destination))
+            .with_bytes(flow.bytes_to_host, flow.bytes_to_sandbox);
+            emit_audit(&record, audit_stdout);
+            closed.push(*destination);
+        }
+    }
+    for destination in closed {
+        flows.remove(&destination);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_host_stream(
+    flow: &mut SandboxTcpFlow,
+    egress_ip_map: &BTreeMap<IpAddr, IpAddr>,
+) -> Result<(), String> {
+    if flow.host_stream.is_some() {
+        return Ok(());
+    }
+    connect_host_stream(flow, mapped_destination(flow.destination, egress_ip_map))
+}
+
+#[cfg(unix)]
+fn connect_host_stream(flow: &mut SandboxTcpFlow, destination: SocketAddr) -> Result<(), String> {
+    if flow.host_stream.is_some() {
+        return Ok(());
+    }
+    let stream = TcpStream::connect_timeout(&destination, Duration::from_secs(10))
+        .map_err(|err| format!("host TCP egress connect to {destination} failed: {err}"))?;
+    stream
+        .set_nonblocking(true)
+        .map_err(|err| format!("failed to make host TCP egress stream nonblocking: {err}"))?;
+    flow.host_stream = Some(stream);
+    Ok(())
+}
+
+#[cfg(unix)]
+fn resolve_proxy_destination(
+    host: &str,
+    port: u16,
+    dns_answers: &[(String, Ipv4Addr)],
+    egress_ip_map: &BTreeMap<IpAddr, IpAddr>,
+) -> Result<SocketAddr, String> {
+    let ip = if let Ok(ip) = host.parse::<IpAddr>() {
+        ip
+    } else if let Some((_, ip)) = dns_answers
+        .iter()
+        .find(|(answer_host, _)| answer_host == &host.to_ascii_lowercase())
+    {
+        IpAddr::V4(*ip)
+    } else {
+        (host, port)
+            .to_socket_addrs()
+            .map_err(|err| format!("host DNS resolution for {host}:{port} failed: {err}"))?
+            .next()
+            .ok_or_else(|| format!("host DNS resolution for {host}:{port} returned no addresses"))?
+            .ip()
+    };
+    Ok(SocketAddr::new(
+        egress_ip_map.get(&ip).copied().unwrap_or(ip),
+        port,
+    ))
+}
+
+#[cfg(unix)]
+fn mapped_destination(
+    destination: SocketAddr,
+    egress_ip_map: &BTreeMap<IpAddr, IpAddr>,
+) -> SocketAddr {
+    SocketAddr::new(
+        egress_ip_map
+            .get(&destination.ip())
+            .copied()
+            .unwrap_or(destination.ip()),
+        destination.port(),
+    )
+}
+
+fn drain_audit_records(records: &mut Vec<AuditRecord>, audit_stdout: bool) {
+    for record in records.drain(..) {
+        emit_audit(&record, audit_stdout);
+    }
+}
+
+fn emit_audit(record: &AuditRecord, audit_stdout: bool) {
+    if audit_stdout {
+        println!("{}", record.to_json_line());
+    } else {
+        eprintln!("{}", record.to_json_line());
+    }
+}
+
+fn cleanup_session_dir(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        fs::remove_dir_all(path).map_err(|err| {
+            format!(
+                "failed to cleanup foxprox session dir {}: {err}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn env_smoke_records() -> Vec<AuditRecord> {

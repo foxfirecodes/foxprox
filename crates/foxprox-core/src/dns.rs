@@ -154,6 +154,38 @@ pub fn parse_dns_query(wire: &[u8]) -> Result<DnsQuery, String> {
 }
 
 /// Synthesize a minimal DNS A response for a query parsed by [`parse_dns_query`].
+pub fn a_response_addresses(wire: &[u8]) -> Result<Vec<Ipv4Addr>, String> {
+    if wire.len() < 12 {
+        return Err("DNS packet too short".to_string());
+    }
+    let ancount = u16::from_be_bytes([wire[6], wire[7]]) as usize;
+    let mut cursor = dns_question_end(wire)?;
+    let mut addresses = Vec::new();
+    for _ in 0..ancount {
+        skip_dns_name(wire, &mut cursor)?;
+        if cursor + 10 > wire.len() {
+            return Err("DNS answer header truncated".to_string());
+        }
+        let rr_type = u16::from_be_bytes([wire[cursor], wire[cursor + 1]]);
+        let rr_class = u16::from_be_bytes([wire[cursor + 2], wire[cursor + 3]]);
+        let rdlen = u16::from_be_bytes([wire[cursor + 8], wire[cursor + 9]]) as usize;
+        cursor += 10;
+        if cursor + rdlen > wire.len() {
+            return Err("DNS answer data truncated".to_string());
+        }
+        if rr_type == 1 && rr_class == 1 && rdlen == 4 {
+            addresses.push(Ipv4Addr::new(
+                wire[cursor],
+                wire[cursor + 1],
+                wire[cursor + 2],
+                wire[cursor + 3],
+            ));
+        }
+        cursor += rdlen;
+    }
+    Ok(addresses)
+}
+
 pub fn synthesize_a_response(
     query_wire: &[u8],
     answer: Ipv4Addr,
@@ -179,6 +211,50 @@ pub fn synthesize_a_response(
     out.extend_from_slice(&[0x00, 0x04]);
     out.extend_from_slice(&answer.octets());
     Ok(out)
+}
+
+fn skip_dns_name(wire: &[u8], cursor: &mut usize) -> Result<(), String> {
+    let mut jumped = false;
+    let mut offset = *cursor;
+    let mut steps = 0;
+    loop {
+        if steps > wire.len() {
+            return Err("DNS name compression loop".to_string());
+        }
+        let Some(&len) = wire.get(offset) else {
+            return Err("DNS name truncated".to_string());
+        };
+        if len & 0xc0 == 0xc0 {
+            if offset + 1 >= wire.len() {
+                return Err("DNS compressed name pointer truncated".to_string());
+            }
+            if !jumped {
+                *cursor = offset + 2;
+            }
+            let pointer = (((len & 0x3f) as usize) << 8) | wire[offset + 1] as usize;
+            if pointer >= wire.len() {
+                return Err("DNS compressed name pointer out of bounds".to_string());
+            }
+            offset = pointer;
+            jumped = true;
+        } else if len == 0 {
+            if !jumped {
+                *cursor = offset + 1;
+            }
+            return Ok(());
+        } else if len & 0xc0 != 0 {
+            return Err("unsupported DNS label type".to_string());
+        } else {
+            offset += 1 + len as usize;
+            if offset > wire.len() {
+                return Err("DNS label truncated".to_string());
+            }
+            if !jumped {
+                *cursor = offset;
+            }
+        }
+        steps += 1;
+    }
 }
 
 fn dns_question_end(wire: &[u8]) -> Result<usize, String> {
@@ -256,6 +332,10 @@ mod tests {
         assert_eq!(&response[..2], &query[..2]);
         assert_eq!(&response[2..4], &[0x81, 0x80]);
         assert!(response.ends_with(&[203, 0, 113, 77]));
+        assert_eq!(
+            a_response_addresses(&response).unwrap(),
+            vec![Ipv4Addr::new(203, 0, 113, 77)]
+        );
     }
 
     #[test]

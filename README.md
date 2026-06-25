@@ -4,6 +4,35 @@ a WIP TUN device transparent network proxy/broker for policy-based sandboxing, p
 
 inspired by [passt/pasta](https://passt.top/passt/about/) and [slirp4netns](https://github.com/rootless-containers/slirp4netns)
 
+## Usable alpha sandbox prototype
+
+Build both binaries, then run an arbitrary command in a bwrap network namespace with a host-side foxprox broker owning the handed-off TUN fd:
+
+```sh
+cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-cli --bin foxprox-lab
+
+target/debug/foxprox-lab sandbox \
+  --allow-all \
+  --proxy-env \
+  --timeout-secs 300 \
+  -- \
+  /usr/bin/python3 -c 'import socket; print(socket.gethostbyname("example.com"))'
+```
+
+The alpha launcher starts `bwrap --unshare-net`, runs `foxproxsetup` with temporary network setup capabilities, receives the TUN fd over a Unix handoff socket, drops setup privileges before target exec, and runs one long-lived broker loop until the target exits. Transparent TUN traffic, broker DNS, ICMP ping, UDP, QUIC candidates, transparent TCP/smoltcp byte bridging, HTTP/SOCKS proxy traffic, shared policy, host egress, and JSON-lines audit are wired through the prototype path.
+
+Useful alpha options:
+
+* `--allow-all` enables an initial permissive network policy for prototype use; omit it for deny-by-default.
+* `--allow-ping` enables ICMP echo without enabling all traffic.
+* `--dns-answer host=ipv4` adds a broker-local DNS answer and attribution entry.
+* `--upstream-dns ip:port` forwards broker DNS misses to an upstream resolver; by default the launcher uses the first host `/etc/resolv.conf` nameserver when available. Use `--no-upstream-dns` for deterministic local-only runs.
+* `--egress-map sandbox_ip=host_ip` maps sandbox-visible fixture IPs to host loopback/local addresses for tests.
+* `--proxy-env` injects `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` for apps that honor proxy variables; apps that ignore them still traverse transparent TUN.
+* `--audit-stdout` writes broker audit JSON lines to stdout instead of stderr.
+
+This is an alpha network sandboxing prototype, not a full sandbox profile manager: filesystem mounts, seccomp, Landlock, PID/IPC policy, and product configuration UX remain caller/runtime responsibilities.
+
 ## Harness lab
 
 The alpha harness is intentionally runnable without network namespace privileges for core behavior:

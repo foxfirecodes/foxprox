@@ -5,7 +5,7 @@ use crate::audit::{
     AttributionConfidence, AttributionSource, AuditRecord, BoundedAuditBuffer, Decision, EventKind,
     Frontend, Protocol,
 };
-use crate::dns::{parse_dns_query, synthesize_a_response, DnsCache};
+use crate::dns::{a_response_addresses, parse_dns_query, synthesize_a_response, DnsCache};
 use crate::egress::{EgressBackend, EgressRequest};
 use crate::origin::{
     parse_connect_request, parse_connect_target, parse_http_request, parse_socks5_connect_request,
@@ -450,6 +450,7 @@ pub struct TransparentDnsRuntime {
     pub dns_cache: DnsCache,
     pub now_tick: u64,
     pub ttl_ticks: u64,
+    pub upstream_dns: Option<SocketAddr>,
 }
 
 impl TransparentDnsRuntime {
@@ -460,7 +461,13 @@ impl TransparentDnsRuntime {
             dns_cache: DnsCache::new(),
             now_tick: 1,
             ttl_ticks: 60,
+            upstream_dns: None,
         }
+    }
+
+    pub fn with_upstream_dns(mut self, upstream_dns: SocketAddr) -> Self {
+        self.upstream_dns = Some(upstream_dns);
+        self
     }
 
     pub fn handle_ipv4_packet(
@@ -534,6 +541,18 @@ impl TransparentDnsRuntime {
             }
         };
         let Some(answer) = self.answers.get(&query.hostname).copied() else {
+            if let Some(upstream) = self.upstream_dns {
+                return self.forward_upstream_dns(
+                    &sandbox_id,
+                    packet,
+                    udp.payload,
+                    &query.hostname,
+                    query.query_type.as_str(),
+                    source,
+                    destination,
+                    upstream,
+                );
+            }
             self.audit.push(
                 AuditRecord::new(
                     EventKind::DnsQuery,
@@ -579,6 +598,83 @@ impl TransparentDnsRuntime {
             .with_metadata("query_type", query.query_type.as_str())
             .with_metadata("answer", answer.to_string()),
         );
+        Ok(Some(reply))
+    }
+
+    fn forward_upstream_dns(
+        &mut self,
+        sandbox_id: &str,
+        original_packet: &[u8],
+        wire_query: &[u8],
+        hostname: &str,
+        query_type: String,
+        source: SocketAddr,
+        destination: SocketAddr,
+        upstream: SocketAddr,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let mut record = AuditRecord::new(
+            EventKind::DnsQuery,
+            sandbox_id,
+            Decision::Allow,
+            "broker DNS query forwarded upstream",
+        )
+        .with_frontend(Frontend::Tun)
+        .with_protocol(Protocol::Dns)
+        .with_addresses(Some(source), Some(destination))
+        .with_hostname(
+            Some(hostname.to_string()),
+            AttributionSource::DnsCache,
+            AttributionConfidence::Medium,
+        )
+        .with_metadata("query_type", query_type)
+        .with_metadata("upstream", upstream.to_string());
+
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0")
+            .map_err(|err| format!("upstream DNS socket bind failed: {err}"))?;
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+            .map_err(|err| format!("upstream DNS timeout setup failed: {err}"))?;
+        match socket.send_to(wire_query, upstream) {
+            Ok(sent) => record.bytes_in = sent as u64,
+            Err(err) => {
+                record.decision = Decision::FailClosed;
+                record.reason = format!("upstream DNS send failed closed: {err}");
+                self.audit.push(record);
+                return Ok(None);
+            }
+        }
+        let mut response = [0_u8; 4096];
+        let received = match socket.recv_from(&mut response) {
+            Ok((received, _)) => received,
+            Err(err) => {
+                record.decision = Decision::FailClosed;
+                record.reason = format!("upstream DNS receive failed closed: {err}");
+                self.audit.push(record);
+                return Ok(None);
+            }
+        };
+        let response = &response[..received];
+        let addresses = a_response_addresses(response).unwrap_or_default();
+        if !addresses.is_empty() {
+            let ips = addresses
+                .iter()
+                .copied()
+                .map(IpAddr::V4)
+                .collect::<Vec<_>>();
+            self.dns_cache
+                .observe_response(hostname, ips, self.now_tick, self.ttl_ticks)?;
+            record = record.with_metadata(
+                "answers",
+                addresses
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+        record.bytes_out = received as u64;
+        let reply = synthesize_udp_reply(original_packet, response)?;
+        self.audit.push(record);
         Ok(Some(reply))
     }
 
