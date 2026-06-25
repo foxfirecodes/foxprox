@@ -7,7 +7,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use foxprox_core::{Endpoint, FlowKey, Protocol};
@@ -67,6 +67,7 @@ pub enum SmoltcpTcpBridgeSessionError {
     Adapter(SmoltcpAdapterError),
     Bridge(TcpBridgeError),
     Audit(foxprox_core::AuditError),
+    HostConnectFailed,
     InvalidLifecycle,
     TunWrite,
 }
@@ -189,6 +190,18 @@ impl SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>> {
         let mut flow_runtime = TcpFlowRuntime::new(components, bridge);
         flow_runtime.mark_opened(flow.clone())?;
         Ok((Self::new(adapter, flow_runtime), flow))
+    }
+
+    pub fn connect_allowed_host_session(
+        adapter: SmoltcpIpLoopback,
+        components: &foxprox_runtime::BrokerRuntimeComponents,
+        attempt: &TcpStackConnectAttempt,
+        host_address: SocketAddr,
+    ) -> Result<(Self, FlowKey), SmoltcpTcpBridgeSessionError> {
+        let host_stream = std::net::TcpStream::connect(host_address)
+            .map_err(|_| SmoltcpTcpBridgeSessionError::HostConnectFailed)?;
+        Self::from_allowed_connect(adapter, components, attempt, host_stream)
+            .map_err(SmoltcpTcpBridgeSessionError::Bridge)
     }
 
     pub fn pump_host_to_sandbox_once<W: Write>(
@@ -1316,6 +1329,65 @@ mod tests {
         assert_eq!(forwarded.flow, flow);
         assert_eq!(forwarded.bytes_forwarded, b"factory-open".len());
         assert_eq!(server.join().unwrap(), b"factory-open".to_vec());
+    }
+
+    #[test]
+    fn allowed_connect_factory_dials_real_loopback_host() {
+        let mut adapter = packet_pumped_adapter_with_unread_payload(b"dialed-host");
+        adapter.set_connect_report_mode(TcpConnectReportMode::AcceptedListenerSockets);
+        let mut rule = PolicyRule::allow("allow-dialed-session");
+        rule.protocol = Some(Protocol::Tcp);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = TcpStackRuntime::new(
+            adapter,
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("dialed-session").unwrap(),
+        );
+        let outcome = runtime.handle_next_connect(2).unwrap();
+        let (adapter, _, _) = runtime.into_parts();
+        let attempt = match outcome {
+            TcpStackOutcome::HostConnectOpened { attempt, .. } => attempt,
+            other => panic!("expected opened connect, got {other:?}"),
+        };
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = vec![0; b"dialed-host".len()];
+            stream.read_exact(&mut received).unwrap();
+            received
+        });
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("dialed-components").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let (mut session, flow) = SmoltcpTcpBridgeSession::connect_allowed_host_session(
+            adapter,
+            &components,
+            &attempt,
+            listen_addr,
+        )
+        .unwrap();
+
+        let forwarded = session.forward_sandbox_payload_once(8080, 64).unwrap();
+
+        assert_eq!(forwarded.flow, flow);
+        assert_eq!(forwarded.bytes_forwarded, b"dialed-host".len());
+        assert_eq!(server.join().unwrap(), b"dialed-host".to_vec());
     }
 
     #[test]

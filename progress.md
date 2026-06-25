@@ -1673,3 +1673,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: the host `TcpStream` is still caller-provided; dialing/resolution and live TUN loop ownership remain to be unified.
 - Exact next step: commit the allowed-connect session factory, then add an explicit stop-gap note or next slice for real host dialing once address resolution policy is ready.
+
+## 2026-06-22T22:43:45Z
+- Current objective: continue with explicit permission to add real host integration for allowed transparent TCP connects.
+- Git status summary: clean worktree after commit `b8c695b`.
+- Intended slice: add a fail-explicit host TCP dialing boundary for allowed `TcpStackConnectAttempt` values and verify it builds an open smoltcp bridge session only after policy has allowed the packet-pumped connect.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` using loopback TCP sockets only.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`, and `learnings.md` only if real dialing reveals a new invariant.
+- Remaining risks: this will dial loopback in tests and keep DNS/name resolution out of scope; continuous live TUN fd orchestration remains later work.
+- Exact next step: add a `connect_allowed_host_session` helper around `TcpStream::connect` plus a regression that policy-gated packet-pumped TCP reaches a real loopback host without caller-provided `TcpStream`.
+
+## 2026-06-25T02:59:10Z
+- Current objective: add real host TCP dialing boundary for allowed smoltcp connects.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 32 smoltcp adapter tests passed. `SmoltcpTcpBridgeSession::connect_allowed_host_session` now dials a real `SocketAddr`, converts connection failure into a typed session error, builds the open `StdTcpStreamBridge<Vec<u8>>` session, and the regression proves a policy-allowed packet-pumped connect forwards sandbox bytes to a real loopback host listener without a caller-provided `TcpStream`.
+- Commit hash when committed: pending.
+- Remaining risks: host address is still provided as an IP socket address; hostname resolution and DNS attribution decisions remain separate, and no live continuous TUN fd loop owns the full session yet.
+- Exact next step: commit real host dialing boundary, then add a higher-level allowed-connect orchestration helper that runs policy handling, real dialing, and session creation in one call.
