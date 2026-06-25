@@ -67,7 +67,7 @@ pub fn receive_fd(socket: &UnixStream) -> Result<OwnedFd, FdPassingError> {
         iov_base: byte.as_mut_ptr().cast(),
         iov_len: byte.len(),
     };
-    let mut control = vec![0_u8; cmsg_space(size_of::<RawFd>())];
+    let mut control = vec![0_u8; cmsg_space(2 * size_of::<RawFd>())];
     let mut msg = libc::msghdr {
         msg_name: std::ptr::null_mut(),
         msg_namelen: 0,
@@ -95,7 +95,12 @@ pub fn receive_fd(socket: &UnixStream) -> Result<OwnedFd, FdPassingError> {
         if (*header).cmsg_level != libc::SOL_SOCKET || (*header).cmsg_type != libc::SCM_RIGHTS {
             return Err(FdPassingError::MissingFd);
         }
+        if msg.msg_flags & libc::MSG_CTRUNC != 0 {
+            close_control_fds(header);
+            return Err(FdPassingError::WrongControlLength);
+        }
         if (*header).cmsg_len != cmsg_len(size_of::<RawFd>()) {
+            close_control_fds(header);
             return Err(FdPassingError::WrongControlLength);
         }
         let fd = *cmsg_data(header).cast::<RawFd>();
@@ -118,6 +123,18 @@ fn cmsg_len(len: usize) -> usize {
     cmsg_align(size_of::<libc::cmsghdr>()) + len
 }
 
+unsafe fn close_control_fds(header: *mut libc::cmsghdr) {
+    let payload_len = (*header).cmsg_len.saturating_sub(cmsg_len(0));
+    let fd_count = payload_len / size_of::<RawFd>();
+    let data = cmsg_data(header).cast::<RawFd>();
+    for index in 0..fd_count {
+        let fd = *data.add(index);
+        if fd >= 0 {
+            let _ = libc::close(fd);
+        }
+    }
+}
+
 unsafe fn cmsg_data(header: *mut libc::cmsghdr) -> *mut u8 {
     // SAFETY: caller ensures `header` points to a valid cmsghdr in a buffer at
     // least CMSG_LEN(payload) bytes long. Data starts after aligned cmsghdr.
@@ -131,6 +148,7 @@ unsafe fn cmsg_data(header: *mut libc::cmsghdr) -> *mut u8 {
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
+    use std::mem::size_of;
     use std::os::fd::AsRawFd;
 
     use super::*;
@@ -158,5 +176,53 @@ mod tests {
         left.write_all(b"x").unwrap();
 
         assert!(matches!(receive_fd(&right), Err(FdPassingError::MissingFd)));
+    }
+
+    #[test]
+    fn receiving_multiple_fds_fails_closed() {
+        let (left, right) = UnixStream::pair().unwrap();
+        let (fd_a, fd_b) = UnixStream::pair().unwrap();
+        send_two_fds(&left, fd_a.as_raw_fd(), fd_b.as_raw_fd()).unwrap();
+
+        assert_eq!(
+            receive_fd(&right).unwrap_err(),
+            FdPassingError::WrongControlLength
+        );
+    }
+
+    fn send_two_fds(socket: &UnixStream, fd_a: RawFd, fd_b: RawFd) -> io::Result<()> {
+        let byte = [0_u8; 1];
+        let iov = libc::iovec {
+            iov_base: byte.as_ptr().cast_mut().cast(),
+            iov_len: byte.len(),
+        };
+        let mut control = vec![0_u8; cmsg_space(2 * size_of::<RawFd>())];
+        // SAFETY: `control` is sized for two RawFd payloads and all cmsghdr
+        // fields are initialized before sendmsg reads the control message.
+        unsafe {
+            let header = control.as_mut_ptr().cast::<libc::cmsghdr>();
+            (*header).cmsg_level = libc::SOL_SOCKET;
+            (*header).cmsg_type = libc::SCM_RIGHTS;
+            (*header).cmsg_len = cmsg_len(2 * size_of::<RawFd>());
+            let data = cmsg_data(header).cast::<RawFd>();
+            *data = fd_a;
+            *data.add(1) = fd_b;
+        }
+        let msg = libc::msghdr {
+            msg_name: std::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: (&iov as *const libc::iovec).cast_mut(),
+            msg_iovlen: 1,
+            msg_control: control.as_mut_ptr().cast(),
+            msg_controllen: control.len(),
+            msg_flags: 0,
+        };
+        // SAFETY: `msg` points at valid iovec/control buffers for this call.
+        let rc = unsafe { libc::sendmsg(socket.as_raw_fd(), &msg, 0) };
+        if rc < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     }
 }

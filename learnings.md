@@ -285,3 +285,7 @@ A lightweight deterministic fuzz-smoke integration test can exercise packet, DNS
 ## 2026-06-21 - Real namespace DNS upstream tests need loopback up
 
 Inside `unshare -Urn`, binding a localhost upstream UDP resolver can fail with `AddrNotAvailable` until `ip link set lo up` has been run. DNS forwarding e2e tests should bring loopback up before binding `127.0.0.1` sockets.
+
+## 2026-06-21 - SCM_RIGHTS receivers should reject multi-fd payloads explicitly
+
+Receiving into a one-fd-sized control buffer is not enough to prove exact descriptor cardinality. Allocate enough space to detect extra descriptors, reject `MSG_CTRUNC`, validate `cmsg_len`, and close any received unexpected descriptors on error.

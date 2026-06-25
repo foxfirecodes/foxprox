@@ -1543,3 +1543,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * cache attribution becomes available only after a correlated allowed response.
 * Audit evidence: query and response audit events both carry `AuditDecision::Allow`; replay/mismatch fail-closed behavior remains covered by core DNS handler tests.
 * Residual risk: this is still test-loop orchestration; production runtime needs to package this path into supervised async/bounded broker tasks.
+
+## 2026-06-21 - Exact fd-handoff cardinality enforcement
+
+* Invariant under work: setup-helper fd handoff must accept exactly one explicit TUN fd and fail closed if the control message is missing, truncated, or contains extra descriptors.
+* Threat or failure mode addressed: accepting a truncated or multi-fd SCM_RIGHTS message could hide ambient descriptor confusion or leak unexpected capabilities across the setup boundary.
+* Planned verification: tighten `receive_fd` validation, add an exact-cardinality regression for two sent fds, run integration checks and full workspace checks.
+
+## 2026-06-21 - Exact fd-handoff cardinality enforcement results
+
+* Tests added/updated:
+  * `receive_fd` now allocates enough control space to observe accidental multi-fd handoffs, rejects `MSG_CTRUNC`, and rejects SCM_RIGHTS payload lengths other than exactly one `RawFd`.
+  * rejection path closes received extra descriptors before returning `WrongControlLength`.
+  * regression test sends two fds over one SCM_RIGHTS message and asserts fail-closed `WrongControlLength`.
+* Commands run:
+  * `cargo test -p foxprox-integrations --lib` and `cargo clippy -p foxprox-integrations --all-targets --all-features -- -D warnings` — passed.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: CLI 2 tests plus 2 ignored, core 161 unit tests plus 2 parser fuzz-smoke tests, device 3 tests plus 2 ignored, integrations 6 tests, net 2 tests plus 7 ignored, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * exactly one fd handoff remains allowed.
+  * missing fd and multi-fd handoffs fail closed before constructing `OwnedFd` for the caller.
+* Audit evidence: fd handoff remains a low-level integration primitive; lifecycle/error audit should be emitted by the launcher/runtime around this error.
+* Residual risk: sender identity/credential verification is not implemented yet; socket-path control channel should remain private to the broker-created directory.
