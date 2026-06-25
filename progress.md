@@ -1564,3 +1564,24 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * missing fd and multi-fd handoffs fail closed before constructing `OwnedFd` for the caller.
 * Audit evidence: fd handoff remains a low-level integration primitive; lifecycle/error audit should be emitted by the launcher/runtime around this error.
 * Residual risk: sender identity/credential verification is not implemented yet; socket-path control channel should remain private to the broker-created directory.
+
+## 2026-06-21 - Setup control-socket peer credential primitive
+
+* Invariant under work: the broker-side setup control socket should be able to authenticate the connecting helper before accepting a TUN fd.
+* Threat or failure mode addressed: a filesystem socket path proves possession of the private path, but without peer credentials a same-host process that reaches the socket could impersonate the helper and send an unexpected fd.
+* Planned verification: add Linux `SO_PEERCRED` helper with same-UID validation, unit tests over `UnixStream::pair`, integration checks, and full workspace checks.
+
+## 2026-06-21 - Setup control-socket peer credential primitive results
+
+* Tests added/updated:
+  * `peer_credentials` queries Linux `SO_PEERCRED` for a Unix control socket peer.
+  * `validate_peer_uid` returns credentials only when the peer UID matches an expected broker-selected UID.
+  * tests validate current-UID success and unexpected-UID fail-closed behavior over `UnixStream::pair`.
+* Commands run:
+  * `cargo test -p foxprox-integrations --lib` and `cargo clippy -p foxprox-integrations --all-targets --all-features -- -D warnings` — passed.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: CLI 2 tests plus 2 ignored, core 161 unit tests plus 2 parser fuzz-smoke tests, device 3 tests plus 2 ignored, integrations 8 tests, net 2 tests plus 7 ignored, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * same-UID helper peers can be accepted.
+  * unexpected UID is rejected with structured `UnexpectedUid` metadata before fd receipt policy would trust the connection.
+* Audit evidence: this primitive returns structured error data for future launcher lifecycle/broker-error audit.
+* Residual risk: full launcher still needs to call this primitive on accepted control-socket connections and include the result in lifecycle/error audit.

@@ -11,6 +11,43 @@ pub enum FdPassingError {
     WrongControlLength,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PeerCredentials {
+    pub pid: libc::pid_t,
+    pub uid: libc::uid_t,
+    pub gid: libc::gid_t,
+}
+
+#[derive(Debug)]
+pub enum PeerCredentialError {
+    Query(io::Error),
+    UnexpectedUid {
+        expected: libc::uid_t,
+        actual: libc::uid_t,
+    },
+}
+
+impl PartialEq for PeerCredentialError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Query(_), Self::Query(_)) => true,
+            (
+                Self::UnexpectedUid {
+                    expected: expected_left,
+                    actual: actual_left,
+                },
+                Self::UnexpectedUid {
+                    expected: expected_right,
+                    actual: actual_right,
+                },
+            ) => expected_left == expected_right && actual_left == actual_right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PeerCredentialError {}
+
 impl PartialEq for FdPassingError {
     fn eq(&self, other: &Self) -> bool {
         matches!(
@@ -24,6 +61,55 @@ impl PartialEq for FdPassingError {
 }
 
 impl Eq for FdPassingError {}
+
+pub fn peer_credentials(socket: &UnixStream) -> Result<PeerCredentials, PeerCredentialError> {
+    let mut credentials = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `credentials` and `len` point to valid writable storage for
+    // SO_PEERCRED, and `socket` is an open Unix domain socket.
+    let rc = unsafe {
+        libc::getsockopt(
+            socket.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut credentials as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    if rc < 0 {
+        return Err(PeerCredentialError::Query(io::Error::last_os_error()));
+    }
+    if len != size_of::<libc::ucred>() as libc::socklen_t {
+        return Err(PeerCredentialError::Query(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected SO_PEERCRED length",
+        )));
+    }
+    Ok(PeerCredentials {
+        pid: credentials.pid,
+        uid: credentials.uid,
+        gid: credentials.gid,
+    })
+}
+
+pub fn validate_peer_uid(
+    socket: &UnixStream,
+    expected_uid: libc::uid_t,
+) -> Result<PeerCredentials, PeerCredentialError> {
+    let credentials = peer_credentials(socket)?;
+    if credentials.uid == expected_uid {
+        Ok(credentials)
+    } else {
+        Err(PeerCredentialError::UnexpectedUid {
+            expected: expected_uid,
+            actual: credentials.uid,
+        })
+    }
+}
 
 pub fn send_fd(socket: &UnixStream, fd: RawFd) -> Result<(), FdPassingError> {
     let byte = [0_u8; 1];
@@ -187,6 +273,37 @@ mod tests {
         assert_eq!(
             receive_fd(&right).unwrap_err(),
             FdPassingError::WrongControlLength
+        );
+    }
+
+    #[test]
+    fn peer_credentials_validate_expected_uid() {
+        let (left, _) = UnixStream::pair().unwrap();
+        // SAFETY: geteuid has no preconditions and does not mutate Rust-owned memory.
+        let uid = unsafe { libc::geteuid() };
+
+        let credentials = validate_peer_uid(&left, uid).unwrap();
+        assert_eq!(credentials.uid, uid);
+        assert!(credentials.pid > 0);
+    }
+
+    #[test]
+    fn peer_credentials_reject_unexpected_uid() {
+        let (left, _) = UnixStream::pair().unwrap();
+        // SAFETY: geteuid has no preconditions and does not mutate Rust-owned memory.
+        let uid = unsafe { libc::geteuid() };
+        let unexpected = if uid == libc::uid_t::MAX {
+            uid - 1
+        } else {
+            uid + 1
+        };
+
+        assert_eq!(
+            validate_peer_uid(&left, unexpected).unwrap_err(),
+            PeerCredentialError::UnexpectedUid {
+                expected: unexpected,
+                actual: uid,
+            }
         );
     }
 

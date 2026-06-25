@@ -289,3 +289,7 @@ Inside `unshare -Urn`, binding a localhost upstream UDP resolver can fail with `
 ## 2026-06-21 - SCM_RIGHTS receivers should reject multi-fd payloads explicitly
 
 Receiving into a one-fd-sized control buffer is not enough to prove exact descriptor cardinality. Allocate enough space to detect extra descriptors, reject `MSG_CTRUNC`, validate `cmsg_len`, and close any received unexpected descriptors on error.
+
+## 2026-06-21 - Control socket paths should be paired with SO_PEERCRED
+
+A private Unix socket path is a useful rendezvous channel, but broker-side setup handoff can be made stricter by checking `SO_PEERCRED` and rejecting unexpected UIDs before trusting SCM_RIGHTS payloads.
