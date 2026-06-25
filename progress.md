@@ -1472,5 +1472,5 @@
   - `cargo tree -p foxprox-dns` — DNS remains core-only.
   - `cargo tree -p foxprox-policy` — policy remains core-only.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: cc1b91f.
 - Remaining boundary risks: wiring the cache into long-running stack runtime state remains.
