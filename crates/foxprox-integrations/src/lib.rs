@@ -11,6 +11,16 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 use std::process::Command;
 
+#[cfg(unix)]
+use std::io::{IoSlice, IoSliceMut};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, RawFd};
+#[cfg(unix)]
+use std::os::unix::net::UnixDatagram;
+
+#[cfg(unix)]
+use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
+
 use foxprox_core::SandboxId;
 
 /// Backend-neutral network setup request.
@@ -99,6 +109,51 @@ pub struct TunSetupCommandPlan {
 pub struct TunSetupFileWrite {
     pub path: PathBuf,
     pub contents: String,
+}
+
+/// Send an already-open TUN fd across a Unix datagram control socket using
+/// SCM_RIGHTS. The helper keeps setup details here; the broker device layer only
+/// receives the returned raw fd and adopts it through its preopened-device API.
+#[cfg(unix)]
+pub fn send_tun_fd(socket: &UnixDatagram, fd: RawFd) -> Result<(), IntegrationError> {
+    let marker = [b'F'];
+    let iov = [IoSlice::new(&marker)];
+    let fds = [fd];
+    let cmsgs = [ControlMessage::ScmRights(&fds)];
+    sendmsg::<()>(socket.as_raw_fd(), &iov, &cmsgs, MsgFlags::empty(), None)
+        .map(|_| ())
+        .map_err(|error| IntegrationError::FdHandoffFailed(error.to_string()))
+}
+
+/// Receive one TUN fd from a Unix datagram control socket using SCM_RIGHTS.
+///
+/// The returned fd is owned by the caller, which should either close it or hand
+/// it to `foxprox-device` for adoption.
+#[cfg(unix)]
+pub fn recv_tun_fd(socket: &UnixDatagram) -> Result<RawFd, IntegrationError> {
+    let mut marker = [0_u8; 1];
+    let mut iov = [IoSliceMut::new(&mut marker)];
+    let mut cmsgspace = nix::cmsg_space!([RawFd; 1]);
+    let msg = recvmsg::<()>(
+        socket.as_raw_fd(),
+        &mut iov,
+        Some(&mut cmsgspace),
+        MsgFlags::empty(),
+    )
+    .map_err(|error| IntegrationError::FdHandoffFailed(error.to_string()))?;
+    for cmsg in msg
+        .cmsgs()
+        .map_err(|error| IntegrationError::FdHandoffFailed(error.to_string()))?
+    {
+        if let ControlMessageOwned::ScmRights(fds) = cmsg {
+            if let Some(fd) = fds.first().copied() {
+                return Ok(fd);
+            }
+        }
+    }
+    Err(IntegrationError::FdHandoffFailed(
+        "missing SCM_RIGHTS file descriptor".into(),
+    ))
 }
 
 /// Linux `ip`-based TUN setup planner for the privileged `foxproxsetup` helper.
@@ -366,6 +421,7 @@ pub enum IntegrationError {
     FileWriteFailed { path: PathBuf, reason: String },
     PrivilegeDropFailed(String),
     ExecFailed { program: String, reason: String },
+    FdHandoffFailed(String),
 }
 
 impl fmt::Display for IntegrationError {
@@ -386,6 +442,7 @@ impl fmt::Display for IntegrationError {
             Self::ExecFailed { program, reason } => {
                 write!(f, "target exec {program} failed: {reason}")
             }
+            Self::FdHandoffFailed(reason) => write!(f, "fd handoff failed: {reason}"),
         }
     }
 }
@@ -552,6 +609,22 @@ mod tests {
             .iter()
             .any(|operation| operation.starts_with("cmd:ip link set")));
         assert!(drop_index < exec_index);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_fd_handoff_transfers_preopened_tun_fd() {
+        use std::fs::File;
+        use std::os::fd::AsRawFd;
+
+        let (helper, broker) = UnixDatagram::pair().unwrap();
+        let file = File::open("/dev/null").unwrap();
+
+        send_tun_fd(&helper, file.as_raw_fd()).unwrap();
+        let received = recv_tun_fd(&broker).unwrap();
+
+        assert!(received >= 0);
+        nix::unistd::close(received).unwrap();
     }
 
     #[test]

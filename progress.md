@@ -1689,3 +1689,26 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 8c7bf27.
 - Remaining boundary risks: cross-sandbox weighted fairness and byte-rate accounting remain.
+
+## 2026-06-22 — Boundary objective: Unix fd handoff channel
+
+- Boundary under work: setup-helper TUN fd transfer from sandbox helper to host broker.
+- Allowed dependency direction: `foxprox-integrations` owns Unix/SCM_RIGHTS handoff mechanics; `foxprox-device` only adopts an already-received raw fd; runtime/policy/audit never see Unix socket control messages or fd-passing details.
+- Dependency-risk assessment: raw fd adoption exists but without a real handoff channel the bwrap-compatible alpha setup path is incomplete. SCM_RIGHTS must stay in integrations so backend details do not leak into device/runtime contracts.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for integrations/device/audit.
+- Observed results: added Unix `send_tun_fd`/`recv_tun_fd` SCM_RIGHTS helpers in `foxprox-integrations` using safe `nix` socket control-message APIs. Added an integration test that passes a preopened fd over a Unix datagram pair, proving setup helper fd transfer without exposing SCM_RIGHTS details to device/runtime/policy/audit. All verification passed.
+- Changed files:
+  - `Cargo.lock`
+  - `crates/foxprox-integrations/Cargo.toml`
+  - `crates/foxprox-integrations/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 146 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-integrations` — Unix fd handoff dependencies are isolated to integrations.
+  - `cargo tree -p foxprox-device` — device remains dependency-free.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: opening the real TUN fd with ioctl and end-to-end namespace smoke tests remain.

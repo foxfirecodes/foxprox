@@ -393,3 +393,8 @@
 
 - Flow-count budgets alone are not fair: if maintenance always starts at the first retained flow, later flows can starve under small budgets. Store read cursors in runtime bridge tables and advance them by visited flow count.
 - Keep cursor state independent from egress/adapter readiness. Runtime can rotate normalized bridge keys while egress and stack adapters remain opaque handles.
+
+## 2026-06-22 — Unix fd handoff boundary
+
+- SCM_RIGHTS belongs in `foxprox-integrations`, not `foxprox-device`: integrations owns setup-helper control sockets, while device only adopts an already-received fd.
+- Use safe `nix` socket control-message wrappers for fd passing so no unsafe code is added to integrations.
