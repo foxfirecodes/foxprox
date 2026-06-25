@@ -1757,3 +1757,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: host-to-sandbox reverse pumping is still a separate call rather than one duplex event-loop tick; live TUN fd smoke remains blocked by missing `CAP_NET_ADMIN` in this environment.
 - Exact next step: commit subsequent TUN packet forwarding, then add a single bidirectional session tick that combines optional sandbox packet ingestion with host-read-to-TUN packet emission.
+
+## 2026-06-25T03:08:15Z
+- Current objective: continue after subsequent TUN packet forwarding by composing a bidirectional session tick.
+- Git status summary: clean worktree after commit `55f3b32`.
+- Intended slice: add one session method that ingests one sandbox/TUN packet, forwards any sandbox payload to host, then reads available host bytes, injects them into smoltcp, and drains sandbox-bound packets to a TUN-like writer.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with in-memory packet IO and loopback host sockets.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: still synchronous one-tick behavior; a production loop must schedule repeated ticks and handle WouldBlock without blocking.
+- Exact next step: add bidirectional tick outcome/method and a request-response regression.
+
+## 2026-06-25T03:10:05Z
+- Current objective: add one bidirectional transparent TCP session tick.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 37 smoltcp adapter tests passed. `pump_bidirectional_once` now composes sandbox packet ingestion, smoltcp outbound draining, sandbox payload forwarding to host, host read, host-byte injection back into smoltcp, and sandbox-bound packet draining; regression proves raw data after an opened SYN session reaches a real host listener and a real host reply is emitted as a TCP/IP packet to the TUN-like writer.
+- Commit hash when committed: pending.
+- Remaining risks: host streams are still blocking by default when created via `connect_next_allowed_host_session`; production loop should use nonblocking host streams to avoid stalls.
+- Exact next step: commit bidirectional tick, then make real host dialing set host streams nonblocking and update tick tests to handle `WouldBlock` explicitly.

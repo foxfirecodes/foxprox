@@ -94,6 +94,12 @@ pub struct SmoltcpHostToSandboxPumpOutcome {
     pub outbound_bytes: usize,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SmoltcpBidirectionalTickOutcome {
+    pub sandbox: SmoltcpSandboxPacketStepOutcome,
+    pub host: SmoltcpHostToSandboxPumpOutcome,
+}
+
 pub struct SmoltcpTcpBridgeSession<B> {
     adapter: SmoltcpIpLoopback,
     flow_runtime: TcpFlowRuntime<B>,
@@ -351,6 +357,30 @@ impl SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>> {
             outbound_packets,
             outbound_bytes,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn pump_bidirectional_once<R: Read, W: Write>(
+        &mut self,
+        reader: &mut R,
+        writer: &mut W,
+        buffer: &mut [u8],
+        listener_port: u16,
+        max_sandbox_payload_bytes: usize,
+        flow: &FlowKey,
+        max_host_bytes: usize,
+        now_millis: i64,
+    ) -> Result<SmoltcpBidirectionalTickOutcome, SmoltcpTcpBridgeSessionError> {
+        let sandbox = self.pump_tun_packet_and_forward_sandbox_payload(
+            reader,
+            writer,
+            buffer,
+            listener_port,
+            max_sandbox_payload_bytes,
+            now_millis,
+        )?;
+        let host = self.pump_host_to_sandbox_once(flow, max_host_bytes, writer, now_millis + 1)?;
+        Ok(SmoltcpBidirectionalTickOutcome { sandbox, host })
     }
 }
 
@@ -856,6 +886,22 @@ mod tests {
     #[derive(Default)]
     struct FakeBridge {
         host_writes: Vec<Vec<u8>>,
+    }
+
+    #[derive(Default)]
+    struct RecordingWriter {
+        writes: Vec<Vec<u8>>,
+    }
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.writes.push(buf.to_vec());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     impl TcpStreamBridge for FakeBridge {
@@ -1798,6 +1844,132 @@ mod tests {
             })
         );
         assert_eq!(server.join().unwrap(), b"step-data".to_vec());
+    }
+
+    #[test]
+    fn bidirectional_tick_forwards_sandbox_data_and_emits_host_reply() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.set_packet_loopback(false);
+        adapter.set_connect_report_mode(TcpConnectReportMode::AcceptedListenerSockets);
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        let source = Ipv4Addr::new(10, 66, 0, 2);
+        let destination = Ipv4Addr::new(10, 66, 0, 1);
+        let syn = ipv4_tcp_syn_packet(source, destination, 50001, 8080, 7);
+        let mut rule = PolicyRule::allow("allow-bidi-session");
+        rule.protocol = Some(Protocol::Tcp);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = vec![0; b"tick-data".len()];
+            stream.read_exact(&mut received).unwrap();
+            stream.write_all(b"tick-reply").unwrap();
+            received
+        });
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("bidi-components").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let mut reader = Cursor::new(syn);
+        let mut writer = Vec::new();
+        let mut buffer = vec![0; 1500];
+        let (mut session, flow, _, _) =
+            SmoltcpTcpBridgeSession::pump_tun_and_open_next_allowed_host_session(
+                adapter,
+                &mut reader,
+                &mut writer,
+                &mut buffer,
+                &components,
+                &mut kernel,
+                SandboxId::new("bidi-session").unwrap(),
+                listen_addr,
+                1,
+                6,
+            )
+            .unwrap();
+        let syn_ack = match parse_ip_packet(&writer).unwrap() {
+            ParsedIpPacket::Tcpv4Segment(segment) => segment,
+            other => panic!("expected SYN/ACK, got {other:?}"),
+        };
+        let server_ack = syn_ack.sequence + 1;
+        writer.clear();
+        let ack = ipv4_tcp_packet(source, destination, 50001, 8080, 8, server_ack, 0x10, &[]);
+        session
+            .pump_tun_packet_and_forward_sandbox_payload(
+                &mut Cursor::new(ack),
+                &mut writer,
+                &mut buffer,
+                8080,
+                64,
+                2,
+            )
+            .unwrap();
+        let data = ipv4_tcp_packet(
+            source,
+            destination,
+            50001,
+            8080,
+            8,
+            server_ack,
+            0x18,
+            b"tick-data",
+        );
+        let mut recording_writer = RecordingWriter::default();
+
+        let outcome = session
+            .pump_bidirectional_once(
+                &mut Cursor::new(data),
+                &mut recording_writer,
+                &mut buffer,
+                8080,
+                64,
+                &flow,
+                64,
+                3,
+            )
+            .unwrap();
+
+        assert_eq!(server.join().unwrap(), b"tick-data".to_vec());
+        assert_eq!(
+            outcome.sandbox.forwarded,
+            Some(SmoltcpTcpBridgeSessionOutcome {
+                flow,
+                bytes_forwarded: b"tick-data".len()
+            })
+        );
+        assert_eq!(
+            outcome.host.host_read,
+            TcpHostReadOutcome::Bytes {
+                count: b"tick-reply".len()
+            }
+        );
+        assert!(recording_writer.writes.iter().any(|packet| {
+            matches!(
+                parse_ip_packet(packet),
+                Ok(ParsedIpPacket::Tcpv4Segment(segment)) if segment.payload == b"tick-reply"
+            )
+        }));
     }
 
     #[test]
