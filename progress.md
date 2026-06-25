@@ -5374,3 +5374,37 @@ Commit: 8debeca
 
 ### Remaining alpha gaps
 - Direct launcher command validation is now covered for one mapped TCP request/response. The remaining `docs/initial-impl.md` gaps are still broader: transparent destination mapping, multi-flow/long-running TCP forwarding, UDP response routing, DNS/proxy listener orchestration in the same launcher, cleanup/lifecycle audit hardening, and curl/DNS/proxy production E2Es.
+
+## 2026-06-25 — Bridge real bwrap UDP datagrams to host egress
+
+Commit: e51880f
+
+### Scope
+- Continued `docs/initial-impl.md` alpha completion for Milestone 4 UDP forwarding proof and real sandbox usability.
+
+### Implementation
+- Added `foxprox_stack::UdpDatagramExchange`, `UdpExchangeError`, and `UdpDatagramBridgeEvidence`.
+- Added `SmoltcpTunBridge::bridge_next_udp_datagram_to_egress(...)` for IPv4 UDP packets read from the received TUN fd.
+  - It parses/audits the inbound UDP packet, evaluates shared policy, forwards the UDP payload through a host egress exchange, synthesizes an IPv4 UDP response packet with reversed endpoints, audits `to_sandbox` write-back, and writes the response to the TUN device.
+  - Unsupported/malformed/read/write/egress failures remain structured fail-closed evidence.
+- Added `BlockingUdpExchange` and `BlockingMappedUdpExchange` host socket implementations.
+  - `BlockingUdpExchange` sends to the packet destination.
+  - `BlockingMappedUdpExchange` supports current alpha launcher mapping from sandbox-visible destination to a real host socket endpoint.
+- Added `foxprox_egress::ReceivedTunUdpExchangeSession` and `run_received_tun_fd_udp_exchange_and_drain(...)`, mirroring the TCP received-fd runner with bounded attempts/cancellation/fan-in final drain.
+- Added user-facing `foxprox run-bwrap-udp-egress <config> <host-ip:port> -- <target...>`.
+  - It validates config, starts bwrap/`foxproxsetup`, receives the TUN fd with bounded accept/read timeouts, runs the UDP received-fd host egress exchange, drains audit JSON lines, waits for target exit, and exits nonzero on failure.
+- Added tests:
+  - stack unit `udp_exchange_bridge_sends_host_response_back_to_tun` for packet synthesis/audit/write-back.
+  - ignored real bwrap E2E `bwrap_foxproxsetup_received_tun_fd_bridges_udp_datagram_to_host_socket` proving target UDP `ping` inside bwrap reaches a real host UDP socket and receives `pong` back through TUN.
+  - ignored real bwrap CLI E2E `foxprox_run_bwrap_udp_egress_command_bridges_target_datagram` proving the actual `foxprox run-bwrap-udp-egress` command works.
+
+### Validation
+- `cargo test -p foxprox-stack --all-targets --all-features udp_exchange -- --nocapture` — passed.
+- `cargo test -p foxprox-cli --test bwrap_setup_e2e --all-features -- --ignored --nocapture` — passed all six ignored real bwrap/TUN tests.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all six ignored real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed: 33 CLI unit tests + 1 ignored privileged CLI unit test, 6 ignored bwrap E2E tests in normal workspace runs, 161 core tests, 13 device tests + 1 ignored, 109 egress tests, and 17 stack tests.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining alpha gaps
+- Real UDP request/response over bwrap + received TUN is now proven, including CLI launcher validation. Remaining `docs/initial-impl.md` gaps are: transparent destination mapping/config model instead of explicit mapped endpoints, long-running multi-flow TCP/UDP sessions, DNS service over the TUN path and DNS cache integration in the launcher, explicit HTTP/SOCKS proxy lifecycle in the launcher, cleanup/lifecycle audit hardening, and curl/DNS/proxy production E2Es.
