@@ -1687,5 +1687,5 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-runtime` — fairness remains runtime-owned.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 8c7bf27.
 - Remaining boundary risks: cross-sandbox weighted fairness and byte-rate accounting remain.
