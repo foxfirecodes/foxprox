@@ -10,6 +10,10 @@ use std::fmt;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
 
+#[cfg(target_os = "linux")]
+use std::fs::OpenOptions;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
 
@@ -159,6 +163,21 @@ impl PreopenedTunDevice<File> {
         Self::from_io(file, max_packet_bytes)
     }
 
+    /// Open and configure a Linux TUN device by name using `/dev/net/tun` and
+    /// `TUNSETIFF`. Linux-specific ioctl details stay inside the device crate;
+    /// callers receive only the safe packet-device wrapper.
+    #[cfg(target_os = "linux")]
+    pub fn open_linux_tun(name: &str, max_packet_bytes: usize) -> Result<Self, DeviceError> {
+        validate_tun_name(name)?;
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/net/tun")
+            .map_err(|error| DeviceError::TunOpenFailed(error.to_string()))?;
+        configure_linux_tun(file.as_raw_fd(), name)?;
+        Self::from_file(file, max_packet_bytes)
+    }
+
     /// Adopt an inherited/preopened Unix file descriptor as the broker TUN
     /// device endpoint.
     ///
@@ -172,6 +191,45 @@ impl PreopenedTunDevice<File> {
         let file = unsafe { File::from_raw_fd(fd) };
         Self::from_file(file, max_packet_bytes)
     }
+}
+
+#[cfg(target_os = "linux")]
+fn validate_tun_name(name: &str) -> Result<(), DeviceError> {
+    if name.is_empty() || name.len() >= libc::IFNAMSIZ || name.as_bytes().contains(&0) {
+        return Err(DeviceError::InvalidTunName);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn configure_linux_tun(fd: RawFd, name: &str) -> Result<(), DeviceError> {
+    const IFF_TUN: libc::c_short = 0x0001;
+    const IFF_NO_PI: libc::c_short = 0x1000;
+    const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
+
+    #[repr(C)]
+    struct IfReq {
+        name: [libc::c_char; libc::IFNAMSIZ],
+        flags: libc::c_short,
+        pad: [u8; 22],
+    }
+
+    let mut ifreq = IfReq {
+        name: [0; libc::IFNAMSIZ],
+        flags: IFF_TUN | IFF_NO_PI,
+        pad: [0; 22],
+    };
+    for (dst, src) in ifreq.name.iter_mut().zip(name.bytes()) {
+        *dst = src as libc::c_char;
+    }
+
+    let result = unsafe { libc::ioctl(fd, TUNSETIFF, &ifreq) };
+    if result < 0 {
+        return Err(DeviceError::TunConfigureFailed(
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    Ok(())
 }
 
 impl<Io: Read + Write> TryPacketDevice for BlockingPacketDevice<Io> {
@@ -206,6 +264,9 @@ pub enum DeviceError {
     EmptyRead,
     WouldBlock,
     InvalidMaxPacketBytes,
+    InvalidTunName,
+    TunOpenFailed(String),
+    TunConfigureFailed(String),
     PacketTooLarge { len: usize, max: usize },
     Io(String),
 }
@@ -219,6 +280,9 @@ impl fmt::Display for DeviceError {
             Self::InvalidMaxPacketBytes => {
                 f.write_str("max packet bytes must be greater than zero")
             }
+            Self::InvalidTunName => f.write_str("invalid TUN device name"),
+            Self::TunOpenFailed(error) => write!(f, "failed to open /dev/net/tun: {error}"),
+            Self::TunConfigureFailed(error) => write!(f, "failed to configure TUN device: {error}"),
             Self::PacketTooLarge { len, max } => {
                 write!(f, "device packet length {len} exceeds max {max}")
             }
@@ -272,6 +336,23 @@ mod tests {
         let packet = device.read_packet().unwrap();
 
         assert_eq!(packet.bytes(), &[0x45, 0, 0, 20]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_tun_open_rejects_invalid_names_before_ioctl() {
+        assert_eq!(
+            PreopenedTunDevice::open_linux_tun("", DEFAULT_ALPHA_MTU).unwrap_err(),
+            DeviceError::InvalidTunName
+        );
+        assert_eq!(
+            PreopenedTunDevice::open_linux_tun("bad\0name", DEFAULT_ALPHA_MTU).unwrap_err(),
+            DeviceError::InvalidTunName
+        );
+        assert_eq!(
+            PreopenedTunDevice::open_linux_tun("abcdefghijklmnop", DEFAULT_ALPHA_MTU).unwrap_err(),
+            DeviceError::InvalidTunName
+        );
     }
 
     #[test]

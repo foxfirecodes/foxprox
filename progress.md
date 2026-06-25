@@ -1712,3 +1712,26 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 9ab4ea3.
 - Remaining boundary risks: opening the real TUN fd with ioctl and end-to-end namespace smoke tests remain.
+
+## 2026-06-22 — Boundary objective: Linux TUN open/ioctl device boundary
+
+- Boundary under work: actual Linux `/dev/net/tun` fd creation for the packet device layer.
+- Allowed dependency direction: `foxprox-device` owns Linux TUN fd opening and ioctl configuration; integrations own namespace/helper execution and fd handoff; runtime consumes only `PacketDevice`/`TryPacketDevice`; policy/audit remain fd-free.
+- Dependency-risk assessment: setup plans and fd handoff are in place, but alpha TUN setup still needs a concrete device-owned open/configure function. The required unsafe ioctl must be tiny and isolated in the device crate.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for device/runtime/audit.
+- Observed results: added Linux-only `PreopenedTunDevice<File>::open_linux_tun`, which opens `/dev/net/tun`, configures `IFF_TUN | IFF_NO_PI` with `TUNSETIFF`, and returns the safe packet-device wrapper. Added pre-ioctl validation for invalid TUN names. All verification passed.
+- Changed files:
+  - `Cargo.lock`
+  - `crates/foxprox-device/Cargo.toml`
+  - `crates/foxprox-device/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 147 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-device` — Linux ioctl dependency is isolated to device.
+  - `cargo tree -p foxprox-runtime` — runtime still consumes device traits.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: privileged end-to-end namespace smoke tests remain.

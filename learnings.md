@@ -398,3 +398,8 @@
 
 - SCM_RIGHTS belongs in `foxprox-integrations`, not `foxprox-device`: integrations owns setup-helper control sockets, while device only adopts an already-received fd.
 - Use safe `nix` socket control-message wrappers for fd passing so no unsafe code is added to integrations.
+
+## 2026-06-22 — Linux TUN ioctl boundary
+
+- The only Linux TUN ioctl in alpha should live in `foxprox-device::PreopenedTunDevice<File>::open_linux_tun`; runtime still accepts just packet device traits.
+- Validate TUN names before opening `/dev/net/tun` or issuing ioctl so malformed setup-helper input fails before privileged kernel calls.
