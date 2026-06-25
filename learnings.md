@@ -312,3 +312,7 @@ The `bwrap-tcp-once` command emits only generated audit JSON lines on stdout and
 ## 2026-06-22 — deterministic fuzz loops are useful alpha CI coverage
 
 For alpha robustness without introducing a separate fuzz runner, add deterministic pseudo-random byte sweeps inside normal unit tests. They catch panic/fail-closed regressions in packet, proxy, SOCKS, and TLS parsers while staying runnable under `cargo test --workspace`.
+
+## 2026-06-22 — live ICMP validation may need CAP_NET_RAW even after NET_ADMIN drop
+
+Inside bwrap user/network namespaces, Linux ping/datagram ICMP sockets may be denied despite working on the host. For ICMP write-back validation, grant `CAP_NET_RAW` to the target while still dropping `CAP_NET_ADMIN`; then use a raw ICMP socket with an explicit checksum.

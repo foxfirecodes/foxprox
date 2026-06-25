@@ -1676,3 +1676,18 @@
 - What failed or surprised the agent: no behavior failures; deterministic in-tree fuzz/property loops avoid adding a heavyweight fuzz harness while still guarding the parser and policy boundaries in normal CI.
 - What remains unproven: external coverage-guided fuzzing with libFuzzer/AFL. The alpha robustness requirement now has runnable in-tree fuzz/property coverage.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — live ICMP echo write-back through bwrap
+
+- Slice attempted: add live bwrap evidence for Milestone 1's packet write-back validation using ICMP echo rather than only UDP write-back.
+- Why next: packet-level ICMP synthesis and fd-stand-in TUN write-back were already covered, but `docs/initial-impl.md` specifically names sandbox ping/ICMP-style validation for packet write-back.
+- What changed: the ignored live bwrap smoke suite now includes `live_bwrap_icmp_echo_receives_synthetic_reply`. It runs a target Python process inside bwrap with temporary `CAP_NET_RAW`, sends an ICMP echo request to the broker-side TUN IP, has broker code process the live packet through `process_packet_once` with ICMP echo allowed, writes the synthesized ICMP echo reply back to TUN, and asserts the target receives the `hi` payload in an ICMP echo reply. `foxproxsetup` still drops `CAP_NET_ADMIN` before target exec; this smoke grants only raw ICMP capability for validation of the ICMP path.
+- Verification:
+  - Focused live check passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_bwrap_icmp -- --ignored --nocapture`.
+  - All explicit live smokes passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, now 6/6 including live ICMP, UDP, DNS, Python TCP, curl launcher, and CLI command curl.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed; the live ICMP smoke compiles and remains ignored by default.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: unprivileged ICMP datagram sockets are denied inside this bwrap namespace, even though they work on the host. Adding `CAP_NET_RAW` for the target validation and using a raw ICMP socket produced the expected live packet while preserving the required `CAP_NET_ADMIN` drop.
+- What remains unproven: no remaining Milestone 1 ICMP write-back gap; longer-running daemon behavior remains a future productionization concern rather than the narrow alpha validation proof.
+- Commit: this commit.
