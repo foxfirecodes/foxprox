@@ -1777,3 +1777,23 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 44f4c6e.
 - Remaining boundary risks: byte-rate limit windows remain.
+
+## 2026-06-22 — Boundary objective: per-sandbox byte-rate accounting
+
+- Boundary under work: per-sandbox byte budgets during bridge maintenance.
+- Allowed dependency direction: byte-rate accounting is runtime scheduler state; egress streams remain opaque and policy/audit consume only normalized events/audit records.
+- Dependency-risk assessment: flow-count fairness prevents slot starvation but does not bound bytes read for one sandbox in a tick. Byte caps should be enforced in runtime before data is enqueued to stack/device write-back.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/audit.
+- Observed results: extended `BridgeMaintenanceBudget` with per-sandbox TCP/UDP byte caps and enforced those caps before reading from retained host streams/flows. Added tests proving TCP and UDP reads are truncated to the per-sandbox byte budget before stack/device write-back. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 154 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — byte-rate accounting remains runtime-owned.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: wall-clock token-bucket refill policy remains future scheduler work.

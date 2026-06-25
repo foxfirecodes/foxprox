@@ -413,3 +413,8 @@
 
 - Round-robin cursors need per-sandbox caps to prevent one sandbox from consuming an entire maintenance tick when it owns many retained flows.
 - Keep fairness weights in `BridgeMaintenanceBudget`; lower-level egress handles and stack adapters should only expose read/write attempts, not scheduling policy.
+
+## 2026-06-22 — per-sandbox byte budgets
+
+- Per-sandbox fairness should include byte caps as well as flow caps; otherwise one sandbox can monopolize a tick with large reads even when flow counts are balanced.
+- Enforce byte caps by reducing each host-read max before data enters stack/device write-back, keeping accounting in runtime scheduler code.

@@ -203,6 +203,8 @@ pub struct BridgeMaintenanceBudget {
     pub max_udp_flows_per_tick: usize,
     pub max_tcp_streams_per_sandbox_per_tick: usize,
     pub max_udp_flows_per_sandbox_per_tick: usize,
+    pub max_tcp_bytes_per_sandbox_per_tick: usize,
+    pub max_udp_bytes_per_sandbox_per_tick: usize,
 }
 
 impl Default for BridgeMaintenanceBudget {
@@ -212,6 +214,8 @@ impl Default for BridgeMaintenanceBudget {
             max_udp_flows_per_tick: DEFAULT_MAX_UDP_BRIDGES_PER_TICK,
             max_tcp_streams_per_sandbox_per_tick: DEFAULT_MAX_TCP_BRIDGES_PER_SANDBOX_PER_TICK,
             max_udp_flows_per_sandbox_per_tick: DEFAULT_MAX_UDP_BRIDGES_PER_SANDBOX_PER_TICK,
+            max_tcp_bytes_per_sandbox_per_tick: usize::MAX,
+            max_udp_bytes_per_sandbox_per_tick: usize::MAX,
         }
     }
 }
@@ -394,6 +398,7 @@ where
         max_bytes_per_flow,
         max_flows,
         usize::MAX,
+        usize::MAX,
         now_millis,
     )
 }
@@ -404,6 +409,7 @@ fn flush_udp_bridge_reads_to_device_with_fairness<D, U>(
     max_bytes_per_flow: usize,
     max_flows: usize,
     max_flows_per_sandbox: usize,
+    max_bytes_per_sandbox: usize,
     now_millis: u64,
 ) -> Result<UdpBridgeReadOutcome, RuntimeError>
 where
@@ -423,6 +429,7 @@ where
     let mut selected = 0;
     let mut visited = 0;
     let mut per_sandbox = HashMap::<SandboxId, usize>::new();
+    let mut bytes_per_sandbox = HashMap::<SandboxId, usize>::new();
     while visited < flow_count && selected < max_flows {
         let key = keys[(start + visited) % flow_count].clone();
         visited += 1;
@@ -430,14 +437,23 @@ where
         if *sandbox_count >= max_flows_per_sandbox {
             continue;
         }
+        let sandbox_bytes = bytes_per_sandbox.entry(key.sandbox_id.clone()).or_default();
+        let remaining_bytes = max_bytes_per_sandbox.saturating_sub(*sandbox_bytes);
+        if remaining_bytes == 0 {
+            continue;
+        }
         *sandbox_count += 1;
         selected += 1;
         let Some(bridge) = bridges.flows.get_mut(&key) else {
             continue;
         };
-        match bridge.flow.recv_to_sandbox(max_bytes_per_flow) {
+        match bridge
+            .flow
+            .recv_to_sandbox(max_bytes_per_flow.min(remaining_bytes))
+        {
             Ok(bytes) if !bytes.is_empty() => {
                 bridge.last_activity_millis = now_millis;
+                *sandbox_bytes += bytes.len();
                 replies.push((key.clone(), bytes));
             }
             Ok(_) => {}
@@ -660,6 +676,7 @@ where
         step.max_tcp_read_bytes_per_stream,
         step.budget.max_tcp_streams_per_tick,
         step.budget.max_tcp_streams_per_sandbox_per_tick,
+        step.budget.max_tcp_bytes_per_sandbox_per_tick,
     )?;
     let udp = flush_udp_bridge_reads_to_device_with_fairness(
         device,
@@ -667,6 +684,7 @@ where
         step.max_udp_read_bytes_per_flow,
         step.budget.max_udp_flows_per_tick,
         step.budget.max_udp_flows_per_sandbox_per_tick,
+        step.budget.max_udp_bytes_per_sandbox_per_tick,
         step.now_millis,
     )?;
     let udp_flows_expired = step.udp_bridges.expire_idle(step.now_millis);
@@ -1268,6 +1286,7 @@ where
         max_bytes_per_stream,
         max_streams,
         usize::MAX,
+        usize::MAX,
     )
 }
 
@@ -1278,6 +1297,7 @@ fn flush_tcp_bridge_reads_to_stack_device_with_fairness<D, S, T>(
     max_bytes_per_stream: usize,
     max_streams: usize,
     max_streams_per_sandbox: usize,
+    max_bytes_per_sandbox: usize,
 ) -> Result<StackBridgeReadOutcome, RuntimeError>
 where
     D: PacketDevice,
@@ -1296,11 +1316,17 @@ where
     let mut selected = 0;
     let mut visited = 0;
     let mut per_sandbox = HashMap::<SandboxId, usize>::new();
+    let mut bytes_per_sandbox = HashMap::<SandboxId, usize>::new();
     while visited < stream_count && selected < max_streams {
         let key = keys[(start + visited) % stream_count].clone();
         visited += 1;
         let sandbox_count = per_sandbox.entry(key.sandbox_id.clone()).or_default();
         if *sandbox_count >= max_streams_per_sandbox {
+            continue;
+        }
+        let sandbox_bytes = bytes_per_sandbox.entry(key.sandbox_id.clone()).or_default();
+        let remaining_bytes = max_bytes_per_sandbox.saturating_sub(*sandbox_bytes);
+        if remaining_bytes == 0 {
             continue;
         }
         *sandbox_count += 1;
@@ -1310,10 +1336,11 @@ where
         };
         let bytes = bridge
             .stream
-            .read_to_sandbox(max_bytes_per_stream)
+            .read_to_sandbox(max_bytes_per_stream.min(remaining_bytes))
             .map_err(BrokerError::Egress)
             .map_err(RuntimeError::Broker)?;
         if !bytes.is_empty() {
+            *sandbox_bytes += bytes.len();
             reads.push((key, bytes));
         }
     }
@@ -2125,6 +2152,7 @@ mod tests {
             1024,
             2,
             1,
+            usize::MAX,
         )
         .unwrap();
 
@@ -2162,12 +2190,76 @@ mod tests {
             1024,
             2,
             1,
+            usize::MAX,
             20,
         )
         .unwrap();
 
         assert_eq!(outcome.udp_flows_read, 2);
         assert_eq!(outcome.outbound_packets_written, 2);
+    }
+
+    #[test]
+    fn tcp_bridge_read_budget_caps_bytes_per_sandbox_per_tick() {
+        let cursor = Cursor::new(Vec::new());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let mut bridges = StackTcpBridgeTable::default();
+        bridges.insert(
+            StackTcpFlowKey::new(
+                SandboxId::new("s1").unwrap(),
+                FrontendKind::Tun,
+                "10.0.0.2:50000".parse().unwrap(),
+                "203.0.113.10:80".parse().unwrap(),
+            ),
+            ReadableTcpStream::new(vec![b"abcdef".to_vec()].into()),
+        );
+        let mut adapter = ReadBackStackAdapter {
+            writes: Vec::new(),
+            outbound: Vec::new(),
+        };
+
+        let outcome = flush_tcp_bridge_reads_to_stack_device_with_fairness(
+            &mut device,
+            &mut adapter,
+            &mut bridges,
+            1024,
+            1,
+            1,
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.tcp_bytes_read_from_egress, 3);
+        assert_eq!(adapter.writes[0].bytes, b"abc".to_vec());
+    }
+
+    #[test]
+    fn udp_bridge_read_budget_caps_bytes_per_sandbox_per_tick() {
+        let cursor = Cursor::new(Vec::new());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let mut bridges = UdpBridgeTable::default();
+        bridges.insert(
+            UdpFlowKey {
+                sandbox_id: SandboxId::new("s1").unwrap(),
+                frontend: FrontendKind::Tun,
+                source: "10.0.0.2:50000".parse().unwrap(),
+                destination: "203.0.113.10:12345".parse().unwrap(),
+            },
+            ReadableUdpFlow::new(vec![b"abcdef".to_vec()].into()),
+        );
+
+        let outcome = flush_udp_bridge_reads_to_device_with_fairness(
+            &mut device,
+            &mut bridges,
+            1024,
+            1,
+            1,
+            3,
+            20,
+        )
+        .unwrap();
+
+        assert_eq!(outcome.udp_bytes_read_from_egress, 3);
     }
 
     #[test]
@@ -2218,6 +2310,8 @@ mod tests {
                     max_udp_flows_per_tick: 1,
                     max_tcp_streams_per_sandbox_per_tick: 1,
                     max_udp_flows_per_sandbox_per_tick: 1,
+                    max_tcp_bytes_per_sandbox_per_tick: usize::MAX,
+                    max_udp_bytes_per_sandbox_per_tick: usize::MAX,
                 },
                 now_millis: 20,
             },
