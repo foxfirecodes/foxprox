@@ -292,3 +292,7 @@ For real bwrap sessions, do not wait for the setup/target process immediately af
 ## 2026-06-22 — bwrap TCP smoke validates live-child setup orchestration
 
 A real bwrap target can be spawned with a broker listener, return a TUN fd via `spawn_setup_command_and_accept_fd`, and then block on TCP connect while the broker starts smoltcp processing. Wait for the child only after forwarding completes.
+
+## 2026-06-22 — keep bwrap network setup composable with external sandbox policy
+
+The network broker should not hardcode broad filesystem/mount decisions into `plan_bwrap_setup`. Let callers pass additional bwrap args before `foxproxsetup`; live smokes can explicitly add `--dev-bind / /`, while production sandbox runtimes can supply stricter mounts.

@@ -135,6 +135,7 @@ pub struct BwrapSetupConfig {
     pub target_argv: Vec<String>,
     pub proxy_environment: ProxyEnvironment,
     pub setup_helper_args: Option<SetupHelperArgs>,
+    pub extra_bwrap_args: Vec<String>,
 }
 
 impl BwrapSetupConfig {
@@ -149,6 +150,7 @@ impl BwrapSetupConfig {
             target_argv,
             proxy_environment: ProxyEnvironment::none(),
             setup_helper_args: None,
+            extra_bwrap_args: Vec::new(),
         }
     }
 
@@ -159,6 +161,11 @@ impl BwrapSetupConfig {
 
     pub fn with_proxy_environment(mut self, proxy_environment: ProxyEnvironment) -> Self {
         self.proxy_environment = proxy_environment;
+        self
+    }
+
+    pub fn with_extra_bwrap_args(mut self, extra_bwrap_args: Vec<String>) -> Self {
+        self.extra_bwrap_args = extra_bwrap_args;
         self
     }
 }
@@ -214,6 +221,7 @@ pub fn plan_bwrap_setup(config: &BwrapSetupConfig) -> Result<CommandPlan, Integr
         "/dev/net/tun".to_owned(),
         "/dev/net/tun".to_owned(),
     ];
+    args.extend(config.extra_bwrap_args.clone());
     config.proxy_environment.append_bwrap_env_args(&mut args);
     args.push(config.setup_program.display().to_string());
     if let Some(setup_helper_args) = &config.setup_helper_args {
@@ -1475,6 +1483,37 @@ os.close(fd)
                 "curl",
                 "http://example.com"
             ]));
+    }
+
+    #[test]
+    fn bwrap_plan_accepts_caller_supplied_sandbox_args_before_setup() {
+        let config = BwrapSetupConfig::new(
+            "bwrap",
+            "/usr/libexec/foxproxsetup",
+            vec!["python3".to_owned()],
+        )
+        .with_extra_bwrap_args(vec![
+            "--dev-bind".to_owned(),
+            "/".to_owned(),
+            "/".to_owned(),
+            "--ro-bind".to_owned(),
+            "/etc/ssl".to_owned(),
+            "/etc/ssl".to_owned(),
+        ]);
+
+        let argv = plan_bwrap_setup(&config).unwrap().argv();
+        let setup_index = argv
+            .iter()
+            .position(|arg| arg == "/usr/libexec/foxproxsetup")
+            .unwrap();
+        let pre_setup_args = &argv[..setup_index];
+
+        assert!(pre_setup_args
+            .windows(3)
+            .any(|window| window == ["--dev-bind", "/", "/"]));
+        assert!(pre_setup_args
+            .windows(3)
+            .any(|window| window == ["--ro-bind", "/etc/ssl", "/etc/ssl"]));
     }
 
     #[test]

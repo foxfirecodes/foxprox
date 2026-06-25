@@ -1572,3 +1572,26 @@
 - What failed or surprised the agent: no behavior failures; receiving the fd first and only then starting packet processing still works because the target's SYN waits in the TUN stream until the broker loop starts.
 - What remains unproven: packaging this into a user-facing long-running launcher command and supervising multi-connection sessions.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — production-shaped bwrap TCP once launcher slice
+
+- Slice attempted: move the live bwrap TCP smoke's orchestration into reusable CLI/runtime code that launches bwrap/`foxproxsetup`, accepts the TUN fd, runs one smoltcp TCP relay to a host stream, and waits for the target after forwarding.
+- Why next: live TCP forwarding is proven, and the live-child launcher seam is proven, but the actual broker-side TCP launch/relay behavior still lives mostly in an ignored test instead of product code.
+- Verification plan: add a `BwrapTcpOnceConfig`/`run_bwrap_tcp_once` helper in `foxprox-cli`, promote `foxprox-tcp` to a production dependency, refactor the ignored live TCP smoke to call the helper, then run focused live TCP, all live smokes, and workspace clippy/tests/fmt.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — production-shaped bwrap TCP once launcher
+
+- Slice attempted: move the live bwrap TCP smoke's orchestration into reusable CLI/runtime code that launches bwrap/`foxproxsetup`, accepts the TUN fd, runs one smoltcp TCP relay to a host stream, and waits for the target after forwarding.
+- Why next: live TCP forwarding was proven, and the live-child launcher seam was proven, but the broker-side TCP launch/relay behavior still lived mostly in an ignored test instead of product code.
+- What changed: `foxprox-cli` now promotes `foxprox-tcp` to a production dependency and exposes `BwrapTcpOnceConfig`, `BwrapTcpOnceSummary`, and `run_bwrap_tcp_once`. The helper binds the broker control socket, plans the bwrap/`foxproxsetup` command, accepts the received TUN fd, feeds packets into `SmoltcpTcpServer`, relays one sandbox payload to a host TCP stream, writes smoltcp responses back through TUN, and then waits for the target child. `foxprox-integrations::BwrapSetupConfig` now accepts caller-supplied extra bwrap args so the network broker integration can be composed with a separate sandbox/filesystem runtime instead of hardcoding those policy choices.
+- Verification:
+  - Focused integration checks passed: `cargo test -p foxprox-integrations bwrap_plan -- --nocapture`, including a new proof that caller-supplied sandbox args are inserted before `foxproxsetup`.
+  - Focused live TCP check passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_bwrap_tcp -- --ignored --nocapture`, with the ignored live TCP smoke now using `run_bwrap_tcp_once` instead of local orchestration.
+  - All explicit live smokes passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 17 integration tests and the ignored live smokes compiling by default.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; the missing abstraction was not smoltcp but the ownership/lifecycle seam that keeps the bwrap child alive while broker code relays the first TCP flow.
+- What remains unproven: a fully unbounded multi-connection TCP scheduler and a polished end-user sandbox CLI; the alpha evidence now has product-code launcher orchestration for the one-flow TCP proof.
+- Commit: this commit.

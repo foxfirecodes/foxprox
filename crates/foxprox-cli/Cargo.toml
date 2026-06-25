@@ -14,6 +14,7 @@ foxprox-core = { path = "../foxprox-core" }
 foxprox-device = { path = "../foxprox-device" }
 foxprox-egress = { path = "../foxprox-egress" }
 foxprox-packet = { path = "../foxprox-packet" }
+foxprox-tcp = { path = "../foxprox-tcp" }
 
 [target.'cfg(unix)'.dependencies]
 foxprox-integrations = { path = "../foxprox-integrations" }
@@ -25,5 +26,4 @@ path = "src/bin/foxproxsetup.rs"
 [dev-dependencies]
 foxprox-dns = { path = "../foxprox-dns" }
 foxprox-inspect = { path = "../foxprox-inspect" }
-foxprox-tcp = { path = "../foxprox-tcp" }
 serde_json = { workspace = true }

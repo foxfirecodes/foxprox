@@ -12,7 +12,7 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, RawFd};
 #[cfg(unix)]
@@ -34,8 +34,11 @@ use foxprox_packet::{parse_ipv4_udp_datagram, synthesize_ipv4_udp_response, Pack
 use foxprox_integrations::{drop_net_admin_capability, CapabilityDropError};
 #[cfg(unix)]
 use foxprox_integrations::{
-    fd_handoff::{run_setup_sequence, SetupSequenceConfig, SetupSequenceError},
-    ResolverConfig, TunInterfaceSetupConfig,
+    fd_handoff::{
+        run_setup_sequence, spawn_setup_command_and_accept_fd, BrokerControlListener,
+        SetupSequenceConfig, SetupSequenceError,
+    },
+    plan_bwrap_setup, BwrapSetupConfig, ResolverConfig, SetupHelperArgs, TunInterfaceSetupConfig,
 };
 
 /// CLI/runtime errors reported to users.
@@ -179,6 +182,42 @@ pub struct SetupCommandSummary {
     pub target_argv: Vec<String>,
 }
 
+/// Inputs for one production-shaped bwrap/TUN/smoltcp TCP relay run.
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BwrapTcpOnceConfig {
+    pub bwrap_program: PathBuf,
+    pub setup_program: PathBuf,
+    pub broker_socket: PathBuf,
+    pub tun_name: String,
+    pub address_cidr: String,
+    pub mtu: u16,
+    pub resolv_conf: PathBuf,
+    pub broker_dns: IpAddr,
+    pub ip_program: PathBuf,
+    pub extra_bwrap_args: Vec<String>,
+    pub target_argv: Vec<String>,
+    pub smoltcp_ip: Ipv4Addr,
+    pub smoltcp_prefix_len: u8,
+    pub listen_port: u16,
+    pub upstream_addr: SocketAddr,
+    pub max_packet_len: usize,
+    pub max_packets: usize,
+    pub sandbox_buffer_len: usize,
+    pub host_buffer_len: usize,
+}
+
+/// Evidence from one bwrap/TUN/smoltcp TCP relay run.
+#[cfg(unix)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BwrapTcpOnceSummary {
+    pub packets_read: usize,
+    pub sandbox_to_host_bytes: usize,
+    pub host_to_sandbox_bytes: usize,
+    pub target_status_code: Option<i32>,
+    pub target_status_success: bool,
+}
+
 /// Process one packet using TOML policy configuration.
 ///
 /// The returned JSON line is suitable for stdout. Any synthesized outbound
@@ -293,6 +332,93 @@ pub fn forward_tun_udp_packet_once<E: UdpEgress>(
     let response = forward_ipv4_udp_packet_once(&packet, egress, target, response_buffer_len)?;
     tun.write_packet(&response)?;
     Ok(response)
+}
+
+/// Launch bwrap/foxproxsetup, accept the TUN fd, relay one TCP payload through
+/// smoltcp to a host TCP stream, write the response back to TUN, then wait for
+/// the target process.
+#[cfg(unix)]
+pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSummary, CliError> {
+    if config.max_packet_len == 0 {
+        return Err(CliError::Usage(
+            "bwrap-tcp-once max_packet_len must be > 0".to_owned(),
+        ));
+    }
+    if config.max_packets == 0 {
+        return Err(CliError::Usage(
+            "bwrap-tcp-once max_packets must be > 0".to_owned(),
+        ));
+    }
+    let listener =
+        BrokerControlListener::bind(&config.broker_socket).map_err(|error| CliError::Io {
+            context: format!("bind-broker-socket {}", config.broker_socket.display()),
+            error: io::Error::other(error.to_string()),
+        })?;
+    let setup_args = SetupHelperArgs::new(
+        config.broker_socket.clone(),
+        config.tun_name.clone(),
+        config.address_cidr.clone(),
+        config.mtu,
+        config.resolv_conf.clone(),
+        config.broker_dns,
+    )
+    .with_ip_program(config.ip_program.clone());
+    let bwrap = BwrapSetupConfig::new(
+        config.bwrap_program.clone(),
+        config.setup_program.clone(),
+        config.target_argv.clone(),
+    )
+    .with_setup_helper_args(setup_args)
+    .with_extra_bwrap_args(config.extra_bwrap_args.clone());
+    let plan = plan_bwrap_setup(&bwrap).map_err(|error| CliError::Core(error.to_string()))?;
+    let mut command = Command::new(&plan.program);
+    command.args(&plan.args);
+    let setup_child = spawn_setup_command_and_accept_fd(listener, command)
+        .map_err(|error| CliError::Core(error.to_string()))?;
+    let mut child = setup_child.child;
+    let mut tun = TunPacketIo::from_owned_fd(setup_child.received.fd, config.max_packet_len)?;
+    let mut tcp = foxprox_tcp::SmoltcpTcpServer::new(
+        config.smoltcp_ip,
+        config.smoltcp_prefix_len,
+        config.listen_port,
+        config.max_packet_len,
+    );
+    let mut host = TcpStream::connect(config.upstream_addr).map_err(|error| CliError::Io {
+        context: format!("connect-tcp-upstream {}", config.upstream_addr),
+        error,
+    })?;
+
+    for packets_read in 1..=config.max_packets {
+        let packet = tun.read_packet()?;
+        for outbound in tcp.accept_packet(packet) {
+            tun.write_packet(&outbound)?;
+        }
+        if tcp.can_recv() {
+            let stats = tcp
+                .relay_once(&mut host, config.sandbox_buffer_len, config.host_buffer_len)
+                .map_err(|error| CliError::Core(error.to_string()))?;
+            for outbound in tcp.poll() {
+                tun.write_packet(&outbound)?;
+            }
+            let status = child.wait().map_err(|error| CliError::Io {
+                context: "wait-bwrap-target".to_owned(),
+                error,
+            })?;
+            return Ok(BwrapTcpOnceSummary {
+                packets_read,
+                sandbox_to_host_bytes: stats.sandbox_to_host_bytes,
+                host_to_sandbox_bytes: stats.host_to_sandbox_bytes,
+                target_status_code: status.code(),
+                target_status_success: status.success(),
+            });
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    Err(CliError::Core(
+        "bwrap-tcp-once-no-sandbox-payload-before-packet-limit".to_owned(),
+    ))
 }
 
 /// Run setup command work with an already-created TUN-like fd.
