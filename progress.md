@@ -1736,3 +1736,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: subsequent ACK/data packets still require direct access to the adapter/session plumbing; the helper opens from SYN but does not yet provide a session method for later TUN packet ingestion and sandbox payload forwarding.
 - Exact next step: commit TUN-pump open-session helper, then add a session method that ingests a subsequent TUN packet, polls smoltcp, and forwards any resulting listener payload to host.
+
+## 2026-06-25T03:05:30Z
+- Current objective: continue after TUN-pump open-session helper by adding subsequent sandbox packet forwarding on the open session.
+- Git status summary: clean worktree after commit `cd94f61`.
+- Intended slice: add a session method that ingests one subsequent TUN-like packet, drains smoltcp outbound packets to a writer, and forwards any newly received listener payload to the already-open host bridge.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with raw ACK/data packets and a loopback host listener.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: host-to-sandbox reverse pumping and loop scheduling are still separate session methods rather than one event loop.
+- Exact next step: add the session packet-step method and an open-SYN then ACK/data forwarding regression.
+
+## 2026-06-25T03:06:35Z
+- Current objective: forward subsequent sandbox TUN packets through an opened real host TCP session.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 36 smoltcp adapter tests passed. `pump_tun_packet_and_forward_sandbox_payload` now lets an opened `SmoltcpTcpBridgeSession` ingest a later TUN-like ACK/data packet, drain smoltcp outbound packets, and forward newly received listener payload bytes into the already-open host bridge; regression proves SYN opens a real host session and subsequent raw ACK/data packets deliver `step-data` to a real loopback host listener.
+- Commit hash when committed: pending.
+- Remaining risks: host-to-sandbox reverse pumping is still a separate call rather than one duplex event-loop tick; live TUN fd smoke remains blocked by missing `CAP_NET_ADMIN` in this environment.
+- Exact next step: commit subsequent TUN packet forwarding, then add a single bidirectional session tick that combines optional sandbox packet ingestion with host-read-to-TUN packet emission.

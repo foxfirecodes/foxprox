@@ -81,6 +81,12 @@ pub struct SmoltcpTcpBridgeSessionOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SmoltcpSandboxPacketStepOutcome {
+    pub pump: SmoltcpTunPumpOutcome,
+    pub forwarded: Option<SmoltcpTcpBridgeSessionOutcome>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SmoltcpHostToSandboxPumpOutcome {
     pub host_read: foxprox_runtime::TcpHostReadOutcome,
     pub sandbox_bytes: usize,
@@ -172,6 +178,36 @@ impl<B: TcpStreamBridge> SmoltcpTcpBridgeSession<B> {
             flow: payload.flow,
             bytes_forwarded: payload.bytes.len(),
         })
+    }
+
+    pub fn pump_tun_packet_and_forward_sandbox_payload<R: Read, W: Write>(
+        &mut self,
+        reader: &mut R,
+        writer: &mut W,
+        buffer: &mut [u8],
+        listener_port: u16,
+        max_payload_bytes: usize,
+        now_millis: i64,
+    ) -> Result<SmoltcpSandboxPacketStepOutcome, SmoltcpTcpBridgeSessionError> {
+        let pump = pump_one_tun_packet(&mut self.adapter, reader, writer, buffer, now_millis)
+            .map_err(|_| SmoltcpTcpBridgeSessionError::TunWrite)?;
+        let forwarded = match self
+            .adapter
+            .recv_on_listener_port_with_flow(listener_port, max_payload_bytes)
+        {
+            Ok(payload) if !payload.bytes.is_empty() => {
+                self.flow_runtime
+                    .send_sandbox_payload_to_host(&payload.flow, &payload.bytes)
+                    .map_err(SmoltcpTcpBridgeSessionError::Bridge)?;
+                Some(SmoltcpTcpBridgeSessionOutcome {
+                    flow: payload.flow,
+                    bytes_forwarded: payload.bytes.len(),
+                })
+            }
+            Ok(_) | Err(SmoltcpAdapterError::TcpRecvRejected) => None,
+            Err(error) => return Err(SmoltcpTcpBridgeSessionError::Adapter(error)),
+        };
+        Ok(SmoltcpSandboxPacketStepOutcome { pump, forwarded })
     }
 }
 
@@ -1650,6 +1686,118 @@ mod tests {
             }
             other => panic!("expected SYN/ACK packet, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn open_session_pumps_subsequent_tun_data_to_real_host() {
+        let mut adapter = SmoltcpIpLoopback::new(
+            SmoltcpIpConfig {
+                address: Ipv4Addr::new(10, 66, 0, 1),
+                prefix_len: 24,
+            },
+            0,
+        )
+        .unwrap();
+        adapter.set_packet_loopback(false);
+        adapter.set_connect_report_mode(TcpConnectReportMode::AcceptedListenerSockets);
+        adapter.listen_tcp(8080, 1024, 1024).unwrap();
+        let source = Ipv4Addr::new(10, 66, 0, 2);
+        let destination = Ipv4Addr::new(10, 66, 0, 1);
+        let syn = ipv4_tcp_syn_packet(source, destination, 50001, 8080, 7);
+        let mut rule = PolicyRule::allow("allow-step-session");
+        rule.protocol = Some(Protocol::Tcp);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = vec![0; b"step-data".len()];
+            stream.read_exact(&mut received).unwrap();
+            received
+        });
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("step-components").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+        let mut reader = Cursor::new(syn);
+        let mut writer = Vec::new();
+        let mut buffer = vec![0; 1500];
+        let (mut session, flow, _, _) =
+            SmoltcpTcpBridgeSession::pump_tun_and_open_next_allowed_host_session(
+                adapter,
+                &mut reader,
+                &mut writer,
+                &mut buffer,
+                &components,
+                &mut kernel,
+                SandboxId::new("step-session").unwrap(),
+                listen_addr,
+                1,
+                6,
+            )
+            .unwrap();
+        let syn_ack = match parse_ip_packet(&writer).unwrap() {
+            ParsedIpPacket::Tcpv4Segment(segment) => segment,
+            other => panic!("expected SYN/ACK, got {other:?}"),
+        };
+        let server_ack = syn_ack.sequence + 1;
+        writer.clear();
+
+        let ack = ipv4_tcp_packet(source, destination, 50001, 8080, 8, server_ack, 0x10, &[]);
+        let ack_step = session
+            .pump_tun_packet_and_forward_sandbox_payload(
+                &mut Cursor::new(ack),
+                &mut writer,
+                &mut buffer,
+                8080,
+                64,
+                2,
+            )
+            .unwrap();
+        writer.clear();
+        let data = ipv4_tcp_packet(
+            source,
+            destination,
+            50001,
+            8080,
+            8,
+            server_ack,
+            0x18,
+            b"step-data",
+        );
+        let data_step = session
+            .pump_tun_packet_and_forward_sandbox_payload(
+                &mut Cursor::new(data),
+                &mut writer,
+                &mut buffer,
+                8080,
+                64,
+                3,
+            )
+            .unwrap();
+
+        assert!(ack_step.forwarded.is_none());
+        assert_eq!(
+            data_step.forwarded,
+            Some(SmoltcpTcpBridgeSessionOutcome {
+                flow,
+                bytes_forwarded: b"step-data".len()
+            })
+        );
+        assert_eq!(server.join().unwrap(), b"step-data".to_vec());
     }
 
     #[test]
