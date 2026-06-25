@@ -1710,5 +1710,5 @@
   - `cargo tree -p foxprox-integrations` — Unix fd handoff dependencies are isolated to integrations.
   - `cargo tree -p foxprox-device` — device remains dependency-free.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 9ab4ea3.
 - Remaining boundary risks: opening the real TUN fd with ioctl and end-to-end namespace smoke tests remain.
