@@ -1883,5 +1883,5 @@
   - `cargo tree -p foxprox-runtime` — tunnel pumping remains runtime-owned over egress traits.
   - `cargo tree -p foxprox-egress` — host stream details remain egress-owned.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: cde5009.
 - Remaining boundary risks: TCP listener accept loop remains.
