@@ -13,3 +13,5 @@ scripts/live-smoke-bwrap-tun.sh
 ```
 
 See [docs/live-smoke.md](docs/live-smoke.md) for requirements, covered paths, and known alpha limits.
+
+For controlled production-like testing with a TOML policy file, see [docs/production-runner.md](docs/production-runner.md) and [examples/controlled-alpha.toml](examples/controlled-alpha.toml).

@@ -1989,3 +1989,27 @@
   - `cargo tree -p foxprox-core`
 - Current git status summary: docs/script/CLI/progress/learnings changes staged for a non-blocking follow-up commit; `.tmp/` live smoke logs remain ignored.
 - Next exact action: commit the verified non-blocking follow-ups, then report alpha plus live-smoke completion.
+
+## 2026-06-25T15:03:08Z — controlled-alpha launcher and TOML policy config WIP verified
+
+- Current objective: add a production-like controlled alpha launcher and policy config so foxprox can be tested against real sandboxed commands without manually orchestrating broker/setup processes.
+- Changes implemented:
+  - Added `foxprox run --config PATH -- target args...` to `crates/foxprox-cli`.
+  - Added TOML config parsing in `crates/foxprox-cli/src/run_config.rs` using `serde`/`toml` in the CLI crate only; `foxprox-core` remains dependency-free.
+  - Launcher starts loopback-only HTTP and SOCKS5 proxy backends when configured, starts bwrap, auto-binds the setup socket directory, read-only binds `foxproxsetup` to `/.foxprox-setup/foxproxsetup`, accepts the TUN fd, starts the combined transparent broker, and waits for the sandbox target or broker failure.
+  - Added config-driven network settings, proxy env injection, bwrap args override, resource limits, and ordered first-match policy rules with protocol/CIDR/port/host/domain/origin/method/path/min-attribution matching.
+  - Added bridge allow rules before user private-network denials so sandbox connections to broker-owned proxy bridge ports remain possible while external private-network rules still apply.
+  - Added `examples/controlled-alpha.toml` and `docs/production-runner.md`; linked them from `README.md`.
+- Live controlled-alpha validation passed:
+  - `cargo build -p foxprox-cli -p foxprox-setup`
+  - `./target/debug/foxprox run --config examples/controlled-alpha.toml -- /usr/bin/curl -k -fsS --max-time 30 https://example.com >/tmp/foxprox-run-example.out` passed via injected HTTP CONNECT proxy policy.
+  - `./target/debug/foxprox run --config examples/controlled-alpha.toml -- /usr/bin/curl -k --noproxy '*' -fsS --max-time 30 https://example.com >/tmp/foxprox-run-direct.out` passed via transparent TUN TLS/SNI policy.
+- Verification passed:
+  - `cargo fmt --all -- --check`
+  - `cargo check --workspace`
+  - `cargo test --workspace`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`
+  - `cargo tree -p foxprox-core`
+- Review note: attempted fresh subagent review twice, but both subagent runs timed out before producing artifacts; parent performed diff review and live validation instead.
+- Current git status summary: launcher/config/docs changes are uncommitted and verified; next exact action is final diff review, commit, then provide usage summary.

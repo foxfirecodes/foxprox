@@ -16,6 +16,7 @@ use foxprox_proxy::{
     run_http_proxy_proof, run_http_proxy_proof_with_ready, run_socks5_proxy_proof,
     run_socks5_proxy_proof_with_ready, HttpProxyProofConfig, Socks5ProxyProofConfig,
 };
+mod run_config;
 use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
 use std::env;
 use std::fs::{self, File};
@@ -25,6 +26,8 @@ use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::process::{Command, ExitStatus};
+use std::sync::mpsc;
 
 fn main() {
     if let Err(error) = run() {
@@ -36,6 +39,7 @@ fn main() {
 fn run() -> io::Result<()> {
     let mut args = env::args().skip(1);
     match args.next().as_deref() {
+        Some("run") => run_launcher(args),
         Some("proof-icmp") => proof_icmp(args),
         Some("proof-tcp") => proof_tcp(args),
         Some("proof-udp-dns") => proof_udp_dns(args),
@@ -51,7 +55,343 @@ fn run() -> io::Result<()> {
 }
 
 fn usage() -> &'static str {
-    "usage: foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1] [--audit-queue-capacity N]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--audit-queue-capacity N]\n       foxprox proof-udp-dns --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N] [--max-udp-flows N]\n       foxprox proof-transparent --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--tcp-forward-port PORT]... [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N] [--max-udp-flows N] [--http-proxy-port PORT] [--http-proxy-allow-port PORT]... [--http-proxy-backend-listen 127.0.0.1:0] [--socks5-proxy-port PORT] [--socks5-proxy-allow-port PORT]... [--socks5-proxy-backend-listen 127.0.0.1:0]\n       foxprox proof-http-proxy [--listen 10.255.0.1:8080] [--allow-port PORT]... [--request-head-limit BYTES] [--request-head-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]\n       foxprox proof-socks5-proxy [--listen 10.255.0.1:1080] [--allow-port PORT]... [--request-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]"
+    "usage: foxprox run --config PATH -- target args...\n       foxprox proof-icmp --setup-socket PATH [--local-ip 10.255.0.1] [--audit-queue-capacity N]\n       foxprox proof-tcp --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--audit-queue-capacity N]\n       foxprox proof-udp-dns --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N] [--max-udp-flows N]\n       foxprox proof-transparent --setup-socket PATH [--broker-ip 10.255.0.1] [--prefix-len 24] [--mtu 1500] [--tcp-port 80] [--tcp-forward-port PORT]... [--upstream-dns 1.1.1.1:53] [--udp-forward-port PORT]... [--audit-queue-capacity N] [--max-workers N] [--max-udp-flows N] [--http-proxy-port PORT] [--http-proxy-allow-port PORT]... [--http-proxy-backend-listen 127.0.0.1:0] [--socks5-proxy-port PORT] [--socks5-proxy-allow-port PORT]... [--socks5-proxy-backend-listen 127.0.0.1:0]\n       foxprox proof-http-proxy [--listen 10.255.0.1:8080] [--allow-port PORT]... [--request-head-limit BYTES] [--request-head-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]\n       foxprox proof-socks5-proxy [--listen 10.255.0.1:1080] [--allow-port PORT]... [--request-timeout-ms MS] [--connect-timeout-ms MS] [--audit-queue-capacity N] [--max-connections N]"
+}
+
+fn run_launcher<I>(mut args: I) -> io::Result<()>
+where
+    I: Iterator<Item = String>,
+{
+    let mut config_path = None;
+    let mut target = Vec::new();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--config" | "-c" => {
+                config_path = Some(PathBuf::from(required_value(&mut args, "--config")?))
+            }
+            "--" => {
+                target.extend(args);
+                break;
+            }
+            "--help" | "-h" => return Err(io::Error::new(io::ErrorKind::InvalidInput, usage())),
+            other => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("unexpected argument {other:?}\n{}", usage()),
+                ));
+            }
+        }
+    }
+    if target.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("missing target command\n{}", usage()),
+        ));
+    }
+    let config_path = config_path.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("missing --config PATH\n{}", usage()),
+        )
+    })?;
+    let config = run_config::load_launcher_config(&config_path)?;
+    run_launcher_config(config, target)
+}
+
+fn run_launcher_config(config: run_config::LauncherConfig, target: Vec<String>) -> io::Result<()> {
+    let setup_socket_host = setup_socket_host_path(&config)?;
+    let setup_socket_sandbox = config
+        .setup_socket_sandbox
+        .clone()
+        .unwrap_or_else(|| setup_socket_host.to_string_lossy().into_owned());
+    let setup_socket_dir = setup_socket_host.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "setup socket path has no parent: {}",
+                setup_socket_host.display()
+            ),
+        )
+    })?;
+    fs::create_dir_all(setup_socket_dir)?;
+
+    let setup_helper_host = setup_helper_host_path(&config)?;
+    let listener = BoundSetupListener::bind(&setup_socket_host)?;
+
+    let mut transparent_config = CombinedTransparentProofConfig::new(config.sandbox_id.clone());
+    transparent_config.broker_ip = config.broker_ip;
+    transparent_config.prefix_len = config.prefix_len;
+    transparent_config.mtu = usize::from(config.mtu);
+    transparent_config.tcp_port = config.transparent_tcp_ports[0];
+    transparent_config.additional_tcp_ports = config.transparent_tcp_ports[1..].to_vec();
+    transparent_config.upstream_dns = config.upstream_dns;
+    transparent_config.udp_forward_ports = config.udp_forward_ports.clone();
+    transparent_config.audit_queue_capacity = config.audit_queue_capacity;
+    transparent_config.max_worker_threads = config.max_worker_threads;
+    transparent_config.max_udp_flows = config.max_udp_flows;
+    transparent_config.policy = config.policy.clone();
+    for port in &config.transparent_tcp_ports {
+        transparent_config
+            .policy
+            .rules
+            .push(allow_tcp_forward_rule(*port));
+    }
+
+    validate_transparent_proxy_bridge_inputs(
+        &config.transparent_tcp_ports,
+        config.http_proxy_port,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+        config.socks5_proxy_port,
+        SocketAddr::from(([127, 0, 0, 1], 0)),
+    )?;
+
+    let mut http_proxy_backend = None;
+    if let Some(port) = config.http_proxy_port {
+        let mut http_proxy_config = HttpProxyProofConfig::new(
+            config.sandbox_id.clone(),
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        );
+        http_proxy_config.policy = config.policy.clone();
+        let backend_addr = start_http_proxy_backend(http_proxy_config)?;
+        validate_http_proxy_backend_loopback(backend_addr)?;
+        transparent_config.http_proxy_bridge = Some(ExplicitProxyBridgeConfig {
+            sandbox_port: port,
+            backend_addr,
+        });
+        transparent_config
+            .policy
+            .rules
+            .insert(0, allow_proxy_bridge_rule(config.broker_ip, port));
+        http_proxy_backend = Some(port);
+    }
+
+    let mut socks5_proxy_backend = None;
+    if let Some(port) = config.socks5_proxy_port {
+        let mut socks5_proxy_config = Socks5ProxyProofConfig::new(
+            config.sandbox_id.clone(),
+            SocketAddr::from(([127, 0, 0, 1], 0)),
+        );
+        socks5_proxy_config.policy = config.policy.clone();
+        let backend_addr = start_socks5_proxy_backend(socks5_proxy_config)?;
+        validate_proxy_backend_loopback(backend_addr)?;
+        transparent_config.socks5_proxy_bridge = Some(ExplicitProxyBridgeConfig {
+            sandbox_port: port,
+            backend_addr,
+        });
+        transparent_config
+            .policy
+            .rules
+            .insert(0, allow_proxy_bridge_rule(config.broker_ip, port));
+        socks5_proxy_backend = Some(port);
+    }
+
+    let mut child = spawn_bwrap_child(
+        &config,
+        &target,
+        &setup_socket_sandbox,
+        setup_socket_dir,
+        &setup_helper_host,
+        http_proxy_backend,
+        socks5_proxy_backend,
+    )?;
+
+    eprintln!(
+        "foxprox: waiting for foxproxsetup on {}",
+        setup_socket_host.display()
+    );
+    let (mut stream, _) = listener.accept()?;
+    verify_peer_credentials(&stream)?;
+    let tun_fd = recv_fd(stream.as_raw_fd())?;
+    eprintln!(
+        "foxprox: received TUN fd; starting configured run sandbox={} tcp_ports={:?} udp_forward_ports={:?}",
+        config.sandbox_id, config.transparent_tcp_ports, config.udp_forward_ports
+    );
+
+    let (broker_tx, broker_rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = run_combined_transparent_proof_with_ready(tun_fd, transparent_config, || {
+            stream.write_all(b"ready\n")
+        });
+        let _ = broker_tx.send(result);
+    });
+
+    wait_for_child_or_broker(&mut child, broker_rx)
+}
+
+fn setup_socket_host_path(config: &run_config::LauncherConfig) -> io::Result<PathBuf> {
+    if let Some(path) = &config.setup_socket_host {
+        return Ok(path.clone());
+    }
+    let mut path = env::temp_dir();
+    path.push(format!("foxprox-{}", std::process::id()));
+    path.push("setup.sock");
+    Ok(path)
+}
+
+fn setup_helper_host_path(config: &run_config::LauncherConfig) -> io::Result<PathBuf> {
+    if let Some(path) = &config.setup_helper_host {
+        return Ok(path.clone());
+    }
+    let mut path = env::current_exe()?;
+    path.set_file_name("foxproxsetup");
+    Ok(path)
+}
+
+fn spawn_bwrap_child(
+    config: &run_config::LauncherConfig,
+    target: &[String],
+    setup_socket_sandbox: &str,
+    setup_socket_dir: &Path,
+    setup_helper_host: &Path,
+    http_proxy_port: Option<u16>,
+    socks5_proxy_port: Option<u16>,
+) -> io::Result<std::process::Child> {
+    let mut command = Command::new(&config.bwrap_program);
+    let bwrap_args = config.bwrap_args.clone().unwrap_or_else(default_bwrap_args);
+    if bwrap_args.iter().any(|arg| arg == "--") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "bwrap.args must not contain --; foxprox adds the setup command separator",
+        ));
+    }
+    command.args(bwrap_args);
+    command.args([
+        "--bind",
+        &setup_socket_dir.to_string_lossy(),
+        &setup_socket_dir.to_string_lossy(),
+    ]);
+    command.args(["--dir", "/.foxprox-setup"]);
+    command.args([
+        "--ro-bind",
+        &setup_helper_host.to_string_lossy(),
+        "/.foxprox-setup/foxproxsetup",
+    ]);
+    command.arg("--");
+    command.arg("/.foxprox-setup/foxproxsetup");
+    command.args(["--setup-socket", setup_socket_sandbox]);
+    command.args(["--ifname", &config.ifname]);
+    command.args(["--sandbox-ip", &config.sandbox_ip.to_string()]);
+    command.args(["--prefix-len", &config.prefix_len.to_string()]);
+    command.args(["--broker-ip", &config.broker_ip.to_string()]);
+    command.args(["--mtu", &config.mtu.to_string()]);
+    command.args(["--resolv-conf", &config.resolv_conf]);
+    if config.keep_cap_net_raw {
+        command.arg("--keep-cap-net-raw-for-ping");
+    }
+    if config.inject_proxy_env {
+        if let Some(port) = http_proxy_port {
+            command.args([
+                "--http-proxy",
+                &format!("http://{}:{port}", config.broker_ip),
+            ]);
+            command.args([
+                "--https-proxy",
+                &format!("http://{}:{port}", config.broker_ip),
+            ]);
+        }
+        if let Some(port) = socks5_proxy_port {
+            command.args([
+                "--all-proxy",
+                &format!("socks5h://{}:{port}", config.broker_ip),
+            ]);
+        }
+        if let Some(no_proxy) = &config.no_proxy {
+            command.args(["--no-proxy", no_proxy]);
+        }
+    }
+    command.arg("--");
+    command.args(target);
+    eprintln!("foxprox: launching bwrap target: {target:?}");
+    command.spawn()
+}
+
+fn default_bwrap_args() -> Vec<String> {
+    [
+        "--unshare-user",
+        "--uid",
+        "0",
+        "--gid",
+        "0",
+        "--unshare-net",
+        "--cap-add",
+        "CAP_NET_ADMIN",
+        "--ro-bind",
+        "/usr",
+        "/usr",
+        "--ro-bind-try",
+        "/lib",
+        "/lib",
+        "--ro-bind-try",
+        "/lib64",
+        "/lib64",
+        "--dir",
+        "/etc",
+        "--ro-bind-try",
+        "/etc/ssl",
+        "/etc/ssl",
+        "--ro-bind-try",
+        "/etc/pki",
+        "/etc/pki",
+        "--ro-bind-try",
+        "/etc/hosts",
+        "/etc/hosts",
+        "--ro-bind-try",
+        "/etc/nsswitch.conf",
+        "/etc/nsswitch.conf",
+        "--dev",
+        "/dev",
+        "--dir",
+        "/dev/net",
+        "--dev-bind",
+        "/dev/net/tun",
+        "/dev/net/tun",
+        "--proc",
+        "/proc",
+        "--tmpfs",
+        "/tmp",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn wait_for_child_or_broker(
+    child: &mut std::process::Child,
+    broker_rx: mpsc::Receiver<io::Result<()>>,
+) -> io::Result<()> {
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return child_status_to_result(status);
+        }
+        match broker_rx.try_recv() {
+            Ok(Ok(())) => return Ok(()),
+            Ok(Err(error)) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+            Err(mpsc::TryRecvError::Empty) => {
+                std::thread::sleep(std::time::Duration::from_millis(50))
+            }
+            Err(mpsc::TryRecvError::Disconnected) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(io::Error::other(
+                    "broker thread exited without reporting status",
+                ));
+            }
+        }
+    }
+}
+
+fn child_status_to_result(status: ExitStatus) -> io::Result<()> {
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "sandbox target exited with {status}"
+        )))
+    }
 }
 
 fn proof_icmp<I>(mut args: I) -> io::Result<()>
@@ -1103,6 +1443,7 @@ mod tests {
 
     #[test]
     fn usage_mentions_combined_transparent_proof() {
+        assert!(usage().contains("foxprox run --config PATH"));
         assert!(usage().contains("proof-transparent"));
         assert!(usage().contains("--max-workers"));
         assert!(usage().contains("--udp-forward-port"));

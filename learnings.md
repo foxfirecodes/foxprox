@@ -37,3 +37,9 @@
 - For live bwrap network setup, `--unshare-user --uid 0 --gid 0 --unshare-net --cap-add CAP_NET_ADMIN` is needed; `--cap-add CAP_NET_ADMIN` without mapping to uid/gid 0 can still leave `ip link set lo up` failing with `Operation not permitted`.
 - In bwrap live tests, provide a writable sandbox resolver file for `foxproxsetup --resolv-conf`, for example with `--bind-data FD /etc/resolv.conf`; read-only host resolver binds fail closed during DNS setup.
 - Keep direct transparent TUN traffic and explicit proxy bridge smoke phases isolated. A fresh broker/setup phase per group avoids listener rearm/timing noise while still exercising the same combined proof runtime.
+
+## 2026-06-25T15:03:08Z — Controlled-alpha launcher policy behavior
+
+- `foxprox run` must insert broker proxy-bridge TCP allow rules before user private-network deny rules; otherwise reasonable policies such as deny `10.0.0.0/8` block sandbox access to broker-owned `10.255.0.1:8080`/`:1080` before proxy semantic policy can run.
+- Transparent HTTP/TLS launcher policy needs automatic TCP pre-inspection allow rules for configured transparent TCP listener ports. For HTTP/TLS ports, host egress still waits for the later semantic HTTP Host/path or TLS SNI decision, so the preallow only permits inspection to begin.
+- For controlled bwrap launching, bind the setup socket directory and read-only bind the host `foxproxsetup` helper to an internal sandbox path; this avoids requiring the user's bwrap mounts to expose the build tree.
