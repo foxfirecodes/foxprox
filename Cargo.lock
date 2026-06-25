@@ -115,6 +115,7 @@ dependencies = [
  "foxprox-device",
  "foxprox-dns",
  "foxprox-egress",
+ "foxprox-flow",
  "foxprox-inspect",
  "foxprox-integrations",
  "foxprox-packet",

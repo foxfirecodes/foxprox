@@ -10,6 +10,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 #[cfg(unix)]
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
@@ -25,10 +26,13 @@ use std::process::Command;
 use foxprox_audit::{audit_record_to_json_line, AuditSinkError};
 use foxprox_broker::IpPacketBroker;
 use foxprox_config::{policy_config_from_toml, ConfigError};
-use foxprox_core::{FrontendKind, PolicyEngine, SandboxId};
+use foxprox_core::{FrontendKind, NormalizedEvent, PolicyConfig, PolicyEngine, SandboxId};
 use foxprox_device::{TunIoError, TunPacketIo};
 use foxprox_egress::{EgressError, UdpEgress, UdpTarget};
-use foxprox_packet::{parse_ipv4_udp_datagram, synthesize_ipv4_udp_response, PacketContext};
+use foxprox_flow::ClosedTcpFlow;
+use foxprox_packet::{
+    parse_ipv4_packet, parse_ipv4_udp_datagram, synthesize_ipv4_udp_response, PacketContext,
+};
 
 #[cfg(target_os = "linux")]
 use foxprox_integrations::{drop_net_admin_capability, CapabilityDropError};
@@ -197,6 +201,8 @@ pub struct BwrapTcpOnceConfig {
     pub ip_program: PathBuf,
     pub extra_bwrap_args: Vec<String>,
     pub target_argv: Vec<String>,
+    pub sandbox_id: String,
+    pub policy: PolicyConfig,
     pub smoltcp_ip: Ipv4Addr,
     pub smoltcp_prefix_len: u8,
     pub listen_port: u16,
@@ -214,6 +220,7 @@ pub struct BwrapTcpOnceSummary {
     pub packets_read: usize,
     pub sandbox_to_host_bytes: usize,
     pub host_to_sandbox_bytes: usize,
+    pub audit_json_lines: Vec<String>,
     pub target_status_code: Option<i32>,
     pub target_status_success: bool,
 }
@@ -376,6 +383,14 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
     let setup_child = spawn_setup_command_and_accept_fd(listener, command)
         .map_err(|error| CliError::Core(error.to_string()))?;
     let mut child = setup_child.child;
+    let sandbox_id =
+        SandboxId::new(&config.sandbox_id).map_err(|error| CliError::Core(error.to_string()))?;
+    let packet_context = PacketContext::new(sandbox_id.clone(), FrontendKind::Tun);
+    let policy = PolicyEngine::new(config.policy.clone());
+    let mut audit_json_lines = Vec::new();
+    let mut tcp_source = None;
+    let mut tcp_destination = None;
+    let mut open_audited = false;
     let mut tun = TunPacketIo::from_owned_fd(setup_child.received.fd, config.max_packet_len)?;
     let mut tcp = foxprox_tcp::SmoltcpTcpServer::new(
         config.smoltcp_ip,
@@ -383,17 +398,35 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
         config.listen_port,
         config.max_packet_len,
     );
-    let mut host = TcpStream::connect(config.upstream_addr).map_err(|error| CliError::Io {
-        context: format!("connect-tcp-upstream {}", config.upstream_addr),
-        error,
-    })?;
 
     for packets_read in 1..=config.max_packets {
         let packet = tun.read_packet()?;
+        if !open_audited {
+            if let Ok(NormalizedEvent::TcpConnectAttempt(event)) =
+                parse_ipv4_packet(&packet_context, &packet)
+            {
+                tcp_source = Some(event.source);
+                tcp_destination = Some(event.destination);
+                let evaluation = policy.evaluate(&NormalizedEvent::TcpConnectAttempt(event));
+                let allowed = evaluation.decision.is_allowed();
+                audit_json_lines.push(audit_record_to_json_line(&evaluation.audit)?);
+                open_audited = true;
+                if !allowed {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(CliError::Core("bwrap-tcp-once-policy-denied".to_owned()));
+                }
+            }
+        }
         for outbound in tcp.accept_packet(packet) {
             tun.write_packet(&outbound)?;
         }
         if tcp.can_recv() {
+            let mut host =
+                TcpStream::connect(config.upstream_addr).map_err(|error| CliError::Io {
+                    context: format!("connect-tcp-upstream {}", config.upstream_addr),
+                    error,
+                })?;
             let stats = tcp
                 .relay_once(&mut host, config.sandbox_buffer_len, config.host_buffer_len)
                 .map_err(|error| CliError::Core(error.to_string()))?;
@@ -404,10 +437,27 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                 context: "wait-bwrap-target".to_owned(),
                 error,
             })?;
+            let close = ClosedTcpFlow {
+                sandbox_id: sandbox_id.clone(),
+                frontend: FrontendKind::Tun,
+                source: tcp_source,
+                destination: tcp_destination,
+                attribution: None,
+                closed_at: SystemTime::now(),
+                client_to_target_bytes: stats.sandbox_to_host_bytes as u64,
+                target_to_client_bytes: stats.host_to_sandbox_bytes as u64,
+                reason: if status.success() {
+                    "target-exited-success".to_owned()
+                } else {
+                    format!("target-exited: status={:?}", status.code())
+                },
+            };
+            audit_json_lines.push(audit_record_to_json_line(&close.audit_record())?);
             return Ok(BwrapTcpOnceSummary {
                 packets_read,
                 sandbox_to_host_bytes: stats.sandbox_to_host_bytes,
                 host_to_sandbox_bytes: stats.host_to_sandbox_bytes,
+                audit_json_lines,
                 target_status_code: status.code(),
                 target_status_success: status.success(),
             });

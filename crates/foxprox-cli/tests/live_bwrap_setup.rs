@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use foxprox_cli::{forward_ipv4_udp_packet_once, run_bwrap_tcp_once, BwrapTcpOnceConfig};
 use foxprox_core::{
-    DnsPolicy, Endpoint, HostnamePattern, PolicyConfig, PolicyEngine, PolicyRule, Protocol,
-    RuleAction, SandboxId,
+    DefaultPolicy, DnsPolicy, Endpoint, HostnamePattern, PolicyConfig, PolicyEngine, PolicyRule,
+    Protocol, RuleAction, SandboxId,
 };
 use foxprox_device::TunPacketIo;
 use foxprox_dns::{handle_tun_dns_packet, DnsBrokerDatagramHandler, UdpDnsForwarder};
@@ -284,6 +284,11 @@ fn live_bwrap_tcp_connection_uses_smoltcp_and_host_stream() {
             "-c".to_owned(),
             "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.settimeout(5); s.connect(('10.129.0.1', 8080)); s.sendall(b'hi'); data=s.recv(16); assert data == b'ok', data".to_owned(),
         ],
+        sandbox_id: "live-bwrap-tcp".to_owned(),
+        policy: PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        },
         smoltcp_ip: Ipv4Addr::new(10, 129, 0, 1),
         smoltcp_prefix_len: 24,
         listen_port: 8080,
@@ -298,6 +303,9 @@ fn live_bwrap_tcp_connection_uses_smoltcp_and_host_stream() {
 
     assert!(summary.target_status_success);
     assert!(summary.packets_read >= 1);
+    assert_eq!(summary.audit_json_lines.len(), 2);
+    assert!(summary.audit_json_lines[0].contains("tcp_connect"));
+    assert!(summary.audit_json_lines[1].contains("tcp_flow_closed"));
     assert_eq!(summary.sandbox_to_host_bytes, 2);
     assert_eq!(summary.host_to_sandbox_bytes, 2);
     std::fs::remove_dir_all(dir).unwrap();
@@ -355,6 +363,11 @@ fn live_bwrap_curl_fetches_http_through_smoltcp_launcher() {
             "--show-error".to_owned(),
             "http://10.130.0.1:8080/".to_owned(),
         ],
+        sandbox_id: "live-bwrap-curl".to_owned(),
+        policy: PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            ..PolicyConfig::default()
+        },
         smoltcp_ip: Ipv4Addr::new(10, 130, 0, 1),
         smoltcp_prefix_len: 24,
         listen_port: 8080,
@@ -371,6 +384,7 @@ fn live_bwrap_curl_fetches_http_through_smoltcp_launcher() {
         .expect("host HTTP server receives curl request");
 
     assert!(summary.target_status_success);
+    assert_eq!(summary.audit_json_lines.len(), 2);
     assert!(summary.sandbox_to_host_bytes > 0);
     assert!(summary.host_to_sandbox_bytes > 0);
     assert!(String::from_utf8_lossy(&request).starts_with("GET / HTTP/1.1"));

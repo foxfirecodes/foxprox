@@ -1617,3 +1617,18 @@
 - What failed or surprised the agent: curl's response body appears in `--nocapture` output because the smoke intentionally exercises the real target stdout path; this is harmless evidence that the application received `ok`.
 - What remains unproven: unbounded production scheduling and polished CLI UX; the documented alpha forwarding proof now includes live curl-level TCP evidence through the reusable launcher path.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — TCP launcher emits open/close audit evidence
+
+- Slice attempted: add structured TCP open/close audit evidence to the production-shaped bwrap TCP once launcher.
+- Why next: reviewer pass found the forwarding proof complete but flagged Milestone 2 validation text requiring connection open/close/error events to be logged. `run_bwrap_tcp_once` relayed bytes but returned only byte/status evidence.
+- What changed: `BwrapTcpOnceConfig` now carries a sandbox id and minimal policy config. `run_bwrap_tcp_once` parses the first TUN TCP connect packet, evaluates it through the shared `PolicyEngine`, records the resulting `tcp_connect` JSON audit line, denies before host connect when policy rejects the flow, and records a `tcp_flow_closed` audit line with directional byte counts after target exit. The live TCP and curl smokes now assert both audit lines are produced.
+- Verification:
+  - Focused live TCP and curl checks passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_bwrap_tcp -- --ignored --nocapture` and `cargo test -p foxprox-cli --test live_bwrap_setup live_bwrap_curl -- --ignored --nocapture`.
+  - All explicit live smokes passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, covering UDP, DNS, Python TCP, and curl-over-TCP.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: the first assertion expected `tcp_connect_attempt`, but the stable audit schema name is `tcp_connect`; the test was corrected to match the existing audit schema.
+- What remains unproven: fully unbounded multi-connection scheduling and polished user-facing launcher UX. The alpha Milestone 2 validation requirement for open/close logs is now covered by the reusable launcher summary and live smokes.
+- Commit: this commit.

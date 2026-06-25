@@ -13,6 +13,7 @@ foxprox-config = { path = "../foxprox-config" }
 foxprox-core = { path = "../foxprox-core" }
 foxprox-device = { path = "../foxprox-device" }
 foxprox-egress = { path = "../foxprox-egress" }
+foxprox-flow = { path = "../foxprox-flow" }
 foxprox-packet = { path = "../foxprox-packet" }
 foxprox-tcp = { path = "../foxprox-tcp" }
 

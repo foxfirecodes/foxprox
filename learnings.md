@@ -300,3 +300,7 @@ The network broker should not hardcode broad filesystem/mount decisions into `pl
 ## 2026-06-22 — curl live smoke proves application-level TCP, not just socket bytes
 
 After smoltcp forwarding works with a Python socket, add a curl smoke against a tiny host HTTP server. `curl` validates that a normal dynamically-linked user tool can run inside the bwrap namespace and receive a full application response through TUN/smoltcp.
+
+## 2026-06-22 — TCP forwarding proofs should emit existing core audit, not invent test-only logs
+
+For live TUN/smoltcp forwarding, parse the first SYN packet with `foxprox-packet`, evaluate the resulting `TcpConnectAttempt` through `PolicyEngine`, and reuse the existing `tcp_connect` audit schema. Pair it with `ClosedTcpFlow::audit_record()` for close byte counts.
