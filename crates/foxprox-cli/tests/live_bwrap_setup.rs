@@ -393,6 +393,7 @@ fn live_bwrap_tcp_connection_uses_smoltcp_and_host_stream() {
             default_policy: DefaultPolicy::Allow,
             ..PolicyConfig::default()
         },
+        dns_cache: DnsAttributionCache::new(),
         smoltcp_ip: Ipv4Addr::new(10, 129, 0, 1),
         smoltcp_prefix_len: 24,
         listen_port: 8080,
@@ -446,6 +447,13 @@ fn live_bwrap_tls_client_hello_emits_sni_audit() {
         assert_eq!(&buffer[..length], expected_hello.as_slice());
         stream.write_all(b"ok").unwrap();
     });
+    let mut dns_cache = DnsAttributionCache::new();
+    dns_cache.record_answer(
+        "secure.example.com",
+        [IpAddr::V4(Ipv4Addr::new(10, 134, 0, 1))],
+        std::time::SystemTime::now(),
+        Duration::from_secs(300),
+    );
 
     let summary = run_bwrap_tcp_once(&BwrapTcpOnceConfig {
         bwrap_program: bwrap,
@@ -471,6 +479,7 @@ fn live_bwrap_tls_client_hello_emits_sni_audit() {
             default_policy: DefaultPolicy::Allow,
             ..PolicyConfig::default()
         },
+        dns_cache,
         smoltcp_ip: Ipv4Addr::new(10, 134, 0, 1),
         smoltcp_prefix_len: 24,
         listen_port: 443,
@@ -484,6 +493,12 @@ fn live_bwrap_tls_client_hello_emits_sni_audit() {
     upstream_thread.join().unwrap();
 
     assert!(summary.target_status_success);
+    assert!(summary
+        .audit_json_lines
+        .iter()
+        .any(|line| line.contains("\"kind\":\"tcp_connect\"")
+            && line.contains("secure.example.com")
+            && line.contains("\"hostname_attribution_source\":\"dns_cache\"")));
     assert!(summary
         .audit_json_lines
         .iter()
@@ -550,6 +565,7 @@ fn live_bwrap_curl_fetches_http_through_smoltcp_launcher() {
             default_policy: DefaultPolicy::Allow,
             ..PolicyConfig::default()
         },
+        dns_cache: DnsAttributionCache::new(),
         smoltcp_ip: Ipv4Addr::new(10, 130, 0, 1),
         smoltcp_prefix_len: 24,
         listen_port: 8080,

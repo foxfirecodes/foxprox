@@ -340,3 +340,7 @@ For transparent HTTPS metadata proof, send a handcrafted TLS ClientHello over th
 ## 2026-06-22 — explicit proxy CLI can wrap serve-one library helpers
 
 Expose HTTP proxy, HTTPS CONNECT, and SOCKS5 TCP CONNECT as one-shot CLI listener commands that load the same policy config and emit the same audit JSON. This proves process-boundary usability without adding a long-running daemon yet.
+
+## 2026-06-22 — one-shot transparent launchers need DNS cache injection seams
+
+Until there is a long-running daemon that observes DNS and TCP in one runtime, pass a `DnsAttributionCache` into one-shot TCP launchers and expose a CLI preseed form like `--dns-attribution host=ip`. This proves the live TCP enrichment/audit path while keeping the DNS handler cache reusable for future orchestration.

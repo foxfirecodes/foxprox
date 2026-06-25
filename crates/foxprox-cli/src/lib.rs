@@ -33,7 +33,7 @@ use foxprox_device::{TunIoError, TunPacketIo};
 use foxprox_egress::{EgressError, HostTcpEgress, UdpEgress, UdpTarget};
 use foxprox_flow::ClosedTcpFlow;
 #[cfg(unix)]
-use foxprox_inspect::{parse_plaintext_http_request, parse_tls_client_hello};
+use foxprox_inspect::{parse_plaintext_http_request, parse_tls_client_hello, DnsAttributionCache};
 use foxprox_packet::{
     parse_ipv4_packet, parse_ipv4_udp_datagram, synthesize_ipv4_udp_response, PacketContext,
 };
@@ -212,6 +212,7 @@ pub struct BwrapTcpOnceConfig {
     pub target_argv: Vec<String>,
     pub sandbox_id: String,
     pub policy: PolicyConfig,
+    pub dns_cache: DnsAttributionCache,
     pub smoltcp_ip: Ipv4Addr,
     pub smoltcp_prefix_len: u8,
     pub listen_port: u16,
@@ -400,6 +401,7 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
     let mut audit_json_lines = Vec::new();
     let mut tcp_source = None;
     let mut tcp_destination = None;
+    let mut tcp_attribution = None;
     let mut open_audited = false;
     let mut tun = TunPacketIo::from_owned_fd(setup_child.received.fd, config.max_packet_len)?;
     let mut tcp = foxprox_tcp::SmoltcpTcpServer::new(
@@ -415,8 +417,16 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
             if let Ok(NormalizedEvent::TcpConnectAttempt(event)) =
                 parse_ipv4_packet(&packet_context, &packet)
             {
+                let event = match config
+                    .dns_cache
+                    .enrich_event(NormalizedEvent::TcpConnectAttempt(event), SystemTime::now())
+                {
+                    NormalizedEvent::TcpConnectAttempt(event) => event,
+                    _ => unreachable!("dns cache preserves TCP event variant"),
+                };
                 tcp_source = Some(event.source);
                 tcp_destination = Some(event.destination);
+                tcp_attribution = event.attribution.clone();
                 let evaluation = policy.evaluate(&NormalizedEvent::TcpConnectAttempt(event));
                 let allowed = evaluation.decision.is_allowed();
                 audit_json_lines.push(audit_record_to_json_line(&evaluation.audit)?);
@@ -483,7 +493,7 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                         FrontendKind::Tun,
                         Some(source),
                         destination,
-                        None,
+                        tcp_attribution.clone(),
                         &sandbox_payload,
                     )
                     .map_err(|error| {
@@ -540,7 +550,7 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                 frontend: FrontendKind::Tun,
                 source: tcp_source,
                 destination: tcp_destination,
-                attribution: None,
+                attribution: tcp_attribution,
                 closed_at: SystemTime::now(),
                 duration_ms: SystemTime::now()
                     .duration_since(flow_started_at)
@@ -938,6 +948,7 @@ where
     let mut upstream_addr = None;
     let mut sandbox_id = None;
     let mut config_path = None;
+    let mut dns_cache = DnsAttributionCache::new();
     let mut max_packet_len = Some(4096_usize);
     let mut max_packets = Some(64_usize);
     let mut sandbox_buffer_len = Some(8192_usize);
@@ -996,6 +1007,16 @@ where
             }
             "--sandbox" => sandbox_id = args.next().map(path_to_string),
             "--config" => config_path = args.next(),
+            "--dns-attribution" => {
+                let value = args.next().ok_or_else(bwrap_tcp_once_usage)?;
+                let (hostname, address) = parse_dns_attribution_arg("--dns-attribution", &value)?;
+                dns_cache.record_answer(
+                    hostname,
+                    [IpAddr::V4(address)],
+                    SystemTime::now(),
+                    Duration::from_secs(300),
+                );
+            }
             "--max-packet-len" => {
                 max_packet_len = Some(parse_usize_arg(
                     "--max-packet-len",
@@ -1060,6 +1081,7 @@ where
         target_argv,
         sandbox_id: sandbox_id.ok_or_else(bwrap_tcp_once_usage)?,
         policy,
+        dns_cache,
         smoltcp_ip: listen_ip.ok_or_else(bwrap_tcp_once_usage)?,
         smoltcp_prefix_len: listen_prefix.ok_or_else(bwrap_tcp_once_usage)?,
         listen_port: listen_port.ok_or_else(bwrap_tcp_once_usage)?,
@@ -1190,6 +1212,21 @@ fn parse_socket_addr_arg(flag: &str, value: &Path) -> Result<SocketAddr, CliErro
         .to_string_lossy()
         .parse::<SocketAddr>()
         .map_err(|error| CliError::Usage(format!("invalid {flag}: {error}")))
+}
+
+#[cfg(unix)]
+fn parse_dns_attribution_arg(flag: &str, value: &Path) -> Result<(String, Ipv4Addr), CliError> {
+    let value = value.to_string_lossy();
+    let (hostname, address) = value
+        .split_once('=')
+        .ok_or_else(|| CliError::Usage(format!("invalid {flag}: expected HOST=IP")))?;
+    if hostname.trim().is_empty() {
+        return Err(CliError::Usage(format!("invalid {flag}: empty hostname")));
+    }
+    let address = address
+        .parse::<Ipv4Addr>()
+        .map_err(|error| CliError::Usage(format!("invalid {flag}: {error}")))?;
+    Ok((hostname.to_owned(), address))
 }
 
 #[cfg(unix)]
@@ -1664,6 +1701,8 @@ mod tests {
                 "127.0.0.1:18080",
                 "--sandbox",
                 "cli-bwrap-test",
+                "--dns-attribution",
+                "www.example.com=10.0.0.1",
                 "--max-packets",
                 "8",
                 "--extra-bwrap-arg",
@@ -1693,6 +1732,7 @@ mod tests {
         assert_eq!(config.listen_port, 8080);
         assert_eq!(config.upstream_addr, "127.0.0.1:18080".parse().unwrap());
         assert_eq!(config.sandbox_id, "cli-bwrap-test");
+        assert_eq!(config.dns_cache.len(), 1);
         assert_eq!(config.max_packets, 8);
         assert_eq!(config.extra_bwrap_args, ["--dev-bind", "/", "/"]);
         assert_eq!(config.target_argv, ["curl", "http://10.0.0.1:8080/"]);

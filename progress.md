@@ -1764,3 +1764,18 @@
 - What failed or surprised the agent: no behavior failures; the existing proxy serve-one library helpers mapped cleanly into CLI commands once policy loading and audit stdout were centralized.
 - What remains unproven: bwrap environment injection for proxy variables in a live sandbox command; bwrap planning already supports proxy env args, and explicit proxy listener behavior is covered by process/listener tests.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — DNS attribution wired into live TCP launcher
+
+- Slice attempted: wire DNS-cache attribution into the transparent TUN/smoltcp TCP launcher so live TCP/TLS audit can distinguish DNS-correlated flows from IP-only flows.
+- Why next: review flagged that DNS-to-flow attribution existed in `foxprox-inspect` but was not connected to the live transparent TCP path.
+- What changed: `BwrapTcpOnceConfig` now carries a `DnsAttributionCache`. The TCP launcher enriches the first parsed `TcpConnectAttempt` through that cache before policy/audit, preserves attribution for close records, and passes DNS attribution into TLS ClientHello inspection so SNI/DNS mismatch policy can run on the live path. The CLI accepts repeatable `--dns-attribution HOST=IP` entries to preseed the cache for one-shot transparent runs. The live TLS smoke now seeds a DNS attribution for the broker-side TUN IP and asserts the `tcp_connect` audit line reports `hostname_attribution_source="dns_cache"` while the TLS audit line reports `tls_sni`.
+- Verification:
+  - Focused checks passed: `cargo test -p foxprox-cli bwrap_tcp_once_arg_parser -- --nocapture` and `cargo test -p foxprox-cli --test live_bwrap_setup live_bwrap_tls -- --ignored --nocapture`.
+  - All explicit live smokes passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, 8/8.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; the one-shot CLI cannot observe DNS and TCP in the same long-lived daemon yet, so `--dns-attribution` provides an explicit preseed seam while the DNS handler/cache remains the source for production orchestration.
+- What remains unproven: a long-running runtime that records a DNS answer and later uses it for a separate TCP connection without preseed args. The alpha cache-to-flow boundary and live TCP enrichment seam are now both verified.
+- Commit: this commit.
