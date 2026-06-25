@@ -1234,3 +1234,29 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * the narrower broker DNS exemption remains limited to port 53 broker resolver traffic.
 * Audit evidence: existing policy/packet handler audit paths record `DirectDnsBypass`; this cycle tightened the decision invariant and covered it at policy level.
 * Residual risk: DoH over TCP/443 remains generally indistinguishable without hostname/SNI/domain policy and is not solved by port-based bypass checks.
+
+## 2026-06-21 - Linux TUN device setup primitive
+
+* Invariant under work: alpha TUN setup must have a small reviewed Linux device primitive that creates IFF_TUN/IFF_NO_PI file descriptors, validates interface names before ioctl, and configures address/route/MTU through explicit setup commands.
+* Threat or failure mode addressed: ad hoc TUN setup in a launcher or tests could silently create TAP/packet-info devices, accept invalid interface names, or skip route/MTU/address setup before claiming sandbox traffic is mediated.
+* Planned verification: add a Linux device crate with validated TUN creation and setup command wrappers, unit tests for validation/argv construction, a privileged ignored network-namespace test, run the full check command, then run the ignored test inside `unshare -Urn`.
+
+## 2026-06-21 - Linux TUN device setup primitive results
+
+* Tests added/updated:
+  * validated TUN names reject empty, overlong, whitespace, slash, and NUL-like invalid inputs before ioctl.
+  * setup command wrapper emits deterministic `ip addr add`, `ip link set mtu ... up`, and `ip route add` commands.
+  * setup rejects ambiguous address/route arguments and MTUs below IPv4 minimum.
+  * ignored network-namespace test creates an IFF_TUN/IFF_NO_PI device, configures address/MTU/default route, and observes ping-generated packets from the TUN fd.
+* Commands run:
+  * Initial `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` failed because `File::set_nonblocking` is not available; replaced with reviewed `fcntl` helper in the privileged test.
+  * Initial `unshare -Urn cargo test -p foxprox-device creates_and_configures_tun_in_network_namespace -- --ignored --nocapture` failed because adding a connected route duplicated the address-created route; switched the test route to default route.
+  * Second ignored test attempt observed ping traffic but failed on an empty TUN write with `EINVAL`; removed the meaningless empty-write assertion.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: core 161 tests, device 3 tests plus 1 ignored, integrations 3 tests, doc tests, and clippy completed cleanly.
+  * `unshare -Urn bash -lc 'cargo test -p foxprox-device creates_and_configures_tun_in_network_namespace -- --ignored --nocapture'` — passed: ignored TUN setup test observed ping-generated packet traffic in a disposable network namespace.
+* Observed allow/deny/fail-closed behavior:
+  * invalid setup inputs fail before device creation or shell command execution.
+  * the real TUN proof runs inside an isolated user/network namespace with temporary CAP_NET_ADMIN and does not alter host routes.
+  * packet observation from ping proves sandbox-side traffic reaches the TUN fd.
+* Audit evidence: this is device setup plumbing; runtime lifecycle audit emission still needs to be wired around successful/failed setup.
+* Residual risk: packet write-back through the real TUN fd, fd handoff from setup helper to host broker, privilege drop before target exec, and smoltcp forwarding are still future work.

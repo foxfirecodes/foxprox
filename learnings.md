@@ -229,3 +229,7 @@ The setup backend should construct `foxproxsetup -- target...` explicitly and va
 ## 2026-06-21 - Broker DNS IP exemptions should not include DoT port 853
 
 The broker DNS server allowlist is for broker-controlled DNS service on port 53. Treating TCP/UDP 853 as exempt when aimed at that IP weakens DoT bypass prevention and can bypass DNS query/response correlation under broad TCP rules.
+
+## 2026-06-21 - Real TUN setup tests should run in disposable user/network namespaces
+
+`unshare -Urn` provides enough CAP_NET_ADMIN for local TUN setup proof without changing host routes. Address assignment already creates a connected route, so tests should add a distinct route such as default; empty writes to TUN are invalid and should not be used as write-back proof.
