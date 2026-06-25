@@ -1795,5 +1795,5 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-runtime` — byte-rate accounting remains runtime-owned.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: d842c3a.
 - Remaining boundary risks: wall-clock token-bucket refill policy remains future scheduler work.
