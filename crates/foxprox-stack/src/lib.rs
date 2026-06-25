@@ -956,7 +956,7 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
             self.sandbox_id.clone(),
             Frontend::Tun,
             source.clone(),
-            destination.clone(),
+            local_destination.clone(),
         );
         let policy_decision = self.broker.evaluate(&request);
         if policy_decision.decision.is_deny() {
@@ -975,9 +975,10 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                     .with_frontend(Frontend::Tun)
                     .with_protocol(foxprox_core::Protocol::Tcp)
                     .with_source(source.clone())
-                    .with_destination(destination)
+                    .with_destination(local_destination.clone())
                     .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
                     .with_detail("stack", "smoltcp")
+                    .with_detail("egress_destination", endpoint_detail(&destination))
                     .with_detail("error", tcp_egress_error_detail(&error));
                 let _ = self.broker.append_audit_for(&request, audit);
                 return Err(error);
@@ -1049,10 +1050,11 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         .with_frontend(Frontend::Tun)
         .with_protocol(foxprox_core::Protocol::Tcp)
         .with_source(source)
-        .with_destination(destination)
+        .with_destination(local_destination.clone())
         .with_byte_counts(byte_counts.clone())
         .with_duration_ms(closed_at_ms.saturating_sub(opened_at_ms))
-        .with_detail("stack", "smoltcp");
+        .with_detail("stack", "smoltcp")
+        .with_detail("egress_destination", endpoint_detail(&destination));
         if let Err(decision) = self.broker.append_audit_for(&request, close_audit) {
             return Ok(tcp_stream_evidence(
                 byte_counts,
@@ -1883,11 +1885,23 @@ mod tests {
         assert_eq!(records[1].details["tcp_stream_remote"], "10.0.2.15:50000");
         assert_eq!(records[2].kind, AuditKind::TcpFlowClosed);
         assert_eq!(records[2].details["stack"], "smoltcp");
+        assert_eq!(records[2].details["egress_destination"], "127.0.0.1:8080");
         assert_eq!(
             records[2].source.as_ref().unwrap().ip.unwrap().to_string(),
             "10.0.2.15"
         );
         assert_eq!(records[2].source.as_ref().unwrap().port, Some(50_000));
+        assert_eq!(
+            records[2]
+                .destination
+                .as_ref()
+                .unwrap()
+                .ip
+                .unwrap()
+                .to_string(),
+            "10.0.2.1"
+        );
+        assert_eq!(records[2].destination.as_ref().unwrap().port, Some(8080));
         assert_eq!(records[2].byte_counts.as_ref().unwrap().from_sandbox, 13);
         assert_eq!(records[2].byte_counts.as_ref().unwrap().to_sandbox, 9);
     }
