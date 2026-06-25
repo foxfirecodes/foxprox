@@ -19,7 +19,7 @@ use foxprox_core::{
 pub trait HostEgress {
     type TcpStream: HostTcpStream;
     type UdpHandle: HostUdpFlow;
-    type HttpResponse;
+    type HttpResponse: HostHttpResponse;
 
     fn connect_tcp(&mut self, event: &TcpConnectAttempt) -> Result<Self::TcpStream, EgressError>;
 
@@ -64,6 +64,11 @@ impl HostTcpStream for TcpStream {
     }
 }
 
+/// Shared host HTTP response contract used by explicit proxy code.
+pub trait HostHttpResponse {
+    fn read_to_proxy_client(&mut self, max_bytes: usize) -> Result<Vec<u8>, EgressError>;
+}
+
 /// Shared host UDP flow contract used by packet forwarding code.
 pub trait HostUdpFlow {
     fn send_from_sandbox(&mut self, bytes: &[u8]) -> Result<usize, EgressError>;
@@ -101,6 +106,7 @@ pub struct MockEgress {
     pub socks_connects: Vec<SocksConnect>,
     pub dns_queries: Vec<DnsQuery>,
     pub dns_results: Vec<SocketAddr>,
+    pub http_response_bytes: Vec<u8>,
 }
 
 impl HostEgress for MockEgress {
@@ -123,7 +129,9 @@ impl HostEgress for MockEgress {
         event: &HttpRequest,
     ) -> Result<Self::HttpResponse, EgressError> {
         self.http_requests.push(event.clone());
-        Ok(MockHttpResponse)
+        Ok(MockHttpResponse {
+            bytes: self.http_response_bytes.clone(),
+        })
     }
 
     fn proxy_connect(&mut self, event: &HttpsConnect) -> Result<Self::TcpStream, EgressError> {
@@ -168,8 +176,17 @@ impl HostUdpFlow for MockUdpHandle {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MockHttpResponse;
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MockHttpResponse {
+    bytes: Vec<u8>,
+}
+
+impl HostHttpResponse for MockHttpResponse {
+    fn read_to_proxy_client(&mut self, max_bytes: usize) -> Result<Vec<u8>, EgressError> {
+        let len = self.bytes.len().min(max_bytes);
+        Ok(self.bytes.drain(..len).collect())
+    }
+}
 
 /// Standard-library host egress backend.
 ///
@@ -224,6 +241,9 @@ impl HostEgress for StdHostEgress {
         stream
             .write_all(request.as_bytes())
             .map_err(|error| EgressError::ConnectFailed(error.to_string()))?;
+        stream
+            .set_nonblocking(true)
+            .map_err(|error| EgressError::ConnectFailed(error.to_string()))?;
         Ok(StdHttpResponse { stream, host })
     }
 
@@ -247,6 +267,19 @@ impl HostEgress for StdHostEgress {
 pub struct StdHttpResponse {
     pub stream: TcpStream,
     pub host: String,
+}
+
+impl HostHttpResponse for StdHttpResponse {
+    fn read_to_proxy_client(&mut self, max_bytes: usize) -> Result<Vec<u8>, EgressError> {
+        let mut buffer = vec![0_u8; max_bytes];
+        let len = match self.stream.read(&mut buffer) {
+            Ok(len) => len,
+            Err(error) if error.kind() == ErrorKind::WouldBlock => 0,
+            Err(error) => return Err(EgressError::StreamIo(error.to_string())),
+        };
+        buffer.truncate(len);
+        Ok(buffer)
+    }
 }
 
 fn connect_destination(host: &DestinationHost, port: u16) -> Result<TcpStream, EgressError> {

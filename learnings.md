@@ -423,3 +423,8 @@
 
 - The runtime loop should be a thin scheduler around the nonblocking tick: it advances sequence/timestamps and idleness state, while device readiness and bridge maintenance remain separately testable.
 - Use idle-streak stopping as a portable readiness boundary before adding OS-specific epoll/tokio adapters.
+
+## 2026-06-22 — explicit HTTP proxy connection step
+
+- Explicit proxy session IO belongs in runtime: frontends parse bounded request heads into normalized events, net/policy/audit decide, and egress owns host response streams.
+- Add a response-stream trait to egress instead of letting runtime depend on `TcpStream` or std IO details for forwarded HTTP responses.

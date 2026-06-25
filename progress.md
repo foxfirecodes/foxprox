@@ -1818,3 +1818,27 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: b7d689c.
 - Remaining boundary risks: OS-specific readiness registration adapters remain.
+
+## 2026-06-22 — Boundary objective: explicit HTTP proxy connection step
+
+- Boundary under work: production-facing explicit HTTP proxy request IO through shared policy/audit/egress.
+- Allowed dependency direction: runtime owns socket/session stepping; frontends parse only into normalized events; net applies policy/audit/egress; egress owns host response streams. Policy/audit still do not see parser or socket types.
+- Dependency-risk assessment: parser and egress contracts exist, but alpha explicit proxy networking needs a concrete connection step that reads a bounded request head, applies shared policy/audit, forwards through shared egress, and writes an allowed/denied response without bypassing policy.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/frontends/egress/audit.
+- Observed results: added `HostHttpResponse` to the shared egress contract and implemented it for mock/std HTTP responses. Added `process_one_http_proxy_request` in runtime to read a bounded HTTP proxy request head, parse through `foxprox-frontends`, run shared policy/audit/egress through `foxprox-net`, write forwarded HTTP response bytes for allowed requests, and write fail-closed 403/502 responses for denials. Added allowed and denied proxy session tests. All verification passed.
+- Changed files:
+  - `crates/foxprox-egress/src/lib.rs`
+  - `crates/foxprox-runtime/Cargo.toml`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 157 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime owns session IO and consumes frontends/net/egress contracts.
+  - `cargo tree -p foxprox-frontends` — frontends remains core-only parser boundary.
+  - `cargo tree -p foxprox-egress` — egress remains core-only host IO boundary.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: full-duplex CONNECT tunnel pump and listener accept loop remain.

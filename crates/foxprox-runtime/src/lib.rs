@@ -8,17 +8,20 @@
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
+    io::{ErrorKind, Read, Write},
     net::{IpAddr, SocketAddr},
     time::{Duration, Instant},
 };
 
 use foxprox_audit::{AuditRecord, AuditSink, FlowClosedAudit};
 use foxprox_core::{
-    FrontendKind, NormalizedEvent, Protocol, SandboxId, TcpConnectAttempt, UdpFlowAttempt,
-    UdpTimeouts,
+    DenialAction, FrontendKind, NormalizedEvent, ParserLimits, Protocol, SandboxId,
+    TcpConnectAttempt, UdpFlowAttempt, UdpTimeouts,
 };
 use foxprox_device::{DeviceError, DevicePacket, PacketDevice, TryPacketDevice};
-use foxprox_egress::{EgressError, EgressOutcome, HostEgress, HostTcpStream, HostUdpFlow};
+use foxprox_egress::{
+    EgressError, EgressOutcome, HostEgress, HostHttpResponse, HostTcpStream, HostUdpFlow,
+};
 use foxprox_net::{
     apply_dns_attribution, handle_ipv4_dns_service_packet, handle_ipv4_packet,
     handle_ipv4_packet_with_egress, handle_ipv6_dns_service_packet, handle_ipv6_packet,
@@ -40,6 +43,121 @@ pub struct DevicePacketStep<'a, E, A> {
     pub audit: &'a mut A,
     pub sequence: u64,
     pub timestamp_millis: u64,
+}
+
+pub struct ExplicitHttpProxyStep<'a, E, A> {
+    pub sandbox_id: &'a SandboxId,
+    pub policy: &'a PolicyEngine,
+    pub egress: &'a mut E,
+    pub audit: &'a mut A,
+    pub parser_limits: ParserLimits,
+    pub max_response_bytes: usize,
+    pub sequence: u64,
+    pub timestamp_millis: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExplicitHttpProxyOutcome {
+    pub event: NormalizedEvent,
+    pub broker_outcome: BrokerEventOutcome,
+    pub response_bytes_written: usize,
+    pub connected_tunnel: bool,
+}
+
+/// Process one bounded explicit HTTP proxy request from a client stream.
+///
+/// This step keeps listener/session IO in runtime, parsing in frontends, policy
+/// and audit in net/policy/audit, and host networking in egress. It intentionally
+/// handles one request head; full-duplex CONNECT tunneling can reuse the returned
+/// egress TCP stream contract in a later pump.
+pub fn process_one_http_proxy_request<Io, E, A>(
+    io: &mut Io,
+    step: ExplicitHttpProxyStep<'_, E, A>,
+) -> Result<ExplicitHttpProxyOutcome, RuntimeError>
+where
+    Io: Read + Write,
+    E: HostEgress,
+    E::HttpResponse: HostHttpResponse,
+    A: AuditSink,
+{
+    let request = read_http_proxy_head(io, step.parser_limits.max_http_request_head_bytes)
+        .map_err(RuntimeError::ProxyIo)?;
+    let event = foxprox_frontends::parse_http_request_with_limits(
+        step.sandbox_id.clone(),
+        FrontendKind::HttpProxy,
+        &request,
+        step.parser_limits,
+    );
+    let mut result = handle_normalized_event_with_egress(
+        &event,
+        step.policy,
+        step.egress,
+        step.audit,
+        step.sequence,
+        step.timestamp_millis,
+    )
+    .map_err(RuntimeError::Broker)?;
+
+    let mut response_bytes_written = 0;
+    let mut connected_tunnel = false;
+    match result.egress_outcome.take() {
+        Some(EgressOutcome::HttpForwarded(mut response)) if result.decision.is_allowed() => {
+            let bytes = response
+                .read_to_proxy_client(step.max_response_bytes)
+                .map_err(BrokerError::Egress)
+                .map_err(RuntimeError::Broker)?;
+            if !bytes.is_empty() {
+                io.write_all(&bytes).map_err(RuntimeError::ProxyIo)?;
+                response_bytes_written = bytes.len();
+            }
+        }
+        Some(EgressOutcome::TcpConnected(_stream)) if result.decision.is_allowed() => {
+            let established = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+            io.write_all(established).map_err(RuntimeError::ProxyIo)?;
+            response_bytes_written = established.len();
+            connected_tunnel = true;
+        }
+        _ if !result.decision.is_allowed() => {
+            let status = match result.outcome {
+                BrokerEventOutcome::Denied(Some(DenialAction::Reset)) => {
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n".as_slice()
+                }
+                _ => b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".as_slice(),
+            };
+            io.write_all(status).map_err(RuntimeError::ProxyIo)?;
+            response_bytes_written = status.len();
+        }
+        _ => {}
+    }
+
+    Ok(ExplicitHttpProxyOutcome {
+        event,
+        broker_outcome: result.outcome,
+        response_bytes_written,
+        connected_tunnel,
+    })
+}
+
+fn read_http_proxy_head<Io: Read>(
+    io: &mut Io,
+    max_bytes: usize,
+) -> Result<Vec<u8>, std::io::Error> {
+    let mut bytes = Vec::new();
+    let mut one = [0_u8; 1];
+    while bytes.len() < max_bytes {
+        match io.read(&mut one) {
+            Ok(0) => break,
+            Ok(_) => {
+                bytes.push(one[0]);
+                if bytes.ends_with(b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(bytes)
 }
 
 /// Read one IPv4 packet from `device`, run it through the existing normalized
@@ -1812,6 +1930,7 @@ pub enum RuntimeError {
     Device(DeviceError),
     Broker(BrokerError),
     Stack(foxprox_net::StackError),
+    ProxyIo(std::io::Error),
 }
 
 impl fmt::Display for RuntimeError {
@@ -1820,6 +1939,7 @@ impl fmt::Display for RuntimeError {
             Self::Device(error) => write!(f, "device runtime error: {error}"),
             Self::Broker(error) => write!(f, "broker runtime error: {error}"),
             Self::Stack(error) => write!(f, "stack runtime error: {error}"),
+            Self::ProxyIo(error) => write!(f, "proxy runtime io error: {error}"),
         }
     }
 }
@@ -1844,6 +1964,87 @@ mod tests {
     use foxprox_device::PreopenedTunDevice;
     use foxprox_egress::{MockEgress, MockHttpResponse, MockTcpStream, MockUdpHandle};
     use foxprox_net::StackError;
+
+    #[test]
+    fn explicit_http_proxy_request_uses_shared_policy_audit_and_egress() {
+        let request = b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec();
+        let request_len = request.len();
+        let mut io = Cursor::new(request);
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut rule = PolicyRule::allow(foxprox_core::RuleId::new("http").unwrap());
+        rule.protocol = ProtocolMatcher::Exact(Protocol::Http);
+        config.rules.push(rule);
+        let policy = PolicyEngine::new(config);
+        let mut egress = MockEgress {
+            http_response_bytes: b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec(),
+            ..MockEgress::default()
+        };
+        let mut audit = BoundedAuditSink::new(4);
+        let sandbox_id = SandboxId::new("s1").unwrap();
+
+        let outcome = process_one_http_proxy_request(
+            &mut io,
+            ExplicitHttpProxyStep {
+                sandbox_id: &sandbox_id,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                parser_limits: ParserLimits::default(),
+                max_response_bytes: 1024,
+                sequence: 1,
+                timestamp_millis: 1000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.broker_outcome, BrokerEventOutcome::Forwarded);
+        assert_eq!(egress.http_requests.len(), 1);
+        assert_eq!(audit.records().len(), 1);
+        let bytes = io.into_inner();
+        assert_eq!(
+            &bytes[request_len..],
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+        );
+        assert_eq!(outcome.response_bytes_written, bytes.len() - request_len);
+    }
+
+    #[test]
+    fn explicit_http_proxy_denial_writes_forbidden_without_egress() {
+        let request = b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec();
+        let request_len = request.len();
+        let mut io = Cursor::new(request);
+        let policy = PolicyEngine::new(RuntimeConfig::deny_by_default());
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(4);
+        let sandbox_id = SandboxId::new("s1").unwrap();
+
+        let outcome = process_one_http_proxy_request(
+            &mut io,
+            ExplicitHttpProxyStep {
+                sandbox_id: &sandbox_id,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                parser_limits: ParserLimits::default(),
+                max_response_bytes: 1024,
+                sequence: 1,
+                timestamp_millis: 1000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome.broker_outcome,
+            BrokerEventOutcome::Denied(Some(DenialAction::Drop))
+        );
+        assert!(egress.http_requests.is_empty());
+        assert_eq!(audit.records().len(), 1);
+        let bytes = io.into_inner();
+        assert_eq!(
+            &bytes[request_len..],
+            b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"
+        );
+    }
 
     #[test]
     fn one_step_runtime_reads_a_packet_and_writes_policy_allowed_reply() {
