@@ -238,7 +238,19 @@ pub fn accept_setup_control_tun_handoff_with_timeouts(
             };
         }
     };
-    let _ = stream.set_read_timeout(read_timeout);
+    if let Err(error) = stream.set_read_timeout(read_timeout) {
+        audit_records.push(setup_control_handoff_error_audit(
+            &config,
+            error.to_string(),
+        ));
+        return HostSetupControlHandoffReport {
+            status: HostSetupControlHandoffStatus::Failed,
+            plan,
+            received: None,
+            failed_report: None,
+            audit_records,
+        };
+    }
     match foxprox_device::recv_tun_fd(&stream, &config.tun_name) {
         Ok(received) => {
             audit_records.push(received.report.audit_record(config.sandbox_id.clone()));
@@ -1834,6 +1846,49 @@ mod tests {
         assert_eq!(audit.decision, Some(Decision::FailClosed));
         assert_eq!(audit.details["setup_phase"], "host_setup_control_handoff");
         assert!(audit.details["setup_error"].contains("timed out"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_control_handoff_read_timeout_is_bounded_and_audited() {
+        let path = std::env::temp_dir().join(format!(
+            "foxprox-host-setup-control-read-timeout-{}-{}.sock",
+            std::process::id(),
+            "cli"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let listener = UnixListener::bind(&path).unwrap();
+        let mut config = NetworkSetupConfig::alpha_default("s1");
+        config.setup_control_socket_path = Some(path.to_string_lossy().to_string());
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let sender_path = path.clone();
+        let sender = std::thread::spawn(move || {
+            let _control = UnixStream::connect(sender_path).unwrap();
+            let _ = release_rx.recv();
+        });
+
+        let report = accept_setup_control_tun_handoff_with_timeouts(
+            &listener,
+            config,
+            &["true".to_string()],
+            Some(Duration::from_secs(1)),
+            Some(Duration::from_millis(10)),
+        );
+        let _ = release_tx.send(());
+        sender.join().unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert_eq!(report.status, HostSetupControlHandoffStatus::Failed);
+        assert!(report.received.is_none());
+        let audit = report
+            .audit_records
+            .iter()
+            .find(|record| {
+                record.details.get("handoff_error").map(String::as_str) == Some("receive_failed")
+            })
+            .unwrap();
+        assert_eq!(audit.kind, AuditKind::BrokerError);
+        assert_eq!(audit.decision, Some(Decision::FailClosed));
     }
 
     #[cfg(unix)]
