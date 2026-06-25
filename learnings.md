@@ -257,3 +257,7 @@ Real broker-DNS tests should configure the smoltcp service IP as a broker DNS se
 ## 2026-06-21 - TUN fd handoff should use explicit SCM_RIGHTS validation
 
 Setup helpers should send the TUN fd over a Unix control socket and the broker should reject messages without exactly the expected fd rights. This avoids relying on ambient inherited descriptors and keeps unsafe code isolated outside the policy core.
+
+## 2026-06-21 - foxproxsetup e2e can validate fd handoff without bwrap first
+
+A disposable `unshare -Urn` test can run the real setup helper with an inherited Unix control fd, verify target exec, and confirm the broker side still reads packets from the handed-off TUN fd. This isolates helper correctness before adding bwrap command orchestration.

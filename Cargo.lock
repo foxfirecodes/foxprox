@@ -62,6 +62,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "foxprox-cli"
+version = "0.1.0"
+dependencies = [
+ "foxprox-device",
+ "foxprox-integrations",
+ "libc",
+]
+
+[[package]]
 name = "foxprox-core"
 version = "0.1.0"
 

@@ -1384,3 +1384,25 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * integration crate contains reviewed unsafe only in the Unix fd-passing boundary; core remains `#![forbid(unsafe_code)]`.
 * Audit evidence: this primitive does not emit audit; runtime setup code should wrap successful/failed handoff with lifecycle/broker-error events.
 * Residual risk: actual `foxproxsetup` binary, privilege drop, bwrap child execution, and cross-namespace end-to-end fd handoff remain future work.
+
+## 2026-06-21 - foxproxsetup helper binary and fd handoff e2e
+
+* Invariant under work: the bwrap-compatible setup helper must create/configure TUN, send the TUN fd to the broker over a control fd, drop setup capability state, and exec the target command only after setup succeeds.
+* Threat or failure mode addressed: without a real helper binary, setup remains ad hoc test code and target execution could occur without broker fd handoff or configured network mediation.
+* Planned verification: add a std-only `foxproxsetup` binary with strict argv parsing, TUN setup, fd handoff, capability drop before exec, parser tests, an ignored unshare e2e spawning the binary with an inherited Unix control fd, then run checks and the ignored e2e.
+
+## 2026-06-21 - foxproxsetup helper binary and fd handoff e2e results
+
+* Tests added/updated:
+  * `foxproxsetup` parser tests cover required `--control-fd`, target separator, TUN setup arguments, and negative missing/invalid cases.
+  * ignored unshare e2e runs the real `foxproxsetup` binary with an inherited Unix control fd, creates/configures TUN, sends the fd to the broker side, execs a target shell command that verifies `fp0`, and confirms the received fd still observes ping traffic after helper exit.
+* Commands run:
+  * `cargo test -p foxprox-cli` and `cargo clippy -p foxprox-cli --all-targets --all-features -- -D warnings` — passed.
+  * `unshare -Urn bash -lc 'cargo test -p foxprox-cli foxproxsetup_creates_tun_sends_fd_and_execs_target -- --ignored --nocapture'` — passed; ping generated traffic visible through the handed-off fd.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: CLI 2 tests plus 1 ignored, core 161 tests, device 3 tests plus 2 ignored, integrations 5 tests, net 4 ignored tests, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * target exec happens only after TUN creation, interface configuration, and fd handoff succeed.
+  * the helper drops the local TUN/control fds before exec and sets `NO_NEW_PRIVS` before target execution.
+  * setup argument errors fail before target execution.
+* Audit evidence: no audit sink is wired in the setup binary yet; runtime launcher should emit lifecycle/broker-error events around helper start, fd receipt, and target exit.
+* Residual risk: full bwrap launcher orchestration, seccomp/capability-set clearing beyond `NO_NEW_PRIVS`, DNS/proxy environment injection, and host-side broker event loop packaging remain future work.
