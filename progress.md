@@ -5440,3 +5440,25 @@ Commit: ef6c6c5
 
 ### Remaining alpha gaps
 - The `e9f5b32d` blocker/high product-scope findings remain: DNS/proxy lifecycle is not integrated into the launchers, transparent destination mapping is still explicit/test-style, launchers are bounded single-exchange proofs rather than long-running multi-flow sessions, transparent HTTP/TLS attribution is not yet wired through the smoltcp data plane, and lifecycle/cleanup audit is not yet using the production runtime harness.
+
+## 2026-06-25 — Audit transparent TCP requested endpoints
+
+Commit: 6d6f500
+
+### Review
+- Reviewer run `e9f5b32d` also noted that the TCP bridge/launcher still used explicit host mapping heavily: policy/audit used the mapped host endpoint instead of the sandbox-requested smoltcp local destination.
+
+### Fix
+- `SmoltcpTunBridge::bridge_first_tcp_stream_to_egress(...)` now evaluates policy and records TCP flow close/error evidence against the sandbox-requested local destination from smoltcp, while still allowing the alpha launcher to pass a mapped host egress endpoint.
+- Close/error records include `egress_destination` detail when the actual host socket endpoint is mapped.
+- Strengthened the stack test to assert `TcpFlowClosed` uses the requested `10.0.2.1:8080` endpoint while recording mapped `127.0.0.1:8080` as egress detail.
+
+### Validation
+- `cargo test -p foxprox-stack --all-targets --all-features smoltcp_tun_bridge_audits_tcp_egress_and_flow_close -- --nocapture` — passed.
+- `cargo test -p foxprox-cli --test bwrap_setup_e2e --all-features -- --ignored --nocapture` — passed all six ignored real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining alpha gaps
+- This improves transparent endpoint policy/audit semantics but does not remove the explicit mapped egress endpoint from the alpha launcher. Remaining gaps continue to include DNS/proxy lifecycle integration, transparent destination mapping/config, long-running multi-flow sessions, transparent HTTP/TLS attribution in the smoltcp data plane, and lifecycle/cleanup hardening.
