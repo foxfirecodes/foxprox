@@ -1516,5 +1516,5 @@
   - `cargo tree -p foxprox-dns` — DNS remains core-only.
   - `cargo tree -p foxprox-packet` — packet remains core-only.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: e7b538e.
 - Remaining boundary risks: TCP DNS and live runtime DNS service scheduling remain.
