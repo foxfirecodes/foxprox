@@ -1536,3 +1536,24 @@
 - What failed or surprised the agent: no behavior failures; using a child process instead of an in-process thread gives real spawn/wait evidence without requiring bwrap in default tests.
 - What remains unproven: using this helper with the full bwrap command plan in a non-ignored runtime path and supervising long-running target lifetime.
 - Commit: this commit.
+
+## 2026-06-22 Session Continue — launcher returns live child after fd handoff slice
+
+- Slice attempted: split setup spawn/fd accept from child wait so the broker can process traffic while the target is still running.
+- Why next: `run_setup_command_and_receive_fd` waits immediately after fd receipt, which is fine for setup-only tests but not for real bwrap sessions where the target may block waiting for broker packet handling.
+- Verification plan: add `spawn_setup_command_and_accept_fd` returning the child handle plus received fd, refactor the existing run helper through it, and test that the caller can read the fd before waiting for child completion. Run focused integration tests plus workspace checks.
+- Commit: pending.
+
+## 2026-06-22 Slice Evidence — launcher returns live child after fd handoff
+
+- Slice attempted: split setup spawn/fd accept from child wait so the broker can process traffic while the target is still running.
+- Why next: `run_setup_command_and_receive_fd` waits immediately after fd receipt, which is fine for setup-only tests but not for real bwrap sessions where the target may block waiting for broker packet handling.
+- What changed: `foxprox-integrations::fd_handoff` now exposes `spawn_setup_command_and_accept_fd`, returning a live child handle plus the received setup fd. `run_setup_command_and_receive_fd` now builds on that helper and waits only in the convenience wrapper.
+- Verification:
+  - Focused checks passed: `cargo test -p foxprox-integrations launcher_ -- --nocapture`, proving both immediate-wait and live-child variants. The live-child test reads the handed-off fd before waiting for the child to exit.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed, including 16 `foxprox-integrations` tests.
+  - `cargo fmt --check` passed after workspace tests.
+- What failed or surprised the agent: no behavior failures; keeping the child live after fd handoff matches the actual bwrap target lifecycle much better.
+- What remains unproven: replacing the manual command construction in ignored live tests with this orchestration helper for full bwrap sessions.
+- Commit: this commit.

@@ -619,7 +619,7 @@ pub mod fd_handoff {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::path::{Path, PathBuf};
-    use std::process::Command;
+    use std::process::{Child, Command};
 
     use nix::cmsg_space;
     use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
@@ -732,6 +732,13 @@ pub mod fd_handoff {
 
     impl std::error::Error for BrokerControlError {}
 
+    /// Live setup child plus the fd it handed to the broker.
+    #[derive(Debug)]
+    pub struct SetupCommandChild {
+        pub child: Child,
+        pub received: ReceivedFd,
+    }
+
     /// Result of spawning a setup command and receiving its fd handoff.
     #[derive(Debug)]
     pub struct SetupCommandRunResult {
@@ -761,16 +768,31 @@ pub mod fd_handoff {
     impl std::error::Error for SetupCommandRunError {}
 
     /// Spawn a setup command while accepting one setup fd on the broker listener.
-    pub fn run_setup_command_and_receive_fd(
+    ///
+    /// The returned child is still live. Callers can process traffic on the
+    /// received fd before waiting for the target process to exit.
+    pub fn spawn_setup_command_and_accept_fd(
         listener: BrokerControlListener,
         mut command: Command,
-    ) -> Result<SetupCommandRunResult, SetupCommandRunError> {
-        let mut child = command
+    ) -> Result<SetupCommandChild, SetupCommandRunError> {
+        let child = command
             .spawn()
             .map_err(|error| SetupCommandRunError::Spawn(error.to_string()))?;
         let received = listener
             .accept_setup_fd()
             .map_err(SetupCommandRunError::Broker)?;
+        Ok(SetupCommandChild { child, received })
+    }
+
+    /// Spawn a setup command, accept one setup fd, then wait for process exit.
+    pub fn run_setup_command_and_receive_fd(
+        listener: BrokerControlListener,
+        command: Command,
+    ) -> Result<SetupCommandRunResult, SetupCommandRunError> {
+        let SetupCommandChild {
+            mut child,
+            received,
+        } = spawn_setup_command_and_accept_fd(listener, command)?;
         let status = child
             .wait()
             .map_err(|error| SetupCommandRunError::Wait(error.to_string()))?;
@@ -1221,6 +1243,67 @@ mod tests {
         ));
         assert!(!resolv_conf.exists());
         assert!(fd_handoff::receive_setup_fd(&broker_socket).is_err());
+        remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn launcher_returns_child_after_fd_handoff_before_waiting() {
+        use std::fs::{create_dir_all, remove_dir_all, OpenOptions};
+        use std::io::{Read, Seek, SeekFrom, Write};
+        use std::process::Command;
+
+        let Some(python) = ["/usr/bin/python3", "/bin/python3"]
+            .iter()
+            .map(PathBuf::from)
+            .find(|path| path.exists())
+        else {
+            eprintln!("skipping live-child fd test: python3 missing");
+            return;
+        };
+        let dir = unique_test_dir("launcher-live-child");
+        create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("setup.sock");
+        let fd_path = dir.join("tun-fd-standin");
+        let mut fd_file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .read(true)
+            .write(true)
+            .open(&fd_path)
+            .unwrap();
+        fd_file.write_all(b"live-child-fd").unwrap();
+        fd_file.seek(SeekFrom::Start(0)).unwrap();
+        drop(fd_file);
+        let listener = fd_handoff::BrokerControlListener::bind(&socket_path).unwrap();
+        let script = r#"
+import array, os, socket, sys, time
+sock_path, fd_path = sys.argv[1], sys.argv[2]
+fd = os.open(fd_path, os.O_RDWR)
+sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+sock.connect(sock_path)
+fds = array.array('i', [fd])
+sock.sendmsg([b'foxprox-fd'], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, fds)])
+sock.close()
+os.close(fd)
+time.sleep(0.2)
+"#;
+        let mut command = Command::new(python);
+        command
+            .arg("-c")
+            .arg(script)
+            .arg(&socket_path)
+            .arg(&fd_path);
+
+        let mut child = fd_handoff::spawn_setup_command_and_accept_fd(listener, command).unwrap();
+        let mut received_file = std::fs::File::from(child.received.fd);
+        let mut contents = String::new();
+        received_file.read_to_string(&mut contents).unwrap();
+        let status = child.child.wait().unwrap();
+
+        assert_eq!(child.received.marker, b"foxprox-fd".to_vec());
+        assert_eq!(contents, "live-child-fd");
+        assert!(status.success());
         remove_dir_all(dir).unwrap();
     }
 

@@ -284,3 +284,7 @@ A minimal live TCP forwarding proof is: target Python connects to the broker-sid
 ## 2026-06-22 — launcher fd orchestration can be tested with a tiny child sender
 
 To prove a Rust launcher can spawn setup and receive an fd without invoking bwrap in default tests, spawn a small child process that connects to the broker Unix socket and sends a read/write fd via SCM_RIGHTS, then assert child status and broker-side fd readability.
+
+## 2026-06-22 — setup launchers must return the live child after fd handoff
+
+For real bwrap sessions, do not wait for the setup/target process immediately after receiving the TUN fd. The target may be blocked waiting for broker traffic. Return the live child plus received fd so the broker can process packets before supervising exit.
