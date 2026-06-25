@@ -368,3 +368,8 @@
 
 - Execute setup helper plans through a trait in `foxprox-integrations`; this proves order and error mapping without making runtime/device crates aware of Linux commands.
 - Apply resolver file writes before `ip` commands so helper-controlled namespace config is represented deterministically in tests.
+
+## 2026-06-22 — inherited raw fd handoff
+
+- Raw fd adoption should be isolated in `foxprox-device::PreopenedTunDevice`; this is the narrow unsafe boundary between trusted setup helper fd handoff and safe runtime packet IO.
+- Runtime remains generic over `PacketDevice`/`TryPacketDevice`, so fd ownership details do not leak into policy, audit, net, or stack code.

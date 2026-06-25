@@ -4,11 +4,14 @@
 //! crates must not depend on these types, Linux file descriptors, or TUN setup
 //! details.
 
-#![forbid(unsafe_code)]
+#![deny(unsafe_op_in_unsafe_fn)]
 
 use std::fmt;
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
+
+#[cfg(unix)]
+use std::os::fd::{FromRawFd, RawFd};
 
 /// Default alpha MTU used by the TUN setup plan.
 pub const DEFAULT_ALPHA_MTU: usize = 1500;
@@ -151,11 +154,23 @@ impl<Io> PreopenedTunDevice<Io> {
 }
 
 impl PreopenedTunDevice<File> {
-    /// Wrap an already-opened TUN file handle. This is intentionally not a raw-fd
-    /// constructor so fd ownership and unsafe conversion stay outside this crate
-    /// until the setup/fd-handoff contract is implemented.
+    /// Wrap an already-opened TUN file handle.
     pub fn from_file(file: File, max_packet_bytes: usize) -> Result<Self, DeviceError> {
         Self::from_io(file, max_packet_bytes)
+    }
+
+    /// Adopt an inherited/preopened Unix file descriptor as the broker TUN
+    /// device endpoint.
+    ///
+    /// # Safety
+    ///
+    /// `fd` must be a valid, open file descriptor for a TUN-like packet device
+    /// or equivalent test endpoint. Ownership is transferred to the returned
+    /// `PreopenedTunDevice`; callers must not close or use `fd` after this call.
+    #[cfg(unix)]
+    pub unsafe fn from_raw_fd(fd: RawFd, max_packet_bytes: usize) -> Result<Self, DeviceError> {
+        let file = unsafe { File::from_raw_fd(fd) };
+        Self::from_file(file, max_packet_bytes)
     }
 }
 
@@ -219,6 +234,11 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
+    #[cfg(unix)]
+    use std::os::fd::IntoRawFd;
+    #[cfg(unix)]
+    use std::os::unix::net::UnixStream;
+
     #[test]
     fn blocking_device_reads_opaque_packet_bytes() {
         let cursor = Cursor::new(vec![0x45, 0, 0, 20]);
@@ -239,6 +259,19 @@ mod tests {
         let cursor = device.into_inner();
 
         assert_eq!(cursor.into_inner(), vec![1, 2, 3, 4]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preopened_tun_can_adopt_inherited_raw_fd() {
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        let raw_fd = reader.into_raw_fd();
+        let mut device = unsafe { PreopenedTunDevice::from_raw_fd(raw_fd, 1500) }.unwrap();
+
+        writer.write_all(&[0x45, 0, 0, 20]).unwrap();
+        let packet = device.read_packet().unwrap();
+
+        assert_eq!(packet.bytes(), &[0x45, 0, 0, 20]);
     }
 
     #[test]

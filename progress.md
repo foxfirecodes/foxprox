@@ -1580,3 +1580,24 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: aff7c8e.
 - Remaining boundary risks: fd handoff and privilege drop enforcement remain.
+
+## 2026-06-22 — Boundary objective: inherited TUN fd device handoff
+
+- Boundary under work: device-side constructor for trusted setup helpers handing an already-opened TUN fd to broker runtime.
+- Allowed dependency direction: `foxprox-device` may own raw fd adoption into `PreopenedTunDevice`; runtime still consumes `PacketDevice`/`TryPacketDevice`, and policy/audit never see fd types.
+- Dependency-risk assessment: setup/helper planning can create/configure TUN, but runtime still needs a narrow handoff point for an inherited/preopened fd. The unsafe ownership adoption must be isolated and documented at the device boundary.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for device/runtime/audit.
+- Observed results: added a documented unsafe Unix `PreopenedTunDevice<File>::from_raw_fd` constructor that adopts ownership of an inherited/preopened fd into the device boundary. Added a UnixStream-based test proving an inherited raw fd becomes an opaque packet device without exposing fd types to runtime/policy/audit. All verification passed.
+- Changed files:
+  - `crates/foxprox-device/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 130 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-device` — device remains dependency-free.
+  - `cargo tree -p foxprox-runtime` — runtime still consumes only device traits.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: SCM_RIGHTS control-socket passing and privilege drop enforcement remain.
