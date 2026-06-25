@@ -97,6 +97,8 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
     );
     broker.tcp_listen_ports = config.tcp_listen_ports;
     broker.tcp_destinations = config.tcp_destinations;
+    broker.udp_listen_ports = config.udp_listen_ports;
+    broker.udp_destinations = config.udp_destinations;
     broker.dns_upstream = config.dns_upstream;
     broker.max_runtime = config.max_runtime;
     broker.audit_stdout = true;
@@ -140,6 +142,8 @@ struct CliConfig {
     policy: PolicyConfig,
     tcp_listen_ports: Vec<u16>,
     tcp_destinations: HashMap<(IpAddr, u16), SocketAddr>,
+    udp_listen_ports: Vec<u16>,
+    udp_destinations: HashMap<(IpAddr, u16), SocketAddr>,
     dns_upstream: Option<SocketAddr>,
     max_runtime: Option<Duration>,
 }
@@ -154,6 +158,8 @@ impl CliConfig {
         policy.broker_dns_servers.push(broker_ip);
         let mut tcp_listen_ports = Vec::new();
         let mut tcp_destinations = HashMap::new();
+        let mut udp_listen_ports = Vec::new();
+        let mut udp_destinations = HashMap::new();
         let mut dns_upstream = None;
         let mut max_runtime = None;
         let mut index = 0;
@@ -173,6 +179,8 @@ impl CliConfig {
                     policy,
                     tcp_listen_ports,
                     tcp_destinations,
+                    udp_listen_ports,
+                    udp_destinations,
                     dns_upstream,
                     max_runtime,
                 });
@@ -193,6 +201,15 @@ impl CliConfig {
                         Some(port),
                     ));
                 }
+                "--allow-udp" => {
+                    let (ip, port) = parse_ip_port(value)?;
+                    udp_listen_ports.push(port);
+                    policy.rules.push(PolicyRule::allow_ip(
+                        format!("allow-udp-{ip}-{port}"),
+                        Cidr::host(ip),
+                        Some(port),
+                    ));
+                }
                 "--tcp-map" => {
                     let value = value.to_string_lossy();
                     let (left, right) = value
@@ -206,6 +223,23 @@ impl CliConfig {
                     tcp_destinations.insert((sandbox_ip, sandbox_port), host);
                     policy.rules.push(PolicyRule::allow_ip(
                         format!("allow-map-{sandbox_ip}-{sandbox_port}"),
+                        Cidr::host(host.ip()),
+                        Some(host.port()),
+                    ));
+                }
+                "--udp-map" => {
+                    let value = value.to_string_lossy();
+                    let (left, right) = value
+                        .split_once('=')
+                        .ok_or("--udp-map must be SANDBOX_IP:PORT=HOST_IP:PORT")?;
+                    let (sandbox_ip, sandbox_port) = parse_ip_port_str(left)?;
+                    let host: SocketAddr = right
+                        .parse()
+                        .map_err(|_| "--udp-map host endpoint must be IP:PORT".to_string())?;
+                    udp_listen_ports.push(sandbox_port);
+                    udp_destinations.insert((sandbox_ip, sandbox_port), host);
+                    policy.rules.push(PolicyRule::allow_ip(
+                        format!("allow-udp-map-{sandbox_ip}-{sandbox_port}"),
                         Cidr::host(host.ip()),
                         Some(host.port()),
                     ));
@@ -291,5 +325,5 @@ fn parse_host_port(value: &OsString) -> Result<(String, Option<u16>), String> {
 }
 
 fn usage() -> String {
-    "usage: foxprox [--allow-tcp IP:PORT] [--tcp-map SANDBOX_IP:PORT=HOST_IP:PORT] [--allow-domain HOST[:PORT] --dns-upstream IP:PORT] -- COMMAND [ARGS...]".into()
+    "usage: foxprox [--allow-tcp IP:PORT] [--tcp-map SANDBOX_IP:PORT=HOST_IP:PORT] [--allow-udp IP:PORT] [--udp-map SANDBOX_IP:PORT=HOST_IP:PORT] [--allow-domain HOST[:PORT] --dns-upstream IP:PORT] -- COMMAND [ARGS...]".into()
 }

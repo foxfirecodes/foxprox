@@ -27,6 +27,8 @@ pub struct AlphaBrokerConfig {
     pub mtu: usize,
     pub tcp_listen_ports: Vec<u16>,
     pub tcp_destinations: HashMap<(IpAddr, u16), SocketAddr>,
+    pub udp_listen_ports: Vec<u16>,
+    pub udp_destinations: HashMap<(IpAddr, u16), SocketAddr>,
     pub dns_upstream: Option<SocketAddr>,
     pub audit_stdout: bool,
     pub max_runtime: Option<Duration>,
@@ -42,6 +44,8 @@ impl AlphaBrokerConfig {
             mtu: 1300,
             tcp_listen_ports: Vec::new(),
             tcp_destinations: HashMap::new(),
+            udp_listen_ports: Vec::new(),
+            udp_destinations: HashMap::new(),
             dns_upstream: None,
             audit_stdout: true,
             max_runtime: None,
@@ -67,6 +71,8 @@ where
 {
     config.tcp_listen_ports.sort_unstable();
     config.tcp_listen_ports.dedup();
+    config.udp_listen_ports.sort_unstable();
+    config.udp_listen_ports.dedup();
     if !config.broker_ip.is_ipv4() {
         return Err(AlphaBrokerError::UnsupportedBrokerIp);
     }
@@ -94,6 +100,23 @@ where
             listen_port: *port,
             host: None,
             opened: false,
+        });
+    }
+
+    let mut udp_bridges = Vec::new();
+    for port in &config.udp_listen_ports {
+        if *port == 53 {
+            continue;
+        }
+        let handle = add_udp_listener(&mut sockets, *port);
+        let host = UdpSocket::bind("0.0.0.0:0").map_err(AlphaBrokerError::DnsBind)?;
+        host.set_nonblocking(true)
+            .map_err(AlphaBrokerError::DnsBind)?;
+        udp_bridges.push(UdpBridge {
+            handle,
+            listen_port: *port,
+            host,
+            last_peer: None,
         });
     }
 
@@ -152,6 +175,9 @@ where
                 timestamp,
             );
         }
+        for bridge in &mut udp_bridges {
+            drive_udp_bridge(&mut sockets, bridge, &config, timestamp);
+        }
 
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -181,12 +207,16 @@ fn add_tcp_listener(
     Ok(sockets.add(socket))
 }
 
-fn add_dns_socket(sockets: &mut SocketSet<'_>) -> SocketHandle {
+fn add_udp_listener(sockets: &mut SocketSet<'_>, port: u16) -> SocketHandle {
     let rx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 16], vec![0; 8192]);
     let tx = udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 16], vec![0; 8192]);
     let mut socket = udp::Socket::new(rx, tx);
-    socket.bind(53).unwrap();
+    socket.bind(port).unwrap();
     sockets.add(socket)
+}
+
+fn add_dns_socket(sockets: &mut SocketSet<'_>) -> SocketHandle {
+    add_udp_listener(sockets, 53)
 }
 
 struct TcpBridge {
@@ -278,6 +308,67 @@ fn drive_tcp_bridge(
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(_) => socket.abort(),
+        }
+    }
+}
+
+struct UdpBridge {
+    handle: SocketHandle,
+    listen_port: u16,
+    host: UdpSocket,
+    last_peer: Option<IpEndpoint>,
+}
+
+fn drive_udp_bridge(
+    sockets: &mut SocketSet<'_>,
+    bridge: &mut UdpBridge,
+    config: &AlphaBrokerConfig,
+    timestamp: u64,
+) {
+    let socket = sockets.get_mut::<udp::Socket>(bridge.handle);
+    while socket.can_recv() {
+        let Ok((data, meta)) = socket.recv() else {
+            break;
+        };
+        let host_destination = config
+            .udp_destinations
+            .get(&(config.broker_ip, bridge.listen_port))
+            .copied()
+            .unwrap_or_else(|| SocketAddr::new(config.broker_ip, bridge.listen_port));
+        let mut request = PolicyRequest::new(Protocol::Udp)
+            .with_destination(Endpoint::udp(
+                host_destination.ip(),
+                host_destination.port(),
+            ))
+            .with_requested_port(bridge.listen_port);
+        request.sandbox_id = config.sandbox_id.clone();
+        request.frontend = Frontend::Tun;
+        request.source = Some(endpoint_from_ip_endpoint(meta.endpoint, Protocol::Udp));
+        let decision = PolicyEngine::decide(&config.policy, &request);
+        emit_audit(
+            config,
+            AuditEvent::from_policy_decision(
+                AuditPolicyContext::from_request(timestamp, AuditEventKind::UdpPacket, &request),
+                &decision,
+            ),
+        );
+        if EgressPermit::from_policy_decision(&request, &decision).is_ok()
+            && bridge.host.send_to(data, host_destination).is_ok()
+        {
+            bridge.last_peer = Some(meta.endpoint);
+        }
+    }
+
+    let mut buffer = [0_u8; 8192];
+    loop {
+        match bridge.host.recv_from(&mut buffer) {
+            Ok((n, _)) => {
+                if let Some(peer) = bridge.last_peer {
+                    let _ = socket.send_slice(&buffer[..n], peer);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
+            Err(_) => break,
         }
     }
 }

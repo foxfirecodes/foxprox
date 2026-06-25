@@ -1617,3 +1617,21 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * alpha emits JSON lifecycle events and per-flow/per-DNS allow/deny decisions to stdout for sandbox runs.
 * Residual risk:
   * alpha is intentionally minimal and bwrap-oriented: it supports transparent TCP and broker DNS in the launcher; generic UDP/QUIC production forwarding and explicit proxy listener processes remain future hardening/features beyond the currently usable alpha path.
+
+## 2026-06-25 - Alpha launcher UDP runtime results
+
+* Product code added:
+  * alpha broker now supports policy-gated transparent UDP sockets and `--udp-map SANDBOX_IP:PORT=HOST_IP:PORT` / `--allow-udp IP:PORT` launcher options.
+  * UDP datagrams are audited as `udp_packet` and are sent to host sockets only after shared policy allow produces an egress permit.
+* Tests added/updated:
+  * ignored real bwrap e2e `foxprox_launches_bwrap_and_bridges_allowed_udp` sends UDP `ping` from sandbox Python to `10.0.0.2:9000`, bridges to a host UDP echo socket, and receives `pong` back through TUN/smoltcp.
+  * README documents UDP map usage.
+* Commands run:
+  * `cargo test -p foxprox-cli foxprox_launches_bwrap_and_bridges_allowed_udp -- --ignored --nocapture` — passed.
+  * `cargo test -p foxprox-cli --test foxprox -- --ignored --nocapture` — passed all 4 real bwrap alpha e2e tests: TCP allow bridge, UDP allow bridge, DNS default deny, DNS allowed forward.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: CLI 2 unit tests plus 6 ignored e2e/setup tests, core 161 unit tests plus 2 parser fuzz-smoke tests, device 3 tests plus 2 ignored, integrations 8 tests, net 2 tests plus 7 ignored, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * UDP host socket send happens only when policy allows the destination and an egress permit can be built.
+  * existing DNS port 53 remains broker-controlled and is skipped by generic UDP mapping.
+* Audit evidence: real bwrap UDP e2e asserts `udp_packet` and `decision:"allow"` in the JSON audit stream.
+* Residual risk: UDP alpha uses simple last-peer reply routing per mapped port; production multi-client UDP flow tables and expiration audits are present in core but not yet fully surfaced through the launcher runtime.

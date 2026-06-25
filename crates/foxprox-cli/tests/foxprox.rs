@@ -56,6 +56,53 @@ fn foxprox_launches_bwrap_and_bridges_allowed_tcp() {
 
 #[test]
 #[ignore = "requires bwrap with user/network namespace and /dev/net/tun access"]
+fn foxprox_launches_bwrap_and_bridges_allowed_udp() {
+    let server = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let host_addr = server.local_addr().unwrap();
+    let server_thread = std::thread::spawn(move || {
+        let mut buffer = [0_u8; 64];
+        let (n, peer) = server.recv_from(&mut buffer).unwrap();
+        assert_eq!(&buffer[..n], b"ping");
+        server.send_to(b"pong", peer).unwrap();
+    });
+
+    let output = Command::new(env!("CARGO_BIN_EXE_foxprox"))
+        .args([
+            "--setup-helper",
+            env!("CARGO_BIN_EXE_foxproxsetup"),
+            "--udp-map",
+            &format!("10.0.0.2:9000={host_addr}"),
+            "--max-runtime-ms",
+            "5000",
+            "--",
+            "python3",
+            "-c",
+            "import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.settimeout(3); s.sendto(b'ping', ('10.0.0.2', 9000)); print(s.recvfrom(16)[0].decode())",
+        ])
+        .output()
+        .unwrap();
+    server_thread.join().unwrap();
+
+    assert!(
+        output.status.success(),
+        "foxprox UDP failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("pong"), "stdout was {stdout}");
+    assert!(
+        stdout.contains("\"kind\":\"udp_packet\""),
+        "stdout was {stdout}"
+    );
+    assert!(
+        stdout.contains("\"decision\":\"allow\""),
+        "stdout was {stdout}"
+    );
+}
+
+#[test]
+#[ignore = "requires bwrap with user/network namespace and /dev/net/tun access"]
 fn foxprox_launches_bwrap_and_default_denies_dns() {
     let output = Command::new(env!("CARGO_BIN_EXE_foxprox"))
         .args([

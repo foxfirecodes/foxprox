@@ -10,7 +10,7 @@ The current alpha includes a usable bwrap-based transparent sandbox launcher:
 
 - `foxproxsetup` runs inside the sandbox network namespace, creates/configures a TUN device with temporary `CAP_NET_ADMIN`, sends the TUN fd back over a broker-owned Unix control socket, drops setup privilege escalation with `NO_NEW_PRIVS`, and execs the target.
 - `foxprox` runs on the host, launches bwrap, authenticates the helper peer UID, receives exactly one TUN fd, runs a smoltcp broker over that fd, emits JSON audit events to stdout, injects broker DNS (`10.0.0.2`) into the sandbox resolver, and enforces deny-by-default policy.
-- Transparent TCP is supported for configured IP/port destinations and optional sandbox-to-host endpoint maps.
+- Transparent TCP and UDP are supported for configured IP/port destinations and optional sandbox-to-host endpoint maps.
 - Broker-controlled DNS is supported with default-deny REFUSED responses, allow-listed domain forwarding to a configured upstream resolver, pending transaction correlation, and DNS attribution cache updates.
 
 ### Build
@@ -29,6 +29,16 @@ target/debug/foxprox \
   curl http://10.0.0.2:8080/
 ```
 
+### Example: map sandbox UDP to a host service
+
+```sh
+# Host UDP service listens on 127.0.0.1:9001; sandbox sends to 10.0.0.2:9000.
+target/debug/foxprox \
+  --udp-map 10.0.0.2:9000=127.0.0.1:9001 \
+  -- \
+  python3 -c 'import socket; s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.sendto(b"ping", ("10.0.0.2", 9000)); print(s.recvfrom(16))'
+```
+
 ### Example: allow DNS for one hostname
 
 ```sh
@@ -45,6 +55,8 @@ Without a matching allow rule, sandbox DNS receives a bounded REFUSED response a
 
 - `--allow-tcp IP:PORT`: allow transparent TCP egress to an IP/port directly.
 - `--tcp-map SANDBOX_IP:PORT=HOST_IP:PORT`: listen inside the sandbox at `SANDBOX_IP:PORT`, but connect from the broker to `HOST_IP:PORT` after policy allow.
+- `--allow-udp IP:PORT`: allow transparent UDP egress to an IP/port directly.
+- `--udp-map SANDBOX_IP:PORT=HOST_IP:PORT`: listen inside the sandbox at `SANDBOX_IP:PORT`, but send from the broker to `HOST_IP:PORT` after policy allow.
 - `--allow-domain HOST[:PORT]`: allow domain policy for broker DNS queries; use port `53` for DNS forwarding.
 - `--dns-upstream IP:PORT`: upstream resolver used for allowed broker DNS queries.
 - `--setup-helper PATH`: path to `foxproxsetup` when it is not adjacent to `foxprox`.
