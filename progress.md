@@ -1145,3 +1145,16 @@
 - Recent broker TCP coverage commit hash: `1a413a2`.
 - Next verification gap: commit ping smoke; continue with real transparent HTTP/TCP or HTTPS/SNI environment coverage if still needed for alpha completion.
 - Commit hash after commit: pending.
+
+## 2026-06-22T13:00:00Z — Transparent HTTP deny environment smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && cargo build -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab run tcp-bridge-http-deny-smoke`
+- Environment assumptions: Linux bwrap/TUN fd handoff works; sandbox Python opens a real TCP socket through the smoltcp bridge and sends plaintext HTTP; no host egress fixture is used because policy should deny before egress.
+- Expected result: direct transparent HTTP `GET /admin` with `Host: example.com` is inspected after the TCP handshake, denied by HTTP Host/path policy, reset back to the sandbox, audited, and never reaches host egress.
+- Observed result: pass. Workspace tests passed (`foxprox-broker` 4, `foxprox-core` 64, `foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). `tcp-bridge-http-deny-smoke` emitted `"decision":"deny_reset"`, `"inspection_rule_id":"deny-transparent-http-admin"`, `"rst_written":"true"`, and `"egress_calls":"0"`; sandbox stdout showed `ConnectionResetError(104, 'Connection reset by peer')`.
+- Relevant output excerpt: `"reason":"transparent HTTP /admin request was denied by inspection before host egress"`; nested inspection audit `"method":"GET","path":"/admin"`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: direct transparent plaintext HTTP now has real environment allow (`tcp-bridge-smoke`) and deny (`tcp-bridge-http-deny-smoke`) coverage by Host/path through the smoltcp/TUN path.
+- Recent real ping commit hash: `011062c`.
+- Next verification gap: commit HTTP deny smoke; continue with real transparent TLS SNI or QUIC environment checks if alpha success criteria still need end-to-end proof.
+- Commit hash after commit: pending.
