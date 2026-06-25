@@ -1275,5 +1275,5 @@
   - `cargo tree -p foxprox-device` — device remains dependency-free.
   - `cargo tree -p foxprox-runtime` — runtime consumes device readiness through the device contract.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 8a7cce0.
 - Remaining boundary risks: full async readiness registration, blocking production fd configuration, and fair loop scheduling remain.
