@@ -114,15 +114,24 @@ impl foxprox_stack::UdpDatagramExchange for BlockingMappedUdpExchange {
 pub struct DnsUdpExchange<U> {
     sandbox_id: String,
     handler: DnsBrokerHandler<U>,
+    broker_dns_endpoint: NetworkEndpoint,
     now_ms: u64,
+    pending_observation: Option<foxprox_core::DnsObservation>,
 }
 
 impl<U: DnsUpstream> DnsUdpExchange<U> {
-    pub fn new(sandbox_id: impl Into<String>, handler: DnsBrokerHandler<U>, now_ms: u64) -> Self {
+    pub fn new(
+        sandbox_id: impl Into<String>,
+        handler: DnsBrokerHandler<U>,
+        broker_dns_endpoint: NetworkEndpoint,
+        now_ms: u64,
+    ) -> Self {
         Self {
             sandbox_id: sandbox_id.into(),
             handler,
+            broker_dns_endpoint,
             now_ms,
+            pending_observation: None,
         }
     }
 
@@ -134,18 +143,30 @@ impl<U: DnsUpstream> DnsUdpExchange<U> {
 impl<U: DnsUpstream> foxprox_stack::UdpDatagramExchange for DnsUdpExchange<U> {
     fn exchange_datagram(
         &mut self,
-        _destination: NetworkEndpoint,
+        destination: NetworkEndpoint,
         payload: &[u8],
     ) -> Result<Vec<u8>, foxprox_stack::UdpExchangeError> {
+        if destination != self.broker_dns_endpoint {
+            return Err(foxprox_stack::UdpExchangeError::SendFailed);
+        }
+        self.pending_observation = None;
         let result = self
             .handler
             .handle_query(self.sandbox_id.clone(), payload, self.now_ms);
-        if let Some(observation) = result.observation.clone() {
-            self.handler.commit_observation(observation);
-        }
+        self.pending_observation = result.observation.clone();
         result
             .response
             .ok_or(foxprox_stack::UdpExchangeError::ReceiveFailed)
+    }
+
+    fn handles_policy(&self) -> bool {
+        true
+    }
+
+    fn on_datagram_delivered(&mut self) {
+        if let Some(observation) = self.pending_observation.take() {
+            self.handler.commit_observation(observation);
+        }
     }
 
     fn audit_records(&self) -> Vec<AuditRecord> {
@@ -3504,7 +3525,9 @@ where
             }
             Ok(None) => {}
             Err(error) => {
-                let broker_records: Vec<_> = bridge.broker().audit().records().cloned().collect();
+                let mut broker_records: Vec<_> =
+                    bridge.broker().audit().records().cloned().collect();
+                broker_records.extend(egress.audit_records());
                 let _ = ingest_resequenced_records("udp_exchange", &broker_records, fan_in);
                 fan_in
                     .drain_to_sink(sink)
@@ -4089,6 +4112,7 @@ mod tests {
         RuntimeTaskOutcome, RuntimeTaskStatus, SharedDnsCache, TcpForwarder, UdpForwarder,
         UdpTimeoutConfig,
     };
+    use foxprox_stack::UdpDatagramExchange;
     use std::collections::VecDeque;
     use std::io::{ErrorKind, Read, Result as IoResult, Write};
     use std::net::{TcpListener, UdpSocket};
@@ -11616,6 +11640,122 @@ mod tests {
         ) -> Result<Vec<u8>, DnsUpstreamError> {
             Ok(self.response.clone())
         }
+    }
+
+    #[test]
+    fn dns_udp_exchange_uses_dns_policy_without_raw_udp_allow() {
+        let query = dns_query(0x4444, "example.test", 1);
+        let response = dns_a_response(&query, [203, 0, 113, 7], 30);
+        let policy = PolicyConfig {
+            rules: vec![PolicyRule::allow("allow-example-dns")
+                .protocol(Protocol::Dns)
+                .hostname("example.test")],
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(policy), 16);
+        let handler = DnsBrokerHandler::new(
+            broker,
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let mut exchange = DnsUdpExchange::new(
+            "s1",
+            handler,
+            NetworkEndpoint::socket("10.0.2.3".parse().unwrap(), 53),
+            12_000,
+        );
+
+        let response = exchange
+            .exchange_datagram(
+                NetworkEndpoint::socket("10.0.2.3".parse().unwrap(), 53),
+                &query,
+            )
+            .expect("DNS policy allows query without raw UDP allow");
+
+        assert!(response
+            .windows([203, 0, 113, 7].len())
+            .any(|w| w == [203, 0, 113, 7]));
+        let records = exchange.audit_records();
+        assert!(records.iter().any(|record| {
+            record.kind == AuditKind::DnsQueryDecision
+                && record.decision == Some(Decision::Allow)
+                && record.rule_id.as_deref() == Some("allow-example-dns")
+        }));
+    }
+
+    #[test]
+    fn dns_udp_exchange_commits_observation_only_after_delivery() {
+        let query = dns_query(0x4545, "example.test", 1);
+        let response = dns_a_response(&query, [203, 0, 113, 8], 30);
+        let policy = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(policy), 16);
+        let handler = DnsBrokerHandler::new(
+            broker,
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let mut exchange = DnsUdpExchange::new(
+            "s1",
+            handler,
+            NetworkEndpoint::socket("10.0.2.3".parse().unwrap(), 53),
+            12_100,
+        );
+
+        exchange
+            .exchange_datagram(
+                NetworkEndpoint::socket("10.0.2.3".parse().unwrap(), 53),
+                &query,
+            )
+            .expect("DNS response is available");
+        assert!(exchange
+            .handler()
+            .cache()
+            .resolve_hostname("example.test", 12_101)
+            .is_none());
+
+        exchange.on_datagram_delivered();
+
+        assert_eq!(
+            exchange
+                .handler()
+                .cache()
+                .resolve_hostname("example.test", 12_101)
+                .unwrap()
+                .address
+                .to_string(),
+            "203.0.113.8"
+        );
+    }
+
+    #[test]
+    fn dns_udp_exchange_rejects_non_broker_dns_destination() {
+        let query = dns_query(0x4646, "example.test", 1);
+        let response = dns_a_response(&query, [203, 0, 113, 9], 30);
+        let broker = BrokerCore::new(PolicyEngine::new(PolicyConfig::default()), 16);
+        let handler = DnsBrokerHandler::new(
+            broker,
+            StaticDnsUpstream { response },
+            "10.0.2.3".parse().unwrap(),
+        );
+        let mut exchange = DnsUdpExchange::new(
+            "s1",
+            handler,
+            NetworkEndpoint::socket("10.0.2.3".parse().unwrap(), 53),
+            12_200,
+        );
+
+        let error = exchange
+            .exchange_datagram(
+                NetworkEndpoint::socket("8.8.8.8".parse().unwrap(), 53),
+                &query,
+            )
+            .unwrap_err();
+
+        assert_eq!(error, foxprox_stack::UdpExchangeError::SendFailed);
+        assert!(exchange.audit_records().is_empty());
     }
 
     fn dns_query(transaction_id: u16, hostname: &str, query_type: u16) -> Vec<u8> {

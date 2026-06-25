@@ -338,6 +338,12 @@ pub trait UdpDatagramExchange {
         payload: &[u8],
     ) -> Result<Vec<u8>, UdpExchangeError>;
 
+    fn handles_policy(&self) -> bool {
+        false
+    }
+
+    fn on_datagram_delivered(&mut self) {}
+
     fn audit_records(&self) -> Vec<AuditRecord> {
         Vec::new()
     }
@@ -822,14 +828,16 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                 Some(DenialReason::MalformedPacket),
             )));
         };
-        let policy_decision = self.broker.evaluate(&request);
-        if policy_decision.decision.is_deny() {
-            return Ok(Some(udp_datagram_evidence(
-                ByteCounts::ZERO,
-                false,
-                policy_decision.decision,
-                policy_decision.reason,
-            )));
+        if !egress.handles_policy() {
+            let policy_decision = self.broker.evaluate(&request);
+            if policy_decision.decision.is_deny() {
+                return Ok(Some(udp_datagram_evidence(
+                    ByteCounts::ZERO,
+                    false,
+                    policy_decision.decision,
+                    policy_decision.reason,
+                )));
+            }
         }
         let response_payload =
             match egress.exchange_datagram(parsed.destination_endpoint(), payload) {
@@ -923,6 +931,7 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
             let _ = self.broker.append_audit_for(&response_request, error_audit);
             return Err(UdpExchangeError::SendFailed);
         }
+        egress.on_datagram_delivered();
         Ok(Some(udp_datagram_evidence(
             ByteCounts {
                 from_sandbox: payload.len() as u64,

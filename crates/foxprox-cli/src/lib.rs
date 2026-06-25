@@ -1843,8 +1843,12 @@ fn run_bwrap_dns_egress_args(args: &[String]) -> CliOutput {
         64 * 1024,
     );
     let dns_handler = DnsBrokerHandler::new(broker, dns_upstream, config.setup.broker_dns_ip);
-    let egress =
-        foxprox_egress::DnsUdpExchange::new(config.setup.sandbox_id.clone(), dns_handler, 30_000);
+    let egress = foxprox_egress::DnsUdpExchange::new(
+        config.setup.sandbox_id.clone(),
+        dns_handler,
+        NetworkEndpoint::socket(config.setup.broker_dns_ip, 53),
+        30_000,
+    );
     let stack =
         foxprox_stack::SmoltcpIpStack::new_ipv4([198, 51, 100, 1], 24, config.setup.mtu as usize);
     let mut fan_in = RuntimeAuditFanIn::new(

@@ -39,7 +39,7 @@ pub use dns_handler::{
     DnsUpstream, DnsUpstreamError,
 };
 pub use flow::{
-    DnsCache, DnsResolution, FlowKey, FlowProtocol, SharedDnsCache, UdpFlowManager,
+    DnsCache, DnsObservation, DnsResolution, FlowKey, FlowProtocol, SharedDnsCache, UdpFlowManager,
     UdpTimeoutConfig,
 };
 pub use packet::{checksum, IpParseError, ParsedIpPacket};
