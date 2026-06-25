@@ -1171,3 +1171,16 @@
 - Recent transparent HTTP deny commit hash: `100fdf1`.
 - Next verification gap: commit QUIC smoke; continue with real transparent TLS SNI deny/logging if alpha success criteria still need end-to-end HTTPS metadata proof.
 - Commit hash after commit: pending.
+
+## 2026-06-22T13:45:00Z — Real sandbox TLS SNI deny smoke
+
+- Command executed: `cargo fmt --all && cargo test --all && target/debug/foxprox-lab run tls-sni-deny-smoke`
+- Environment assumptions: Linux bwrap/TUN fd handoff works; sandbox Python opens a real TCP socket through the smoltcp bridge and sends a complete TLS ClientHello fixture with SNI `blocked.example`; no host egress fixture is used because policy should deny before egress.
+- Expected result: transparent TCP/443 connection is allowed at the TCP layer, TLS ClientHello SNI is parsed from sandbox bytes, SNI policy denies `blocked.example`, the broker writes a TCP reset to the sandbox, audit includes high-confidence `tls_sni` attribution, and no host egress occurs.
+- Observed result: pass. Workspace tests passed (`foxprox-broker` 4, `foxprox-core` 64, `foxprox-device` 6, `foxprox-egress` 1, `foxprox-cli` 2, `foxproxsetup` 4). `tls-sni-deny-smoke` emitted `"decision":"deny_reset"`, `"sni_hostname":"blocked.example"`, `"tls_rule_id":"deny-tls-blocked-example"`, `"rst_written":"true"`, and `"egress_calls":"0"`.
+- Relevant output excerpt: nested TLS audit `"hostname":"blocked.example"`, `"attribution_source":"tls_sni"`, `"attribution_confidence":"high"`, `"decision":"deny_reset"`; sandbox stdout `ConnectionResetError(104, 'Connection reset by peer')`.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: direct transparent HTTPS metadata policy now has real sandbox/TUN SNI deny/log coverage without TLS MITM or external network dependency.
+- Recent QUIC smoke commit hash: `e283a1f`.
+- Next verification gap: commit TLS SNI smoke; remaining alpha validation should be a final full sweep including the new ping, QUIC, HTTP deny, and TLS SNI smokes plus direct DNS bypass denial if not yet included in the broad environment set.
+- Commit hash after commit: pending.

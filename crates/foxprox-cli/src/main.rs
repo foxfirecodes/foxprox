@@ -68,6 +68,7 @@ fn run(args: Vec<String>) -> Result<(), String> {
             println!("tcp-synack-smoke");
             println!("tcp-bridge-smoke");
             println!("tcp-bridge-http-deny-smoke");
+            println!("tls-sni-deny-smoke");
             println!("tcp-bridge-deny-smoke");
             println!("http-proxy-smoke");
             println!("https-connect-smoke");
@@ -114,6 +115,8 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
         tcp_bridge_smoke_records()
     } else if scenario == "tcp-bridge-http-deny-smoke" {
         tcp_bridge_http_deny_smoke_records()
+    } else if scenario == "tls-sni-deny-smoke" {
+        tls_sni_deny_smoke_records()
     } else if scenario == "tcp-bridge-deny-smoke" {
         tcp_bridge_deny_smoke_records()
     } else if scenario == "http-proxy-smoke" {
@@ -2700,6 +2703,253 @@ fn run_tcp_bridge_http_deny_smoke() -> Result<AuditRecord, String> {
             .with_metadata("inspection_audit", audit.to_json_line());
         if let Some(rule_id) = audit.rule_id {
             record = record.with_metadata("inspection_rule_id", rule_id);
+        }
+    }
+    if !stdout.is_empty() {
+        record = record.with_metadata("stdout", stdout);
+    }
+    if !stderr.is_empty() {
+        record = record.with_metadata("stderr", stderr);
+    }
+    Ok(record)
+}
+
+#[cfg(unix)]
+fn tls_sni_deny_smoke_records() -> Vec<AuditRecord> {
+    match run_tls_sni_deny_smoke() {
+        Ok(record) => vec![record],
+        Err(err) => vec![AuditRecord::new(
+            EventKind::TlsClientHello,
+            "tls-sni-deny-smoke",
+            Decision::FailClosed,
+            err,
+        )
+        .with_frontend(Frontend::Harness)
+        .with_protocol(Protocol::Tls)],
+    }
+}
+
+#[cfg(not(unix))]
+fn tls_sni_deny_smoke_records() -> Vec<AuditRecord> {
+    vec![AuditRecord::new(
+        EventKind::TlsClientHello,
+        "tls-sni-deny-smoke",
+        Decision::FailClosed,
+        "TLS SNI deny smoke is only supported on Unix",
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Tls)]
+}
+
+#[cfg(unix)]
+fn run_tls_sni_deny_smoke() -> Result<AuditRecord, String> {
+    let helper = setup_helper_path()?;
+    let target_dir = helper
+        .parent()
+        .and_then(|path| path.parent())
+        .ok_or_else(|| {
+            format!(
+                "could not derive target directory from {}",
+                helper.display()
+            )
+        })?
+        .to_path_buf();
+    let socket_dir = target_dir.join(format!("fxtlsdeny-{}", std::process::id()));
+    let socket_path = socket_dir.join("s");
+    let _ = std::fs::remove_file(&socket_path);
+    std::fs::create_dir_all(&socket_dir)
+        .map_err(|err| format!("failed to create TLS SNI deny socket dir: {err}"))?;
+    let handoff_listener = UnixListener::bind(&socket_path)
+        .map_err(|err| format!("failed to bind TLS SNI deny handoff socket: {err}"))?;
+    handoff_listener.set_nonblocking(true).map_err(|err| {
+        format!("failed to make TLS SNI deny handoff listener nonblocking: {err}")
+    })?;
+
+    let mut child = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/dev/net/tun",
+            "/dev/net/tun",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/bin",
+            "/bin",
+            "--ro-bind",
+            "/lib",
+            "/lib",
+            "--ro-bind",
+            "/lib64",
+            "/lib64",
+            "--ro-bind",
+        ])
+        .arg(&target_dir)
+        .arg(&target_dir)
+        .args(["--bind"])
+        .arg(&socket_dir)
+        .arg(&socket_dir)
+        .args(["--proc", "/proc", "--"])
+        .env("FOXPROX_SETUP_SOCKET", &socket_path)
+        .arg(&helper)
+        .args([
+            "--",
+            "/usr/bin/python3",
+            "-c",
+            "import socket,sys; host=b'blocked.example'; sni=bytes([0])+len(host).to_bytes(2,'big')+host; sni_list=len(sni).to_bytes(2,'big')+sni; ext=(0).to_bytes(2,'big')+len(sni_list).to_bytes(2,'big')+sni_list; exts=len(ext).to_bytes(2,'big')+ext; hello=bytes([3,3])+bytes(32)+bytes([0])+(2).to_bytes(2,'big')+bytes([0x13,0x01])+bytes([1,0])+exts; hs=bytes([1])+len(hello).to_bytes(3,'big')+hello; rec=bytes([0x16,3,1])+len(hs).to_bytes(2,'big')+hs; sock=socket.socket(socket.AF_INET,socket.SOCK_STREAM); sock.settimeout(5); sock.connect(('203.0.113.25',443)); sock.sendall(rec)\ntry:\n data=sock.recv(128); print(data); sys.exit(4 if data else 0)\nexcept (ConnectionResetError, TimeoutError, OSError) as e:\n print(repr(e)); sys.exit(0)",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|err| format!("failed to spawn bwrap TLS SNI deny smoke: {err}"))?;
+
+    let fd = accept_handoff_fd(&handoff_listener, &mut child, Duration::from_secs(10))?;
+    fd.set_nonblocking()?;
+    let bridge_destination: std::net::Ipv4Addr = "203.0.113.25"
+        .parse()
+        .map_err(|err| format!("invalid TLS SNI deny destination IP: {err}"))?;
+    let policy = PolicyEngine::new(
+        PolicyConfig::deny_by_default().with_rule(
+            PolicyRule::new("allow-tcp-tls-sni-deny-smoke", RuleAction::Allow)
+                .protocol(Protocol::Tcp)
+                .destination(Cidr::host(std::net::IpAddr::V4(bridge_destination)))
+                .port(443),
+        ),
+    );
+    let inspect_policy = PolicyEngine::new(
+        PolicyConfig::deny_by_default().with_rule(
+            PolicyRule::new("deny-tls-blocked-example", RuleAction::DenyReset)
+                .protocol(Protocol::Tls)
+                .hostname("blocked.example"),
+        ),
+    );
+    let inspection = foxprox_core::runtime::TransparentInspectionRuntime::new(inspect_policy);
+    let mut bridge_runtime = TransparentTcpBridgeRuntime::listen(bridge_destination, 443, policy)?
+        .with_inspection(inspection);
+    let mut buf = [0_u8; 4096];
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut packets_read = 0_u64;
+    let mut emitted_packets = 0_u64;
+    let mut rst_written = false;
+    let mut denied = false;
+    while Instant::now() < deadline {
+        match fd.read_packet(&mut buf) {
+            Ok(0) => {}
+            Ok(n) => {
+                packets_read += 1;
+                let step = bridge_runtime.handle_ipv4_packet("tls-sni-deny-smoke", &buf[..n])?;
+                for emitted in step.emitted_packets {
+                    emitted_packets += 1;
+                    if let Ok(ip) = foxprox_core::packet::parse_ipv4(&emitted) {
+                        if let Ok(tcp) = foxprox_core::packet::parse_tcp(ip.payload) {
+                            if tcp.rst {
+                                rst_written = true;
+                            }
+                        }
+                    }
+                    fd.write_packet(&emitted)?;
+                }
+                if step.egress_payload.is_some() {
+                    return Err(
+                        "TLS-denied bridge unexpectedly produced host egress payload".to_string(),
+                    );
+                }
+                denied = bridge_runtime.audit.iter().any(|audit| {
+                    audit.kind == EventKind::TlsClientHello && !audit.decision.is_allow()
+                });
+                if denied && rst_written {
+                    break;
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) if err.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(err) => {
+                return Err(format!(
+                    "failed to read TUN fd during TLS SNI deny smoke: {err}"
+                ))
+            }
+        }
+        for emitted in bridge_runtime.poll()? {
+            emitted_packets += 1;
+            fd.write_packet(&emitted)?;
+        }
+        if child
+            .try_wait()
+            .map_err(|err| format!("failed to poll TLS SNI deny smoke: {err}"))?
+            .is_some()
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    if !denied {
+        return Err("timed out waiting for TLS SNI deny audit".to_string());
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|err| format!("failed to wait for TLS SNI deny smoke: {err}"))?;
+    fd.close();
+    let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_dir(&socket_dir);
+    let connect_audit = bridge_runtime
+        .audit
+        .iter()
+        .find(|audit| audit.kind == EventKind::TcpConnectAttempt)
+        .cloned();
+    let tls_audit = bridge_runtime
+        .audit
+        .iter()
+        .find(|audit| audit.kind == EventKind::TlsClientHello)
+        .cloned();
+    let success = output.status.success()
+        && rst_written
+        && tls_audit
+            .as_ref()
+            .is_some_and(|audit| !audit.decision.is_allow());
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let mut record = AuditRecord::new(
+        EventKind::TlsClientHello,
+        "tls-sni-deny-smoke",
+        if success {
+            Decision::DenyReset
+        } else {
+            Decision::FailClosed
+        },
+        if success {
+            "transparent TLS ClientHello SNI was denied before host egress"
+        } else {
+            "TLS SNI deny smoke failed before reset/no-egress proof completed"
+        },
+    )
+    .with_frontend(Frontend::Harness)
+    .with_protocol(Protocol::Tls)
+    .with_metadata("status", output.status.to_string())
+    .with_metadata("packets_read", packets_read.to_string())
+    .with_metadata("emitted_packets", emitted_packets.to_string())
+    .with_metadata("rst_written", rst_written.to_string())
+    .with_metadata("denied", denied.to_string())
+    .with_metadata("egress_calls", "0");
+    if let Some(audit) = connect_audit {
+        record = record
+            .with_metadata("connect_decision", audit.decision.as_str())
+            .with_metadata("connect_audit", audit.to_json_line());
+    }
+    if let Some(audit) = tls_audit {
+        record = record
+            .with_metadata("tls_decision", audit.decision.as_str())
+            .with_metadata("tls_reason", audit.reason.clone())
+            .with_metadata("tls_audit", audit.to_json_line());
+        if let Some(hostname) = audit.hostname {
+            record = record.with_metadata("sni_hostname", hostname);
+        }
+        if let Some(rule_id) = audit.rule_id {
+            record = record.with_metadata("tls_rule_id", rule_id);
         }
     }
     if !stdout.is_empty() {
