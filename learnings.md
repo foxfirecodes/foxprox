@@ -363,3 +363,8 @@
 
 - The setup helper contract needs route and resolver file-write plans in addition to TUN create/address/link commands; otherwise callers must infer Linux setup details outside `foxprox-integrations`.
 - Keep proxy exposure in the integration/setup plan as environment data, not runtime policy state.
+
+## 2026-06-22 — setup-helper execution boundary
+
+- Execute setup helper plans through a trait in `foxprox-integrations`; this proves order and error mapping without making runtime/device crates aware of Linux commands.
+- Apply resolver file writes before `ip` commands so helper-controlled namespace config is represented deterministically in tests.

@@ -9,6 +9,7 @@
 use std::fmt;
 use std::net::IpAddr;
 use std::path::PathBuf;
+use std::process::Command;
 
 use foxprox_core::SandboxId;
 
@@ -260,6 +261,63 @@ impl IntegrationBackend for ExternalNamespaceBackend {
     }
 }
 
+/// Executor boundary for a trusted setup helper applying a data-only TUN plan.
+pub trait TunSetupExecutor {
+    fn run_command(&mut self, command: &TunSetupCommand) -> Result<(), IntegrationError>;
+    fn write_file(&mut self, file: &TunSetupFileWrite) -> Result<(), IntegrationError>;
+}
+
+/// Apply setup-helper file writes and commands in deterministic order.
+pub fn execute_tun_setup_plan<E>(
+    plan: &TunSetupCommandPlan,
+    executor: &mut E,
+) -> Result<(), IntegrationError>
+where
+    E: TunSetupExecutor,
+{
+    for file in &plan.file_writes {
+        executor.write_file(file)?;
+    }
+    for command in &plan.commands {
+        executor.run_command(command)?;
+    }
+    Ok(())
+}
+
+/// Standard setup-helper executor. It is intentionally in integrations, not in
+/// runtime or broker core.
+#[derive(Clone, Debug, Default)]
+pub struct StdTunSetupExecutor;
+
+impl TunSetupExecutor for StdTunSetupExecutor {
+    fn run_command(&mut self, command: &TunSetupCommand) -> Result<(), IntegrationError> {
+        let status = Command::new(&command.program)
+            .args(&command.args)
+            .status()
+            .map_err(|error| IntegrationError::CommandFailed {
+                program: command.program.clone(),
+                status: error.to_string(),
+            })?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(IntegrationError::CommandFailed {
+                program: command.program.clone(),
+                status: status.to_string(),
+            })
+        }
+    }
+
+    fn write_file(&mut self, file: &TunSetupFileWrite) -> Result<(), IntegrationError> {
+        std::fs::write(&file.path, file.contents.as_bytes()).map_err(|error| {
+            IntegrationError::FileWriteFailed {
+                path: file.path.clone(),
+                reason: error.to_string(),
+            }
+        })
+    }
+}
+
 fn validate_request(request: &NetworkSetupRequest) -> Result<(), IntegrationError> {
     if request.tun.name.trim().is_empty() {
         return Err(IntegrationError::InvalidTunName);
@@ -275,6 +333,8 @@ pub enum IntegrationError {
     InvalidTunName,
     InvalidMtu(u16),
     MismatchedTunAddressFamilies,
+    CommandFailed { program: String, status: String },
+    FileWriteFailed { path: PathBuf, reason: String },
 }
 
 impl fmt::Display for IntegrationError {
@@ -285,6 +345,12 @@ impl fmt::Display for IntegrationError {
             Self::MismatchedTunAddressFamilies => {
                 f.write_str("TUN broker and sandbox address families must match")
             }
+            Self::CommandFailed { program, status } => {
+                write!(f, "setup command {program} failed: {status}")
+            }
+            Self::FileWriteFailed { path, reason } => {
+                write!(f, "setup file write {} failed: {reason}", path.display())
+            }
         }
     }
 }
@@ -294,6 +360,39 @@ impl std::error::Error for IntegrationError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Default)]
+    struct RecordingExecutor {
+        operations: Vec<String>,
+        fail_program: Option<String>,
+    }
+
+    impl TunSetupExecutor for RecordingExecutor {
+        fn run_command(&mut self, command: &TunSetupCommand) -> Result<(), IntegrationError> {
+            self.operations.push(format!(
+                "cmd:{} {}",
+                command.program,
+                command.args.join(" ")
+            ));
+            if self.fail_program.as_deref() == Some(command.program.as_str()) {
+                Err(IntegrationError::CommandFailed {
+                    program: command.program.clone(),
+                    status: "mock failure".to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+
+        fn write_file(&mut self, file: &TunSetupFileWrite) -> Result<(), IntegrationError> {
+            self.operations.push(format!(
+                "file:{}={}",
+                file.path.display(),
+                file.contents.trim_end()
+            ));
+            Ok(())
+        }
+    }
 
     fn request() -> NetworkSetupRequest {
         NetworkSetupRequest {
@@ -360,6 +459,24 @@ mod tests {
         assert_eq!(plan.file_writes[0].path, PathBuf::from("/etc/resolv.conf"));
         assert_eq!(plan.file_writes[0].contents, "nameserver 10.255.0.1\n");
         assert!(plan.proxy_environment.is_some());
+    }
+
+    #[test]
+    fn setup_executor_applies_files_before_commands_and_translates_errors() {
+        let plan = LinuxIpTunSetup::plan_commands(&request()).unwrap();
+        let mut executor = RecordingExecutor::default();
+
+        execute_tun_setup_plan(&plan, &mut executor).unwrap();
+
+        assert!(executor.operations[0].starts_with("file:/etc/resolv.conf"));
+        assert!(executor.operations[1].starts_with("cmd:ip tuntap add"));
+
+        let mut failing = RecordingExecutor {
+            fail_program: Some("ip".to_string()),
+            ..RecordingExecutor::default()
+        };
+        let error = execute_tun_setup_plan(&plan, &mut failing).unwrap_err();
+        assert!(matches!(error, IntegrationError::CommandFailed { .. }));
     }
 
     #[test]

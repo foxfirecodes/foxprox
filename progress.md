@@ -1560,3 +1560,23 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: e0bc5fc.
 - Remaining boundary risks: command execution, fd handoff, and privilege drop enforcement remain.
+
+## 2026-06-22 — Boundary objective: setup-helper command execution contract
+
+- Boundary under work: executable setup-helper boundary for data-only TUN setup plans.
+- Allowed dependency direction: `foxprox-integrations` owns command/file execution for setup helpers; broker core/runtime/device remain preopened-device consumers and never invoke Linux setup commands directly.
+- Dependency-risk assessment: command plans prove shape but not execution order or error translation. A narrow executor trait lets the trusted helper run plans while tests verify ordering without privileged operations.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for integrations/audit.
+- Observed results: added `TunSetupExecutor`, `execute_tun_setup_plan`, and `StdTunSetupExecutor` in `foxprox-integrations`. The executor applies planned resolver file writes before setup commands and translates command/file failures into integration errors. Added a mock executor test proving deterministic ordering and error translation without privileged operations. All verification passed.
+- Changed files:
+  - `crates/foxprox-integrations/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 129 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-integrations` — execution boundary remains integrations/core-only.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: fd handoff and privilege drop enforcement remain.
