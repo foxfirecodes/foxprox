@@ -123,6 +123,23 @@ impl UdpFlowKey {
 /// the shared `HostUdpFlow` contract.
 pub const DEFAULT_UDP_BRIDGE_IDLE_TIMEOUT_MILLIS: u64 = 60_000;
 pub const DEFAULT_MAX_UDP_BRIDGES: usize = 4096;
+pub const DEFAULT_MAX_TCP_BRIDGES_PER_TICK: usize = 64;
+pub const DEFAULT_MAX_UDP_BRIDGES_PER_TICK: usize = 64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BridgeMaintenanceBudget {
+    pub max_tcp_streams_per_tick: usize,
+    pub max_udp_flows_per_tick: usize,
+}
+
+impl Default for BridgeMaintenanceBudget {
+    fn default() -> Self {
+        Self {
+            max_tcp_streams_per_tick: DEFAULT_MAX_TCP_BRIDGES_PER_TICK,
+            max_udp_flows_per_tick: DEFAULT_MAX_UDP_BRIDGES_PER_TICK,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UdpBridgeLimits {
@@ -253,8 +270,29 @@ where
     D: PacketDevice,
     U: HostUdpFlow,
 {
+    flush_udp_bridge_reads_to_device_with_limit(
+        device,
+        bridges,
+        max_bytes_per_flow,
+        usize::MAX,
+        now_millis,
+    )
+}
+
+/// Read host UDP replies from at most `max_flows` retained flow handles.
+pub fn flush_udp_bridge_reads_to_device_with_limit<D, U>(
+    device: &mut D,
+    bridges: &mut UdpBridgeTable<U>,
+    max_bytes_per_flow: usize,
+    max_flows: usize,
+    now_millis: u64,
+) -> Result<UdpBridgeReadOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    U: HostUdpFlow,
+{
     let mut replies = Vec::new();
-    for (key, bridge) in &mut bridges.flows {
+    for (key, bridge) in bridges.flows.iter_mut().take(max_flows) {
         let bytes = bridge
             .flow
             .recv_to_sandbox(max_bytes_per_flow)
@@ -302,6 +340,7 @@ where
     pub timestamp_millis: u64,
     pub max_tcp_read_bytes_per_stream: usize,
     pub max_udp_read_bytes_per_flow: usize,
+    pub budget: BridgeMaintenanceBudget,
     pub now_millis: u64,
 }
 
@@ -336,6 +375,7 @@ where
         timestamp_millis,
         max_tcp_read_bytes_per_stream,
         max_udp_read_bytes_per_flow,
+        budget,
         now_millis,
     } = step;
 
@@ -359,6 +399,7 @@ where
             udp_bridges,
             max_tcp_read_bytes_per_stream,
             max_udp_read_bytes_per_flow,
+            budget,
             now_millis,
         },
     )?;
@@ -375,6 +416,7 @@ pub struct BridgeMaintenanceStep<'a, S, T, U> {
     pub udp_bridges: &'a mut UdpBridgeTable<U>,
     pub max_tcp_read_bytes_per_stream: usize,
     pub max_udp_read_bytes_per_flow: usize,
+    pub budget: BridgeMaintenanceBudget,
     pub now_millis: u64,
 }
 
@@ -407,16 +449,18 @@ where
         .flush_pending_sandbox_writes()
         .map_err(BrokerError::Egress)
         .map_err(RuntimeError::Broker)?;
-    let tcp = flush_tcp_bridge_reads_to_stack_device(
+    let tcp = flush_tcp_bridge_reads_to_stack_device_with_limit(
         device,
         step.adapter,
         step.tcp_bridges,
         step.max_tcp_read_bytes_per_stream,
+        step.budget.max_tcp_streams_per_tick,
     )?;
-    let udp = flush_udp_bridge_reads_to_device(
+    let udp = flush_udp_bridge_reads_to_device_with_limit(
         device,
         step.udp_bridges,
         step.max_udp_read_bytes_per_flow,
+        step.budget.max_udp_flows_per_tick,
         step.now_millis,
     )?;
     let udp_flows_expired = step.udp_bridges.expire_idle(step.now_millis);
@@ -737,8 +781,30 @@ where
     S: StackAdapter,
     T: HostTcpStream,
 {
+    flush_tcp_bridge_reads_to_stack_device_with_limit(
+        device,
+        adapter,
+        bridges,
+        max_bytes_per_stream,
+        usize::MAX,
+    )
+}
+
+/// Read pending host-side bytes from at most `max_streams` TCP streams.
+pub fn flush_tcp_bridge_reads_to_stack_device_with_limit<D, S, T>(
+    device: &mut D,
+    adapter: &mut S,
+    bridges: &mut StackTcpBridgeTable<T>,
+    max_bytes_per_stream: usize,
+    max_streams: usize,
+) -> Result<StackBridgeReadOutcome, RuntimeError>
+where
+    D: PacketDevice,
+    S: StackAdapter,
+    T: HostTcpStream,
+{
     let mut reads = Vec::new();
-    for (key, bridge) in &mut bridges.streams {
+    for (key, bridge) in bridges.streams.iter_mut().take(max_streams) {
         let bytes = bridge
             .stream
             .read_to_sandbox(max_bytes_per_stream)
@@ -1143,6 +1209,7 @@ mod tests {
                 timestamp_millis: 1000,
                 max_tcp_read_bytes_per_stream: 1024,
                 max_udp_read_bytes_per_flow: 1024,
+                budget: BridgeMaintenanceBudget::default(),
                 now_millis: 1000,
             },
         )
@@ -1197,6 +1264,7 @@ mod tests {
                 udp_bridges: &mut udp_bridges,
                 max_tcp_read_bytes_per_stream: 1024,
                 max_udp_read_bytes_per_flow: 1024,
+                budget: BridgeMaintenanceBudget::default(),
                 now_millis: 20,
             },
         )
@@ -1260,6 +1328,66 @@ mod tests {
         assert_eq!(bridges.len(), 1);
         assert_eq!(bridges.expire_idle(130), 1);
         assert!(bridges.is_empty());
+    }
+
+    #[test]
+    fn bridge_maintenance_tick_honors_flow_count_budget() {
+        let cursor = Cursor::new(Vec::new());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let mut tcp_bridges = StackTcpBridgeTable::default();
+        for port in [49152, 49153] {
+            tcp_bridges.insert(
+                StackTcpFlowKey::new(
+                    SandboxId::new("s1").unwrap(),
+                    FrontendKind::Tun,
+                    format!("10.0.0.2:{port}").parse().unwrap(),
+                    "203.0.113.10:80".parse().unwrap(),
+                ),
+                ReadableTcpStream::new(vec![b"tcp".to_vec()].into()),
+            );
+        }
+        let mut udp_bridges = UdpBridgeTable::default();
+        for port in [53000, 53001] {
+            udp_bridges.insert_with_timeout(
+                UdpFlowKey {
+                    sandbox_id: SandboxId::new("s1").unwrap(),
+                    frontend: FrontendKind::Tun,
+                    source: format!("10.0.0.2:{port}").parse().unwrap(),
+                    destination: "203.0.113.10:12345".parse().unwrap(),
+                },
+                ReadableUdpFlow::new(vec![b"udp".to_vec()].into()),
+                10,
+                60_000,
+            );
+        }
+        let mut adapter = ReadBackStackAdapter {
+            writes: Vec::new(),
+            outbound: vec![OutboundIpPacket::new(vec![0x45, 0, 0, 20]).unwrap()],
+        };
+
+        let outcome = process_bridge_maintenance_tick(
+            &mut device,
+            BridgeMaintenanceStep {
+                adapter: &mut adapter,
+                tcp_bridges: &mut tcp_bridges,
+                udp_bridges: &mut udp_bridges,
+                max_tcp_read_bytes_per_stream: 1024,
+                max_udp_read_bytes_per_flow: 1024,
+                budget: BridgeMaintenanceBudget {
+                    max_tcp_streams_per_tick: 1,
+                    max_udp_flows_per_tick: 1,
+                },
+                now_millis: 20,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.tcp_streams_read, 1);
+        assert_eq!(outcome.tcp_bytes_read_from_egress, 3);
+        assert_eq!(outcome.udp_flows_read, 1);
+        assert_eq!(outcome.udp_bytes_read_from_egress, 3);
+        assert_eq!(outcome.outbound_packets_written, 2);
+        assert_eq!(adapter.writes.len(), 1);
     }
 
     #[test]

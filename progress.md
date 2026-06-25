@@ -1321,3 +1321,24 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 8fbe8e6.
 - Remaining boundary risks: production event loop, readiness registration, per-flow fairness, and signal/shutdown handling remain.
+
+## 2026-06-22 — Boundary objective: bounded bridge maintenance budgets
+
+- Boundary under work: per-tick bridge maintenance budgets for TCP and UDP flows.
+- Allowed dependency direction: runtime owns scheduling/budget decisions while egress streams, packet synthesis, stack adapters, and audit remain behind their existing contracts.
+- Dependency-risk assessment: maintenance can now run when the device is idle, but unlimited flow iteration per tick risks starving packet ingress or other sandboxes. Bounded flow counts are a scheduler-facing contract for future fairness without changing policy/audit/egress types.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/device/audit.
+- Observed results: added `BridgeMaintenanceBudget` with default TCP/UDP flow-count caps, wired it through `BridgeMaintenanceStep` and `StackRuntimeTickStep`, and added bounded read helpers for TCP and UDP bridge maintenance. Existing unbounded helpers remain as convenience wrappers. Added a runtime test proving a tick with a 1/1 budget reads only one TCP stream and one UDP flow while preserving existing per-flow byte caps. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 113 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — fairness/budgeting remains runtime-owned.
+  - `cargo tree -p foxprox-device` — device contract unchanged.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: true round-robin readiness cursors, per-sandbox fairness, and rate accounting remain.

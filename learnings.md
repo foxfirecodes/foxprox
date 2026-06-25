@@ -308,3 +308,8 @@
 
 - A useful runtime loop boundary is a single nonblocking tick that performs at most one device ingestion and then always runs bridge maintenance; this prevents idle TUN reads from starving host-to-sandbox forwarding.
 - The tick contract should report packet-ingest and maintenance outcomes separately so future schedulers can add readiness/fairness policy without changing packet, policy, audit, egress, or smoltcp contracts.
+
+## 2026-06-22 — bounded maintenance budgets
+
+- Keep scheduling/fairness state in `foxprox-runtime`: bridge maintenance can expose max TCP streams and UDP flows per tick while egress handles and stack adapters remain unchanged.
+- Count budgets separately from byte budgets: per-flow byte caps bound individual reads, while per-tick flow caps bound total runtime work before returning to the scheduler.
