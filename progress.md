@@ -1425,5 +1425,5 @@
   - `cargo tree -p foxprox-integrations` — integrations remains core-only.
   - `cargo tree -p foxprox-device` — device remains independent/preopened boundary.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 52cde96.
 - Remaining boundary risks: executing these commands, fd handoff, and OS-specific error mapping remain.
