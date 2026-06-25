@@ -288,6 +288,87 @@ where
     })
 }
 
+pub struct StackRuntimeTickStep<'a, S, E, A, U>
+where
+    E: HostEgress,
+{
+    pub adapter: &'a mut S,
+    pub policy: &'a PolicyEngine,
+    pub egress: &'a mut E,
+    pub audit: &'a mut A,
+    pub tcp_bridges: &'a mut StackTcpBridgeTable<E::TcpStream>,
+    pub udp_bridges: &'a mut UdpBridgeTable<U>,
+    pub sequence_start: u64,
+    pub timestamp_millis: u64,
+    pub max_tcp_read_bytes_per_stream: usize,
+    pub max_udp_read_bytes_per_flow: usize,
+    pub now_millis: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StackRuntimeTickOutcome {
+    pub stack_packet: Option<StackDevicePacketOutcome>,
+    pub maintenance: BridgeMaintenanceOutcome,
+}
+
+/// Run one nonblocking stack runtime tick: optionally ingest one device packet,
+/// then always flush bridge maintenance.
+pub fn process_stack_runtime_tick<D, S, E, A, U>(
+    device: &mut D,
+    step: StackRuntimeTickStep<'_, S, E, A, U>,
+) -> Result<StackRuntimeTickOutcome, RuntimeError>
+where
+    D: TryPacketDevice,
+    S: StackAdapter,
+    E: HostEgress,
+    E::TcpStream: HostTcpStream,
+    A: AuditSink,
+    U: HostUdpFlow,
+{
+    let StackRuntimeTickStep {
+        adapter,
+        policy,
+        egress,
+        audit,
+        tcp_bridges,
+        udp_bridges,
+        sequence_start,
+        timestamp_millis,
+        max_tcp_read_bytes_per_stream,
+        max_udp_read_bytes_per_flow,
+        now_millis,
+    } = step;
+
+    let stack_packet = process_one_stack_device_packet_if_ready(
+        device,
+        StackDevicePacketStep {
+            adapter,
+            policy,
+            egress,
+            audit,
+            tcp_bridges,
+            sequence_start,
+            timestamp_millis,
+        },
+    )?;
+    let maintenance = process_bridge_maintenance_tick(
+        device,
+        BridgeMaintenanceStep {
+            adapter,
+            tcp_bridges,
+            udp_bridges,
+            max_tcp_read_bytes_per_stream,
+            max_udp_read_bytes_per_flow,
+            now_millis,
+        },
+    )?;
+
+    Ok(StackRuntimeTickOutcome {
+        stack_packet,
+        maintenance,
+    })
+}
+
 pub struct BridgeMaintenanceStep<'a, S, T, U> {
     pub adapter: &'a mut S,
     pub tcp_bridges: &'a mut StackTcpBridgeTable<T>,
@@ -1028,6 +1109,54 @@ mod tests {
     }
 
     #[test]
+    fn stack_runtime_tick_runs_maintenance_when_device_not_ready() {
+        let mut device = PreopenedTunDevice::from_io(WouldBlockIo, 1500).unwrap();
+        let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
+        let mut egress = MaintenanceEgress;
+        let mut audit = BoundedAuditSink::new(4);
+        let mut adapter = ReadBackStackAdapter {
+            writes: Vec::new(),
+            outbound: vec![OutboundIpPacket::new(vec![0x45, 0, 0, 20]).unwrap()],
+        };
+        let mut tcp_bridges = StackTcpBridgeTable::default();
+        tcp_bridges.insert(
+            StackTcpFlowKey::new(
+                SandboxId::new("s1").unwrap(),
+                FrontendKind::Tun,
+                "10.0.0.2:49152".parse().unwrap(),
+                "203.0.113.10:80".parse().unwrap(),
+            ),
+            ReadableTcpStream::new(vec![b"tcp".to_vec()].into()),
+        );
+        let mut udp_bridges: UdpBridgeTable<MockUdpHandle> = UdpBridgeTable::default();
+
+        let outcome = process_stack_runtime_tick(
+            &mut device,
+            StackRuntimeTickStep {
+                adapter: &mut adapter,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                tcp_bridges: &mut tcp_bridges,
+                udp_bridges: &mut udp_bridges,
+                sequence_start: 1,
+                timestamp_millis: 1000,
+                max_tcp_read_bytes_per_stream: 1024,
+                max_udp_read_bytes_per_flow: 1024,
+                now_millis: 1000,
+            },
+        )
+        .unwrap();
+
+        assert!(outcome.stack_packet.is_none());
+        assert_eq!(outcome.maintenance.tcp_streams_read, 1);
+        assert_eq!(outcome.maintenance.tcp_bytes_enqueued_to_stack, 3);
+        assert_eq!(outcome.maintenance.outbound_packets_written, 1);
+        assert_eq!(adapter.writes[0].bytes, b"tcp");
+        assert!(audit.records().is_empty());
+    }
+
+    #[test]
     fn bridge_maintenance_tick_flushes_tcp_udp_and_expiry() {
         let cursor = Cursor::new(Vec::new());
         let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
@@ -1582,6 +1711,47 @@ mod tests {
 
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
+        }
+    }
+
+    struct MaintenanceEgress;
+
+    impl HostEgress for MaintenanceEgress {
+        type TcpStream = ReadableTcpStream;
+        type UdpHandle = MockUdpHandle;
+        type HttpResponse = MockHttpResponse;
+
+        fn connect_tcp(
+            &mut self,
+            _event: &TcpConnectAttempt,
+        ) -> Result<Self::TcpStream, EgressError> {
+            Err(EgressError::UnsupportedAllowedEvent)
+        }
+
+        fn open_udp_flow(
+            &mut self,
+            _event: &UdpFlowAttempt,
+        ) -> Result<Self::UdpHandle, EgressError> {
+            Err(EgressError::UnsupportedAllowedEvent)
+        }
+
+        fn proxy_http_request(
+            &mut self,
+            _event: &HttpRequest,
+        ) -> Result<Self::HttpResponse, EgressError> {
+            Err(EgressError::UnsupportedAllowedEvent)
+        }
+
+        fn proxy_connect(&mut self, _event: &HttpsConnect) -> Result<Self::TcpStream, EgressError> {
+            Err(EgressError::UnsupportedAllowedEvent)
+        }
+
+        fn socks_connect(&mut self, _event: &SocksConnect) -> Result<Self::TcpStream, EgressError> {
+            Err(EgressError::UnsupportedAllowedEvent)
+        }
+
+        fn resolve_dns(&mut self, _event: &DnsQuery) -> Result<Vec<SocketAddr>, EgressError> {
+            Ok(Vec::new())
         }
     }
 

@@ -303,3 +303,8 @@
 
 - Stack/TCP forwarding needs the same optional-read device semantics as raw IPv4 handling; otherwise an idle TUN read can block bridge maintenance.
 - Factoring packet bytes into a private runtime helper keeps the public blocking and nonblocking stack steps aligned without duplicating policy/audit/egress handling.
+
+## 2026-06-22 — stack runtime tick orchestration
+
+- A useful runtime loop boundary is a single nonblocking tick that performs at most one device ingestion and then always runs bridge maintenance; this prevents idle TUN reads from starving host-to-sandbox forwarding.
+- The tick contract should report packet-ingest and maintenance outcomes separately so future schedulers can add readiness/fairness policy without changing packet, policy, audit, egress, or smoltcp contracts.

@@ -1299,3 +1299,25 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 79feaf2.
 - Remaining boundary risks: full loop scheduling, readiness registration, and fairness budgets remain.
+
+## 2026-06-22 — Boundary objective: stack runtime tick orchestration
+
+- Boundary under work: one nonblocking stack runtime tick that optionally ingests a TUN packet and always runs bridge maintenance.
+- Allowed dependency direction: runtime coordinates `TryPacketDevice`, `StackAdapter`, policy/audit/egress, TCP bridges, and UDP bridges through existing contracts; no smoltcp or std socket types leak into policy/audit.
+- Dependency-risk assessment: optional packet steps and bridge maintenance exist separately. A tick-level orchestration contract proves an idle device no longer starves forwarding maintenance, while still keeping scheduling/fairness policy outside lower-level crates.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/device/smoltcp/audit.
+- Observed results: added `StackRuntimeTickStep` and `process_stack_runtime_tick`, which optionally ingests one stack device packet via `TryPacketDevice` and then always runs `process_bridge_maintenance_tick`. Added `StackRuntimeTickOutcome` with separate packet and maintenance results. Added a runtime test proving an idle device still flushes TCP host bytes through the adapter and writes outbound packets. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 112 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — tick coordinates only existing runtime boundary crates.
+  - `cargo tree -p foxprox-device` — device remains readiness boundary.
+  - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated in adapter crate.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: production event loop, readiness registration, per-flow fairness, and signal/shutdown handling remain.
