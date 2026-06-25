@@ -318,3 +318,8 @@
 
 - Runtime bridge retention should enforce both global and per-sandbox caps using normalized `SandboxId`; this prevents one sandbox from consuming all TCP/UDP retained-flow slots without involving policy/audit.
 - Keep existing convenience `insert` methods for tests/simple callers, but use fallible insertion on policy/egress paths so resource-limit failures surface as runtime/broker errors instead of panics.
+
+## 2026-06-22 — IPv6 UDP reply synthesis
+
+- UDP reply synthesis belongs in `foxprox-packet` for both IPv4 and IPv6; runtime should choose based only on normalized `SocketAddr` families and write opaque packet bytes.
+- IPv6 UDP checksums require the IPv6 pseudo-header and cannot be omitted, unlike IPv4's optional zero UDP checksum behavior.

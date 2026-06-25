@@ -326,10 +326,19 @@ where
     let mut outbound_packets_written = 0;
     for (key, bytes) in replies {
         udp_bytes_read_from_egress += bytes.len();
-        let packet =
-            foxprox_packet::synthesize_udp_ipv4_response(key.source, key.destination, &bytes)
-                .map_err(BrokerError::Packet)
-                .map_err(RuntimeError::Broker)?;
+        let packet = match (key.source.ip(), key.destination.ip()) {
+            (std::net::IpAddr::V4(_), std::net::IpAddr::V4(_)) => {
+                foxprox_packet::synthesize_udp_ipv4_response(key.source, key.destination, &bytes)
+            }
+            (std::net::IpAddr::V6(_), std::net::IpAddr::V6(_)) => {
+                foxprox_packet::synthesize_udp_ipv6_response(key.source, key.destination, &bytes)
+            }
+            _ => Err(foxprox_packet::PacketError::unsupported(
+                "udp bridge response address families differ",
+            )),
+        }
+        .map_err(BrokerError::Packet)
+        .map_err(RuntimeError::Broker)?;
         let outbound =
             OutboundIpPacket::new(packet.bytes().to_vec()).map_err(RuntimeError::Stack)?;
         write_outbound_packets(device, &[outbound])?;
@@ -1505,6 +1514,48 @@ mod tests {
         assert_eq!(u16::from_be_bytes([bytes[20], bytes[21]]), 12345);
         assert_eq!(u16::from_be_bytes([bytes[22], bytes[23]]), 53000);
         assert_eq!(&bytes[28..], b"pong");
+    }
+
+    #[test]
+    fn udp_bridge_reads_ipv6_host_reply_and_writes_sandbox_packet() {
+        let cursor = Cursor::new(Vec::new());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let key = UdpFlowKey {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "[2001:db8::2]:53000".parse().unwrap(),
+            destination: "[2001:db8::10]:12345".parse().unwrap(),
+        };
+        let mut bridges = UdpBridgeTable::default();
+        bridges.insert(key, ReadableUdpFlow::new(vec![b"pong".to_vec()].into()));
+
+        let outcome =
+            flush_udp_bridge_reads_to_device(&mut device, &mut bridges, 1024, 20).unwrap();
+
+        assert_eq!(outcome.udp_flows_read, 1);
+        assert_eq!(outcome.udp_bytes_read_from_egress, 4);
+        assert_eq!(outcome.outbound_packets_written, 1);
+        let bytes = device.into_inner().into_inner();
+        assert_eq!(bytes[0] >> 4, 6);
+        assert_eq!(u16::from_be_bytes([bytes[4], bytes[5]]), 12);
+        assert_eq!(bytes[6], 17);
+        assert_eq!(
+            &bytes[8..24],
+            &"2001:db8::10"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets()
+        );
+        assert_eq!(
+            &bytes[24..40],
+            &"2001:db8::2"
+                .parse::<std::net::Ipv6Addr>()
+                .unwrap()
+                .octets()
+        );
+        assert_eq!(u16::from_be_bytes([bytes[40], bytes[41]]), 12345);
+        assert_eq!(u16::from_be_bytes([bytes[42], bytes[43]]), 53000);
+        assert_eq!(&bytes[48..], b"pong");
     }
 
     #[test]

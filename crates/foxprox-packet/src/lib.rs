@@ -6,7 +6,7 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
 use foxprox_core::{
     classify_udp_destination, DenialAction, FrontendKind, IcmpMessage, NormalizedEvent,
@@ -265,6 +265,44 @@ pub fn synthesize_udp_ipv4_response(
     Ok(SyntheticIpPacket { bytes: packet })
 }
 
+/// Synthesize an IPv6 UDP response packet for a host reply to an original
+/// sandbox UDP flow. The returned packet swaps the original flow endpoints.
+pub fn synthesize_udp_ipv6_response(
+    original_source: SocketAddr,
+    original_destination: SocketAddr,
+    payload: &[u8],
+) -> Result<SyntheticIpPacket, PacketError> {
+    let (source_ip, destination_ip) = match (original_source.ip(), original_destination.ip()) {
+        (IpAddr::V6(source), IpAddr::V6(destination)) => (source, destination),
+        _ => {
+            return Err(PacketError::unsupported(
+                "udp ipv6 response requires IPv6 socket addresses",
+            ));
+        }
+    };
+    let udp_len = 8_usize
+        .checked_add(payload.len())
+        .ok_or_else(|| PacketError::malformed("udp payload length overflow"))?;
+    if udp_len > u16::MAX as usize {
+        return Err(PacketError::malformed("udp payload too large"));
+    }
+    let total_len = 40 + udp_len;
+    let mut packet = vec![0_u8; total_len];
+    packet[0] = 0x60;
+    packet[4..6].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    packet[6] = 17;
+    packet[7] = 64;
+    packet[8..24].copy_from_slice(&destination_ip.octets());
+    packet[24..40].copy_from_slice(&source_ip.octets());
+    packet[40..42].copy_from_slice(&original_destination.port().to_be_bytes());
+    packet[42..44].copy_from_slice(&original_source.port().to_be_bytes());
+    packet[44..46].copy_from_slice(&(udp_len as u16).to_be_bytes());
+    packet[48..].copy_from_slice(payload);
+    let udp_checksum = udp_checksum_ipv6(destination_ip, source_ip, &packet[40..]);
+    packet[46..48].copy_from_slice(&udp_checksum.to_be_bytes());
+    Ok(SyntheticIpPacket { bytes: packet })
+}
+
 fn udp_checksum_ipv4(source: Ipv4Addr, destination: Ipv4Addr, udp_segment: &[u8]) -> u16 {
     let mut pseudo = Vec::with_capacity(12 + udp_segment.len() + 1);
     pseudo.extend_from_slice(&source.octets());
@@ -272,6 +310,24 @@ fn udp_checksum_ipv4(source: Ipv4Addr, destination: Ipv4Addr, udp_segment: &[u8]
     pseudo.push(0);
     pseudo.push(17);
     pseudo.extend_from_slice(&(udp_segment.len() as u16).to_be_bytes());
+    pseudo.extend_from_slice(udp_segment);
+    if pseudo.len() % 2 == 1 {
+        pseudo.push(0);
+    }
+    let checksum = internet_checksum(&pseudo);
+    if checksum == 0 {
+        0xffff
+    } else {
+        checksum
+    }
+}
+
+fn udp_checksum_ipv6(source: Ipv6Addr, destination: Ipv6Addr, udp_segment: &[u8]) -> u16 {
+    let mut pseudo = Vec::with_capacity(40 + udp_segment.len() + 1);
+    pseudo.extend_from_slice(&source.octets());
+    pseudo.extend_from_slice(&destination.octets());
+    pseudo.extend_from_slice(&(udp_segment.len() as u32).to_be_bytes());
+    pseudo.extend_from_slice(&[0, 0, 0, 17]);
     pseudo.extend_from_slice(udp_segment);
     if pseudo.len() % 2 == 1 {
         pseudo.push(0);
@@ -392,6 +448,13 @@ impl PacketError {
     fn malformed(metadata: impl Into<String>) -> Self {
         Self {
             reason: UnsupportedReason::MalformedPacket,
+            safe_metadata: Some(metadata.into()),
+        }
+    }
+
+    pub fn unsupported(metadata: impl Into<String>) -> Self {
+        Self {
+            reason: UnsupportedReason::UnsupportedIpProtocol(0),
             safe_metadata: Some(metadata.into()),
         }
     }
@@ -530,6 +593,34 @@ mod tests {
         assert_eq!(u16::from_be_bytes([bytes[22], bytes[23]]), 53000);
         assert_ne!(u16::from_be_bytes([bytes[26], bytes[27]]), 0);
         assert_eq!(&bytes[28..], b"pong");
+    }
+
+    #[test]
+    fn udp_ipv6_response_synthesis_swaps_original_flow_endpoints() {
+        let packet = synthesize_udp_ipv6_response(
+            "[2001:db8::2]:53000".parse().unwrap(),
+            "[2001:db8::10]:12345".parse().unwrap(),
+            b"pong",
+        )
+        .unwrap();
+        let bytes = packet.bytes();
+
+        assert_eq!(bytes[0] >> 4, 6);
+        assert_eq!(u16::from_be_bytes([bytes[4], bytes[5]]), 12);
+        assert_eq!(bytes[6], 17);
+        assert_eq!(bytes[7], 64);
+        assert_eq!(
+            &bytes[8..24],
+            &"2001:db8::10".parse::<Ipv6Addr>().unwrap().octets()
+        );
+        assert_eq!(
+            &bytes[24..40],
+            &"2001:db8::2".parse::<Ipv6Addr>().unwrap().octets()
+        );
+        assert_eq!(u16::from_be_bytes([bytes[40], bytes[41]]), 12345);
+        assert_eq!(u16::from_be_bytes([bytes[42], bytes[43]]), 53000);
+        assert_ne!(u16::from_be_bytes([bytes[46], bytes[47]]), 0);
+        assert_eq!(&bytes[48..], b"pong");
     }
 
     #[test]

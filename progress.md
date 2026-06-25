@@ -1362,3 +1362,25 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 39f1b54.
 - Remaining boundary risks: rate-limit accounting and cross-sandbox weighted fairness remain.
+
+## 2026-06-22 — Boundary objective: IPv6 UDP reply synthesis
+
+- Boundary under work: host UDP reply write-back for IPv6 flows.
+- Allowed dependency direction: `foxprox-packet` owns IPv6/UDP wire synthesis; runtime selects synthesis based on normalized `SocketAddr` flow keys and still writes opaque packets only.
+- Dependency-risk assessment: UDP bridge write-back currently synthesizes IPv4 only, so IPv6 UDP replies cannot be returned without leaking packet-format logic into runtime. Adding packet-owned IPv6 synthesis preserves the boundary.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/packet/audit.
+- Observed results: added `foxprox_packet::synthesize_udp_ipv6_response` with IPv6 header construction, endpoint swapping, payload length, UDP ports, and IPv6 UDP checksum. Runtime UDP bridge write-back now selects IPv4 or IPv6 synthesis from normalized flow-key socket address families and still writes opaque outbound packets. Added packet and runtime tests for IPv6 UDP host replies. All verification passed.
+- Changed files:
+  - `crates/foxprox-packet/src/lib.rs`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 117 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime selects packet crate synthesis through existing dependency.
+  - `cargo tree -p foxprox-packet` — packet crate remains core-only.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: IPv6 packet classification/input path and ICMPv6 errors remain.
