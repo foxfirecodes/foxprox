@@ -1540,3 +1540,23 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 21455f6.
 - Remaining boundary risks: TCP DNS and async DNS serving remain.
+
+## 2026-06-22 — Boundary objective: setup-helper route DNS and proxy plan
+
+- Boundary under work: complete data-only Linux setup-helper plan for TUN route, DNS resolver config, and proxy environment handoff.
+- Allowed dependency direction: `foxprox-integrations` owns Linux setup-helper commands and file writes; broker runtime/device/policy/audit remain independent of bwrap/Linux setup details.
+- Dependency-risk assessment: TUN create/address/link commands are not enough for alpha validation; without route and DNS/proxy plan fields, setup-helper responsibilities remain implicit and likely to leak into callers.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for integrations/audit.
+- Observed results: extended `TunSetupCommandPlan` with setup-helper file writes and proxy environment. `LinuxIpTunSetup::plan_commands` now includes default route setup and `/etc/resolv.conf` contents pointing at broker DNS, in addition to TUN create/address/link commands. Tests now prove route, resolver, and proxy handoff are represented in the data-only integration boundary. All verification passed.
+- Changed files:
+  - `crates/foxprox-integrations/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 128 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-integrations` — integrations remains core-only.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: command execution, fd handoff, and privilege drop enforcement remain.

@@ -358,3 +358,8 @@
 
 - Runtime should call broker DNS interception before generic UDP bridge handling, otherwise broker-addressed DNS becomes ordinary UDP forwarding and never updates attribution.
 - Return DNS cache updates from net and apply them in runtime with an explicit cache timestamp to keep DNS parsing, packet synthesis, and cache ownership separated.
+
+## 2026-06-22 — setup-helper route/DNS/proxy plan
+
+- The setup helper contract needs route and resolver file-write plans in addition to TUN create/address/link commands; otherwise callers must infer Linux setup details outside `foxprox-integrations`.
+- Keep proxy exposure in the integration/setup plan as environment data, not runtime policy state.

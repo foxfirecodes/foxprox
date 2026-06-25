@@ -88,7 +88,16 @@ pub struct TunSetupCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TunSetupCommandPlan {
     pub commands: Vec<TunSetupCommand>,
+    pub file_writes: Vec<TunSetupFileWrite>,
     pub broker_dns: IpAddr,
+    pub proxy_environment: Option<ProxyExposure>,
+}
+
+/// One setup-helper file write needed inside the sandbox network namespace.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TunSetupFileWrite {
+    pub path: PathBuf,
+    pub contents: String,
 }
 
 /// Linux `ip`-based TUN setup planner for the privileged `foxproxsetup` helper.
@@ -123,8 +132,25 @@ impl LinuxIpTunSetup {
             request.tun.name.clone(),
         ]);
 
+        let mut route_args = Vec::new();
+        if let Some(flag) = family_flag {
+            route_args.push(flag.to_string());
+        }
+        route_args.extend([
+            "route".to_string(),
+            "replace".to_string(),
+            "default".to_string(),
+            "dev".to_string(),
+            request.tun.name.clone(),
+        ]);
+
         Ok(TunSetupCommandPlan {
             broker_dns: request.broker_dns,
+            proxy_environment: request.proxy.clone(),
+            file_writes: vec![TunSetupFileWrite {
+                path: PathBuf::from("/etc/resolv.conf"),
+                contents: format!("nameserver {}\n", request.broker_dns),
+            }],
             commands: vec![
                 TunSetupCommand {
                     program: "ip".to_string(),
@@ -152,6 +178,10 @@ impl LinuxIpTunSetup {
                         request.tun.mtu.to_string(),
                         "up".to_string(),
                     ],
+                },
+                TunSetupCommand {
+                    program: "ip".to_string(),
+                    args: route_args,
                 },
             ],
         })
@@ -323,6 +353,13 @@ mod tests {
             plan.commands[2].args,
             vec!["link", "set", "dev", "foxprox0", "mtu", "1500", "up"]
         );
+        assert_eq!(
+            plan.commands[3].args,
+            vec!["route", "replace", "default", "dev", "foxprox0"]
+        );
+        assert_eq!(plan.file_writes[0].path, PathBuf::from("/etc/resolv.conf"));
+        assert_eq!(plan.file_writes[0].contents, "nameserver 10.255.0.1\n");
+        assert!(plan.proxy_environment.is_some());
     }
 
     #[test]
