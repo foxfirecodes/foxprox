@@ -1840,5 +1840,5 @@
   - `cargo tree -p foxprox-frontends` — frontends remains core-only parser boundary.
   - `cargo tree -p foxprox-egress` — egress remains core-only host IO boundary.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 74d6146.
 - Remaining boundary risks: full-duplex CONNECT tunnel pump and listener accept loop remain.
