@@ -1694,3 +1694,24 @@
 - Commit hash when committed: pending.
 - Remaining risks: host address is still provided as an IP socket address; hostname resolution and DNS attribution decisions remain separate, and no live continuous TUN fd loop owns the full session yet.
 - Exact next step: commit real host dialing boundary, then add a higher-level allowed-connect orchestration helper that runs policy handling, real dialing, and session creation in one call.
+
+## 2026-06-25T02:59:35Z
+- Current objective: continue after real host TCP dialing boundary toward one-call allowed-connect session orchestration.
+- Git status summary: clean worktree after commit `3c68a26`.
+- Intended slice: add a helper that consumes a smoltcp adapter, evaluates the next accepted connect through `VerificationKernel`, resets denied attempts, dials a real host socket only on allow, marks the adapter connect opened, and returns an open bridge session.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features` with loopback-only host sockets.
+- Files expected to change: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Remaining risks: helper still accepts an IP socket address and does not perform hostname resolution or spawn a continuous session loop.
+- Exact next step: implement `connect_next_allowed_host_session` and allowed/denied regression coverage.
+
+## 2026-06-25T03:01:20Z
+- Current objective: add one-call orchestration for policy-gated real host TCP session creation.
+- Files changed: `crates/foxprox-smoltcp/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially failed on wrapped `from_allowed_connect`; fixed with `cargo fmt`)
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+- Observed result: final verification passed; 55 core tests, 6 device tests, 3 integration tests, 6 launcher tests, 85 runtime tests, 7 setup tests, and 34 smoltcp adapter tests passed. `connect_next_allowed_host_session` now consumes a smoltcp adapter, evaluates the next accepted connect through `VerificationKernel`, resets denied attempts before dialing, dials a real host `SocketAddr` only on allow, marks the adapter attempt opened, and returns an open bridge session plus `FlowKey` and `Decision`.
+- Commit hash when committed: pending.
+- Remaining risks: host connect failure coverage is not yet explicit, hostname resolution is still out of scope, and no continuous live TUN fd loop owns sessions.
+- Exact next step: commit one-call allowed host session orchestration, then add explicit host-connect-failure coverage proving failed dialing resets the smoltcp attempt and emits the allow audit before returning a typed host-connect error.

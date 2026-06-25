@@ -68,6 +68,8 @@ pub enum SmoltcpTcpBridgeSessionError {
     Bridge(TcpBridgeError),
     Audit(foxprox_core::AuditError),
     HostConnectFailed,
+    NoConnectAttempt,
+    PolicyDenied(foxprox_core::Decision),
     InvalidLifecycle,
     TunWrite,
 }
@@ -202,6 +204,45 @@ impl SmoltcpTcpBridgeSession<foxprox_runtime::StdTcpStreamBridge<Vec<u8>>> {
             .map_err(|_| SmoltcpTcpBridgeSessionError::HostConnectFailed)?;
         Self::from_allowed_connect(adapter, components, attempt, host_stream)
             .map_err(SmoltcpTcpBridgeSessionError::Bridge)
+    }
+
+    pub fn connect_next_allowed_host_session<S: foxprox_core::AuditSink>(
+        mut adapter: SmoltcpIpLoopback,
+        components: &foxprox_runtime::BrokerRuntimeComponents,
+        kernel: &mut foxprox_core::VerificationKernel<S>,
+        sandbox_id: foxprox_core::SandboxId,
+        host_address: SocketAddr,
+        timestamp_millis: u128,
+    ) -> Result<(Self, FlowKey, foxprox_core::Decision), SmoltcpTcpBridgeSessionError> {
+        let attempt = adapter
+            .next_connect_attempt()
+            .ok_or(SmoltcpTcpBridgeSessionError::NoConnectAttempt)?;
+        let event = foxprox_core::NormalizedEvent::TcpConnectAttempt {
+            sandbox_id,
+            frontend: foxprox_core::FrontendKind::Tun,
+            source: Some(attempt.source.clone()),
+            destination: attempt.destination.clone(),
+            hostname: None,
+            sni_status: foxprox_core::SniStatus::Missing,
+            sni_dns_mismatch: false,
+        };
+        let decision = kernel.decide_and_audit(&event, timestamp_millis);
+        if decision.action != foxprox_core::DecisionAction::Allow {
+            adapter.reset_connect(&attempt);
+            return Err(SmoltcpTcpBridgeSessionError::PolicyDenied(decision));
+        }
+        let host_stream = match std::net::TcpStream::connect(host_address) {
+            Ok(stream) => stream,
+            Err(_) => {
+                adapter.reset_connect(&attempt);
+                return Err(SmoltcpTcpBridgeSessionError::HostConnectFailed);
+            }
+        };
+        adapter.mark_connect_opened(&attempt);
+        let (session, flow) =
+            Self::from_allowed_connect(adapter, components, &attempt, host_stream)
+                .map_err(SmoltcpTcpBridgeSessionError::Bridge)?;
+        Ok((session, flow, decision))
     }
 
     pub fn pump_host_to_sandbox_once<W: Write>(
@@ -1388,6 +1429,103 @@ mod tests {
         assert_eq!(forwarded.flow, flow);
         assert_eq!(forwarded.bytes_forwarded, b"dialed-host".len());
         assert_eq!(server.join().unwrap(), b"dialed-host".to_vec());
+    }
+
+    #[test]
+    fn next_allowed_connect_helper_policy_gates_dials_and_opens_session() {
+        let mut adapter = packet_pumped_adapter_with_unread_payload(b"one-call-open");
+        adapter.set_connect_report_mode(TcpConnectReportMode::AcceptedListenerSockets);
+        let mut rule = PolicyRule::allow("allow-one-call-session");
+        rule.protocol = Some(Protocol::Tcp);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut received = vec![0; b"one-call-open".len()];
+            stream.read_exact(&mut received).unwrap();
+            received
+        });
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("one-call-components").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+
+        let (mut session, flow, decision) =
+            SmoltcpTcpBridgeSession::connect_next_allowed_host_session(
+                adapter,
+                &components,
+                &mut kernel,
+                SandboxId::new("one-call-session").unwrap(),
+                listen_addr,
+                5,
+            )
+            .unwrap();
+        let forwarded = session.forward_sandbox_payload_once(8080, 64).unwrap();
+
+        assert_eq!(decision.action, DecisionAction::Allow);
+        assert_eq!(kernel.audit_sink().events().len(), 1);
+        assert_eq!(forwarded.flow, flow);
+        assert_eq!(forwarded.bytes_forwarded, b"one-call-open".len());
+        assert_eq!(server.join().unwrap(), b"one-call-open".to_vec());
+    }
+
+    #[test]
+    fn next_allowed_connect_helper_resets_denied_attempt_before_dialing() {
+        let mut adapter = packet_pumped_adapter_with_unread_payload(b"denied-one-call");
+        adapter.set_connect_report_mode(TcpConnectReportMode::AcceptedListenerSockets);
+        let mut kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(8),
+        );
+        let components = build_runtime_components(BrokerRuntimeConfig {
+            sandbox_id: SandboxId::new("denied-one-call-components").unwrap(),
+            policy: PolicyConfig::default(),
+            static_dns_ttl_secs: 30,
+            static_dns_records: Vec::new(),
+            tcp_max_open_flows: 8,
+            tcp_metadata_buffer_bytes: 1024,
+        })
+        .unwrap();
+
+        let error = match SmoltcpTcpBridgeSession::connect_next_allowed_host_session(
+            adapter,
+            &components,
+            &mut kernel,
+            SandboxId::new("denied-one-call").unwrap(),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 9)),
+            5,
+        ) {
+            Ok(_) => panic!("denied connect should not open a session"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(
+            error,
+            SmoltcpTcpBridgeSessionError::PolicyDenied(_)
+        ));
+        assert_eq!(kernel.audit_sink().events().len(), 1);
+        assert_eq!(
+            kernel.audit_sink().events()[0]
+                .decision
+                .as_ref()
+                .unwrap()
+                .action,
+            DecisionAction::DenyDrop
+        );
     }
 
     #[test]
