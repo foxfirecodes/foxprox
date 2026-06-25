@@ -8,13 +8,13 @@
 
 use foxprox_core::{
     audit_backpressure_decision, classify_udp, parse_dns_query, parse_http_proxy_request_line,
-    parse_http_request, parse_ip_packet, parse_socks5_connect, parse_tls_client_hello_sni,
-    synthesize_icmpv4_echo_reply, synthesize_udpv4_response, validate_policy_config,
-    AttributionConfidence, AttributionSource, AuditEvent, AuditEventKind, AuditSink, ConfigError,
-    Decision, DecisionAction, DecisionReason, DnsCache, DnsParseError, Endpoint, FlowKey,
-    FlowTable, FrontendKind, HostnameAttribution, HttpProxyRequestLine, HttpRequestMetadata,
-    InspectError, NormalizedEvent, PacketError, ParsedIpPacket, PolicyEngine, Protocol,
-    ProxyParseError, QuicStatus, SandboxId, SniStatus, SocksDestination, StaticDnsRecord,
+    parse_http_request, parse_ip_packet, parse_socks5_connect, parse_socks5_greeting,
+    parse_tls_client_hello_sni, synthesize_icmpv4_echo_reply, synthesize_udpv4_response,
+    validate_policy_config, AttributionConfidence, AttributionSource, AuditEvent, AuditEventKind,
+    AuditSink, ConfigError, Decision, DecisionAction, DecisionReason, DnsCache, DnsParseError,
+    Endpoint, FlowKey, FlowTable, FrontendKind, HostnameAttribution, HttpProxyRequestLine,
+    HttpRequestMetadata, InspectError, NormalizedEvent, PacketError, ParsedIpPacket, PolicyEngine,
+    Protocol, ProxyParseError, QuicStatus, SandboxId, SniStatus, SocksDestination, StaticDnsRecord,
     StaticDnsResolver, Tcpv4Segment, UdpFlow, UdpTimeouts, Udpv4Packet, UnsupportedIpv4Protocol,
     VerificationKernel,
 };
@@ -823,6 +823,88 @@ pub enum SocksOutcome {
         event: NormalizedEvent,
         error: EgressError,
     },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SocksConnectionOutcome {
+    GreetingRejected(ProxyParseError),
+    ConnectRejected(SocksRuntimeError),
+    Runtime(Box<SocksOutcome>),
+}
+
+pub fn handle_socks5_connection_once<R, W, E, S>(
+    runtime: &mut SocksRuntime<E, S>,
+    reader: &mut R,
+    writer: &mut W,
+    resolved_ip: Option<IpAddr>,
+    timestamp_millis: u128,
+) -> io::Result<SocksConnectionOutcome>
+where
+    R: Read,
+    W: Write,
+    E: HostEgress,
+    S: AuditSink,
+{
+    let mut greeting_prefix = [0u8; 2];
+    reader.read_exact(&mut greeting_prefix)?;
+    let method_count = greeting_prefix[1] as usize;
+    let mut greeting = Vec::with_capacity(2 + method_count);
+    greeting.extend_from_slice(&greeting_prefix);
+    let mut methods = vec![0u8; method_count];
+    reader.read_exact(&mut methods)?;
+    greeting.extend_from_slice(&methods);
+    if let Err(error) = parse_socks5_greeting(&greeting) {
+        writer.write_all(&[5, 0xff])?;
+        return Ok(SocksConnectionOutcome::GreetingRejected(error));
+    }
+    writer.write_all(&[5, 0])?;
+
+    let mut request_prefix = [0u8; 4];
+    reader.read_exact(&mut request_prefix)?;
+    let mut request = request_prefix.to_vec();
+    match request_prefix[3] {
+        1 => {
+            let mut rest = [0u8; 6];
+            reader.read_exact(&mut rest)?;
+            request.extend_from_slice(&rest);
+        }
+        3 => {
+            let mut len = [0u8; 1];
+            reader.read_exact(&mut len)?;
+            request.push(len[0]);
+            let mut rest = vec![0u8; len[0] as usize + 2];
+            reader.read_exact(&mut rest)?;
+            request.extend_from_slice(&rest);
+        }
+        4 => {
+            let mut rest = [0u8; 18];
+            reader.read_exact(&mut rest)?;
+            request.extend_from_slice(&rest);
+        }
+        _ => {}
+    }
+
+    let outcome = match runtime.handle_connect_request(&request, resolved_ip, timestamp_millis) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            let reply = match error {
+                SocksRuntimeError::MissingResolvedIp => socks5_reply(4),
+                SocksRuntimeError::Parse(_) => socks5_reply(8),
+            };
+            writer.write_all(&reply)?;
+            return Ok(SocksConnectionOutcome::ConnectRejected(error));
+        }
+    };
+    match &outcome {
+        SocksOutcome::Denied { .. } => writer.write_all(&socks5_reply(2))?,
+        SocksOutcome::HostConnectOpened { .. } => writer.write_all(&socks5_reply(0))?,
+        SocksOutcome::HostConnectFailed { .. } => writer.write_all(&socks5_reply(5))?,
+    }
+    Ok(SocksConnectionOutcome::Runtime(Box::new(outcome)))
+}
+
+fn socks5_reply(status: u8) -> [u8; 10] {
+    [5, status, 0, 1, 0, 0, 0, 0, 0, 0]
 }
 
 fn socks_connect_to_event_and_destination(
@@ -3703,6 +3785,102 @@ mod tests {
                 443
             ))
         );
+    }
+
+    #[test]
+    fn socks5_connection_step_negotiates_and_writes_success_reply() {
+        let mut rule = PolicyRule::allow("allow-socks-step");
+        rule.protocol = Some(Protocol::Socks);
+        rule.destination_port = Some(foxprox_core::PortMatcher::Exact(443));
+        rule.domain_suffix = Some(Hostname::normalize("example.com").unwrap());
+        rule.minimum_confidence = Some(AttributionConfidence::High);
+        let mut rules = RuleSet::default();
+        rules.push(rule);
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig {
+                rules,
+                ..PolicyConfig::default()
+            }),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = SocksRuntime::new(
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("socks-step").unwrap(),
+        );
+        let mut bytes = vec![5, 1, 0, 5, 1, 0, 3, 15];
+        bytes.extend_from_slice(b"api.example.com");
+        bytes.extend_from_slice(&443u16.to_be_bytes());
+        let mut reader = std::io::Cursor::new(bytes);
+        let mut writer = Vec::new();
+
+        let outcome = handle_socks5_connection_once(
+            &mut runtime,
+            &mut reader,
+            &mut writer,
+            Some(IpAddr::V4(Ipv4Addr::new(93, 184, 216, 34))),
+            100,
+        )
+        .unwrap();
+
+        let SocksConnectionOutcome::Runtime(outcome) = outcome else {
+            panic!("expected SOCKS runtime outcome");
+        };
+        assert!(matches!(*outcome, SocksOutcome::HostConnectOpened { .. }));
+        assert_eq!(runtime.egress().tcp_attempts, 1);
+        assert_eq!(writer, [vec![5, 0], socks5_reply(0).to_vec()].concat());
+    }
+
+    #[test]
+    fn socks5_connection_step_writes_fail_closed_replies() {
+        let kernel = VerificationKernel::new(
+            PolicyEngine::new(PolicyConfig::default()),
+            VecAuditSink::bounded(8),
+        );
+        let mut runtime = SocksRuntime::new(
+            FakeEgress::default(),
+            kernel,
+            SandboxId::new("socks-step-deny").unwrap(),
+        );
+        let mut denied_reader =
+            std::io::Cursor::new(vec![5, 1, 0, 5, 1, 0, 1, 93, 184, 216, 34, 0x01, 0xbb]);
+        let mut denied_writer = Vec::new();
+
+        let denied = handle_socks5_connection_once(
+            &mut runtime,
+            &mut denied_reader,
+            &mut denied_writer,
+            None,
+            100,
+        )
+        .unwrap();
+
+        let SocksConnectionOutcome::Runtime(denied) = denied else {
+            panic!("expected SOCKS runtime denial");
+        };
+        assert!(matches!(*denied, SocksOutcome::Denied { .. }));
+        assert_eq!(runtime.egress().tcp_attempts, 0);
+        assert_eq!(
+            denied_writer,
+            [vec![5, 0], socks5_reply(2).to_vec()].concat()
+        );
+
+        let mut rejected_greeting_reader = std::io::Cursor::new(vec![5, 1, 2]);
+        let mut rejected_greeting_writer = Vec::new();
+        let rejected_greeting = handle_socks5_connection_once(
+            &mut runtime,
+            &mut rejected_greeting_reader,
+            &mut rejected_greeting_writer,
+            None,
+            101,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            rejected_greeting,
+            SocksConnectionOutcome::GreetingRejected(ProxyParseError::NoAcceptableSocksAuth)
+        ));
+        assert_eq!(rejected_greeting_writer, vec![5, 0xff]);
     }
 
     #[test]

@@ -1966,3 +1966,26 @@
 - Commit hash when committed: pending.
 - Remaining risks: the helper is a stream-step harness, not a full async listener/relay; SOCKS has runtime/parser support but not a similar stream-step response helper yet.
 - Exact next step: commit HTTP proxy connection-step harness, then add a deterministic SOCKS5 connection-step helper for greeting/connect response behavior.
+
+## 2026-06-25T03:52:05Z
+- Current objective: add deterministic SOCKS5 connection-step IO coverage around the existing SOCKS runtime.
+- Git status summary: clean worktree after commit `067eca4`.
+- Intended slice: provide a one-connection SOCKS5 helper that performs no-auth greeting negotiation, parses one CONNECT request, runs shared policy/audit/egress logic, and writes explicit SOCKS success/denial/failure replies.
+- Verification plan: run `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`.
+- Files expected to change: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Remaining risks: this remains a deterministic connection-step harness, not a full relay loop.
+- Exact next step: implement SOCKS5 connection-step helper and tests.
+
+## 2026-06-25T03:56:35Z
+- Current objective: add deterministic SOCKS5 connection-step IO coverage.
+- Files changed: `crates/foxprox-runtime/src/lib.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check` (initially reported formatting drift)
+  - `cargo fmt`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `cargo test --all-targets --all-features`
+  - `cargo fmt --check`
+- Observed result: verification passed; 55 core tests, 7 device tests, 3 integration tests, 6 launcher tests, 94 runtime tests, 7 setup tests, and 40 smoltcp adapter tests passed. Added `handle_socks5_connection_once` and typed SOCKS connection outcomes; tests prove no-auth greeting negotiation, domain CONNECT policy success with SOCKS success reply, policy denial with fail-closed SOCKS reply, and rejected auth methods without host egress.
+- Commit hash when committed: pending.
+- Remaining risks: SOCKS helper is a deterministic connection-step harness, not a full long-running relay loop; live privileged TUN/bwrap smoke remains unavailable in this worktree.
+- Exact next step: commit SOCKS5 connection-step harness, then perform a final alpha-scope audit and either add the last missing verified boundary or record completion criteria.
