@@ -1816,5 +1816,5 @@
   - `cargo tree -p foxprox-runtime` — runtime loop coordinates existing boundary crates only.
   - `cargo tree -p foxprox-device` — device remains readiness boundary.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: b7d689c.
 - Remaining boundary risks: OS-specific readiness registration adapters remain.
