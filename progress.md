@@ -1757,3 +1757,23 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: d789581.
 - Remaining boundary risks: stack-adapter-native reset signaling for established smoltcp flows remains.
+
+## 2026-06-22 — Boundary objective: per-sandbox maintenance fairness budget
+
+- Boundary under work: cross-sandbox fairness for bridge maintenance scheduling.
+- Allowed dependency direction: per-sandbox scheduling budgets stay in `foxprox-runtime`; egress, stack adapter, packet, policy, and audit contracts remain unchanged.
+- Dependency-risk assessment: round-robin cursors avoid fixed-flow starvation but a single sandbox can still consume an entire tick budget. Per-sandbox maintenance caps keep cross-sandbox fairness explicit without moving scheduler state into policy or egress.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/audit.
+- Observed results: extended `BridgeMaintenanceBudget` with per-sandbox TCP/UDP caps and routed maintenance ticks through fairness-aware read selection. Added tests proving a tick budget reads from multiple sandboxes instead of allowing one sandbox with multiple flows to consume all selected TCP/UDP slots. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 152 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — fairness remains runtime-owned.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: byte-rate limit windows remain.

@@ -408,3 +408,8 @@
 
 - Deny/reset must be a packet-boundary feature: policy selects `DenialAction::Reset`, while packet code formats RST+ACK bytes and recomputes TCP/IP checksums.
 - Raw SYN packet reset synthesis is separate from stack-adapter reset signaling; established smoltcp-managed flows need a later adapter-native close/reset contract.
+
+## 2026-06-22 — per-sandbox maintenance fairness
+
+- Round-robin cursors need per-sandbox caps to prevent one sandbox from consuming an entire maintenance tick when it owns many retained flows.
+- Keep fairness weights in `BridgeMaintenanceBudget`; lower-level egress handles and stack adapters should only expose read/write attempts, not scheduling policy.
