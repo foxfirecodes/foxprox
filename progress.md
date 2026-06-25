@@ -1302,3 +1302,23 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * the adapter uses L3/IP medium and does not introduce TAP/Ethernet assumptions into the stack boundary.
 * Audit evidence: this proof does not yet emit flow lifecycle audit; it validates the stack/device path that future audited forwarding will use.
 * Residual risk: host TCP socket bridging, policy-gated connect permits inside the smoltcp loop, DNS/UDP forwarding, and lifecycle/error audit around the loop remain future work.
+
+## 2026-06-21 - smoltcp TCP host-socket bridge proof
+
+* Invariant under work: smoltcp TCP streams from TUN must be bridgeable to ordinary host TCP sockets without handing sandbox processes direct host networking, preserving the broker-owned egress boundary.
+* Threat or failure mode addressed: accepting TCP inside smoltcp is not enough; alpha forwarding needs bytes from sandbox TCP streams to cross only through broker-controlled host sockets and return through smoltcp/TUN.
+* Planned verification: add an ignored disposable-namespace test with a local host TCP server, smoltcp TUN listener, curl client, bidirectional byte bridge, full checks, and the ignored test under `unshare -Urn`.
+
+## 2026-06-21 - smoltcp TCP host-socket bridge proof results
+
+* Tests added/updated:
+  * ignored network-namespace test starts a local TCP server, accepts sandbox curl traffic through smoltcp over TUN, bridges request bytes to a broker-owned `TcpStream`, bridges the host response back into smoltcp, and asserts curl receives `bridge`.
+* Commands run:
+  * `cargo test -p foxprox-net --lib` and `cargo clippy -p foxprox-net --all-targets --all-features -- -D warnings` — passed for the new bridge test compilation.
+  * `unshare -Urn bash -lc 'cargo test -p foxprox-net smoltcp_bridges_tun_tcp_to_host_socket -- --ignored --nocapture'` — passed and printed `bridge` from curl receiving the host-socket response.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: core 161 tests, device 3 tests plus 2 ignored, integrations 3 tests, net 2 ignored tests, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * sandbox TCP bytes cross through the broker's smoltcp socket and a broker-owned host `TcpStream`; the sandbox still has no direct host socket.
+  * response bytes return through smoltcp/TUN rather than a kernel NAT path.
+* Audit evidence: no lifecycle audit yet in the bridge loop; this remains a forwarding proof and not a full audited runtime.
+* Residual risk: bridge proof is local-loopback inside a disposable namespace; policy-gated egress permits, external host namespace fd handoff, flow lifecycle/error audit, and robust async/backpressure remain future work.

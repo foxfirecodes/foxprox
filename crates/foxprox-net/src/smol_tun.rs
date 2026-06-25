@@ -140,6 +140,8 @@ pub fn set_nonblocking(fd: RawFd) -> Result<(), SmolTunError> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read as _, Write as _};
+    use std::net::{TcpListener, TcpStream};
     use std::process::Command;
     use std::time::{Duration as StdDuration, Instant as StdInstant};
 
@@ -215,5 +217,126 @@ mod tests {
             "smoltcp should receive the HTTP request and send a response"
         );
         assert!(status.success(), "curl should receive the smoltcp response");
+    }
+
+    #[test]
+    #[ignore = "requires CAP_NET_ADMIN in a disposable network namespace"]
+    fn smoltcp_bridges_tun_tcp_to_host_socket() {
+        Command::new("ip")
+            .args(["link", "set", "lo", "up"])
+            .status()
+            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener_addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let n = stream.read(&mut buffer).unwrap();
+                if n == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..n]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            assert!(request.starts_with(b"GET /"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nbridge\n",
+                )
+                .unwrap();
+        });
+
+        let tun = create_tun(&TunConfig::new("fp0").unwrap()).unwrap();
+        let setup = TunSetup::new("fp0", "10.0.0.1/24", "0.0.0.0/0", 1300).unwrap();
+        configure_tun_interface(&setup, &mut IpCommandRunner).unwrap();
+
+        let mut device = SmolTunDevice::new(tun, 1300).unwrap();
+        let mut config = Config::new(HardwareAddress::Ip);
+        config.random_seed = 0x8765_4321;
+        let mut iface = Interface::new(config, &mut device, Instant::from_millis(0));
+        iface.update_ip_addrs(|addrs| {
+            addrs
+                .push(IpCidr::new(IpAddress::v4(10, 0, 0, 2), 24))
+                .unwrap();
+        });
+
+        let rx_buffer = tcp::SocketBuffer::new(vec![0; 8192]);
+        let tx_buffer = tcp::SocketBuffer::new(vec![0; 8192]);
+        let mut tcp_socket = tcp::Socket::new(rx_buffer, tx_buffer);
+        tcp_socket.listen(8080).unwrap();
+        let mut sockets = SocketSet::new(vec![]);
+        let tcp_handle = sockets.add(tcp_socket);
+
+        let mut curl = Command::new("curl")
+            .args([
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--max-time",
+                "3",
+                "http://10.0.0.2:8080/",
+            ])
+            .spawn()
+            .unwrap();
+
+        let started = StdInstant::now();
+        let mut host_stream: Option<TcpStream> = None;
+        let mut bridged_request = false;
+        let mut bridged_response = false;
+        while started.elapsed() < StdDuration::from_secs(3) {
+            let now = Instant::from_millis(started.elapsed().as_millis() as i64);
+            iface.poll(now, &mut device, &mut sockets);
+            let socket = sockets.get_mut::<tcp::Socket>(tcp_handle);
+
+            if socket.can_recv() {
+                let data = socket.recv(|data| (data.len(), data.to_vec())).unwrap();
+                let stream = host_stream.get_or_insert_with(|| {
+                    let stream = TcpStream::connect(listener_addr).unwrap();
+                    stream.set_nonblocking(true).unwrap();
+                    stream
+                });
+                stream.write_all(&data).unwrap();
+                bridged_request = true;
+            }
+
+            if let Some(stream) = host_stream.as_mut() {
+                let mut buffer = [0_u8; 1024];
+                match stream.read(&mut buffer) {
+                    Ok(0) => {}
+                    Ok(n) => {
+                        if socket.can_send() && socket.send_slice(&buffer[..n]).is_ok() {
+                            socket.close();
+                            bridged_response = true;
+                        }
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => panic!("host stream read failed: {error}"),
+                }
+            }
+
+            if bridged_response && socket.state() == tcp::State::Closed {
+                break;
+            }
+            std::thread::sleep(StdDuration::from_millis(5));
+        }
+
+        let status = curl.wait().unwrap();
+        server.join().unwrap();
+        assert!(
+            bridged_request,
+            "expected sandbox request bytes to reach host socket"
+        );
+        assert!(
+            bridged_response,
+            "expected host response bytes to return through smoltcp"
+        );
+        assert!(
+            status.success(),
+            "curl should receive the bridged host response"
+        );
     }
 }

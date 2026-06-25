@@ -241,3 +241,7 @@ End-to-end TUN tests should loop until the expected policy-gated outcome appears
 ## 2026-06-21 - smoltcp can run directly over IFF_TUN with Medium::Ip
 
 For L3 TUN devices, configure smoltcp with `HardwareAddress::Ip`, `Medium::Ip`, and an IP address representing the userspace stack peer. A real namespace curl-to-TUN proof can validate ingress and egress without introducing TAP/Ethernet concerns.
+
+## 2026-06-21 - TCP forwarding proof can bridge smoltcp sockets to ordinary TcpStream
+
+A minimal alpha TCP bridge can treat smoltcp as the sandbox-facing TCP endpoint and copy bytes to a broker-owned `TcpStream`, then send host bytes back through smoltcp. This proves the no-direct-host-socket boundary before adding async/backpressure and policy permits.
