@@ -1841,3 +1841,17 @@
   - `cargo fmt --check` passed.
 - What remains unproven: long-lived UDP flow table in the CLI launcher; low-level flow-table resource limits/timeouts remain covered in unit/property tests.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — ICMP in bwrap CLI launcher
+
+- Slice attempted: integrate ICMP echo handling into the real bwrap CLI launcher.
+- Why next: the alpha had live ICMP write-back evidence through a manual broker thread, but the user-facing bwrap prototype command should also handle ICMP packets from the sandbox while it is running.
+- What changed: the launcher now detects ICMP packets, routes them through the shared `IpPacketBroker`, emits shared audit JSON, and writes any synthesized ICMP echo reply back to the sandbox TUN fd. Added a live ignored CLI smoke where Python inside bwrap has `CAP_NET_RAW`, sends an ICMP echo, receives the synthetic reply, and stdout contains allowed `icmp_message` audit.
+- Verification:
+  - Focused live ICMP CLI check passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_cli_bwrap_tcp_once_handles_icmp_echo -- --ignored --nocapture`.
+  - Full live bwrap suite passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, now 12/12.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- What remains unproven: ICMP beyond echo/error basics remains intentionally alpha-scoped by policy defaults.
+- Commit: this commit.

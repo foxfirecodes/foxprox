@@ -416,6 +416,7 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
         })
         .transpose()?;
     let dns_egress = HostUdpEgress::new(Duration::from_secs(3))?;
+    let packet_broker = IpPacketBroker::new(PolicyEngine::new(config.policy.clone()));
     let flow_started_at = SystemTime::now();
     let mut audit_json_lines = Vec::new();
     let mut tcp_source = None;
@@ -471,6 +472,17 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                     continue;
                 }
             }
+        }
+        if matches!(
+            parse_ipv4_packet(&packet_context, &packet),
+            Ok(NormalizedEvent::IcmpMessage(_))
+        ) {
+            let result = packet_broker.process_packet(&packet_context, &packet);
+            audit_json_lines.push(audit_record_to_json_line(&result.evaluation.audit)?);
+            for outbound in result.outbound_packets {
+                tun.write_packet(&outbound)?;
+            }
+            continue;
         }
         if let Ok(datagram) = parse_ipv4_udp_datagram(&packet) {
             if let Ok(event) = parse_ipv4_packet(&packet_context, &packet) {

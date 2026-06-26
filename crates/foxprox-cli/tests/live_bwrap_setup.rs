@@ -699,6 +699,106 @@ fn live_cli_bwrap_tcp_once_curl_emits_audit_json() {
 
 #[test]
 #[ignore = "requires bwrap, /dev/net/tun, user namespaces, curl, and Python in the sandbox"]
+fn live_cli_bwrap_tcp_once_handles_icmp_echo() {
+    let Some(bwrap) = existing_path("/usr/bin/bwrap") else {
+        eprintln!("skipping live CLI ICMP smoke: /usr/bin/bwrap missing");
+        return;
+    };
+    if !Path::new("/dev/net/tun").exists() {
+        eprintln!("skipping live CLI ICMP smoke: /dev/net/tun missing");
+        return;
+    }
+    let Some(python) = existing_path("/usr/bin/python3") else {
+        eprintln!("skipping live CLI ICMP smoke: /usr/bin/python3 missing");
+        return;
+    };
+    let setup = foxproxsetup_path();
+    let cli = foxprox_cli_path();
+    let dir = unique_test_dir("live-cli-icmp");
+    std::fs::create_dir_all(&dir).unwrap();
+    let socket_path = dir.join("broker.sock");
+    let resolv_conf = dir.join("resolv.conf");
+    let policy_path = dir.join("policy.toml");
+    std::fs::write(
+        &policy_path,
+        r#"
+default_policy = "deny"
+
+[icmp]
+allow_echo = true
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new(cli)
+        .arg("bwrap-tcp-once")
+        .arg("--bwrap")
+        .arg(bwrap)
+        .arg("--setup")
+        .arg(setup)
+        .arg("--broker-socket")
+        .arg(&socket_path)
+        .args([
+            "--tun-name",
+            "fpxicmpcli0",
+            "--address-cidr",
+            "10.139.0.2/24",
+            "--mtu",
+            "1400",
+        ])
+        .arg("--resolv-conf")
+        .arg(&resolv_conf)
+        .args([
+            "--broker-dns",
+            "10.139.0.1",
+            "--ip-program",
+            "/usr/bin/ip",
+            "--listen-ip",
+            "10.139.0.1",
+            "--listen-port",
+            "9",
+            "--sandbox",
+            "live-cli-icmp",
+            "--config",
+        ])
+        .arg(&policy_path)
+        .args([
+            "--max-packets",
+            "32",
+            "--extra-bwrap-arg",
+            "--cap-add",
+            "--extra-bwrap-arg",
+            "CAP_NET_RAW",
+            "--extra-bwrap-arg",
+            "--dev-bind",
+            "--extra-bwrap-arg",
+            "/",
+            "--extra-bwrap-arg",
+            "/",
+            "--",
+        ])
+        .arg(python)
+        .args([
+            "-c",
+            "import socket, struct\ndef csum(data):\n    data += b'\\0' if len(data) % 2 else b''\n    total = sum(int.from_bytes(data[i:i+2], 'big') for i in range(0, len(data), 2))\n    while total >> 16: total = (total & 0xffff) + (total >> 16)\n    return (~total) & 0xffff\ns=socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP); s.settimeout(5); pkt=struct.pack('!BBHHH',8,0,0,0x1234,7)+b'hi'; pkt=pkt[:2]+csum(pkt).to_bytes(2,'big')+pkt[4:]; s.sendto(pkt, ('10.139.0.1', 0)); data,_=s.recvfrom(128); icmp=data[20:] if data[0] >> 4 == 4 else data; assert icmp[0] == 0, data; assert icmp[8:] == b'hi', data",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"kind\":\"icmp_message\""));
+    assert!(stdout.contains("\"decision\":\"allowed\""));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "requires bwrap, /dev/net/tun, user namespaces, curl, and Python in the sandbox"]
 fn live_cli_bwrap_tcp_once_forwards_original_destination_udp() {
     let Some(bwrap) = existing_path("/usr/bin/bwrap") else {
         eprintln!("skipping live CLI UDP smoke: /usr/bin/bwrap missing");
