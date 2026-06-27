@@ -1,11 +1,15 @@
 use std::env;
 use std::fmt;
+use std::fs;
 use std::net::{IpAddr, UdpSocket};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use foxprox_core::{FrontendKind, RuntimeConfig, SandboxId};
+use foxprox_core::{
+    DefaultPolicy, DenialAction, DestinationMatcher, DomainSuffix, FrontendKind, Hostname, IpCidr,
+    PolicyRule, PortMatcher, Protocol, ProtocolMatcher, RuleId, RuntimeConfig, SandboxId,
+};
 use foxprox_integrations::{NetworkSetupRequest, ProxyExposure, TunDeviceConfig};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -19,6 +23,7 @@ pub struct LauncherArgs {
     pub mtu: u16,
     pub dns: IpAddr,
     pub proxy: Option<ProxyExposure>,
+    pub policy: RuntimeConfig,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -116,6 +121,8 @@ pub fn parse_launcher_args(
     let mut broker_ip: IpAddr = "10.255.0.1".parse().expect("static IP is valid");
     let mut mtu = 1500_u16;
     let mut dns = broker_ip;
+    let mut policy = RuntimeConfig::allow_by_default();
+    let mut deny_action = DenialAction::Reset;
     let mut target = Vec::new();
 
     let mut iter = args.into_iter();
@@ -144,6 +151,85 @@ pub fn parse_launcher_args(
                     .parse()
                     .map_err(|_| CliError::Usage("invalid --mtu".into()))?
             }
+            "--policy" => {
+                let path = PathBuf::from(next_value(&mut iter, "--policy")?);
+                apply_policy_file(&mut policy, &mut deny_action, &path)?;
+            }
+            "--default-policy" => {
+                policy.default_policy =
+                    parse_default_policy(next_value(&mut iter, "--default-policy")?)?;
+            }
+            "--deny-action" => {
+                deny_action = parse_denial_action(next_value(&mut iter, "--deny-action")?)?;
+            }
+            "--allow-ping" => policy.allow_ping = true,
+            "--deny-ping" => policy.allow_ping = false,
+            "--allow-direct-dns" => {
+                policy.direct_dns_policy = foxprox_core::DirectDnsPolicy::AllowExternal;
+            }
+            "--deny-direct-dns" => {
+                policy.direct_dns_policy = foxprox_core::DirectDnsPolicy::DenyExternal;
+            }
+            "--allow-quic" => policy.quic_policy = foxprox_core::QuicPolicy::AllowCandidates,
+            "--deny-quic" => policy.quic_policy = foxprox_core::QuicPolicy::DenyByDefault,
+            "--allow-tcp" => add_port_rule(
+                &mut policy,
+                RuleActionSpec::Allow,
+                Protocol::Tcp,
+                next_value(&mut iter, "--allow-tcp")?,
+            )?,
+            "--deny-tcp" => add_port_rule(
+                &mut policy,
+                RuleActionSpec::Deny(deny_action),
+                Protocol::Tcp,
+                next_value(&mut iter, "--deny-tcp")?,
+            )?,
+            "--allow-udp" => add_port_rule(
+                &mut policy,
+                RuleActionSpec::Allow,
+                Protocol::Udp,
+                next_value(&mut iter, "--allow-udp")?,
+            )?,
+            "--deny-udp" => add_port_rule(
+                &mut policy,
+                RuleActionSpec::Deny(deny_action),
+                Protocol::Udp,
+                next_value(&mut iter, "--deny-udp")?,
+            )?,
+            "--allow-host" => add_hostname_rules(
+                &mut policy,
+                RuleActionSpec::Allow,
+                next_value(&mut iter, "--allow-host")?,
+                HostRuleKind::Exact,
+            )?,
+            "--deny-host" => add_hostname_rules(
+                &mut policy,
+                RuleActionSpec::Deny(deny_action),
+                next_value(&mut iter, "--deny-host")?,
+                HostRuleKind::Exact,
+            )?,
+            "--allow-domain" => add_hostname_rules(
+                &mut policy,
+                RuleActionSpec::Allow,
+                next_value(&mut iter, "--allow-domain")?,
+                HostRuleKind::Suffix,
+            )?,
+            "--deny-domain" => add_hostname_rules(
+                &mut policy,
+                RuleActionSpec::Deny(deny_action),
+                next_value(&mut iter, "--deny-domain")?,
+                HostRuleKind::Suffix,
+            )?,
+            "--allow-ip" => add_destination_rule(
+                &mut policy,
+                RuleActionSpec::Allow,
+                next_value(&mut iter, "--allow-ip")?,
+            )?,
+            "--deny-ip" => add_destination_rule(
+                &mut policy,
+                RuleActionSpec::Deny(deny_action),
+                next_value(&mut iter, "--deny-ip")?,
+            )?,
             "--help" | "-h" => return Err(CliError::Usage(launcher_usage())),
             value if value.starts_with('-') => {
                 return Err(CliError::Usage(format!(
@@ -176,6 +262,7 @@ pub fn parse_launcher_args(
         mtu,
         dns,
         proxy: None,
+        policy,
     })
 }
 
@@ -252,8 +339,276 @@ fn parse_ip(value: String) -> Result<IpAddr, CliError> {
         .map_err(|_| CliError::Usage(format!("invalid IP address: {value}")))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuleActionSpec {
+    Allow,
+    Deny(DenialAction),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostRuleKind {
+    Exact,
+    Suffix,
+}
+
+fn parse_default_policy(value: String) -> Result<DefaultPolicy, CliError> {
+    match normalized_token(&value).as_str() {
+        "allow" => Ok(DefaultPolicy::Allow),
+        "deny" => Ok(DefaultPolicy::Deny),
+        _ => Err(CliError::Usage(format!(
+            "invalid default policy {value:?}; expected allow or deny"
+        ))),
+    }
+}
+
+fn parse_denial_action(value: String) -> Result<DenialAction, CliError> {
+    match normalized_token(&value).as_str() {
+        "drop" => Ok(DenialAction::Drop),
+        "reset" | "close" | "closed" => Ok(DenialAction::Reset),
+        "icmp" | "icmp_unreachable" | "icmp-unreachable" => Ok(DenialAction::IcmpUnreachable),
+        _ => Err(CliError::Usage(format!(
+            "invalid deny action {value:?}; expected reset, drop, or icmp-unreachable"
+        ))),
+    }
+}
+
+fn normalized_token(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('-', "_")
+}
+
+fn make_rule(id: String, action: RuleActionSpec) -> Result<PolicyRule, CliError> {
+    let id = RuleId::new(id).map_err(|error| CliError::Usage(error.to_string()))?;
+    Ok(match action {
+        RuleActionSpec::Allow => PolicyRule::allow(id),
+        RuleActionSpec::Deny(deny_action) => PolicyRule::deny(id, deny_action),
+    })
+}
+
+fn add_port_rule(
+    policy: &mut RuntimeConfig,
+    action: RuleActionSpec,
+    protocol: Protocol,
+    port: String,
+) -> Result<(), CliError> {
+    let port: u16 = port
+        .parse()
+        .map_err(|_| CliError::Usage(format!("invalid port: {port}")))?;
+    let mut rule = make_rule(
+        format!("cli-{}-{protocol:?}-{port}", action_label(action)),
+        action,
+    )?;
+    rule.protocol = ProtocolMatcher::Exact(protocol);
+    rule.port = PortMatcher::Exact(port);
+    policy.rules.push(rule);
+    Ok(())
+}
+
+fn add_hostname_rules(
+    policy: &mut RuntimeConfig,
+    action: RuleActionSpec,
+    host: String,
+    kind: HostRuleKind,
+) -> Result<(), CliError> {
+    let destination = match kind {
+        HostRuleKind::Exact => DestinationMatcher::Hostname(
+            Hostname::new(host.clone()).map_err(|error| CliError::Usage(error.to_string()))?,
+        ),
+        HostRuleKind::Suffix => DestinationMatcher::DomainSuffix(
+            DomainSuffix::new(host.clone()).map_err(|error| CliError::Usage(error.to_string()))?,
+        ),
+    };
+    for protocol in hostname_policy_protocols() {
+        let mut rule = make_rule(
+            format!(
+                "cli-{}-{protocol:?}-{}",
+                action_label(action),
+                sanitize_rule_id_component(&host)
+            ),
+            action,
+        )?;
+        rule.protocol = ProtocolMatcher::Exact(protocol);
+        rule.destination = destination.clone();
+        policy.rules.push(rule);
+    }
+    Ok(())
+}
+
+fn hostname_policy_protocols() -> [Protocol; 4] {
+    [
+        Protocol::Http,
+        Protocol::HttpsConnect,
+        Protocol::TlsClientHello,
+        Protocol::SocksConnect,
+    ]
+}
+
+fn add_destination_rule(
+    policy: &mut RuntimeConfig,
+    action: RuleActionSpec,
+    destination: String,
+) -> Result<(), CliError> {
+    let destination_matcher = match destination.parse::<IpAddr>() {
+        Ok(ip) => DestinationMatcher::Ip(ip),
+        Err(_) => DestinationMatcher::Cidr(
+            destination
+                .parse::<IpCidr>()
+                .map_err(|error| CliError::Usage(error.to_string()))?,
+        ),
+    };
+    let mut rule = make_rule(
+        format!(
+            "cli-{}-ip-{}",
+            action_label(action),
+            sanitize_rule_id_component(&destination)
+        ),
+        action,
+    )?;
+    rule.destination = destination_matcher;
+    policy.rules.push(rule);
+    Ok(())
+}
+
+fn action_label(action: RuleActionSpec) -> &'static str {
+    match action {
+        RuleActionSpec::Allow => "allow",
+        RuleActionSpec::Deny(_) => "deny",
+    }
+}
+
+fn sanitize_rule_id_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '-' })
+        .collect()
+}
+
+fn apply_policy_file(
+    policy: &mut RuntimeConfig,
+    deny_action: &mut DenialAction,
+    path: &Path,
+) -> Result<(), CliError> {
+    let text = fs::read_to_string(path).map_err(CliError::Io)?;
+    for (line_index, line) in text.lines().enumerate() {
+        let line = line
+            .split_once('#')
+            .map_or(line, |(before, _)| before)
+            .trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut words = line.split_whitespace().map(str::to_string);
+        let Some(option) = words.next() else {
+            continue;
+        };
+        let value = words.next();
+        let extra = words.next();
+        if extra.is_some() {
+            return Err(CliError::Usage(format!(
+                "{}:{}: policy lines must contain an option and optional value",
+                path.display(),
+                line_index + 1
+            )));
+        }
+        apply_policy_option(policy, deny_action, option, value).map_err(|error| {
+            CliError::Usage(format!("{}:{}: {error}", path.display(), line_index + 1))
+        })?;
+    }
+    Ok(())
+}
+
+fn apply_policy_option(
+    policy: &mut RuntimeConfig,
+    deny_action: &mut DenialAction,
+    option: String,
+    value: Option<String>,
+) -> Result<(), CliError> {
+    let option = option.trim_start_matches('-');
+    match option {
+        "default-policy" => {
+            policy.default_policy = parse_default_policy(required_policy_value(value, option)?)?;
+        }
+        "deny-action" => *deny_action = parse_denial_action(required_policy_value(value, option)?)?,
+        "allow-ping" => policy.allow_ping = true,
+        "deny-ping" => policy.allow_ping = false,
+        "allow-direct-dns" => {
+            policy.direct_dns_policy = foxprox_core::DirectDnsPolicy::AllowExternal
+        }
+        "deny-direct-dns" => policy.direct_dns_policy = foxprox_core::DirectDnsPolicy::DenyExternal,
+        "allow-quic" => policy.quic_policy = foxprox_core::QuicPolicy::AllowCandidates,
+        "deny-quic" => policy.quic_policy = foxprox_core::QuicPolicy::DenyByDefault,
+        "allow-tcp" => add_port_rule(
+            policy,
+            RuleActionSpec::Allow,
+            Protocol::Tcp,
+            required_policy_value(value, option)?,
+        )?,
+        "deny-tcp" => add_port_rule(
+            policy,
+            RuleActionSpec::Deny(*deny_action),
+            Protocol::Tcp,
+            required_policy_value(value, option)?,
+        )?,
+        "allow-udp" => add_port_rule(
+            policy,
+            RuleActionSpec::Allow,
+            Protocol::Udp,
+            required_policy_value(value, option)?,
+        )?,
+        "deny-udp" => add_port_rule(
+            policy,
+            RuleActionSpec::Deny(*deny_action),
+            Protocol::Udp,
+            required_policy_value(value, option)?,
+        )?,
+        "allow-host" => add_hostname_rules(
+            policy,
+            RuleActionSpec::Allow,
+            required_policy_value(value, option)?,
+            HostRuleKind::Exact,
+        )?,
+        "deny-host" => add_hostname_rules(
+            policy,
+            RuleActionSpec::Deny(*deny_action),
+            required_policy_value(value, option)?,
+            HostRuleKind::Exact,
+        )?,
+        "allow-domain" => add_hostname_rules(
+            policy,
+            RuleActionSpec::Allow,
+            required_policy_value(value, option)?,
+            HostRuleKind::Suffix,
+        )?,
+        "deny-domain" => add_hostname_rules(
+            policy,
+            RuleActionSpec::Deny(*deny_action),
+            required_policy_value(value, option)?,
+            HostRuleKind::Suffix,
+        )?,
+        "allow-ip" => add_destination_rule(
+            policy,
+            RuleActionSpec::Allow,
+            required_policy_value(value, option)?,
+        )?,
+        "deny-ip" => add_destination_rule(
+            policy,
+            RuleActionSpec::Deny(*deny_action),
+            required_policy_value(value, option)?,
+        )?,
+        _ => {
+            return Err(CliError::Usage(format!(
+                "unknown policy option: --{option}"
+            )))
+        }
+    }
+    Ok(())
+}
+
+fn required_policy_value(value: Option<String>, option: &str) -> Result<String, CliError> {
+    value.ok_or_else(|| CliError::Usage(format!("missing value for --{option}")))
+}
+
 pub fn launcher_usage() -> String {
-    "usage: foxprox [--setup-helper PATH] [--sandbox-id ID] [--tun-name NAME] [--sandbox-ip IP] [--broker-ip IP] [--dns IP] [--mtu MTU] -- COMMAND [ARGS...]".into()
+    "usage: foxprox [launcher options] [policy options] -- COMMAND [ARGS...]\n\nlauncher options:\n  --setup-helper PATH\n  --sandbox-id ID\n  --tun-name NAME\n  --sandbox-ip IP\n  --broker-ip IP\n  --dns IP\n  --mtu MTU\n\npolicy options:\n  --policy FILE                 read one policy option per line, comments start with #\n  --default-policy allow|deny   default is allow for the alpha launcher\n  --deny-action reset|drop|icmp-unreachable\n                                default action for --deny-* flags is reset\n  --allow-host HOST             allow hostname-aware HTTP/TLS/proxy events\n  --deny-host HOST              deny hostname-aware HTTP/TLS/proxy events\n  --allow-domain SUFFIX         allow subdomains of SUFFIX\n  --deny-domain SUFFIX          deny subdomains of SUFFIX\n  --allow-ip IP_OR_CIDR\n  --deny-ip IP_OR_CIDR\n  --allow-tcp PORT\n  --deny-tcp PORT\n  --allow-udp PORT\n  --deny-udp PORT\n  --allow-ping | --deny-ping\n  --allow-quic | --deny-quic\n  --allow-direct-dns | --deny-direct-dns".into()
 }
 
 pub fn setup_usage() -> String {
@@ -345,7 +700,7 @@ pub fn run_launcher(args: LauncherArgs) -> Result<i32, CliError> {
         .with_tcp_listener(8080)
         .with_tcp_listener(1080),
     )?;
-    let policy = PolicyEngine::new(RuntimeConfig::allow_by_default());
+    let policy = PolicyEngine::new(args.policy.clone());
     let mut egress = StdHostEgress;
     let mut audit = JsonLineAuditSink::new(std::io::stderr());
     let mut tcp_bridges = StackTcpBridgeTable::default();
@@ -539,6 +894,66 @@ mod tests {
         assert_eq!(args.sandbox_id.as_str(), "s1");
         assert_eq!(args.target, vec!["curl", "http://example.com"]);
         assert_eq!(args.broker_ip, "10.255.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[test]
+    fn parses_launcher_policy_flags_into_runtime_rules() {
+        let args = parse_launcher_args([
+            "--default-policy".to_string(),
+            "deny".to_string(),
+            "--deny-action".to_string(),
+            "reset".to_string(),
+            "--deny-host".to_string(),
+            "github.com".to_string(),
+            "--allow-tcp".to_string(),
+            "443".to_string(),
+            "--".to_string(),
+            "curl".to_string(),
+            "https://github.com/".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(args.policy.default_policy, DefaultPolicy::Deny);
+        assert!(args.policy.rules.iter().any(|rule| {
+            rule.protocol == ProtocolMatcher::Exact(Protocol::TlsClientHello)
+                && matches!(
+                    rule.action,
+                    foxprox_core::RuleAction::Deny(DenialAction::Reset)
+                )
+                && matches!(rule.destination, DestinationMatcher::Hostname(_))
+        }));
+        assert!(args.policy.rules.iter().any(|rule| {
+            rule.protocol == ProtocolMatcher::Exact(Protocol::Tcp)
+                && rule.port == PortMatcher::Exact(443)
+                && matches!(rule.action, foxprox_core::RuleAction::Allow)
+        }));
+    }
+
+    #[test]
+    fn parses_policy_file_lines() {
+        let mut path = std::env::temp_dir();
+        path.push(format!("foxprox-policy-{}.conf", std::process::id()));
+        std::fs::write(
+            &path,
+            "# alpha policy\ndefault-policy deny\ndeny-action reset\ndeny-domain github.com\nallow-tcp 443\n",
+        )
+        .unwrap();
+
+        let args = parse_launcher_args([
+            "--policy".to_string(),
+            path.display().to_string(),
+            "--".to_string(),
+            "curl".to_string(),
+            "https://github.com/".to_string(),
+        ])
+        .unwrap();
+        let _ = std::fs::remove_file(path);
+
+        assert_eq!(args.policy.default_policy, DefaultPolicy::Deny);
+        assert!(args.policy.rules.iter().any(|rule| {
+            rule.protocol == ProtocolMatcher::Exact(Protocol::TlsClientHello)
+                && matches!(rule.destination, DestinationMatcher::DomainSuffix(_))
+        }));
     }
 
     #[test]

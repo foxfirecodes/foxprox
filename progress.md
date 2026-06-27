@@ -2171,3 +2171,26 @@
   - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated behind `foxprox-net`.
 - Commit hash after commit: b3d97e4.
 - Remaining boundary risks: none for the observed `bad record mac`; future policy/config work should expose user-selectable deny rules so denied HTTPS can be exercised from the CLI without editing code.
+
+## 2026-06-27 — Boundary objective: add alpha launcher policy controls
+
+- Boundary under work: CLI policy configuration feeding the normalized policy engine.
+- Allowed dependency direction: `foxprox-cli` parses user-facing policy flags/files into `foxprox_core::RuntimeConfig`; `foxprox-policy` still receives only normalized runtime rules and normalized events; no bwrap, TUN, smoltcp, parser, or audit types enter policy.
+- Dependency-risk assessment: prior launcher hardcoded `RuntimeConfig::allow_by_default()`, so users could not exercise deny/reset policy behavior from the runnable alpha wrapper. Added policy controls must not couple policy logic to CLI parsing or raw frontend types.
+- Observed results: launcher now accepts policy flags and a simple line-oriented `--policy FILE`. Host/domain deny flags create hostname-aware rules for HTTP, HTTPS CONNECT, transparent TLS ClientHello, and SOCKS CONNECT without denying DNS resolution. Default deny, direct-DNS, ping, QUIC, TCP/UDP port, IP/CIDR, host, and domain controls are supported. Real `target/debug/foxprox --deny-host github.com -- curl --max-time 15 -v https://github.com/` now denies the TLS ClientHello with `deny_reset`, and curl reports `Connection reset by peer` instead of TLS corruption.
+- Changed files:
+  - `crates/foxprox-cli/src/lib.rs`
+  - `README.md`
+  - `progress.md`
+- Verification commands run:
+  - `cargo test -p foxprox-cli --lib -- --nocapture` — passed, 4 tests.
+  - `cargo build -p foxprox-cli --bins` — passed.
+  - `timeout 30 target/debug/foxprox --deny-host github.com -- curl --max-time 15 -v https://github.com/ -o /tmp/foxprox-deny-gh.out` — expected exit 35; audit showed `tls_client_hello` decision `deny_reset`; curl reported `Connection reset by peer`.
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 173 tests plus 1 ignored privileged smoke.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo check --manifest-path fuzz/Cargo.toml --bins` — passed.
+  - `cargo tree -p foxprox-cli` — CLI owns parsing and still depends on policy only through core runtime config.
+  - `cargo tree -p foxprox-policy` — policy remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: the policy file format is intentionally simple for alpha; a richer TOML/serde config loader can replace it later without changing policy/audit boundaries.
