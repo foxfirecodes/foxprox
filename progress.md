@@ -2192,5 +2192,5 @@
   - `cargo check --manifest-path fuzz/Cargo.toml --bins` — passed.
   - `cargo tree -p foxprox-cli` — CLI owns parsing and still depends on policy only through core runtime config.
   - `cargo tree -p foxprox-policy` — policy remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 8c7c585.
 - Remaining boundary risks: the policy file format is intentionally simple for alpha; a richer TOML/serde config loader can replace it later without changing policy/audit boundaries.
