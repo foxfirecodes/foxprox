@@ -2111,10 +2111,14 @@ fn run_bwrap_alpha_args(args: &[String]) -> CliOutput {
         .transport_events
         .iter()
         .any(|event| match event {
-            foxprox_stack::TransportBridgeEvidence::Packet(packet) => packet.decision.is_deny(),
-            foxprox_stack::TransportBridgeEvidence::Udp(udp) => udp.decision.is_deny(),
+            foxprox_stack::TransportBridgeEvidence::Packet(packet) => {
+                packet.decision == Decision::FailClosed
+            }
+            foxprox_stack::TransportBridgeEvidence::Udp(udp) => {
+                udp.decision == Decision::FailClosed
+            }
             foxprox_stack::TransportBridgeEvidence::Tcp { packet, tcp } => {
-                packet.decision.is_deny() || tcp.decision.is_deny()
+                packet.decision == Decision::FailClosed || tcp.decision == Decision::FailClosed
             }
         });
     let success = !saw_fail_closed

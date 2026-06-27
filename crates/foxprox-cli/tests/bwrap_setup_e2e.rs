@@ -818,6 +818,88 @@ fn foxprox_run_bwrap_dns_egress_command_answers_target_query() {
     assert!(stdout.contains("to_sandbox"), "{stdout}");
 }
 
+#[test]
+#[ignore = "requires rootless bwrap, /dev/net/tun, CAP_NET_ADMIN inside bwrap, and combined foxprox alpha launcher"]
+fn foxprox_run_bwrap_alpha_command_answers_dns_query() {
+    let foxprox = env!("CARGO_BIN_EXE_foxprox");
+    let setup_helper = env!("CARGO_BIN_EXE_foxproxsetup");
+    assert!(std::path::Path::new(foxprox).exists());
+    assert!(std::path::Path::new(setup_helper).exists());
+    assert!(std::path::Path::new("/dev/net/tun").exists());
+
+    let upstream = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let (server_tx, server_rx) = std::sync::mpsc::channel();
+    let upstream_server = std::thread::spawn(move || {
+        let mut query = [0u8; 512];
+        let (len, peer) = upstream.recv_from(&mut query).unwrap();
+        let query = query[..len].to_vec();
+        let response = dns_a_response(&query, [203, 0, 113, 8]);
+        upstream.send_to(&response, peer).unwrap();
+        server_tx.send(query).unwrap();
+    });
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_path = std::env::temp_dir().join(format!("foxprox-run-bwrap-alpha-{unique}.json"));
+    let mut config = BrokerRuntimeConfig::alpha_default(format!("foxprox-alpha-cli-e2e-{unique}"));
+    config.setup.tun_name = format!("fxa{:x}", std::process::id() % 0x00ff_ffff);
+    config.dns_upstream = upstream_addr;
+    config.policy = PolicyConfig {
+        default_decision: Decision::Allow,
+        ..PolicyConfig::default()
+    };
+    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+
+    let target = [
+        "python3",
+        "-c",
+        concat!(
+            "import socket; ",
+            "q=b'\\x12\\x34\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00' + b'\\x07example\\x04test\\x00' + b'\\x00\\x01\\x00\\x01'; ",
+            "s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); ",
+            "s.settimeout(3.0); ",
+            "s.sendto(q, (\"10.0.2.3\", 53)); ",
+            "data,_=s.recvfrom(512); ",
+            "assert b'\\xcb\\x00\\x71\\x08' in data, data.hex(); ",
+            "s.close()"
+        ),
+    ];
+    let setup_dir = std::path::Path::new(setup_helper).parent().unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!("{}:{}", setup_dir.display(), path.to_string_lossy());
+    let output = Command::new(foxprox)
+        .env("PATH", path)
+        .arg("run-bwrap-alpha")
+        .arg(&config_path)
+        .arg("--")
+        .args(target)
+        .output()
+        .expect("foxprox alpha launcher command runs");
+    let _ = std::fs::remove_file(&config_path);
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let upstream_query = server_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("upstream receives DNS query through alpha launcher");
+    assert!(upstream_query
+        .windows(b"example".len())
+        .any(|w| w == b"example"));
+    upstream_server.join().unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("dns_query"), "{stdout}");
+    assert!(stdout.contains("returned_addresses"), "{stdout}");
+    assert!(stdout.contains("to_sandbox"), "{stdout}");
+}
+
 fn dns_a_response(query: &[u8], ip: [u8; 4]) -> Vec<u8> {
     assert!(query.len() >= 12);
     let mut question_end = 12;
