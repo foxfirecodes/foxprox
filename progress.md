@@ -1949,5 +1949,5 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-integrations` — Linux capability dependencies are isolated to integrations.
   - `cargo tree -p foxprox-runtime` — runtime remains independent of setup-helper/capability dependencies.
-- Commit hash after commit: pending.
+- Commit hash after commit: 5b35008.
 - Remaining boundary risks: privileged namespace smoke coverage remains.
