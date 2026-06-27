@@ -2063,3 +2063,42 @@
   - `cargo tree -p foxprox-integrations` — Linux/cap/fd details remain isolated.
 - Commit hash after commit: ee8dc28.
 - Remaining boundary risks: none for alpha launcher wrapper; future hardening should add richer filesystem profile integration, signal handling, config-file policy loading, and explicit proxy reachability from the sandbox namespace.
+
+## 2026-06-26 — Boundary objective: fix real launcher transparent TCP path
+
+- Boundary under work: real bwrap launcher traffic through TUN to arbitrary external IPv4 destinations.
+- Allowed dependency direction: CLI may enable stack-adapter routing behavior; smoltcp details remain inside `foxprox-smoltcp`; Linux namespace address assignment remains in integrations; runtime/policy/audit still consume normalized events.
+- Dependency-risk assessment: initial launcher smoke only proved the interface existed. `curl http://example.com/` hung because the sandbox-side TUN address was assigned as the broker IP and the smoltcp adapter only accepted packets addressed to its configured IP. Transparent forwarding needs sandbox TUN address = sandbox IP, broker stack IP = broker peer, and smoltcp AnyIP/default route enabled for externally addressed packets arriving over TUN.
+- Verification commands planned: package tests, real wrapper `ip addr` inspection, real wrapper `curl`, full workspace check/test/clippy, fuzz target check, and dependency trees for CLI/smoltcp/integrations.
+- Observed results: fixed real transparent launcher traffic. `LinuxIpTunSetup` now assigns the sandbox-side address as `sandbox_ip peer broker_ip`; `foxprox-smoltcp` exposes a stack-neutral `with_any_ip()` config that enables smoltcp AnyIP and a default route via the broker IP; the CLI enables that mode for its TUN broker adapter. Updated README to show a non-redirected interface/route/DNS inspection command. Real wrapper checks now show `foxprox0` as `10.255.0.2 peer 10.255.0.1`, and `target/debug/foxprox -- curl --max-time 10 -fsS http://example.com/` succeeds with audit records for TCP connect and transparent HTTP. Full verification passed.
+- Changed files:
+  - `README.md`
+  - `crates/foxprox-cli/src/lib.rs`
+  - `crates/foxprox-integrations/src/lib.rs`
+  - `crates/foxprox-smoltcp/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo build -p foxprox-cli --bins` — passed.
+  - `target/debug/foxprox -- /bin/sh -c 'ip addr show foxprox0; ip route; cat /etc/resolv.conf'` — passed and printed the sandbox TUN interface, default route, and broker DNS.
+  - `timeout 20 target/debug/foxprox -- curl --max-time 10 -fsS http://example.com/ -o /tmp/foxprox-curl.out && test -s /tmp/foxprox-curl.out` — passed.
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 167 tests plus 1 ignored privileged smoke.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo check --manifest-path fuzz/Cargo.toml --bins` — passed.
+  - `cargo tree -p foxprox-cli` — CLI wires launcher/runtime boundaries.
+  - `cargo tree -p foxprox-smoltcp` — AnyIP remains private behind adapter config.
+  - `cargo tree -p foxprox-integrations` — Linux address assignment remains integrations-owned.
+- Commit hash after commit: pending.
+- Remaining boundary risks: none for the reported launcher smoke/curl issue.
+
+## 2026-06-26 — Boundary objective: fix real launcher transparent TCP path
+
+- Boundary under work: real bwrap launcher traffic through TUN to arbitrary external IPv4 destinations.
+- Allowed dependency direction: CLI may enable stack-adapter routing behavior; smoltcp details remain inside `foxprox-smoltcp`; Linux namespace address assignment remains in integrations; runtime/policy/audit still consume normalized events.
+- Dependency-risk assessment: initial launcher smoke only proved the interface existed. `curl http://example.com/` hung because the sandbox-side TUN address was assigned as the broker IP and the smoltcp adapter only accepted packets addressed to its configured IP. Transparent forwarding needs sandbox TUN address = sandbox IP, broker stack IP = broker peer, and smoltcp AnyIP/default route enabled for externally addressed packets arriving over TUN.
+- Verification commands planned: package tests, real wrapper `ip addr` inspection, real wrapper `curl`, full workspace check/test/clippy, fuzz target check, and dependency trees for CLI/smoltcp/integrations.
+- Observed results: pending.
+- Changed files: pending.
+- Commit hash after commit: pending.
+- Remaining boundary risks: none for the reported launcher smoke/curl issue.

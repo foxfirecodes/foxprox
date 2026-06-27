@@ -183,9 +183,9 @@ impl LinuxIpTunSetup {
         addr_args.extend([
             "addr".to_string(),
             "add".to_string(),
-            request.tun.broker_ip.to_string(),
-            "peer".to_string(),
             request.tun.sandbox_ip.to_string(),
+            "peer".to_string(),
+            request.tun.broker_ip.to_string(),
             "dev".to_string(),
             request.tun.name.clone(),
         ]);
@@ -769,9 +769,9 @@ mod tests {
             vec![
                 "addr",
                 "add",
-                "10.255.0.1",
-                "peer",
                 "10.255.0.2",
+                "peer",
+                "10.255.0.1",
                 "dev",
                 "foxprox0"
             ]

@@ -469,3 +469,8 @@
 - A runnable alpha needs both `foxprox` and `foxproxsetup`: the host wrapper owns bwrap spawning and the broker loop; the setup helper runs inside the bwrap network namespace, configures TUN/DNS/route, sends the TUN fd, drops setup capabilities, and execs the target.
 - bwrap cannot bind a replacement `/etc/resolv.conf` over a root bind in this environment, so the alpha wrapper uses a temporary `/etc` tmpfs inside the sandbox and lets `foxproxsetup` write broker DNS there instead of touching host `/etc/resolv.conf`.
 - bwrap with only `CAP_NET_ADMIN` cannot drop the capability bounding set without `CAP_SETPCAP`; production privilege drop treats EPERM on bounding-set drop as nonfatal after clearing ambient/effective/inheritable/permitted sets and setting no-new-privs.
+
+## 2026-06-26 — launcher transparent TCP fix
+
+- Real transparent TUN forwarding needs the sandbox namespace interface to own the sandbox IP (`10.255.0.2 peer 10.255.0.1`), while the host-side smoltcp broker owns the peer/broker IP.
+- smoltcp must enable AnyIP plus a default route via its broker IP to accept externally addressed packets arriving from the TUN route; otherwise direct `curl http://example.com/` SYN packets are ignored because they are not addressed to the stack's configured IP.

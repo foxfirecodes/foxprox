@@ -31,6 +31,7 @@ pub struct SmoltcpAdapterConfig {
     pub mtu: usize,
     pub random_seed: u64,
     pub tcp_listen_ports: Vec<u16>,
+    pub accept_any_ip: bool,
 }
 
 impl SmoltcpAdapterConfig {
@@ -57,11 +58,17 @@ impl SmoltcpAdapterConfig {
             mtu,
             random_seed: 0x6650_584f_4c54,
             tcp_listen_ports: Vec::new(),
+            accept_any_ip: false,
         })
     }
 
     pub fn with_tcp_listener(mut self, port: u16) -> Self {
         self.tcp_listen_ports.push(port);
+        self
+    }
+
+    pub fn with_any_ip(mut self) -> Self {
+        self.accept_any_ip = true;
         self
     }
 }
@@ -94,6 +101,13 @@ impl SmoltcpStackAdapter {
                 .map_err(|_| StackError::Adapter("smoltcp IP address table is full".into()));
         });
         push_result?;
+        if config.accept_any_ip {
+            iface.set_any_ip(true);
+            iface
+                .routes_mut()
+                .add_default_ipv4_route(config.ipv4_addr)
+                .map_err(|_| StackError::Adapter("smoltcp route table is full".into()))?;
+        }
         let mut sockets = SocketSet::new(Vec::new());
         let mut tcp_listeners = Vec::new();
         for port in config.tcp_listen_ports.iter().copied() {

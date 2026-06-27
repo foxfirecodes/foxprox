@@ -339,6 +339,7 @@ pub fn run_launcher(args: LauncherArgs) -> Result<i32, CliError> {
             24,
             mtu,
         )?
+        .with_any_ip()
         .with_tcp_listener(80)
         .with_tcp_listener(443)
         .with_tcp_listener(8080)

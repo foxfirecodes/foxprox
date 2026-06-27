@@ -18,6 +18,12 @@ Run a command in a bwrap-created network namespace mediated by foxprox:
 target/debug/foxprox -- curl http://example.com/
 ```
 
+Inspect the sandbox TUN interface:
+
+```sh
+target/debug/foxprox -- /bin/sh -c 'ip addr show foxprox0; ip route; cat /etc/resolv.conf'
+```
+
 The wrapper starts `bwrap` with a network/user namespace and temporary `CAP_NET_ADMIN`, runs `foxproxsetup` inside the namespace to create/configure a TUN device, hands the TUN fd back to the host broker, drops setup capabilities, and execs the target command.
 
 Useful options:
