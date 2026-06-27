@@ -1907,3 +1907,25 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: 34efb60.
 - Remaining boundary risks: TCP listener accept loop remains.
+
+## 2026-06-22 — Boundary objective: explicit proxy listener accept contract
+
+- Boundary under work: nonblocking listener acceptance for explicit HTTP and SOCKS proxy sessions.
+- Allowed dependency direction: runtime owns listener/client IO contracts; frontends parse accepted session bytes; egress owns host sockets; policy/audit receive normalized events only.
+- Dependency-risk assessment: session setup, tunnel retention, and tunnel pumping exist, but alpha explicit proxy exposure still needs a listener boundary that accepts client streams without moving std listener types into policy/frontend/egress contracts.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/frontends/egress/audit.
+- Observed results: added runtime-owned `ProxyListener`, std `TcpListener` adaptation, `AcceptedHttpProxySession`, `AcceptedSocks5Session`, and one-client accept helpers for HTTP proxy and SOCKS5 sessions. `WouldBlock` maps to `None`, accepted std streams are set nonblocking, and accepted clients feed into the existing normalized session/policy/audit/egress flow. Added tests for an accepted HTTP CONNECT tunnel session and idle listener behavior. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 163 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — listener/session orchestration remains runtime-owned.
+  - `cargo tree -p foxprox-frontends` — frontend parser boundary remains core-only.
+  - `cargo tree -p foxprox-egress` — concrete host sockets remain egress-owned.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: OS-specific privilege drop and privileged namespace smoke coverage remain.

@@ -9,7 +9,7 @@ use std::{
     collections::{HashMap, VecDeque},
     fmt,
     io::{ErrorKind, Read, Write},
-    net::{IpAddr, SocketAddr},
+    net::{IpAddr, SocketAddr, TcpListener},
     time::{Duration, Instant},
 };
 
@@ -91,6 +91,101 @@ pub struct ExplicitSocks5Outcome {
 pub struct ExplicitSocks5SessionOutcome<T> {
     pub outcome: ExplicitSocks5Outcome,
     pub tunnel: Option<T>,
+}
+
+/// Runtime-owned accept boundary for explicit proxy listeners.
+pub trait ProxyListener {
+    type Client: Read + Write;
+
+    fn accept_proxy_client(&mut self) -> Result<Option<Self::Client>, std::io::Error>;
+}
+
+impl ProxyListener for TcpListener {
+    type Client = std::net::TcpStream;
+
+    fn accept_proxy_client(&mut self) -> Result<Option<Self::Client>, std::io::Error> {
+        match self.accept() {
+            Ok((stream, _peer)) => {
+                stream.set_nonblocking(true)?;
+                Ok(Some(stream))
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct AcceptedHttpProxySession<Client, Tunnel> {
+    pub client: Client,
+    pub outcome: ExplicitHttpProxyOutcome,
+    pub tunnel: Option<Tunnel>,
+}
+
+#[derive(Debug)]
+pub struct AcceptedSocks5Session<Client, Tunnel> {
+    pub client: Client,
+    pub outcome: ExplicitSocks5Outcome,
+    pub tunnel: Option<Tunnel>,
+}
+
+pub type AcceptedHttpProxyResult<L, E> = Result<
+    Option<AcceptedHttpProxySession<<L as ProxyListener>::Client, <E as HostEgress>::TcpStream>>,
+    RuntimeError,
+>;
+
+pub type AcceptedSocks5Result<L, E> = Result<
+    Option<AcceptedSocks5Session<<L as ProxyListener>::Client, <E as HostEgress>::TcpStream>>,
+    RuntimeError,
+>;
+
+/// Accept and process at most one HTTP proxy client from a nonblocking listener.
+pub fn accept_one_http_proxy_client<L, E, A>(
+    listener: &mut L,
+    step: ExplicitHttpProxyStep<'_, E, A>,
+) -> AcceptedHttpProxyResult<L, E>
+where
+    L: ProxyListener,
+    E: HostEgress,
+    E::HttpResponse: HostHttpResponse,
+    A: AuditSink,
+{
+    let Some(mut client) = listener
+        .accept_proxy_client()
+        .map_err(RuntimeError::ProxyIo)?
+    else {
+        return Ok(None);
+    };
+    let session = process_one_http_proxy_request_with_tunnel(&mut client, step)?;
+    Ok(Some(AcceptedHttpProxySession {
+        client,
+        outcome: session.outcome,
+        tunnel: session.tunnel,
+    }))
+}
+
+/// Accept and process at most one SOCKS5 client from a nonblocking listener.
+pub fn accept_one_socks5_client<L, E, A>(
+    listener: &mut L,
+    step: ExplicitSocks5Step<'_, E, A>,
+) -> AcceptedSocks5Result<L, E>
+where
+    L: ProxyListener,
+    E: HostEgress,
+    A: AuditSink,
+{
+    let Some(mut client) = listener
+        .accept_proxy_client()
+        .map_err(RuntimeError::ProxyIo)?
+    else {
+        return Ok(None);
+    };
+    let session = process_one_socks5_connect_with_tunnel(&mut client, step)?;
+    Ok(Some(AcceptedSocks5Session {
+        client,
+        outcome: session.outcome,
+        tunnel: session.tunnel,
+    }))
 }
 
 /// Process one bounded explicit HTTP proxy request from a client stream.
@@ -2295,6 +2390,70 @@ mod tests {
     }
 
     #[test]
+    fn http_proxy_listener_accepts_one_client_and_returns_tunnel_session() {
+        let request = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n".to_vec();
+        let mut listener = MockProxyListener::with_clients(vec![DuplexIo::new(request)]);
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut rule = PolicyRule::allow(foxprox_core::RuleId::new("connect").unwrap());
+        rule.protocol = ProtocolMatcher::Exact(Protocol::HttpsConnect);
+        config.rules.push(rule);
+        let policy = PolicyEngine::new(config);
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(4);
+        let sandbox_id = SandboxId::new("s1").unwrap();
+
+        let accepted = accept_one_http_proxy_client(
+            &mut listener,
+            ExplicitHttpProxyStep {
+                sandbox_id: &sandbox_id,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                parser_limits: ParserLimits::default(),
+                max_response_bytes: 1024,
+                sequence: 1,
+                timestamp_millis: 1000,
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(accepted.outcome.connected_tunnel);
+        assert_eq!(accepted.tunnel, Some(MockTcpStream));
+        assert_eq!(egress.proxy_connects.len(), 1);
+        assert_eq!(
+            accepted.client.writes,
+            b"HTTP/1.1 200 Connection Established\r\n\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn proxy_listener_idle_returns_none_without_policy_or_audit() {
+        let mut listener = MockProxyListener::default();
+        let policy = PolicyEngine::new(RuntimeConfig::deny_by_default());
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(4);
+        let sandbox_id = SandboxId::new("s1").unwrap();
+
+        let accepted = accept_one_socks5_client(
+            &mut listener,
+            ExplicitSocks5Step {
+                sandbox_id: &sandbox_id,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                parser_limits: ParserLimits::default(),
+                sequence: 1,
+                timestamp_millis: 1000,
+            },
+        )
+        .unwrap();
+
+        assert!(accepted.is_none());
+        assert!(audit.records().is_empty());
+    }
+
+    #[test]
     fn explicit_http_proxy_denial_writes_forbidden_without_egress() {
         let request = b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec();
         let request_len = request.len();
@@ -3955,6 +4114,27 @@ mod tests {
                 reads: Cursor::new(reads),
                 writes: Vec::new(),
             }
+        }
+    }
+
+    #[derive(Default)]
+    struct MockProxyListener {
+        clients: VecDeque<DuplexIo>,
+    }
+
+    impl MockProxyListener {
+        fn with_clients(clients: Vec<DuplexIo>) -> Self {
+            Self {
+                clients: clients.into(),
+            }
+        }
+    }
+
+    impl ProxyListener for MockProxyListener {
+        type Client = DuplexIo;
+
+        fn accept_proxy_client(&mut self) -> Result<Option<Self::Client>, std::io::Error> {
+            Ok(self.clients.pop_front())
         }
     }
 

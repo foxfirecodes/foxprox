@@ -443,3 +443,8 @@
 
 - A CONNECT/SOCKS setup step that only returns a boolean is too narrow: runtime needs the egress-owned `HostTcpStream` handle to compose the setup result with the bounded tunnel pump.
 - Keep backward-compatible summary outcomes, but add session outcomes that retain `Option<E::TcpStream>` without exposing concrete socket types outside egress/runtime.
+
+## 2026-06-22 — explicit proxy listener contract
+
+- Listener readiness belongs in runtime as a narrow `ProxyListener` accept contract; accepted client streams can be fed into existing HTTP/SOCKS session steps without changing frontend, policy, audit, or egress contracts.
+- Standard `TcpListener` can be adapted at the boundary by mapping `WouldBlock` to `None` and setting accepted streams nonblocking before session processing.
