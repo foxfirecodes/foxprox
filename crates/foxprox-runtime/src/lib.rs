@@ -29,7 +29,7 @@ use foxprox_net::{
     handle_normalized_event_without_egress, udp_timeout, BrokerError, BrokerEventOutcome,
     DnsAttributionCache, FlowProtocol, InboundIpv4Packet, InboundIpv6Packet, Ipv4DnsServiceRequest,
     Ipv6DnsServiceRequest, OutboundIpPacket, PacketBrokerOutcome, StackAdapter, StackEvent,
-    StackTcpData, StackTcpWrite,
+    StackTcpData, StackTcpFlow, StackTcpWrite,
 };
 use foxprox_policy::PolicyEngine;
 
@@ -1680,6 +1680,8 @@ pub struct StackTcpBridgeTable<T> {
 struct StackTcpBridge<T> {
     stream: T,
     pending_sandbox_to_host: VecDeque<Vec<u8>>,
+    pending_host_to_sandbox: VecDeque<Vec<u8>>,
+    pending_first_payload_from_sandbox: Vec<u8>,
     first_payload_inspected: bool,
 }
 
@@ -1688,12 +1690,21 @@ impl<T> StackTcpBridge<T> {
         Self {
             stream,
             pending_sandbox_to_host: VecDeque::new(),
+            pending_host_to_sandbox: VecDeque::new(),
+            pending_first_payload_from_sandbox: Vec::new(),
             first_payload_inspected: false,
         }
     }
 
     fn pending_sandbox_bytes(&self) -> usize {
         self.pending_sandbox_to_host
+            .iter()
+            .map(Vec::len)
+            .sum::<usize>()
+    }
+
+    fn pending_host_bytes(&self) -> usize {
+        self.pending_host_to_sandbox
             .iter()
             .map(Vec::len)
             .sum::<usize>()
@@ -1708,6 +1719,12 @@ impl<T> Default for StackTcpBridgeTable<T> {
             read_cursor: 0,
         }
     }
+}
+
+enum FirstPayloadAction {
+    AwaitMore,
+    Forward(Vec<u8>),
+    Inspect(Vec<u8>),
 }
 
 impl<T> StackTcpBridgeTable<T> {
@@ -1783,14 +1800,50 @@ impl<T> StackTcpBridgeTable<T> {
             .unwrap_or(0)
     }
 
-    fn mark_first_payload_inspected(&mut self, key: &StackTcpFlowKey) -> Option<bool> {
-        let bridge = self.streams.get_mut(key)?;
+    pub fn pending_host_bytes(&self, key: &StackTcpFlowKey) -> usize {
+        self.streams
+            .get(key)
+            .map(StackTcpBridge::pending_host_bytes)
+            .unwrap_or(0)
+    }
+
+    fn prepare_first_payload(
+        &mut self,
+        key: &StackTcpFlowKey,
+        bytes: &[u8],
+    ) -> Result<Option<FirstPayloadAction>, EgressError> {
+        let Some(bridge) = self.streams.get_mut(key) else {
+            return Ok(None);
+        };
         if bridge.first_payload_inspected {
-            Some(false)
-        } else {
-            bridge.first_payload_inspected = true;
-            Some(true)
+            return Ok(Some(FirstPayloadAction::Forward(bytes.to_vec())));
         }
+        if !transparent_port_needs_first_payload_inspection(key.destination.port()) {
+            bridge.first_payload_inspected = true;
+            return Ok(Some(FirstPayloadAction::Forward(bytes.to_vec())));
+        }
+        let pending_after = bridge
+            .pending_first_payload_from_sandbox
+            .len()
+            .saturating_add(bytes.len());
+        if pending_after > self.limits.max_pending_sandbox_bytes {
+            return Err(EgressError::StreamIo(
+                "TCP bridge pending first payload buffer limit exceeded".into(),
+            ));
+        }
+        bridge
+            .pending_first_payload_from_sandbox
+            .extend_from_slice(bytes);
+        if !transparent_first_payload_ready(
+            key.destination.port(),
+            &bridge.pending_first_payload_from_sandbox,
+        ) {
+            return Ok(Some(FirstPayloadAction::AwaitMore));
+        }
+        bridge.first_payload_inspected = true;
+        Ok(Some(FirstPayloadAction::Inspect(std::mem::take(
+            &mut bridge.pending_first_payload_from_sandbox,
+        ))))
     }
 
     pub fn total_pending_sandbox_bytes(&self) -> usize {
@@ -1860,12 +1913,18 @@ where
         event: &StackTcpData,
     ) -> Result<Option<usize>, EgressError> {
         let key = StackTcpFlowKey::from_tcp_data(event);
-        let Some(bridge) = self.streams.get_mut(&key) else {
+        self.write_bytes_from_sandbox(&key, &event.bytes)
+    }
+
+    fn write_bytes_from_sandbox(
+        &mut self,
+        key: &StackTcpFlowKey,
+        bytes: &[u8],
+    ) -> Result<Option<usize>, EgressError> {
+        let Some(bridge) = self.streams.get_mut(key) else {
             return Ok(None);
         };
-        bridge
-            .write_from_sandbox(&event.bytes, self.limits)
-            .map(Some)
+        bridge.write_from_sandbox(bytes, self.limits).map(Some)
     }
 
     pub fn flush_pending_sandbox_writes(&mut self) -> Result<usize, EgressError> {
@@ -1945,7 +2004,6 @@ where
     S: StackAdapter,
     T: HostTcpStream,
 {
-    let mut reads = Vec::new();
     let mut keys: Vec<_> = bridges.streams.keys().cloned().collect();
     keys.sort_by_key(|key| format!("{key:?}"));
     let stream_count = keys.len();
@@ -1958,6 +2016,9 @@ where
     let mut visited = 0;
     let mut per_sandbox = HashMap::<SandboxId, usize>::new();
     let mut bytes_per_sandbox = HashMap::<SandboxId, usize>::new();
+    let mut tcp_streams_read = 0;
+    let mut tcp_bytes_read_from_egress = 0;
+    let mut tcp_bytes_enqueued_to_stack = 0;
     while visited < stream_count && selected < max_streams {
         let key = keys[(start + visited) % stream_count].clone();
         visited += 1;
@@ -1966,7 +2027,7 @@ where
             continue;
         }
         let sandbox_bytes = bytes_per_sandbox.entry(key.sandbox_id.clone()).or_default();
-        let remaining_bytes = max_bytes_per_sandbox.saturating_sub(*sandbox_bytes);
+        let mut remaining_bytes = max_bytes_per_sandbox.saturating_sub(*sandbox_bytes);
         if remaining_bytes == 0 {
             continue;
         }
@@ -1975,35 +2036,46 @@ where
         let Some(bridge) = bridges.streams.get_mut(&key) else {
             continue;
         };
+
+        let pending_budget = max_bytes_per_stream.min(remaining_bytes);
+        let pending_written = flush_pending_host_bytes_to_stack(
+            adapter,
+            &key,
+            bridge,
+            pending_budget,
+            bridges.limits,
+        )?;
+        tcp_bytes_enqueued_to_stack += pending_written;
+        *sandbox_bytes += pending_written;
+        remaining_bytes = max_bytes_per_sandbox.saturating_sub(*sandbox_bytes);
+        if remaining_bytes == 0
+            || pending_written == pending_budget
+            || !bridge.pending_host_to_sandbox.is_empty()
+        {
+            continue;
+        }
+
+        let read_budget = max_bytes_per_stream
+            .saturating_sub(pending_written)
+            .min(remaining_bytes);
+        if read_budget == 0 {
+            continue;
+        }
         let bytes = bridge
             .stream
-            .read_to_sandbox(max_bytes_per_stream.min(remaining_bytes))
+            .read_to_sandbox(read_budget)
             .map_err(BrokerError::Egress)
             .map_err(RuntimeError::Broker)?;
         if !bytes.is_empty() {
-            *sandbox_bytes += bytes.len();
-            reads.push((key, bytes));
+            tcp_streams_read += 1;
+            tcp_bytes_read_from_egress += bytes.len();
+            let written = send_host_bytes_to_stack(adapter, &key, bridge, bytes, bridges.limits)?;
+            tcp_bytes_enqueued_to_stack += written;
+            *sandbox_bytes += written;
         }
     }
     if stream_count > 0 {
         bridges.read_cursor = (start + visited) % stream_count;
-    }
-
-    let tcp_streams_read = reads.len();
-    let mut tcp_bytes_read_from_egress = 0;
-    let mut tcp_bytes_enqueued_to_stack = 0;
-    for (key, bytes) in reads {
-        tcp_bytes_read_from_egress += bytes.len();
-        let write = StackTcpWrite {
-            sandbox_id: key.sandbox_id,
-            frontend: key.frontend,
-            source: key.source,
-            destination: key.destination,
-            bytes,
-        };
-        tcp_bytes_enqueued_to_stack += adapter
-            .send_tcp_data_to_sandbox(&write)
-            .map_err(RuntimeError::Stack)?;
     }
 
     let outbound_packets = adapter
@@ -2018,6 +2090,81 @@ where
         tcp_bytes_enqueued_to_stack,
         outbound_packets_written,
     })
+}
+
+fn flush_pending_host_bytes_to_stack<S, T>(
+    adapter: &mut S,
+    key: &StackTcpFlowKey,
+    bridge: &mut StackTcpBridge<T>,
+    mut budget: usize,
+    limits: StackTcpBridgeLimits,
+) -> Result<usize, RuntimeError>
+where
+    S: StackAdapter,
+{
+    let mut total = 0;
+    while budget > 0 {
+        let Some(bytes) = bridge.pending_host_to_sandbox.pop_front() else {
+            break;
+        };
+        let send_len = bytes.len().min(budget);
+        let send_bytes = bytes[..send_len].to_vec();
+        let deferred_by_budget = bytes[send_len..].to_vec();
+        if !deferred_by_budget.is_empty() {
+            queue_pending_host_bytes(bridge, deferred_by_budget, limits)?;
+        }
+        let written = send_host_bytes_to_stack(adapter, key, bridge, send_bytes, limits)?;
+        total += written;
+        if written < send_len {
+            break;
+        }
+        budget -= written;
+    }
+    Ok(total)
+}
+
+fn send_host_bytes_to_stack<S, T>(
+    adapter: &mut S,
+    key: &StackTcpFlowKey,
+    bridge: &mut StackTcpBridge<T>,
+    bytes: Vec<u8>,
+    limits: StackTcpBridgeLimits,
+) -> Result<usize, RuntimeError>
+where
+    S: StackAdapter,
+{
+    let write = StackTcpWrite {
+        sandbox_id: key.sandbox_id.clone(),
+        frontend: key.frontend,
+        source: key.source,
+        destination: key.destination,
+        bytes,
+    };
+    let written = adapter
+        .send_tcp_data_to_sandbox(&write)
+        .map_err(RuntimeError::Stack)?;
+    if written < write.bytes.len() {
+        queue_pending_host_bytes(bridge, write.bytes[written..].to_vec(), limits)?;
+    }
+    Ok(written)
+}
+
+fn queue_pending_host_bytes<T>(
+    bridge: &mut StackTcpBridge<T>,
+    bytes: Vec<u8>,
+    limits: StackTcpBridgeLimits,
+) -> Result<(), RuntimeError> {
+    if bytes.is_empty() {
+        return Ok(());
+    }
+    let pending_after = bridge.pending_host_bytes().saturating_add(bytes.len());
+    if pending_after > limits.max_pending_sandbox_bytes {
+        return Err(RuntimeError::Broker(BrokerError::Egress(
+            EgressError::StreamIo("TCP bridge pending host buffer limit exceeded".into()),
+        )));
+    }
+    bridge.pending_host_to_sandbox.push_front(bytes);
+    Ok(())
 }
 
 /// Context for processing one packet through a stack adapter.
@@ -2091,18 +2238,32 @@ fn transparent_first_payload_event(data: &StackTcpData) -> Option<NormalizedEven
             data.frontend,
             &data.bytes,
         )),
-        443 if tls_record_is_complete(&data.bytes) => {
-            Some(foxprox_inspect::inspect_tls_client_hello(
-                data.sandbox_id.clone(),
-                data.frontend,
-                data.destination,
-                None,
-                &data.bytes,
-            ))
-        }
-        443 => None,
+        443 => Some(foxprox_inspect::inspect_tls_client_hello(
+            data.sandbox_id.clone(),
+            data.frontend,
+            data.destination,
+            None,
+            &data.bytes,
+        )),
         _ => None,
     }
+}
+
+fn transparent_port_needs_first_payload_inspection(port: u16) -> bool {
+    matches!(port, 80 | 443)
+}
+
+fn transparent_first_payload_ready(port: u16, bytes: &[u8]) -> bool {
+    match port {
+        80 => http_request_headers_are_complete(bytes),
+        443 => tls_record_is_complete(bytes),
+        _ => true,
+    }
+}
+
+fn http_request_headers_are_complete(bytes: &[u8]) -> bool {
+    bytes.windows(4).any(|window| window == b"\r\n\r\n")
+        || bytes.windows(2).any(|window| window == b"\n\n")
 }
 
 fn tls_record_is_complete(bytes: &[u8]) -> bool {
@@ -2169,32 +2330,55 @@ where
             }
             StackEvent::TcpData(data) => {
                 tcp_data_events += 1;
-                if ctx
+                let key = StackTcpFlowKey::from_tcp_data(&data);
+                let action = ctx
                     .tcp_bridges
-                    .mark_first_payload_inspected(&StackTcpFlowKey::from_tcp_data(&data))
-                    .unwrap_or(false)
-                {
-                    if let Some(event) = transparent_first_payload_event(&data) {
-                        transparent_inspection_events += 1;
-                        let result = handle_normalized_event_without_egress(
-                            &event,
-                            ctx.policy,
-                            ctx.audit,
-                            ctx.sequence_start + offset as u64,
-                            ctx.timestamp_millis,
-                        )
-                        .map_err(RuntimeError::Broker)?;
-                        if !result.decision.is_allowed() {
-                            transparent_inspection_denials += 1;
-                            ctx.tcp_bridges
-                                .remove(&StackTcpFlowKey::from_tcp_data(&data));
-                            continue;
+                    .prepare_first_payload(&key, &data.bytes)
+                    .map_err(BrokerError::Egress)
+                    .map_err(RuntimeError::Broker)?;
+                let Some(action) = action else {
+                    tcp_data_without_bridge += 1;
+                    continue;
+                };
+                let bytes = match action {
+                    FirstPayloadAction::AwaitMore => continue,
+                    FirstPayloadAction::Forward(bytes) => bytes,
+                    FirstPayloadAction::Inspect(bytes) => {
+                        let inspect_data = StackTcpData {
+                            bytes: bytes.clone(),
+                            ..data.clone()
+                        };
+                        if let Some(event) = transparent_first_payload_event(&inspect_data) {
+                            transparent_inspection_events += 1;
+                            let result = handle_normalized_event_without_egress(
+                                &event,
+                                ctx.policy,
+                                ctx.audit,
+                                ctx.sequence_start + offset as u64,
+                                ctx.timestamp_millis,
+                            )
+                            .map_err(RuntimeError::Broker)?;
+                            if !result.decision.is_allowed() {
+                                transparent_inspection_denials += 1;
+                                let _ = ctx
+                                    .adapter
+                                    .close_tcp_flow(&StackTcpFlow {
+                                        sandbox_id: key.sandbox_id.clone(),
+                                        frontend: key.frontend,
+                                        source: key.source,
+                                        destination: key.destination,
+                                    })
+                                    .map_err(RuntimeError::Stack)?;
+                                ctx.tcp_bridges.remove(&key);
+                                continue;
+                            }
                         }
+                        bytes
                     }
-                }
+                };
                 match ctx
                     .tcp_bridges
-                    .write_from_sandbox(&data)
+                    .write_bytes_from_sandbox(&key, &bytes)
                     .map_err(BrokerError::Egress)
                     .map_err(RuntimeError::Broker)?
                 {
@@ -3732,7 +3916,7 @@ mod tests {
     }
 
     #[test]
-    fn incomplete_tls_first_payload_is_forwarded_without_fail_closed_inspection() {
+    fn incomplete_tls_first_payload_is_buffered_without_fail_closed_inspection() {
         let inbound = vec![0x45, 0, 0, 20];
         let cursor = Cursor::new(inbound);
         let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
@@ -3778,10 +3962,69 @@ mod tests {
         assert_eq!(outcome.broker_outcomes, vec![BrokerEventOutcome::Forwarded]);
         assert_eq!(outcome.transparent_inspection_events, 0);
         assert_eq!(outcome.transparent_inspection_denials, 0);
-        assert_eq!(outcome.tcp_bytes_written_to_egress, data.bytes.len());
-        assert_eq!(writes.borrow().as_slice(), &[data.bytes]);
+        assert_eq!(outcome.tcp_bytes_written_to_egress, 0);
+        assert!(writes.borrow().is_empty());
         assert_eq!(audit.records().len(), 1);
-        assert_eq!(egress.tcp_connects, vec![connect]);
+        assert_eq!(egress.tcp_connects, vec![connect.clone()]);
+        assert_eq!(
+            tcp_bridges.pending_sandbox_bytes(&StackTcpFlowKey::from_connect_attempt(&connect)),
+            0
+        );
+        assert!(tcp_bridges.contains_key(&StackTcpFlowKey::from_connect_attempt(&connect)));
+    }
+
+    #[test]
+    fn denied_transparent_tls_first_payload_closes_stack_flow() {
+        let inbound = vec![0x45, 0, 0, 20];
+        let cursor = Cursor::new(inbound);
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let mut connect = tcp_connect_event();
+        connect.destination = "203.0.113.10:443".parse().unwrap();
+        let data = foxprox_net::StackTcpData {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:49152".parse().unwrap(),
+            destination: "203.0.113.10:443".parse().unwrap(),
+            bytes: vec![22, 3, 1, 0, 3, 1, 2, 3],
+        };
+        let mut adapter = ScriptedStackAdapter::new(vec![
+            StackEvent::PolicyEvent(NormalizedEvent::TcpConnectAttempt(connect.clone())),
+            StackEvent::TcpData(data),
+        ]);
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut tcp_rule = PolicyRule::allow(foxprox_core::RuleId::new("tcp-443").unwrap());
+        tcp_rule.protocol = ProtocolMatcher::Exact(Protocol::Tcp);
+        tcp_rule.port = PortMatcher::Exact(443);
+        config.rules.push(tcp_rule);
+        let policy = PolicyEngine::new(config);
+        let writes = Rc::new(RefCell::new(Vec::new()));
+        let mut egress = RecordingEgress::new(Rc::clone(&writes));
+        let mut audit = BoundedAuditSink::new(4);
+        let mut tcp_bridges = StackTcpBridgeTable::default();
+
+        let outcome = process_one_stack_device_packet(
+            &mut device,
+            StackDevicePacketStep {
+                adapter: &mut adapter,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                tcp_bridges: &mut tcp_bridges,
+                sequence_start: 30,
+                timestamp_millis: 4000,
+                dns_attribution: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.transparent_inspection_events, 1);
+        assert_eq!(outcome.transparent_inspection_denials, 1);
+        assert_eq!(outcome.tcp_bytes_written_to_egress, 0);
+        assert!(writes.borrow().is_empty());
+        assert!(tcp_bridges.is_empty());
+        assert_eq!(adapter.closes.len(), 1);
+        assert_eq!(adapter.closes[0].source, connect.source);
+        assert_eq!(adapter.closes[0].destination, connect.destination);
     }
 
     #[test]
@@ -3985,6 +4228,91 @@ mod tests {
         assert_eq!(device.into_inner().into_inner(), vec![0x45, 0, 0, 20]);
     }
 
+    #[test]
+    fn bridge_does_not_read_new_host_bytes_while_prior_host_bytes_are_pending() {
+        let cursor = Cursor::new(Vec::new());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let key = StackTcpFlowKey::new(
+            SandboxId::new("s1").unwrap(),
+            FrontendKind::Tun,
+            "10.0.0.2:49152".parse().unwrap(),
+            "203.0.113.10:443".parse().unwrap(),
+        );
+        let mut bridges = StackTcpBridgeTable::default();
+        bridges.insert(
+            key.clone(),
+            ReadableTcpStream::new(vec![b"abcdef".to_vec(), b"ghij".to_vec()].into()),
+        );
+        let mut adapter = PartialReadBackStackAdapter {
+            writes: Vec::new(),
+            max_write: 0,
+        };
+
+        let first =
+            flush_tcp_bridge_reads_to_stack_device(&mut device, &mut adapter, &mut bridges, 1024)
+                .unwrap();
+        let second =
+            flush_tcp_bridge_reads_to_stack_device(&mut device, &mut adapter, &mut bridges, 1024)
+                .unwrap();
+
+        assert_eq!(first.tcp_bytes_read_from_egress, 6);
+        assert_eq!(first.tcp_bytes_enqueued_to_stack, 0);
+        assert_eq!(second.tcp_bytes_read_from_egress, 0);
+        assert_eq!(second.tcp_bytes_enqueued_to_stack, 0);
+        assert_eq!(bridges.pending_host_bytes(&key), 6);
+
+        adapter.max_write = 1024;
+        let third =
+            flush_tcp_bridge_reads_to_stack_device(&mut device, &mut adapter, &mut bridges, 1024)
+                .unwrap();
+
+        assert_eq!(third.tcp_bytes_enqueued_to_stack, 10);
+        assert_eq!(adapter.writes[2].bytes, b"abcdef");
+        assert_eq!(adapter.writes[3].bytes, b"ghij");
+        assert_eq!(bridges.pending_host_bytes(&key), 0);
+    }
+
+    #[test]
+    fn bridge_retains_host_bytes_when_stack_accepts_partial_write() {
+        let cursor = Cursor::new(Vec::new());
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let key = StackTcpFlowKey::new(
+            SandboxId::new("s1").unwrap(),
+            FrontendKind::Tun,
+            "10.0.0.2:49152".parse().unwrap(),
+            "203.0.113.10:443".parse().unwrap(),
+        );
+        let mut bridges = StackTcpBridgeTable::default();
+        bridges.insert(
+            key.clone(),
+            ReadableTcpStream::new(vec![b"abcdef".to_vec()].into()),
+        );
+        let mut adapter = PartialReadBackStackAdapter {
+            writes: Vec::new(),
+            max_write: 3,
+        };
+
+        let first =
+            flush_tcp_bridge_reads_to_stack_device(&mut device, &mut adapter, &mut bridges, 1024)
+                .unwrap();
+
+        assert_eq!(first.tcp_streams_read, 1);
+        assert_eq!(first.tcp_bytes_read_from_egress, 6);
+        assert_eq!(first.tcp_bytes_enqueued_to_stack, 3);
+        assert_eq!(bridges.pending_host_bytes(&key), 3);
+        assert_eq!(adapter.writes[0].bytes, b"abcdef");
+
+        let second =
+            flush_tcp_bridge_reads_to_stack_device(&mut device, &mut adapter, &mut bridges, 1024)
+                .unwrap();
+
+        assert_eq!(second.tcp_streams_read, 0);
+        assert_eq!(second.tcp_bytes_read_from_egress, 0);
+        assert_eq!(second.tcp_bytes_enqueued_to_stack, 3);
+        assert_eq!(bridges.pending_host_bytes(&key), 0);
+        assert_eq!(adapter.writes[1].bytes, b"def");
+    }
+
     struct FlowClosedStackAdapter;
 
     impl StackAdapter for FlowClosedStackAdapter {
@@ -4042,17 +4370,26 @@ mod tests {
 
     struct ScriptedStackAdapter {
         events: Vec<StackEvent>,
+        closes: Vec<StackTcpFlow>,
     }
 
     impl ScriptedStackAdapter {
         fn new(events: Vec<StackEvent>) -> Self {
-            Self { events }
+            Self {
+                events,
+                closes: Vec::new(),
+            }
         }
     }
 
     impl StackAdapter for ScriptedStackAdapter {
         fn ingest_ip_packet(&mut self, _packet: &[u8]) -> Result<Vec<StackEvent>, StackError> {
             Ok(std::mem::take(&mut self.events))
+        }
+
+        fn close_tcp_flow(&mut self, flow: &StackTcpFlow) -> Result<bool, StackError> {
+            self.closes.push(flow.clone());
+            Ok(true)
         }
 
         fn poll_outbound_packets(&mut self) -> Result<Vec<OutboundIpPacket>, StackError> {
@@ -4422,6 +4759,26 @@ mod tests {
 
         fn poll_outbound_packets(&mut self) -> Result<Vec<OutboundIpPacket>, StackError> {
             Ok(std::mem::take(&mut self.outbound))
+        }
+    }
+
+    struct PartialReadBackStackAdapter {
+        writes: Vec<StackTcpWrite>,
+        max_write: usize,
+    }
+
+    impl StackAdapter for PartialReadBackStackAdapter {
+        fn ingest_ip_packet(&mut self, _packet: &[u8]) -> Result<Vec<StackEvent>, StackError> {
+            Ok(Vec::new())
+        }
+
+        fn send_tcp_data_to_sandbox(&mut self, data: &StackTcpWrite) -> Result<usize, StackError> {
+            self.writes.push(data.clone());
+            Ok(self.max_write.min(data.bytes.len()))
+        }
+
+        fn poll_outbound_packets(&mut self) -> Result<Vec<OutboundIpPacket>, StackError> {
+            Ok(Vec::new())
         }
     }
 

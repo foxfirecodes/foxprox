@@ -41,6 +41,11 @@ pub trait StackAdapter {
         ))
     }
 
+    fn close_tcp_flow(&mut self, flow: &StackTcpFlow) -> Result<bool, StackError> {
+        let _ = flow;
+        Ok(false)
+    }
+
     fn poll_outbound_packets(&mut self) -> Result<Vec<OutboundIpPacket>, StackError>;
 }
 
@@ -74,6 +79,15 @@ pub struct StackTcpWrite {
     pub source: SocketAddr,
     pub destination: SocketAddr,
     pub bytes: Vec<u8>,
+}
+
+/// Normalized TCP stream identity for closing an adapter-managed sandbox flow.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StackTcpFlow {
+    pub sandbox_id: SandboxId,
+    pub frontend: FrontendKind,
+    pub source: SocketAddr,
+    pub destination: SocketAddr,
 }
 
 /// Normalized flow lifecycle event emitted by a stack adapter without exposing

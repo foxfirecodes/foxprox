@@ -11,7 +11,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use foxprox_core::{ByteCounts, FrontendKind, NormalizedEvent, SandboxId, TcpConnectAttempt};
 use foxprox_net::{
     FlowKey, FlowProtocol, OutboundIpPacket, StackAdapter, StackError, StackEvent, StackFlowClosed,
-    StackTcpData, StackTcpWrite,
+    StackTcpData, StackTcpFlow, StackTcpWrite,
 };
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{ChecksumCapabilities, Device, DeviceCapabilities, Medium, RxToken, TxToken};
@@ -280,6 +280,25 @@ impl StackAdapter for SmoltcpStackAdapter {
         ))
     }
 
+    fn close_tcp_flow(&mut self, flow: &StackTcpFlow) -> Result<bool, StackError> {
+        for listener in &mut self.tcp_listeners {
+            let socket = self.sockets.get_mut::<tcp::Socket>(listener.handle);
+            let Some(remote) = endpoint_to_socket_addr(socket.remote_endpoint()) else {
+                continue;
+            };
+            let Some(local) = endpoint_to_socket_addr(socket.local_endpoint()) else {
+                continue;
+            };
+            if remote == flow.source && local == flow.destination {
+                socket.abort();
+                let now = self.now();
+                self.iface.poll(now, &mut self.device, &mut self.sockets);
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn poll_outbound_packets(&mut self) -> Result<Vec<OutboundIpPacket>, StackError> {
         self.device
             .drain_outbound()
@@ -383,8 +402,8 @@ impl TxToken for QueuedTxToken<'_> {
     where
         F: FnOnce(&mut [u8]) -> R,
     {
-        let capped_len = len.min(self.mtu);
-        let mut buffer = vec![0_u8; capped_len];
+        debug_assert!(len <= self.mtu, "smoltcp emitted packet larger than MTU");
+        let mut buffer = vec![0_u8; len];
         let result = f(&mut buffer);
         self.outbound.push_back(buffer);
         result

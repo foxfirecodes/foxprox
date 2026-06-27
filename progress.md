@@ -2140,3 +2140,30 @@
 - Changed files: pending.
 - Commit hash after commit: 9d73d0e.
 - Remaining boundary risks: none for reported HTTPS trust/curl issue.
+
+## 2026-06-27 — Boundary objective: make HTTPS bridge failures deterministic/closed instead of TLS corruption
+
+- Boundary under work: transparent TCP/TLS bridge runtime and smoltcp adapter contract.
+- Allowed dependency direction: runtime retains bridge/backpressure state over `foxprox-net::StackAdapter`; smoltcp remains private to `foxprox-smoltcp`; policy/audit continue to see only normalized TCP/TLS events.
+- Dependency-risk assessment: `curl https://github.com/` produced `bad record mac` because host-to-sandbox TCP backpressure could reorder bytes when prior host bytes were still pending, and the smoltcp test device silently truncated packets to MTU instead of preserving the adapter-emitted packet length. TLS first-payload inspection also needed to buffer partial records before deciding, and policy-denied transparent TLS payloads should abort the stack flow instead of leaving an ambiguous half-open bridge.
+- Observed results: runtime now buffers partial HTTP/TLS first payloads until inspectable, aborts adapter TCP flows on transparent first-payload denial, retains host-to-sandbox bytes across partial adapter writes without reading newer host bytes first, and the smoltcp queued device no longer truncates emitted packets. Real `target/debug/foxprox -- curl --max-time 30 -fsS https://github.com/ -o /tmp/foxprox-gh.out` now succeeds with a complete response instead of `bad record mac`; denied transparent TLS first-payload tests verify the stack flow close path.
+- Changed files:
+  - `crates/foxprox-net/src/lib.rs`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `crates/foxprox-smoltcp/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo build -p foxprox-cli --bins` — passed.
+  - `timeout 50 target/debug/foxprox -- curl --max-time 30 -fsS https://github.com/ -o /tmp/foxprox-gh.out && test -s /tmp/foxprox-gh.out` — passed, output 564568 bytes.
+  - `cargo test -p foxprox-runtime --lib -- --nocapture` — passed, 45 tests.
+  - `cargo test -p foxprox-smoltcp --lib -- --nocapture` — passed, 8 tests.
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 171 tests plus 1 ignored privileged smoke.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo check --manifest-path fuzz/Cargo.toml --bins` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime still depends on normalized net/inspect contracts, not smoltcp.
+  - `cargo tree -p foxprox-net` — adapter contract remains stack-neutral.
+  - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated behind `foxprox-net`.
+- Commit hash after commit: pending.
+- Remaining boundary risks: none for the observed `bad record mac`; future policy/config work should expose user-selectable deny rules so denied HTTPS can be exercised from the CLI without editing code.

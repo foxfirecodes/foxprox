@@ -479,3 +479,9 @@
 
 - When the wrapper uses a tmpfs `/etc`, binding `/etc/ssl` is not enough on distros where `/etc/ssl/certs/ca-certificates.crt` points to `../../ca-certificates/...`; also bind `/etc/ca-certificates` (and `/etc/pki` for common CA layouts).
 - Transparent TLS first-payload inspection must not treat an incomplete TLS record as malformed fail-closed; real ClientHello data can arrive split across TCP reads. Defer inspection/forward under the already-allowed TCP decision until a complete record is available.
+
+## 2026-06-27 — transparent TCP bridge backpressure lessons
+
+- Host-to-sandbox TCP bridge code must not read newer host bytes while older host bytes are still pending in the adapter/socket buffer; doing so can reorder the TLS bytestream and surface as `OpenSSL SSL_read: bad record mac`.
+- smoltcp `TxToken::consume(len, ...)` must preserve the exact `len` requested by smoltcp. Silently capping to MTU truncates packets and corrupts larger TLS responses; assert rather than truncate if the adapter ever emits an over-MTU packet.
+- Transparent TLS inspection should buffer until a complete TLS record is available. On policy denial after first-payload inspection, abort the adapter-managed TCP flow so clients see a closed/reset flow rather than an ambiguous corrupted TLS stream.
