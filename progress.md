@@ -2175,3 +2175,71 @@
 - Commit hash when committed: pending.
 - Remaining risks/deferred beyond this CLI slice: the CLI currently exposes one transparent TCP port mapping per invocation and no config file; UDP/proxy runtime pieces exist but are not yet surfaced through `foxprox run` flags. A future daemon iteration should support multiple mappings and configuration files.
 - Exact next step: commit the CLI slice, then report usage and remaining limits.
+
+## 2026-06-27T02:50:30Z
+- Current objective: extend `foxprox run` beyond TCP-only so the production alpha launcher exposes a minimal UDP forwarding path too.
+- Git status summary: clean worktree after commit `4ed919a`.
+- Intended slice: add `--udp-listen PORT --udp-host HOST:PORT` mode that launches the same rootless bwrap/TUN setup, accepts sandbox UDP addressed to broker-ip:port, forwards it to the configured host UDP socket, and writes a TUN UDP reply back to the sandbox.
+- Verification plan: parser tests, launcher package clippy/tests, full workspace checks, and live CLI UDP smoke with a sandbox Python UDP client and localhost UDP host server.
+- Files expected to change: `crates/foxprox-launcher/src/bin/foxprox.rs`, `progress.md`.
+- Exact next step: implement mutually exclusive TCP/UDP modes in the CLI.
+
+## 2026-06-27T02:55:30Z
+- Current objective: expose a minimal UDP forwarding mode in the production `foxprox run` CLI.
+- Files changed: `crates/foxprox-launcher/src/bin/foxprox.rs`, `progress.md`.
+- Verification commands run so far:
+  - `cargo fmt --check` (reported formatting drift; fixed with `cargo fmt`)
+  - `cargo clippy -p foxprox-launcher --all-targets --all-features -- -D warnings`
+  - `cargo test -p foxprox-launcher --all-targets --all-features`
+  - `cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-launcher --bin foxprox`
+  - live UDP CLI smoke with `target/debug/foxprox run --setup-bin target/debug/foxproxsetup --sandbox-id udp-cli --tun-name fpxudpc --udp-listen 5353 --udp-host 127.0.0.1:<host-port> -- /usr/bin/python3 -c <sandbox udp client>`: passed; sandbox printed `udp-cli-reply`, host UDP server received `udp-cli-live`.
+- Observed result: `foxprox run` now supports mutually exclusive TCP and UDP alpha modes. UDP mode launches the same rootless bwrap/TUN setup, accepts sandbox UDP datagrams addressed to broker-ip:listen-port, forwards payloads to the configured host UDP socket, and writes a synthesized IPv4/UDP response back to the sandbox.
+- Remaining risks: TCP and UDP modes are still one mapping per invocation; config-file and multi-flow daemon orchestration are future work.
+- Exact next step: run full workspace verification, run live TCP and UDP CLI smokes, then commit the UDP CLI mode.
+
+## 2026-06-27T02:55:30Z
+- Current objective: expose a minimal UDP forwarding mode in the production `foxprox run` CLI.
+- Files changed: `crates/foxprox-launcher/src/bin/foxprox.rs`, `progress.md`.
+- Verification commands run so far:
+  - `cargo fmt --check` (reported formatting drift; fixed with `cargo fmt`)
+  - `cargo clippy -p foxprox-launcher --all-targets --all-features -- -D warnings`
+  - `cargo test -p foxprox-launcher --all-targets --all-features`
+  - `cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-launcher --bin foxprox`
+  - live UDP CLI smoke with `target/debug/foxprox run --setup-bin target/debug/foxproxsetup --sandbox-id udp-cli --tun-name fpxudpc --udp-listen 5353 --udp-host 127.0.0.1:<host-port> -- /usr/bin/python3 -c <sandbox udp client>`: passed; sandbox printed `udp-cli-reply`, host UDP server received `udp-cli-live`.
+- Observed result: `foxprox run` now supports mutually exclusive TCP and UDP alpha modes. UDP mode launches the same rootless bwrap/TUN setup, accepts sandbox UDP datagrams addressed to broker-ip:listen-port, forwards payloads to the configured host UDP socket, and writes a synthesized IPv4/UDP response back to the sandbox.
+- Remaining risks: TCP and UDP modes are still one mapping per invocation; config-file and multi-flow daemon orchestration are future work.
+- Exact next step: run full workspace verification, run live TCP and UDP CLI smokes, then commit the UDP CLI mode.
+
+## 2026-06-27T02:59:00Z
+- Current objective: finalize TCP+UDP production alpha CLI modes.
+- Files changed: `crates/foxprox-launcher/src/bin/foxprox.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy -p foxprox-launcher --all-targets --all-features -- -D warnings`
+  - `cargo test -p foxprox-launcher --all-targets --all-features`
+  - `cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-launcher --bin foxprox`
+  - live UDP CLI smoke: sandbox sent `udp-cli-live` to `10.66.0.1:5353`, host UDP server received it and replied `udp-cli-reply`, sandbox printed `udp-cli-reply`.
+  - full workspace `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`: passed; 55 core tests, 9 device tests, 4 integration tests, 7 launcher library tests, 5 `foxprox` CLI tests, 95 runtime tests, 10 setup tests, and 40 smoltcp tests passed.
+  - final live TCP CLI smoke: sandbox printed `tcp-again`, host received `tcp-again-request`.
+  - final live UDP CLI smoke: sandbox printed `udp-again`, host received `udp-again-request`.
+- Observed result: production alpha `foxprox run` supports both TCP and UDP rootless-bwrap/TUN modes. TCP mode bridges one transparent sandbox TCP port through smoltcp to a configured host TCP socket. UDP mode forwards sandbox UDP datagrams addressed to broker-ip:listen-port to a configured host UDP socket and writes synthesized UDP responses back to the sandbox.
+- Commit hash when committed: pending.
+- Remaining risks/deferred beyond alpha CLI: one mapping per invocation; no config file or multi-flow/multi-mapping daemon orchestration yet; explicit HTTP/SOCKS proxy listener runtimes are still not surfaced as listener flags.
+- Exact next step: commit UDP CLI mode, then provide concise usage and limits.
+
+## 2026-06-27T02:59:00Z
+- Current objective: finalize TCP+UDP production alpha CLI modes.
+- Files changed: `crates/foxprox-launcher/src/bin/foxprox.rs`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy -p foxprox-launcher --all-targets --all-features -- -D warnings`
+  - `cargo test -p foxprox-launcher --all-targets --all-features`
+  - `cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-launcher --bin foxprox`
+  - live UDP CLI smoke: sandbox sent `udp-cli-live` to `10.66.0.1:5353`, host UDP server received it and replied `udp-cli-reply`, sandbox printed `udp-cli-reply`.
+  - full workspace `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`: passed; 55 core tests, 9 device tests, 4 integration tests, 7 launcher library tests, 5 `foxprox` CLI tests, 95 runtime tests, 10 setup tests, and 40 smoltcp tests passed.
+  - final live TCP CLI smoke: sandbox printed `tcp-again`, host received `tcp-again-request`.
+  - final live UDP CLI smoke: sandbox printed `udp-again`, host received `udp-again-request`.
+- Observed result: production alpha `foxprox run` supports both TCP and UDP rootless-bwrap/TUN modes. TCP mode bridges one transparent sandbox TCP port through smoltcp to a configured host TCP socket. UDP mode forwards sandbox UDP datagrams addressed to broker-ip:listen-port to a configured host UDP socket and writes synthesized UDP responses back to the sandbox.
+- Commit hash when committed: pending.
+- Remaining risks/deferred beyond alpha CLI: one mapping per invocation; no config file or multi-flow/multi-mapping daemon orchestration yet; explicit HTTP/SOCKS proxy listener runtimes are still not surfaced as listener flags.
+- Exact next step: commit UDP CLI mode, then provide concise usage and limits.

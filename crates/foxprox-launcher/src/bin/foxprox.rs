@@ -1,6 +1,7 @@
 use foxprox_core::{
-    DecisionAction, Endpoint, FrontendKind, NormalizedEvent, PolicyConfig, PolicyEngine,
-    PolicyRule, Protocol, RuleSet, SandboxId, SniStatus, VecAuditSink, VerificationKernel,
+    parse_ip_packet, synthesize_udpv4_response, DecisionAction, Endpoint, FrontendKind,
+    NormalizedEvent, ParsedIpPacket, PolicyConfig, PolicyEngine, PolicyRule, Protocol, RuleSet,
+    SandboxId, SniStatus, VecAuditSink, VerificationKernel,
 };
 use foxprox_device::set_file_nonblocking;
 use foxprox_integrations::{SetupPlan, TunDeviceConfig};
@@ -10,7 +11,8 @@ use foxprox_smoltcp::{
     SmoltcpIpConfig, SmoltcpTcpBridgeIoSession, SmoltcpTcpBridgeSession,
     SmoltcpTcpBridgeSessionError, TcpConnectReportMode,
 };
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::io::{Read, Write};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -37,9 +39,14 @@ struct CliConfig {
     broker_ip: Ipv4Addr,
     mtu: u16,
     dns: Ipv4Addr,
-    tcp_listen: u16,
-    tcp_host: SocketAddr,
+    mode: BrokerMode,
     target: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum BrokerMode {
+    Tcp { listen: u16, host: SocketAddr },
+    Udp { listen: u16, host: SocketAddr },
 }
 
 impl CliConfig {
@@ -59,6 +66,8 @@ impl CliConfig {
         let mut dns = None;
         let mut tcp_listen = None;
         let mut tcp_host = None;
+        let mut udp_listen = None;
+        let mut udp_host = None;
         let mut target = Vec::new();
 
         let mut iter = args.into_iter().map(Into::into).peekable();
@@ -89,6 +98,14 @@ impl CliConfig {
                             .map_err(|_| "invalid --tcp-host socket address".to_string())?,
                     );
                 }
+                "--udp-listen" => udp_listen = Some(parse_u16(&arg, next_value(&arg, &mut iter)?)?),
+                "--udp-host" => {
+                    udp_host = Some(
+                        next_value(&arg, &mut iter)?
+                            .parse::<SocketAddr>()
+                            .map_err(|_| "invalid --udp-host socket address".to_string())?,
+                    );
+                }
                 "--help" | "-h" => return Err(usage()),
                 other if other.starts_with('-') => return Err(format!("unknown flag `{other}`")),
                 other => {
@@ -102,8 +119,24 @@ impl CliConfig {
         if target.is_empty() {
             return Err("missing target command after --".to_string());
         }
-        let tcp_listen = tcp_listen.ok_or("missing required --tcp-listen PORT".to_string())?;
-        let tcp_host = tcp_host.ok_or("missing required --tcp-host ADDR:PORT".to_string())?;
+        let mode = match (tcp_listen, tcp_host, udp_listen, udp_host) {
+            (Some(listen), Some(host), None, None) => BrokerMode::Tcp { listen, host },
+            (None, None, Some(listen), Some(host)) => BrokerMode::Udp { listen, host },
+            (Some(_), None, _, _) => {
+                return Err("missing required --tcp-host ADDR:PORT".to_string())
+            }
+            (None, Some(_), _, _) => return Err("missing required --tcp-listen PORT".to_string()),
+            (_, _, Some(_), None) => {
+                return Err("missing required --udp-host ADDR:PORT".to_string())
+            }
+            (_, _, None, Some(_)) => return Err("missing required --udp-listen PORT".to_string()),
+            (None, None, None, None) => {
+                return Err("missing required TCP or UDP mapping".to_string());
+            }
+            _ => {
+                return Err("TCP and UDP modes are mutually exclusive in this alpha CLI".to_string())
+            }
+        };
 
         Ok(Self {
             setup_bin,
@@ -113,8 +146,7 @@ impl CliConfig {
             broker_ip,
             mtu,
             dns: dns.unwrap_or(broker_ip),
-            tcp_listen,
-            tcp_host,
+            mode,
             target,
         })
     }
@@ -157,6 +189,22 @@ fn run(config: CliConfig) -> Result<(), String> {
     };
     set_file_nonblocking(&tun, false).map_err(|error| format!("set blocking TUN fd: {error:?}"))?;
 
+    match config.mode {
+        BrokerMode::Tcp { listen, host } => {
+            run_tcp_mode(tun, &mut child, &config, sandbox_id, listen, host)
+        }
+        BrokerMode::Udp { listen, host } => run_udp_mode(tun, &mut child, &config, listen, host),
+    }
+}
+
+fn run_tcp_mode(
+    tun: std::fs::File,
+    child: &mut Child,
+    config: &CliConfig,
+    sandbox_id: SandboxId,
+    listen: u16,
+    host: SocketAddr,
+) -> Result<(), String> {
     let mut tun_reader = tun
         .try_clone()
         .map_err(|error| format!("clone TUN reader fd: {error}"))?;
@@ -174,13 +222,8 @@ fn run(config: CliConfig) -> Result<(), String> {
     adapter.set_packet_loopback(false);
     adapter.set_connect_report_mode(TcpConnectReportMode::AcceptedListenerSockets);
     adapter
-        .listen_tcp(config.tcp_listen, 8192, 8192)
-        .map_err(|error| {
-            format!(
-                "listen on sandbox TCP port {}: {error:?}",
-                config.tcp_listen
-            )
-        })?;
+        .listen_tcp(listen, 8192, 8192)
+        .map_err(|error| format!("listen on sandbox TCP port {listen}: {error:?}"))?;
 
     let mut rule = PolicyRule::allow("alpha-cli-allow-tcp");
     rule.protocol = Some(Protocol::Tcp);
@@ -242,9 +285,9 @@ fn run(config: CliConfig) -> Result<(), String> {
             adapter,
             &components,
             &attempt,
-            config.tcp_host,
+            host,
         )
-        .map_err(|error| format!("connect host TCP {}: {error:?}", config.tcp_host))?;
+        .map_err(|error| format!("connect host TCP {host}: {error:?}"))?;
     };
 
     set_file_nonblocking(&tun, true)
@@ -254,7 +297,7 @@ fn run(config: CliConfig) -> Result<(), String> {
         tun,
         config.mtu as usize + 128,
         flow,
-        config.tcp_listen,
+        listen,
         8192,
         8192,
     );
@@ -275,6 +318,52 @@ fn run(config: CliConfig) -> Result<(), String> {
         }
         tick_millis = tick_millis.saturating_add(1);
         thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn run_udp_mode(
+    mut tun: std::fs::File,
+    child: &mut Child,
+    config: &CliConfig,
+    listen: u16,
+    host: SocketAddr,
+) -> Result<(), String> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))
+        .map_err(|error| format!("bind host UDP socket: {error}"))?;
+    socket
+        .connect(host)
+        .map_err(|error| format!("connect host UDP {host}: {error}"))?;
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .map_err(|error| format!("set host UDP read timeout: {error}"))?;
+    let mut buffer = vec![0; config.mtu as usize + 128];
+    loop {
+        if let Some(status) = child
+            .try_wait()
+            .map_err(|error| format!("poll child: {error}"))?
+        {
+            return child_result(status);
+        }
+        let count = tun
+            .read(&mut buffer)
+            .map_err(|error| format!("read TUN packet: {error}"))?;
+        let packet = match parse_ip_packet(&buffer[..count]) {
+            Ok(ParsedIpPacket::Udpv4Packet(packet)) => packet,
+            Ok(_) | Err(_) => continue,
+        };
+        if packet.destination != config.broker_ip || packet.destination_port != listen {
+            continue;
+        }
+        socket
+            .send(packet.payload)
+            .map_err(|error| format!("send host UDP payload: {error}"))?;
+        let mut reply = vec![0; config.mtu as usize];
+        let reply_len = socket
+            .recv(&mut reply)
+            .map_err(|error| format!("receive host UDP reply: {error}"))?;
+        let response = synthesize_udpv4_response(&packet, &reply[..reply_len]);
+        tun.write_all(&response)
+            .map_err(|error| format!("write UDP response to TUN: {error}"))?;
     }
 }
 
@@ -360,7 +449,8 @@ fn parse_u16(flag: &str, value: String) -> Result<u16, String> {
 fn usage() -> String {
     "usage: foxprox run [--setup-bin PATH] [--sandbox-id ID] [--tun-name NAME] \
      [--sandbox-ip 10.66.0.2] [--broker-ip 10.66.0.1] [--dns 10.66.0.1] \
-     --tcp-listen PORT --tcp-host HOST:PORT -- COMMAND [ARGS...]"
+     (--tcp-listen PORT --tcp-host HOST:PORT | --udp-listen PORT --udp-host HOST:PORT) \
+     -- COMMAND [ARGS...]"
         .to_string()
 }
 
@@ -382,17 +472,64 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(parsed.tcp_listen, 8080);
-        assert_eq!(parsed.tcp_host, "127.0.0.1:18080".parse().unwrap());
+        assert_eq!(
+            parsed.mode,
+            BrokerMode::Tcp {
+                listen: 8080,
+                host: "127.0.0.1:18080".parse().unwrap()
+            }
+        );
         assert_eq!(parsed.broker_ip, Ipv4Addr::new(10, 66, 0, 1));
         assert_eq!(parsed.dns, parsed.broker_ip);
         assert_eq!(parsed.target, ["python3", "app.py"]);
     }
 
     #[test]
-    fn rejects_missing_required_tcp_mapping() {
+    fn parses_minimal_udp_run_command() {
+        let parsed = CliConfig::parse([
+            "run",
+            "--udp-listen",
+            "5353",
+            "--udp-host",
+            "127.0.0.1:15353",
+            "--",
+            "python3",
+            "app.py",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            parsed.mode,
+            BrokerMode::Udp {
+                listen: 5353,
+                host: "127.0.0.1:15353".parse().unwrap()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_missing_required_mapping() {
         let error = CliConfig::parse(["run", "--", "true"]).unwrap_err();
-        assert!(error.contains("--tcp-listen"));
+        assert!(error.contains("TCP or UDP mapping"));
+    }
+
+    #[test]
+    fn rejects_mixed_tcp_and_udp_modes() {
+        let error = CliConfig::parse([
+            "run",
+            "--tcp-listen",
+            "8080",
+            "--tcp-host",
+            "127.0.0.1:18080",
+            "--udp-listen",
+            "5353",
+            "--udp-host",
+            "127.0.0.1:15353",
+            "--",
+            "true",
+        ])
+        .unwrap_err();
+        assert!(error.contains("mutually exclusive"));
     }
 
     #[test]
