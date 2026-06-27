@@ -237,8 +237,8 @@ impl<U: DnsUpstream> foxprox_stack::UdpDatagramExchange for BrokerDnsOrDirectUdp
         }
     }
 
-    fn handles_policy_for(&self, destination: NetworkEndpoint) -> bool {
-        destination == self.broker_dns_endpoint
+    fn handles_policy_for(&self, _destination: NetworkEndpoint) -> bool {
+        true
     }
 
     fn on_datagram_delivered(&mut self) {
@@ -572,9 +572,11 @@ pub struct AlphaRuntimeTcpProxyEgress {
     direct: BlockingTcpEgress,
     http_proxy_endpoint: NetworkEndpoint,
     socks_proxy_endpoint: NetworkEndpoint,
-    http_proxy_frontend: ExplicitProxyFrontend<BlockingExplicitProxyEgress>,
+    http_proxy_frontend: ExplicitProxyFrontend<PolicyOnlyProxyEgress>,
     socks_proxy_frontend: ExplicitProxyFrontend<PolicyOnlyProxyEgress>,
+    explicit_egress: BlockingExplicitProxyEgress,
     shared_dns_cache: SharedDnsCache,
+    http_connect_tunnel: Option<TcpStream>,
     socks_tunnel: Option<TcpStream>,
     now_ms: u64,
     lifecycle_audits: Vec<AuditRecord>,
@@ -600,7 +602,7 @@ impl AlphaRuntimeTcpProxyEgress {
         let http_proxy_frontend = ExplicitProxyFrontend::new(
             sandbox_id.clone(),
             BrokerCore::new(policy.clone(), audit_capacity.max(1)),
-            explicit.clone(),
+            PolicyOnlyProxyEgress,
         )
         .with_shared_dns_cache(shared_dns_cache.clone());
         let socks_proxy_frontend = ExplicitProxyFrontend::new(
@@ -633,7 +635,9 @@ impl AlphaRuntimeTcpProxyEgress {
             socks_proxy_endpoint,
             http_proxy_frontend,
             socks_proxy_frontend,
+            explicit_egress: explicit,
             shared_dns_cache,
+            http_connect_tunnel: None,
             socks_tunnel: None,
             now_ms,
             lifecycle_audits,
@@ -641,17 +645,106 @@ impl AlphaRuntimeTcpProxyEgress {
     }
 
     fn handle_http_proxy_exchange(&mut self, bytes: &[u8]) -> Vec<u8> {
-        let is_connect = parse_http_proxy_request(bytes)
-            .map(|request| request.is_connect)
-            .unwrap_or(false);
+        if self.http_connect_tunnel.is_some() {
+            return self.exchange_http_connect_tunnel(bytes).unwrap_or_default();
+        }
+        let metadata = parse_http_proxy_request(bytes).ok();
+        let is_connect = metadata.as_ref().is_some_and(|request| request.is_connect);
         match self
             .http_proxy_frontend
             .handle_http_proxy_bytes_at(bytes, self.now_ms)
         {
-            Ok(result) if result.forwarded => result.response_bytes,
+            Ok(result) if result.forwarded && is_connect => {
+                let Some(mut metadata) = metadata else {
+                    return http_proxy_response_bytes(Decision::FailClosed, true, true).to_vec();
+                };
+                self.resolve_http_metadata(&mut metadata);
+                match self.open_http_connect_tunnel(&metadata) {
+                    Ok(tunnel) => {
+                        self.http_connect_tunnel = Some(tunnel);
+                        http_proxy_response_bytes(Decision::Allow, false, true).to_vec()
+                    }
+                    Err(error) => {
+                        self.record_http_proxy_egress_failure(&metadata, error);
+                        http_proxy_response_bytes(Decision::FailClosed, true, true).to_vec()
+                    }
+                }
+            }
+            Ok(result) if result.forwarded => {
+                let Some(mut metadata) = metadata else {
+                    return http_proxy_response_bytes(Decision::FailClosed, true, false).to_vec();
+                };
+                self.resolve_http_metadata(&mut metadata);
+                match self.explicit_egress.forward_http(&metadata, bytes) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        self.record_http_proxy_egress_failure(&metadata, error);
+                        http_proxy_response_bytes(Decision::FailClosed, true, false).to_vec()
+                    }
+                }
+            }
             Ok(result) => http_proxy_response_bytes(result.decision, false, is_connect).to_vec(),
             Err(_) => http_proxy_response_bytes(Decision::FailClosed, true, is_connect).to_vec(),
         }
+    }
+
+    fn resolve_http_metadata(&self, metadata: &mut HttpProxyRequestMetadata) {
+        if metadata.resolved_destination_ip.is_some() || metadata.host.parse::<IpAddr>().is_ok() {
+            return;
+        }
+        metadata.resolved_destination_ip = self
+            .shared_dns_cache
+            .resolve_hostname(&metadata.host, self.now_ms)
+            .map(|resolution| resolution.address);
+    }
+
+    fn open_http_connect_tunnel(
+        &self,
+        metadata: &HttpProxyRequestMetadata,
+    ) -> Result<TcpStream, ProxyEgressError> {
+        let ip = metadata
+            .resolved_destination_ip
+            .or_else(|| metadata.host.parse::<IpAddr>().ok())
+            .ok_or(ProxyEgressError::SendFailed)?;
+        self.explicit_egress.connect_ip_literal(ip, metadata.port)
+    }
+
+    fn exchange_http_connect_tunnel(&mut self, bytes: &[u8]) -> Result<Vec<u8>, ProxyEgressError> {
+        let Some(stream) = self.http_connect_tunnel.as_mut() else {
+            return Err(ProxyEgressError::SendFailed);
+        };
+        stream
+            .write_all(bytes)
+            .map_err(|_| ProxyEgressError::SendFailed)?;
+        let mut response = vec![0u8; 64 * 1024];
+        let len = stream
+            .read(&mut response)
+            .map_err(|_| ProxyEgressError::SendFailed)?;
+        response.truncate(len);
+        Ok(response)
+    }
+
+    fn record_http_proxy_egress_failure(
+        &mut self,
+        metadata: &HttpProxyRequestMetadata,
+        error: ProxyEgressError,
+    ) {
+        let request = metadata
+            .clone()
+            .into_policy_request(self.http_proxy_frontend.sandbox_id());
+        let audit = AuditRecord::new(
+            AuditKind::BrokerError,
+            self.http_proxy_frontend.sandbox_id(),
+        )
+        .with_frontend(Frontend::HttpProxy)
+        .with_protocol(request.protocol)
+        .with_destination(request.destination.clone())
+        .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+        .with_detail("error", proxy_egress_error_detail(&error));
+        let _ = self
+            .http_proxy_frontend
+            .broker_mut()
+            .append_audit_for(&request, audit);
     }
 
     fn handle_socks5_proxy_exchange(&mut self, bytes: &[u8]) -> Vec<u8> {
@@ -667,14 +760,46 @@ impl AlphaRuntimeTcpProxyEgress {
             .handle_socks5_connect_bytes_at(bytes, self.now_ms)
         {
             Ok(result) if result.decision.is_allow() => {
-                if let Some(metadata) = metadata {
-                    self.socks_tunnel = self.open_socks_tunnel(&metadata).ok();
+                let Some(metadata) = metadata else {
+                    return socks5_connect_response(0x01).to_vec();
+                };
+                match self.open_socks_tunnel(&metadata) {
+                    Ok(tunnel) => {
+                        self.socks_tunnel = Some(tunnel);
+                        socks5_connect_response(0x00).to_vec()
+                    }
+                    Err(error) => {
+                        self.record_socks_proxy_egress_failure(&metadata, error);
+                        socks5_connect_response(0x01).to_vec()
+                    }
                 }
-                socks5_connect_response(0x00).to_vec()
             }
             Ok(result) => socks5_connect_response(socks5_reply_code_for(result.decision)).to_vec(),
             Err(_) => socks5_connect_response(0x01).to_vec(),
         }
+    }
+
+    fn record_socks_proxy_egress_failure(
+        &mut self,
+        metadata: &SocksConnectMetadata,
+        error: ProxyEgressError,
+    ) {
+        let request = metadata
+            .clone()
+            .into_policy_request(self.socks_proxy_frontend.sandbox_id());
+        let audit = AuditRecord::new(
+            AuditKind::BrokerError,
+            self.socks_proxy_frontend.sandbox_id(),
+        )
+        .with_frontend(Frontend::Socks5Proxy)
+        .with_protocol(request.protocol)
+        .with_destination(request.destination.clone())
+        .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+        .with_detail("error", proxy_egress_error_detail(&error));
+        let _ = self
+            .socks_proxy_frontend
+            .broker_mut()
+            .append_audit_for(&request, audit);
     }
 
     fn open_socks_tunnel(

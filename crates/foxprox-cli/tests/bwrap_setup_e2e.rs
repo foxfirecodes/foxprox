@@ -1276,6 +1276,99 @@ fn foxprox_run_bwrap_alpha_command_exposes_http_proxy() {
 }
 
 #[test]
+#[ignore = "requires rootless bwrap, /dev/net/tun, CAP_NET_ADMIN inside bwrap, and combined foxprox alpha HTTP CONNECT proxy"]
+fn foxprox_run_bwrap_alpha_command_tunnels_http_connect() {
+    let foxprox = env!("CARGO_BIN_EXE_foxprox");
+    let setup_helper = env!("CARGO_BIN_EXE_foxproxsetup");
+    assert!(std::path::Path::new(foxprox).exists());
+    assert!(std::path::Path::new(setup_helper).exists());
+    assert!(std::path::Path::new("/dev/net/tun").exists());
+
+    let host_ip = host_primary_ipv4();
+    let host_listener = TcpListener::bind((host_ip, 0)).unwrap();
+    let host_addr = host_listener.local_addr().unwrap();
+    let (server_tx, server_rx) = std::sync::mpsc::channel();
+    let host_server = std::thread::spawn(move || {
+        let (mut stream, peer) = host_listener.accept().unwrap();
+        let mut request = [0u8; 4];
+        stream.read_exact(&mut request).unwrap();
+        stream.write_all(b"pong").unwrap();
+        server_tx.send((peer, request)).unwrap();
+    });
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_path = std::env::temp_dir().join(format!(
+        "foxprox-run-bwrap-alpha-connect-proxy-{unique}.json"
+    ));
+    let mut config =
+        BrokerRuntimeConfig::alpha_default(format!("foxprox-alpha-connect-proxy-e2e-{unique}"));
+    config.setup.tun_name = format!("fxc{:x}", std::process::id() % 0x00ff_ffff);
+    config.policy = PolicyConfig::default();
+    config.policy.rules.push(
+        PolicyRule::allow("allow-http-connect-e2e")
+            .frontend(Frontend::HttpProxy)
+            .protocol(Protocol::Https)
+            .destination_cidr(Cidr::new(host_addr.ip(), 32))
+            .destination_port(host_addr.port()),
+    );
+    let expected_proxy = config.setup.proxy_environment().https_proxy;
+    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+
+    let script = format!(
+        concat!(
+            "import os, socket; ",
+            "assert os.environ.get('HTTPS_PROXY') == {proxy:?}, os.environ.get('HTTPS_PROXY'); ",
+            "s=socket.socket(socket.AF_INET, socket.SOCK_STREAM); ",
+            "s.settimeout(5.0); ",
+            "s.connect(('10.0.2.2', 3128)); ",
+            "s.sendall(('CONNECT {host}:{port} HTTP/1.1\\r\\nHost: {host}:{port}\\r\\n\\r\\n').encode()); ",
+            "reply=s.recv(128); ",
+            "assert reply.startswith(b'HTTP/1.1 200'), reply; ",
+            "s.sendall(b'ping'); ",
+            "data=s.recv(4); ",
+            "assert data == b'pong', data; ",
+            "s.close()"
+        ),
+        proxy = expected_proxy,
+        host = host_addr.ip(),
+        port = host_addr.port()
+    );
+    let setup_dir = std::path::Path::new(setup_helper).parent().unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!("{}:{}", setup_dir.display(), path.to_string_lossy());
+    let output = Command::new(foxprox)
+        .env("PATH", path)
+        .arg("run-bwrap-alpha")
+        .arg(&config_path)
+        .arg("--")
+        .arg("python3")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("foxprox alpha HTTP CONNECT proxy launcher command runs");
+    let _ = std::fs::remove_file(&config_path);
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_peer, request) = server_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("host TCP listener receives HTTP CONNECT tunnel bytes through alpha launcher");
+    assert_eq!(&request, b"ping");
+    host_server.join().unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("https_connect_decision"), "{stdout}");
+    assert!(stdout.contains("allow-http-connect-e2e"), "{stdout}");
+}
+
+#[test]
 #[ignore = "requires rootless bwrap, /dev/net/tun, CAP_NET_ADMIN inside bwrap, and combined foxprox alpha explicit SOCKS proxy"]
 fn foxprox_run_bwrap_alpha_command_exposes_socks_proxy() {
     let foxprox = env!("CARGO_BIN_EXE_foxprox");

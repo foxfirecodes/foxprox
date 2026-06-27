@@ -5762,3 +5762,19 @@ Commit: db9da60
 - `cargo test --all-targets --all-features` — passed.
 - `cargo fmt --check` — passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+
+## 2026-06-27 — Close follow-up proxy and UDP review findings
+
+### Fixes
+- Fixed direct UDP policy ownership in the combined alpha runtime: `BrokerDnsOrDirectUdpExchange` now owns policy for broker DNS and direct UDP, so direct UDP reaches the core UDP forwarder for QUIC classification, DNS attribution, flow lifecycle/resource-limit audit, and policy decisions before host egress.
+- Fixed SOCKS false success: alpha SOCKS CONNECT now returns success only after the host tunnel opens; tunnel-open failures produce broker error evidence and a failure reply.
+- Added HTTP CONNECT tunnel support for the production alpha launcher path: CONNECT policy is evaluated by the explicit proxy frontend, the host tunnel is opened only after allow, and post-CONNECT bytes are relayed through smoltcp.
+- Switched alpha HTTP/SOCKS synthetic proxy policy checks to policy-only frontends plus explicit egress/tunnel ownership so policy/audit and real byte relay are both observable.
+- Added real bwrap/TUN HTTP CONNECT tunnel E2E and strengthened explicit proxy E2Es to verify byte relay under default-deny allow-rule policy.
+
+### Validation
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all fourteen real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
