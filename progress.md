@@ -2100,5 +2100,5 @@
 - Verification commands planned: package tests, real wrapper `ip addr` inspection, real wrapper `curl`, full workspace check/test/clippy, fuzz target check, and dependency trees for CLI/smoltcp/integrations.
 - Observed results: pending.
 - Changed files: pending.
-- Commit hash after commit: pending.
+- Commit hash after commit: 5f8655d.
 - Remaining boundary risks: none for the reported launcher smoke/curl issue.
