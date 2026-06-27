@@ -1855,3 +1855,35 @@
   - `cargo fmt --check` passed.
 - What remains unproven: ICMP beyond echo/error basics remains intentionally alpha-scoped by policy defaults.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — production bwrap-run launcher
+
+- Slice attempted: add a production-shaped CLI launcher for running arbitrary commands inside bwrap with foxprox network mediation, instead of requiring users to supply all low-level `bwrap-tcp-once` plumbing arguments.
+- Why next: the user explicitly asked for full alpha scope including a launcher usable for arbitrary commands in a real bwrap sandbox environment.
+- What changed: added `foxprox-cli bwrap-run`, which defaults bwrap/setup paths, creates unique broker socket/resolver bind paths, installs broker DNS in an isolated in-sandbox `/etc/resolv.conf`, configures default broker-DNS policy, runs `foxproxsetup`, receives the TUN fd, and brokers ICMP/DNS/UDP/first TCP for the arbitrary target command. TCP listener port is now derived from the first TCP SYN when omitted, so arbitrary destination ports work without predeclaring `--listen-port`. Target stdout is suppressed so CLI stdout remains JSON-lines audit only. Added parser coverage for production defaults and a live ignored `bwrap-run` smoke that runs curl by hostname through broker DNS and original-destination TCP.
+- Verification:
+  - Parser check passed: `cargo test -p foxprox-cli bwrap_run_arg_parser_builds_production_defaults -- --nocapture`.
+  - Focused live production launcher passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_cli_bwrap_run_executes_arbitrary_command_with_dns_and_tcp -- --ignored --nocapture`.
+  - Full live bwrap suite passed after these changes: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, 13/13.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- What failed or surprised the agent: the first `bwrap-run` live attempt did not receive DNS because the launcher bind-mounted the resolver file over the host `/etc` tree without first making `/etc` writable/isolated. Mirroring the proven live pattern (`--tmpfs /etc` then `--bind <temp> /etc/resolv.conf`) fixed real resolver behavior while avoiding host mutation.
+- Current alpha boundary: `bwrap-run` runs arbitrary commands but brokers one TCP flow per invocation; ICMP/DNS/UDP packets are handled while the target runs. Multi-flow long-running supervision remains productionization beyond alpha.
+- Commit: this commit.
+
+## 2026-06-22 Slice Evidence — production bwrap-run launcher
+
+- Slice attempted: add a production-shaped CLI launcher for running arbitrary commands inside bwrap with foxprox network mediation, instead of requiring users to supply all low-level `bwrap-tcp-once` plumbing arguments.
+- Why next: the user explicitly asked for full alpha scope including a launcher usable for arbitrary commands in a real bwrap sandbox environment.
+- What changed: added `foxprox-cli bwrap-run`, which defaults bwrap/setup paths, creates unique broker socket/resolver bind paths, installs broker DNS in an isolated in-sandbox `/etc/resolv.conf`, configures default broker-DNS policy, runs `foxproxsetup`, receives the TUN fd, and brokers ICMP/DNS/UDP/first TCP for the arbitrary target command. TCP listener port is now derived from the first TCP SYN when omitted, so arbitrary destination ports work without predeclaring `--listen-port`. Target stdout is suppressed so CLI stdout remains JSON-lines audit only. Added parser coverage for production defaults and a live ignored `bwrap-run` smoke that runs curl by hostname through broker DNS and original-destination TCP.
+- Verification:
+  - Parser check passed: `cargo test -p foxprox-cli bwrap_run_arg_parser_builds_production_defaults -- --nocapture`.
+  - Focused live production launcher passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_cli_bwrap_run_executes_arbitrary_command_with_dns_and_tcp -- --ignored --nocapture`.
+  - Full live bwrap suite passed after these changes: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, 13/13.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- What failed or surprised the agent: the first `bwrap-run` live attempt did not receive DNS because the launcher bind-mounted the resolver file over the host `/etc` tree without first making `/etc` writable/isolated. Mirroring the proven live pattern (`--tmpfs /etc` then `--bind <temp> /etc/resolv.conf`) fixed real resolver behavior while avoiding host mutation.
+- Current alpha boundary: `bwrap-run` runs arbitrary commands but brokers one TCP flow per invocation; ICMP/DNS/UDP packets are handled while the target runs. Multi-flow long-running supervision remains productionization beyond alpha.
+- Commit: this commit.

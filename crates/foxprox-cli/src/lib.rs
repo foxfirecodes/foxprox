@@ -10,7 +10,7 @@ use std::fmt;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
@@ -21,13 +21,14 @@ use std::os::unix::net::UnixStream;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 #[cfg(unix)]
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use foxprox_audit::{audit_record_to_json_line, AuditSinkError};
 use foxprox_broker::IpPacketBroker;
 use foxprox_config::{policy_config_from_toml, ConfigError};
 use foxprox_core::{
-    DefaultPolicy, Endpoint, FrontendKind, NormalizedEvent, PolicyConfig, PolicyEngine, SandboxId,
+    DefaultPolicy, DnsPolicy, Endpoint, FrontendKind, NormalizedEvent, PolicyConfig, PolicyEngine,
+    SandboxId,
 };
 use foxprox_device::{TunIoError, TunPacketIo};
 #[cfg(unix)]
@@ -220,7 +221,7 @@ pub struct BwrapTcpOnceConfig {
     pub dns_cache: DnsAttributionCache,
     pub smoltcp_ip: Ipv4Addr,
     pub smoltcp_prefix_len: u8,
-    pub listen_port: u16,
+    pub listen_port: Option<u16>,
     pub upstream_addr: Option<SocketAddr>,
     pub max_packet_len: usize,
     pub max_packets: usize,
@@ -395,6 +396,7 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
     let plan = plan_bwrap_setup(&bwrap).map_err(|error| CliError::Core(error.to_string()))?;
     let mut command = Command::new(&plan.program);
     command.args(&plan.args);
+    command.stdout(Stdio::null());
     let setup_child = spawn_setup_command_and_accept_fd(listener, command)
         .map_err(|error| CliError::Core(error.to_string()))?;
     let mut child = setup_child.child;
@@ -424,12 +426,14 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
     let mut tcp_attribution = None;
     let mut open_audited = false;
     let mut tun = TunPacketIo::from_owned_fd(setup_child.received.fd, config.max_packet_len)?;
-    let mut tcp = foxprox_tcp::SmoltcpTcpServer::new(
-        config.smoltcp_ip,
-        config.smoltcp_prefix_len,
-        config.listen_port,
-        config.max_packet_len,
-    );
+    let mut tcp = config.listen_port.map(|listen_port| {
+        foxprox_tcp::SmoltcpTcpServer::new(
+            config.smoltcp_ip,
+            config.smoltcp_prefix_len,
+            listen_port,
+            config.max_packet_len,
+        )
+    });
 
     for packets_read in 1..=config.max_packets {
         if !tun.wait_readable(Duration::from_millis(50))? {
@@ -520,7 +524,20 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                 };
                 tcp_source = Some(event.source);
                 tcp_destination = Some(event.destination);
-                if let IpAddr::V4(destination_ip) = event.destination.ip {
+                if tcp.is_none() {
+                    let listen_port = event.destination.port.ok_or_else(|| {
+                        CliError::Core("bwrap-tcp-run-missing-destination-port".to_owned())
+                    })?;
+                    tcp = Some(foxprox_tcp::SmoltcpTcpServer::new(
+                        config.smoltcp_ip,
+                        config.smoltcp_prefix_len,
+                        listen_port,
+                        config.max_packet_len,
+                    ));
+                }
+                if let (Some(tcp), IpAddr::V4(destination_ip)) =
+                    (tcp.as_mut(), event.destination.ip)
+                {
                     let _ = tcp.add_ip_address(destination_ip, config.smoltcp_prefix_len);
                 }
                 tcp_attribution = event.attribution.clone();
@@ -545,6 +562,9 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                 }
             }
         }
+        let Some(tcp) = tcp.as_mut() else {
+            continue;
+        };
         for outbound in tcp.accept_packet(packet) {
             tun.write_packet(&outbound)?;
         }
@@ -801,6 +821,18 @@ where
             ));
         }
     }
+    if command.as_os_str() == "bwrap-run" {
+        #[cfg(unix)]
+        {
+            return run_bwrap_run_args(args);
+        }
+        #[cfg(not(unix))]
+        {
+            return Err(CliError::Usage(
+                "bwrap-run command is only supported on Unix".to_owned(),
+            ));
+        }
+    }
     if command.as_os_str() == "http-proxy-once" {
         #[cfg(unix)]
         {
@@ -1034,6 +1066,201 @@ where
 }
 
 #[cfg(unix)]
+fn run_bwrap_run_args<I>(args: I) -> Result<(), CliError>
+where
+    I: Iterator<Item = PathBuf>,
+{
+    let config = parse_bwrap_run_args(args)?;
+    let summary = run_bwrap_tcp_once(&config)?;
+    for line in summary.audit_json_lines {
+        io::stdout()
+            .write_all(line.as_bytes())
+            .map_err(|error| CliError::Io {
+                context: "write-audit-stdout".to_owned(),
+                error,
+            })?;
+    }
+    if !summary.target_status_success {
+        return Err(CliError::Core(format!(
+            "bwrap-run-target-failed: status={:?}",
+            summary.target_status_code
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn parse_bwrap_run_args<I>(mut args: I) -> Result<BwrapTcpOnceConfig, CliError>
+where
+    I: Iterator<Item = PathBuf>,
+{
+    let mut bwrap_program = PathBuf::from("/usr/bin/bwrap");
+    let mut setup_program = default_foxproxsetup_path()?;
+    let mut address_cidr = "10.150.0.2/24".to_owned();
+    let mut broker_dns: IpAddr = "10.150.0.1".parse().unwrap();
+    let mut mtu = 1400_u16;
+    let mut ip_program = PathBuf::from("/usr/bin/ip");
+    let mut sandbox_id = format!("foxprox-{}", std::process::id());
+    let mut config_path = None;
+    let mut dns_upstream = None;
+    let mut max_packet_len = 4096_usize;
+    let mut max_packets = 10_000_usize;
+    let mut sandbox_buffer_len = 8192_usize;
+    let mut host_buffer_len = 8192_usize;
+    let mut extra_bwrap_args = Vec::new();
+    let mut use_default_root_bind = true;
+    let mut target_argv = Vec::new();
+
+    while let Some(flag) = args.next() {
+        if flag.as_os_str() == "--" {
+            target_argv.extend(args.map(|value| value.to_string_lossy().into_owned()));
+            break;
+        }
+        match flag.to_string_lossy().as_ref() {
+            "--bwrap" => bwrap_program = args.next().ok_or_else(bwrap_run_usage)?,
+            "--setup" => setup_program = args.next().ok_or_else(bwrap_run_usage)?,
+            "--address-cidr" => {
+                address_cidr = path_to_string(args.next().ok_or_else(bwrap_run_usage)?)
+            }
+            "--broker-dns" => {
+                broker_dns =
+                    parse_ip_arg("--broker-dns", &args.next().ok_or_else(bwrap_run_usage)?)?
+            }
+            "--dns-upstream" => {
+                dns_upstream = Some(parse_socket_addr_arg(
+                    "--dns-upstream",
+                    &args.next().ok_or_else(bwrap_run_usage)?,
+                )?)
+            }
+            "--mtu" => mtu = parse_u16_arg("--mtu", &args.next().ok_or_else(bwrap_run_usage)?)?,
+            "--ip-program" => ip_program = args.next().ok_or_else(bwrap_run_usage)?,
+            "--sandbox" => sandbox_id = path_to_string(args.next().ok_or_else(bwrap_run_usage)?),
+            "--config" => config_path = Some(args.next().ok_or_else(bwrap_run_usage)?),
+            "--max-packet-len" => {
+                max_packet_len = parse_usize_arg(
+                    "--max-packet-len",
+                    &args.next().ok_or_else(bwrap_run_usage)?,
+                )?
+            }
+            "--max-packets" => {
+                max_packets =
+                    parse_usize_arg("--max-packets", &args.next().ok_or_else(bwrap_run_usage)?)?
+            }
+            "--sandbox-buffer-len" => {
+                sandbox_buffer_len = parse_usize_arg(
+                    "--sandbox-buffer-len",
+                    &args.next().ok_or_else(bwrap_run_usage)?,
+                )?
+            }
+            "--host-buffer-len" => {
+                host_buffer_len = parse_usize_arg(
+                    "--host-buffer-len",
+                    &args.next().ok_or_else(bwrap_run_usage)?,
+                )?
+            }
+            "--extra-bwrap-arg" => {
+                extra_bwrap_args.push(path_to_string(args.next().ok_or_else(bwrap_run_usage)?));
+            }
+            "--no-default-root-bind" => use_default_root_bind = false,
+            _ => return Err(bwrap_run_usage()),
+        }
+    }
+
+    if target_argv.is_empty() || target_argv[0].trim().is_empty() {
+        return Err(bwrap_run_usage());
+    }
+    let dns_upstream = dns_upstream.ok_or_else(bwrap_run_usage)?;
+    let unique = unique_runtime_suffix();
+    let broker_socket = std::env::temp_dir().join(format!("foxprox-{unique}.sock"));
+    let resolv_source = std::env::temp_dir().join(format!("foxprox-{unique}.resolv.conf"));
+    fs::write(&resolv_source, "").map_err(|error| CliError::Io {
+        context: format!("create-resolver-bind-source {}", resolv_source.display()),
+        error,
+    })?;
+    let tun_name = format!("fpx{}", std::process::id() % 1_000_000);
+    let mut bwrap_args = Vec::new();
+    if use_default_root_bind {
+        bwrap_args.extend(["--dev-bind".to_owned(), "/".to_owned(), "/".to_owned()]);
+    }
+    bwrap_args.extend([
+        "--tmpfs".to_owned(),
+        "/etc".to_owned(),
+        "--bind".to_owned(),
+        resolv_source.display().to_string(),
+        "/etc/resolv.conf".to_owned(),
+    ]);
+    bwrap_args.extend(extra_bwrap_args);
+
+    let policy = if let Some(config_path) = config_path {
+        let config_toml = fs::read_to_string(&config_path).map_err(|error| CliError::Io {
+            context: format!("read-config {}", config_path.display()),
+            error,
+        })?;
+        policy_config_from_toml(&config_toml)?
+    } else {
+        PolicyConfig {
+            default_policy: DefaultPolicy::Allow,
+            dns: DnsPolicy {
+                broker_resolvers: vec![Endpoint::udp(broker_dns, 53)],
+                deny_direct_external_dns: true,
+            },
+            ..PolicyConfig::default()
+        }
+    };
+
+    Ok(BwrapTcpOnceConfig {
+        bwrap_program,
+        setup_program,
+        broker_socket,
+        tun_name,
+        address_cidr,
+        mtu,
+        resolv_conf: PathBuf::from("/etc/resolv.conf"),
+        broker_dns,
+        dns_upstream: Some(dns_upstream),
+        ip_program,
+        extra_bwrap_args: bwrap_args,
+        target_argv,
+        sandbox_id,
+        policy,
+        dns_cache: DnsAttributionCache::new(),
+        smoltcp_ip: match broker_dns {
+            IpAddr::V4(ip) => ip,
+            IpAddr::V6(_) => {
+                return Err(CliError::Usage(
+                    "bwrap-run broker DNS must be IPv4".to_owned(),
+                ))
+            }
+        },
+        smoltcp_prefix_len: 24,
+        listen_port: None,
+        upstream_addr: None,
+        max_packet_len,
+        max_packets,
+        sandbox_buffer_len,
+        host_buffer_len,
+    })
+}
+
+#[cfg(unix)]
+fn default_foxproxsetup_path() -> Result<PathBuf, CliError> {
+    let current = std::env::current_exe().map_err(|error| CliError::Io {
+        context: "resolve-current-exe".to_owned(),
+        error,
+    })?;
+    Ok(current.with_file_name("foxproxsetup"))
+}
+
+#[cfg(unix)]
+fn unique_runtime_suffix() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
+    format!("{}-{millis}", std::process::id())
+}
+
+#[cfg(unix)]
 fn parse_bwrap_tcp_once_args<I>(mut args: I) -> Result<BwrapTcpOnceConfig, CliError>
 where
     I: Iterator<Item = PathBuf>,
@@ -1197,7 +1424,7 @@ where
         dns_cache,
         smoltcp_ip: listen_ip.ok_or_else(bwrap_tcp_once_usage)?,
         smoltcp_prefix_len: listen_prefix.ok_or_else(bwrap_tcp_once_usage)?,
-        listen_port: listen_port.ok_or_else(bwrap_tcp_once_usage)?,
+        listen_port,
         upstream_addr,
         max_packet_len: max_packet_len.ok_or_else(bwrap_tcp_once_usage)?,
         max_packets: max_packets.ok_or_else(bwrap_tcp_once_usage)?,
@@ -1343,13 +1570,21 @@ fn parse_dns_attribution_arg(flag: &str, value: &Path) -> Result<(String, Ipv4Ad
 }
 
 #[cfg(unix)]
+fn bwrap_run_usage() -> CliError {
+    CliError::Usage(
+        "usage: foxprox-cli bwrap-run --dns-upstream IP:PORT [--sandbox ID] [--config policy.toml] [--bwrap PROGRAM] [--setup PROGRAM] [--address-cidr CIDR] [--broker-dns IP] [--mtu MTU] [--ip-program PATH] [--extra-bwrap-arg ARG ...] [--no-default-root-bind] -- TARGET [ARGS...]"
+            .to_owned(),
+    )
+}
+
+#[cfg(unix)]
 fn bwrap_tcp_once_usage() -> CliError {
     CliError::Usage(bwrap_tcp_once_usage_text().to_owned())
 }
 
 #[cfg(unix)]
 fn bwrap_tcp_once_usage_text() -> &'static str {
-    "usage: foxprox-cli bwrap-tcp-once --bwrap PROGRAM --setup PROGRAM --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP --listen-ip IP --listen-port PORT --sandbox ID [--config policy.toml] [--dns-upstream IP:PORT] [--upstream IP:PORT] [--ip-program PATH] [--listen-prefix N] [--extra-bwrap-arg ARG ...] -- TARGET [ARGS...]"
+    "usage: foxprox-cli bwrap-tcp-once --bwrap PROGRAM --setup PROGRAM --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP --listen-ip IP --sandbox ID [--listen-port PORT] [--config policy.toml] [--dns-upstream IP:PORT] [--upstream IP:PORT] [--ip-program PATH] [--listen-prefix N] [--extra-bwrap-arg ARG ...] -- TARGET [ARGS...]"
 }
 
 #[cfg(unix)]
@@ -1426,7 +1661,7 @@ fn run_packet_once_command(
 
 fn usage() -> CliError {
     CliError::Usage(
-        "usage: foxprox-cli packet-once --config <policy.toml> --sandbox <id> [--outbound <packet.bin>] < packet.bin\n       foxprox-cli bwrap-tcp-once --bwrap PROGRAM --setup PROGRAM --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP --listen-ip IP --listen-port PORT --sandbox ID [--config policy.toml] [--dns-upstream IP:PORT] [--upstream IP:PORT] [--ip-program PATH] [--listen-prefix N] [--extra-bwrap-arg ARG ...] -- TARGET [ARGS...]\n       foxprox-cli setup --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP [--tun-device PATH] [--ip-program PATH] -- TARGET [ARGS...]"
+        "usage: foxprox-cli packet-once --config <policy.toml> --sandbox <id> [--outbound <packet.bin>] < packet.bin\n       foxprox-cli bwrap-run --dns-upstream IP:PORT [--sandbox ID] [--config policy.toml] -- TARGET [ARGS...]\n       foxprox-cli bwrap-tcp-once --bwrap PROGRAM --setup PROGRAM --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP --listen-ip IP --sandbox ID [--listen-port PORT] [--config policy.toml] [--dns-upstream IP:PORT] [--upstream IP:PORT] [--ip-program PATH] [--listen-prefix N] [--extra-bwrap-arg ARG ...] -- TARGET [ARGS...]\n       foxprox-cli setup --broker-socket PATH --tun-name NAME --address-cidr CIDR --mtu MTU --resolv-conf PATH --broker-dns IP [--tun-device PATH] [--ip-program PATH] -- TARGET [ARGS...]"
             .to_owned(),
     )
 }
@@ -1845,7 +2080,7 @@ mod tests {
         assert_eq!(config.broker_dns, "10.0.0.1".parse::<IpAddr>().unwrap());
         assert_eq!(config.dns_upstream, Some("127.0.0.1:53".parse().unwrap()));
         assert_eq!(config.smoltcp_ip, Ipv4Addr::new(10, 0, 0, 1));
-        assert_eq!(config.listen_port, 8080);
+        assert_eq!(config.listen_port, Some(8080));
         assert_eq!(
             config.upstream_addr,
             Some("127.0.0.1:18080".parse().unwrap())
@@ -1855,6 +2090,51 @@ mod tests {
         assert_eq!(config.max_packets, 8);
         assert_eq!(config.extra_bwrap_args, ["--dev-bind", "/", "/"]);
         assert_eq!(config.target_argv, ["curl", "http://10.0.0.1:8080/"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bwrap_run_arg_parser_builds_production_defaults() {
+        let config = parse_bwrap_run_args(
+            [
+                "--dns-upstream",
+                "127.0.0.1:53",
+                "--sandbox",
+                "run-test",
+                "--max-packets",
+                "12",
+                "--",
+                "curl",
+                "http://example.com/",
+            ]
+            .into_iter()
+            .map(PathBuf::from),
+        )
+        .unwrap();
+
+        assert_eq!(config.bwrap_program, PathBuf::from("/usr/bin/bwrap"));
+        assert!(config.setup_program.ends_with("foxproxsetup"));
+        assert_eq!(config.address_cidr, "10.150.0.2/24");
+        assert_eq!(config.broker_dns, "10.150.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(config.dns_upstream, Some("127.0.0.1:53".parse().unwrap()));
+        assert_eq!(config.resolv_conf, PathBuf::from("/etc/resolv.conf"));
+        assert_eq!(config.smoltcp_ip, Ipv4Addr::new(10, 150, 0, 1));
+        assert_eq!(config.listen_port, None);
+        assert_eq!(config.max_packets, 12);
+        assert_eq!(config.sandbox_id, "run-test");
+        assert_eq!(config.target_argv, ["curl", "http://example.com/"]);
+        assert!(config
+            .extra_bwrap_args
+            .windows(3)
+            .any(|window| window == ["--dev-bind", "/", "/"]));
+        assert!(config
+            .extra_bwrap_args
+            .windows(3)
+            .any(|window| window[0] == "--bind" && window[2] == "/etc/resolv.conf"));
+        assert_eq!(
+            config.policy.dns.broker_resolvers,
+            vec![Endpoint::udp(config.broker_dns, 53)]
+        );
     }
 
     #[test]

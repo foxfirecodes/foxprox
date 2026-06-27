@@ -14,9 +14,28 @@ cargo build --workspace
 
 The live smoke tests require unprivileged user namespaces, `bwrap`, and access to `/dev/net/tun`.
 
-## Transparent bwrap TCP/HTTP/TLS one-shot
+## Production-shaped bwrap launcher
 
-`foxprox-cli bwrap-tcp-once` starts a `bwrap` sandbox, runs `foxproxsetup` inside the setup phase with temporary `CAP_NET_ADMIN`, receives the TUN fd over a Unix socket, drops `CAP_NET_ADMIN` before the target command, and brokers ICMP, DNS, UDP, and one TCP flow through the received TUN fd. TCP uses smoltcp; UDP uses original-destination host UDP egress with synthesized TUN responses; allowed ICMP echo receives a synthetic reply.
+`foxprox-cli bwrap-run` is the alpha launcher intended for running arbitrary commands inside a real `bwrap` network namespace with foxprox mediation. It chooses temporary broker paths, runs `foxproxsetup` inside the setup phase with temporary `CAP_NET_ADMIN`, receives the TUN fd over a Unix socket, drops `CAP_NET_ADMIN` before the target command, installs broker DNS in the sandbox, and brokers ICMP, DNS, UDP, and the first TCP flow through the received TUN fd. TCP uses smoltcp with the original destination from the SYN; UDP uses original-destination host UDP egress with synthesized TUN responses; allowed ICMP echo receives a synthetic reply.
+
+Stdout is reserved for foxprox JSON-lines audit. The target command's stdout is suppressed in the current alpha launcher so audit stdout remains machine-parseable; target stderr is still visible on launcher stderr.
+
+Example:
+
+```sh
+cargo build --workspace
+cargo run -p foxprox-cli -- bwrap-run \
+  --dns-upstream 1.1.1.1:53 \
+  --sandbox alpha-demo \
+  -- \
+  /usr/bin/curl --ipv4 --max-time 5 --silent --show-error http://example.com/
+```
+
+Optional flags include `--config policy.toml`, `--address-cidr 10.150.0.2/24`, `--broker-dns 10.150.0.1`, `--extra-bwrap-arg ARG`, and `--no-default-root-bind` for callers that want to provide their own filesystem sandbox arguments.
+
+## Low-level transparent bwrap TCP/HTTP/TLS one-shot
+
+`foxprox-cli bwrap-tcp-once` exposes the lower-level launcher contract used by the tests and by `bwrap-run`. It accepts explicit broker socket, resolver, TUN name, and setup paths while brokering the same ICMP/DNS/UDP/TCP paths.
 
 Example HTTP request to an original destination address, with the sandbox resolver also wired through the broker for hostname-based targets:
 
@@ -104,7 +123,7 @@ Live bwrap/TUN evidence:
 cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture
 ```
 
-The live suite currently covers setup/fd handoff, ICMP write-back, UDP forwarding, DNS-over-TUN, smoltcp TCP forwarding, original-destination transparent TCP and UDP egress, CLI ICMP echo handling, DNS-to-TCP attribution in one real bwrap run, HTTP allow/deny audit, TLS SNI audit, and CLI JSON audit output.
+The live suite currently covers setup/fd handoff, ICMP write-back, UDP forwarding, DNS-over-TUN, smoltcp TCP forwarding, original-destination transparent TCP and UDP egress, CLI ICMP echo handling, production `bwrap-run` arbitrary-command DNS+TCP, DNS-to-TCP attribution in one real bwrap run, HTTP allow/deny audit, TLS SNI audit, and CLI JSON audit output.
 
 ## Current alpha boundary
 

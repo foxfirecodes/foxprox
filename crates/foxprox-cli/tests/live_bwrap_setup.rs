@@ -397,7 +397,7 @@ fn live_bwrap_tcp_connection_uses_smoltcp_and_host_stream() {
         dns_cache: DnsAttributionCache::new(),
         smoltcp_ip: Ipv4Addr::new(10, 129, 0, 1),
         smoltcp_prefix_len: 24,
-        listen_port: 8080,
+        listen_port: Some(8080),
         upstream_addr: Some(upstream_addr),
         max_packet_len: 4096,
         max_packets: 16,
@@ -484,7 +484,7 @@ fn live_bwrap_tls_client_hello_emits_sni_audit() {
         dns_cache,
         smoltcp_ip: Ipv4Addr::new(10, 134, 0, 1),
         smoltcp_prefix_len: 24,
-        listen_port: 443,
+        listen_port: Some(443),
         upstream_addr: Some(upstream_addr),
         max_packet_len: 4096,
         max_packets: 32,
@@ -571,7 +571,7 @@ fn live_bwrap_curl_fetches_http_through_smoltcp_launcher() {
         dns_cache: DnsAttributionCache::new(),
         smoltcp_ip: Ipv4Addr::new(10, 130, 0, 1),
         smoltcp_prefix_len: 24,
-        listen_port: 8080,
+        listen_port: Some(8080),
         upstream_addr: Some(upstream_addr),
         max_packet_len: 4096,
         max_packets: 32,
@@ -1051,6 +1051,113 @@ deny_direct_external_dns = true
     assert!(stdout.contains("\"kind\":\"tcp_connect\""));
     assert!(stdout.contains("\"hostname_attribution_source\":\"dns_cache\""));
     assert!(stdout.contains("\"kind\":\"http_request\""));
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+#[ignore = "requires bwrap, /dev/net/tun, user namespaces, curl, and Python in the sandbox"]
+fn live_cli_bwrap_run_executes_arbitrary_command_with_dns_and_tcp() {
+    let Some(_bwrap) = existing_path("/usr/bin/bwrap") else {
+        eprintln!("skipping live bwrap-run smoke: /usr/bin/bwrap missing");
+        return;
+    };
+    if !Path::new("/dev/net/tun").exists() {
+        eprintln!("skipping live bwrap-run smoke: /dev/net/tun missing");
+        return;
+    }
+    let Some(curl) = existing_path("/usr/bin/curl") else {
+        eprintln!("skipping live bwrap-run smoke: /usr/bin/curl missing");
+        return;
+    };
+    let Some(host_ip) = local_host_ipv4() else {
+        eprintln!("skipping live bwrap-run smoke: no non-loopback host IPv4");
+        return;
+    };
+    let setup = foxproxsetup_path();
+    let cli = foxprox_cli_path();
+    let dir = unique_test_dir("live-bwrap-run");
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let dns_upstream = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    dns_upstream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let dns_upstream_addr = dns_upstream.local_addr().unwrap();
+    let dns_thread = std::thread::spawn(move || {
+        let mut buffer = [0_u8; 512];
+        let (length, peer) = dns_upstream.recv_from(&mut buffer).unwrap();
+        let query = &buffer[..length];
+        assert!(query
+            .windows(b"alpha-run".len())
+            .any(|window| window == b"alpha-run"));
+        let response = dns_a_response(query, host_ip.octets(), 60);
+        dns_upstream.send_to(&response, peer).unwrap();
+    });
+
+    let upstream = TcpListener::bind((host_ip, 0)).unwrap();
+    upstream.set_nonblocking(true).unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let upstream_thread = std::thread::spawn(move || {
+        let start = std::time::Instant::now();
+        let (mut stream, _) = loop {
+            match upstream.accept() {
+                Ok(accepted) => break accepted,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        start.elapsed() < Duration::from_secs(10),
+                        "bwrap-run upstream accept timed out"
+                    );
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(error) => panic!("bwrap-run upstream accept failed: {error}"),
+            }
+        };
+        let mut buffer = [0_u8; 1024];
+        let length = stream.read(&mut buffer).unwrap();
+        let request = String::from_utf8_lossy(&buffer[..length]);
+        assert!(request.starts_with("GET / HTTP/1.1"));
+        assert!(request.contains("Host: alpha-run.test"));
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+            .unwrap();
+    });
+
+    let output = Command::new(cli)
+        .arg("bwrap-run")
+        .arg("--setup")
+        .arg(setup)
+        .arg("--dns-upstream")
+        .arg(dns_upstream_addr.to_string())
+        .args(["--sandbox", "live-bwrap-run", "--max-packets", "96", "--"])
+        .arg(curl)
+        .args([
+            "--ipv4",
+            "--max-time",
+            "5",
+            "--silent",
+            "--show-error",
+            &format!("http://alpha-run.test:{}/", upstream_addr.port()),
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    dns_thread.join().unwrap();
+    upstream_thread.join().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout
+        .lines()
+        .all(|line| line.starts_with('{') && line.ends_with('}')));
+    assert!(!stdout.contains("ok"));
+    assert!(stdout.contains("\"kind\":\"dns_query\""));
+    assert!(stdout.contains("\"kind\":\"tcp_connect\""));
+    assert!(stdout.contains("\"kind\":\"http_request\""));
+    assert!(stdout.contains("\"hostname_attribution_source\":\"dns_cache\""));
     std::fs::remove_dir_all(dir).unwrap();
 }
 
