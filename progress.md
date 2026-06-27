@@ -1635,3 +1635,26 @@ This is an append-only implementation ledger for `docs/implementation-approach-s
   * existing DNS port 53 remains broker-controlled and is skipped by generic UDP mapping.
 * Audit evidence: real bwrap UDP e2e asserts `udp_packet` and `decision:"allow"` in the JSON audit stream.
 * Residual risk: UDP alpha uses simple last-peer reply routing per mapped port; production multi-client UDP flow tables and expiration audits are present in core but not yet fully surfaced through the launcher runtime.
+
+## 2026-06-26 - Fully transparent real-domain curl results
+
+* Product code added/updated:
+  * `--allow-domain HOST` now opens transparent alpha TCP listeners for common HTTP(S) ports 80 and 443 and allows broker DNS for the same host, so sandbox commands can run `curl http://HOST/` without `--tcp-map` or curl `--connect-to` overrides.
+  * non-DNS `--allow-domain HOST:PORT` now also adds the required broker-DNS allow rule for hostname resolution.
+  * smoltcp alpha runtime installs a default IPv4 route through the broker address while AnyIP is enabled, allowing packets to DNS-returned external IPs to be accepted by the broker stack.
+  * launcher unsets inherited proxy environment variables inside bwrap so tests and real runs exercise TUN forwarding rather than ambient HTTP proxy settings.
+  * audit writes tolerate closed stdout pipes without panicking.
+  * README now documents the direct `curl http://example.com/` flow.
+* Tests added/updated:
+  * ignored real bwrap e2e `foxprox_launches_bwrap_and_curls_real_domain_transparently` runs sandbox `curl http://example.com/`, resolves via broker DNS, connects to the returned IP through TUN, and asserts HTML plus DNS/TCP/dns_attribution audit evidence.
+* Commands run:
+  * Manual transparent run passed: `target/debug/foxprox --setup-helper target/debug/foxproxsetup --allow-domain example.com --dns-upstream 1.1.1.1:53 -- curl http://example.com/` returned the Example Domain HTML and emitted DNS query/response plus `tcp_connect allow` with `dns_attribution:"example.com"`.
+  * `cargo test -p foxprox-cli foxprox_launches_bwrap_and_curls_real_domain_transparently -- --ignored --nocapture` — passed after an initial transient upstream DNS failure on the first run.
+  * `cargo test -p foxprox-cli --test foxprox -- --ignored --nocapture` — passed all 5 real bwrap alpha e2e tests.
+  * `cargo fmt && cargo test && cargo clippy --all-targets --all-features -- -D warnings` — passed: CLI 2 unit tests plus 7 ignored e2e/setup tests, core 161 unit tests plus 2 parser fuzz-smoke tests, device 3 tests plus 2 ignored, integrations 8 tests, net 2 tests plus 7 ignored, doc tests, and clippy completed cleanly.
+* Observed allow/deny/fail-closed behavior:
+  * ordinary external TCP is now allowed only after broker DNS attribution matches a configured domain policy.
+  * DNS still defaults to deny without an allow-domain rule.
+  * inherited proxy env is stripped to avoid bypassing TUN mediation.
+* Audit evidence: real transparent curl e2e asserts `dns_query`, `tcp_connect`, `decision:"allow"`, and `dns_attribution:"example.com"` in the JSON audit stream.
+* Residual risk: HTTPS SNI inspection is implemented in core but not yet surfaced in the launcher runtime; current transparent alpha relies on DNS attribution for `--allow-domain` TCP allows.

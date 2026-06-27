@@ -82,6 +82,9 @@ where
     iface_config.random_seed = 0x5eed_f00d;
     let mut iface = Interface::new(iface_config, &mut device, Instant::from_millis(0));
     iface.set_any_ip(true);
+    if let IpAddr::V4(broker_v4) = config.broker_ip {
+        let _ = iface.routes_mut().add_default_ipv4_route(broker_v4);
+    }
     iface.update_ip_addrs(|addrs| {
         addrs
             .push(IpCidr::new(
@@ -506,7 +509,7 @@ fn drive_dns(
 
 fn emit_audit(config: &AlphaBrokerConfig, event: AuditEvent) {
     if config.audit_stdout {
-        println!("{}", event.to_json_line());
+        let _ = writeln!(io::stdout(), "{}", event.to_json_line());
     }
 }
 

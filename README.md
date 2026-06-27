@@ -19,6 +19,18 @@ The current alpha includes a usable bwrap-based transparent sandbox launcher:
 cargo build --workspace
 ```
 
+### Example: curl a real site transparently
+
+```sh
+target/debug/foxprox \
+  --allow-domain example.com \
+  --dns-upstream 1.1.1.1:53 \
+  -- \
+  curl http://example.com/
+```
+
+The sandbox resolves `example.com` through broker-controlled DNS (`10.0.0.2`), then connects to the returned IP through the TUN route. The broker uses DNS attribution to allow the TCP connection and opens the host socket itself.
+
 ### Example: map sandbox TCP to a host service
 
 ```sh
@@ -57,7 +69,7 @@ Without a matching allow rule, sandbox DNS receives a bounded REFUSED response a
 - `--tcp-map SANDBOX_IP:PORT=HOST_IP:PORT`: listen inside the sandbox at `SANDBOX_IP:PORT`, but connect from the broker to `HOST_IP:PORT` after policy allow.
 - `--allow-udp IP:PORT`: allow transparent UDP egress to an IP/port directly.
 - `--udp-map SANDBOX_IP:PORT=HOST_IP:PORT`: listen inside the sandbox at `SANDBOX_IP:PORT`, but send from the broker to `HOST_IP:PORT` after policy allow.
-- `--allow-domain HOST[:PORT]`: allow domain policy for broker DNS queries; use port `53` for DNS forwarding.
+- `--allow-domain HOST[:PORT]`: allow domain policy. Without a port, alpha listens transparently for common HTTP(S) ports 80 and 443 and allows broker DNS for that host. With a non-53 port, alpha also adds the DNS allow needed to resolve that host.
 - `--dns-upstream IP:PORT`: upstream resolver used for allowed broker DNS queries.
 - `--setup-helper PATH`: path to `foxproxsetup` when it is not adjacent to `foxprox`.
 - `--max-runtime-ms N`: stop the broker after a bounded runtime.

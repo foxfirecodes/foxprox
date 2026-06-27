@@ -56,6 +56,51 @@ fn foxprox_launches_bwrap_and_bridges_allowed_tcp() {
 
 #[test]
 #[ignore = "requires bwrap with user/network namespace and /dev/net/tun access"]
+fn foxprox_launches_bwrap_and_curls_real_domain_transparently() {
+    let output = Command::new(env!("CARGO_BIN_EXE_foxprox"))
+        .args([
+            "--setup-helper",
+            env!("CARGO_BIN_EXE_foxproxsetup"),
+            "--allow-domain",
+            "example.com",
+            "--dns-upstream",
+            "1.1.1.1:53",
+            "--max-runtime-ms",
+            "10000",
+            "--",
+            "curl",
+            "-sS",
+            "--max-time",
+            "8",
+            "http://example.com/",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "transparent curl failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Example Domain"), "stdout was {stdout}");
+    assert!(
+        stdout.contains("\"kind\":\"dns_query\""),
+        "stdout was {stdout}"
+    );
+    assert!(
+        stdout.contains("\"kind\":\"tcp_connect\""),
+        "stdout was {stdout}"
+    );
+    assert!(
+        stdout.contains("\"dns_attribution\":\"example.com\""),
+        "stdout was {stdout}"
+    );
+}
+
+#[test]
+#[ignore = "requires bwrap with user/network namespace and /dev/net/tun access"]
 fn foxprox_launches_bwrap_and_bridges_allowed_udp() {
     let server = UdpSocket::bind("127.0.0.1:0").unwrap();
     let host_addr = server.local_addr().unwrap();

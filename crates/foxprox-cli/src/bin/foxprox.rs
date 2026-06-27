@@ -50,6 +50,22 @@ fn run(args: Vec<OsString>) -> Result<(), String> {
             "--ro-bind-data",
             &resolv_conf.as_raw_fd().to_string(),
             "/run/systemd/resolve/stub-resolv.conf",
+            "--unsetenv",
+            "HTTP_PROXY",
+            "--unsetenv",
+            "HTTPS_PROXY",
+            "--unsetenv",
+            "ALL_PROXY",
+            "--unsetenv",
+            "NO_PROXY",
+            "--unsetenv",
+            "http_proxy",
+            "--unsetenv",
+            "https_proxy",
+            "--unsetenv",
+            "all_proxy",
+            "--unsetenv",
+            "no_proxy",
             "--unshare-user",
             "--unshare-net",
             "--cap-add",
@@ -246,12 +262,25 @@ impl CliConfig {
                 }
                 "--allow-domain" => {
                     let (host, port) = parse_host_port(value)?;
+                    let matcher = HostMatcher::exact(&host)
+                        .map_err(|error| format!("invalid domain: {error:?}"))?;
                     policy.rules.push(PolicyRule::allow_domain(
                         format!("allow-domain-{host}"),
-                        HostMatcher::exact(&host)
-                            .map_err(|error| format!("invalid domain: {error:?}"))?,
+                        matcher.clone(),
                         port,
                     ));
+                    if port.is_some() && port != Some(53) {
+                        policy.rules.push(PolicyRule::allow_domain(
+                            format!("allow-domain-dns-{host}"),
+                            matcher,
+                            Some(53),
+                        ));
+                    }
+                    match port {
+                        Some(53) => {}
+                        Some(port) => tcp_listen_ports.push(port),
+                        None => tcp_listen_ports.extend([80, 443]),
+                    }
                 }
                 "--dns-upstream" => {
                     dns_upstream = Some(

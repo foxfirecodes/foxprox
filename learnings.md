@@ -301,3 +301,11 @@ On this host `/etc/resolv.conf` is a symlink to `/run/systemd/resolve/stub-resol
 ## 2026-06-25 - smoltcp alpha runtime needs AnyIP for transparent TUN destinations
 
 A broker address like `10.0.0.2` can accept transparent connections for mapped destinations when smoltcp `Interface::set_any_ip(true)` is enabled. Policy and egress mapping must still decide the actual host socket before opening it.
+
+## 2026-06-26 - Transparent external TUN forwarding needs smoltcp default route
+
+Enabling AnyIP alone was not enough for smoltcp to accept packets addressed to DNS-returned external IPs. The alpha broker also needs a default IPv4 route via its configured broker IP for AnyIP to accept routed external destinations.
+
+## 2026-06-26 - Launcher tests must remove ambient proxy environment
+
+Host `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` variables can leak into bwrap and make curl bypass the intended TUN path. The launcher now unsets proxy env vars inside the sandbox before executing the target.
