@@ -983,6 +983,86 @@ fn foxprox_run_bwrap_alpha_command_bridges_transparent_tcp() {
     assert!(stdout.contains(&host_addr.ip().to_string()), "{stdout}");
 }
 
+#[test]
+#[ignore = "requires rootless bwrap, /dev/net/tun, CAP_NET_ADMIN inside bwrap, and combined foxprox alpha transparent UDP"]
+fn foxprox_run_bwrap_alpha_command_bridges_transparent_udp() {
+    let foxprox = env!("CARGO_BIN_EXE_foxprox");
+    let setup_helper = env!("CARGO_BIN_EXE_foxproxsetup");
+    assert!(std::path::Path::new(foxprox).exists());
+    assert!(std::path::Path::new(setup_helper).exists());
+    assert!(std::path::Path::new("/dev/net/tun").exists());
+
+    let host_ip = host_primary_ipv4();
+    let host_socket = std::net::UdpSocket::bind((host_ip, 0)).unwrap();
+    let host_addr = host_socket.local_addr().unwrap();
+    let (server_tx, server_rx) = std::sync::mpsc::channel();
+    let host_server = std::thread::spawn(move || {
+        let mut request = [0u8; 64];
+        let (len, peer) = host_socket.recv_from(&mut request).unwrap();
+        host_socket.send_to(b"pong", peer).unwrap();
+        server_tx.send((peer, request[..len].to_vec())).unwrap();
+    });
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_path =
+        std::env::temp_dir().join(format!("foxprox-run-bwrap-alpha-udp-{unique}.json"));
+    let mut config = BrokerRuntimeConfig::alpha_default(format!("foxprox-alpha-udp-e2e-{unique}"));
+    config.setup.tun_name = format!("fxu{:x}", std::process::id() % 0x00ff_ffff);
+    config.policy = PolicyConfig {
+        default_decision: Decision::Allow,
+        ..PolicyConfig::default()
+    };
+    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+
+    let script = format!(
+        concat!(
+            "import socket; ",
+            "s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); ",
+            "s.settimeout(5.0); ",
+            "s.sendto(b'ping', ({host:?}, {port})); ",
+            "data,_=s.recvfrom(64); ",
+            "assert data == b'pong', data; ",
+            "s.close()"
+        ),
+        host = host_addr.ip().to_string(),
+        port = host_addr.port()
+    );
+    let setup_dir = std::path::Path::new(setup_helper).parent().unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!("{}:{}", setup_dir.display(), path.to_string_lossy());
+    let output = Command::new(foxprox)
+        .env("PATH", path)
+        .arg("run-bwrap-alpha")
+        .arg(&config_path)
+        .arg("--")
+        .arg("python3")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("foxprox alpha UDP launcher command runs");
+    let _ = std::fs::remove_file(&config_path);
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_peer, request) = server_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("host UDP socket receives datagram through alpha launcher");
+    assert_eq!(request, b"ping");
+    host_server.join().unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("udp_exchange"), "{stdout}");
+    assert!(stdout.contains("to_sandbox"), "{stdout}");
+    assert!(stdout.contains(&host_addr.ip().to_string()), "{stdout}");
+}
+
 fn host_primary_ipv4() -> std::net::Ipv4Addr {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
     socket.connect("1.1.1.1:53").unwrap();
