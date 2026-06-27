@@ -186,6 +186,67 @@ impl<U: DnsUpstream> foxprox_stack::UdpDatagramExchange for DnsUdpExchange<U> {
     }
 }
 
+pub struct BrokerDnsOrDirectUdpExchange<U> {
+    broker_dns_endpoint: NetworkEndpoint,
+    dns: DnsUdpExchange<U>,
+    direct: BlockingUdpExchange,
+    last_route_was_dns: bool,
+}
+
+impl<U: DnsUpstream> BrokerDnsOrDirectUdpExchange<U> {
+    pub fn new(
+        broker_dns_endpoint: NetworkEndpoint,
+        dns: DnsUdpExchange<U>,
+        direct: BlockingUdpExchange,
+    ) -> Self {
+        Self {
+            broker_dns_endpoint,
+            dns,
+            direct,
+            last_route_was_dns: false,
+        }
+    }
+
+    pub fn dns(&self) -> &DnsUdpExchange<U> {
+        &self.dns
+    }
+}
+
+impl<U: DnsUpstream> foxprox_stack::UdpDatagramExchange for BrokerDnsOrDirectUdpExchange<U> {
+    fn exchange_datagram(
+        &mut self,
+        destination: NetworkEndpoint,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, foxprox_stack::UdpExchangeError> {
+        self.last_route_was_dns = destination == self.broker_dns_endpoint;
+        if self.last_route_was_dns {
+            self.dns.exchange_datagram(destination, payload)
+        } else {
+            self.direct.exchange_datagram(destination, payload)
+        }
+    }
+
+    fn handles_policy_for(&self, destination: NetworkEndpoint) -> bool {
+        destination == self.broker_dns_endpoint
+    }
+
+    fn on_datagram_delivered(&mut self) {
+        if self.last_route_was_dns {
+            self.dns.on_datagram_delivered();
+        }
+    }
+
+    fn datagram_decision(&self) -> Option<(Decision, Option<DenialReason>)> {
+        self.last_route_was_dns
+            .then(|| self.dns.datagram_decision())
+            .flatten()
+    }
+
+    fn audit_records(&self) -> Vec<AuditRecord> {
+        self.dns.audit_records()
+    }
+}
+
 impl foxprox_stack::UdpDatagramExchange for BlockingUdpExchange {
     fn exchange_datagram(
         &mut self,
@@ -3164,6 +3225,41 @@ pub enum ReceivedTunUdpExchangeDrainError {
 }
 
 #[cfg(unix)]
+pub struct ReceivedTunAlphaRuntimeSession<'a, T, U> {
+    pub setup_source: String,
+    pub setup_records: &'a [AuditRecord],
+    pub received: foxprox_device::ReceivedTunFd,
+    pub sandbox_id: String,
+    pub broker: BrokerCore,
+    pub stack: foxprox_stack::SmoltcpIpStack,
+    pub tcp_egress: T,
+    pub udp_egress: U,
+    pub now_ms: i64,
+    pub max_steps: usize,
+    pub max_from_sandbox_bytes: usize,
+    pub idle_sleep: Duration,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub struct ReceivedTunAlphaRuntimeDrainReport {
+    pub setup_ingest: RuntimeAuditIngestReport,
+    pub transport_events: Vec<foxprox_stack::TransportBridgeEvidence>,
+    pub broker_ingest: RuntimeAuditIngestReport,
+    pub egress_ingest: RuntimeAuditIngestReport,
+    pub final_drain: RuntimeAuditDrainReport,
+}
+
+#[cfg(unix)]
+#[derive(Debug)]
+pub enum ReceivedTunAlphaRuntimeDrainError {
+    Ingest(RuntimeAuditFanInError),
+    Fd(std::io::Error),
+    Transport(foxprox_stack::TransportBridgeError),
+    Drain(RuntimeAuditDrainError),
+}
+
+#[cfg(unix)]
 pub async fn drain_setup_audits_and_read_packet_fd_once<F, W>(
     setup_source: impl Into<String>,
     setup_records: &[AuditRecord],
@@ -3569,6 +3665,112 @@ where
         setup_ingest,
         udp_bridge,
         broker_ingest,
+        final_drain,
+    })
+}
+
+#[cfg(unix)]
+pub fn run_received_tun_fd_alpha_runtime_and_drain<T, U, W>(
+    session: ReceivedTunAlphaRuntimeSession<'_, T, U>,
+    fan_in: &mut RuntimeAuditFanIn,
+    sink: &mut JsonLineAuditSink<W>,
+    cancellation: &AsyncRuntimeCancellationToken,
+) -> Result<ReceivedTunAlphaRuntimeDrainReport, ReceivedTunAlphaRuntimeDrainError>
+where
+    T: TcpEgress,
+    U: foxprox_stack::UdpDatagramExchange,
+    W: Write,
+{
+    let ReceivedTunAlphaRuntimeSession {
+        setup_source,
+        setup_records,
+        received,
+        sandbox_id,
+        broker,
+        stack,
+        mut tcp_egress,
+        mut udp_egress,
+        now_ms,
+        max_steps,
+        max_from_sandbox_bytes,
+        idle_sleep,
+    } = session;
+    let setup_ingest = match ingest_resequenced_records(setup_source, setup_records, fan_in) {
+        Ok(report) => report,
+        Err(error) => {
+            fan_in
+                .drain_to_sink(sink)
+                .map_err(ReceivedTunAlphaRuntimeDrainError::Drain)?;
+            return Err(ReceivedTunAlphaRuntimeDrainError::Ingest(error));
+        }
+    };
+    if let Err(error) = foxprox_device::set_fd_nonblocking(&received.fd, true) {
+        fan_in
+            .drain_to_sink(sink)
+            .map_err(ReceivedTunAlphaRuntimeDrainError::Drain)?;
+        return Err(ReceivedTunAlphaRuntimeDrainError::Fd(error));
+    }
+    let mtu = stack.mtu();
+    let (device, _handoff) = received.into_file_device(mtu);
+    let mut bridge = foxprox_stack::SmoltcpTunBridge::new(sandbox_id, broker, stack, device);
+    let mut transport_events = Vec::new();
+    for step in 0..max_steps.max(1) {
+        if cancellation.is_cancelled() {
+            break;
+        }
+        match bridge.bridge_next_transport_to_egress(
+            &mut tcp_egress,
+            &mut udp_egress,
+            now_ms.saturating_add(step as i64),
+            max_from_sandbox_bytes,
+        ) {
+            Ok(Some(event)) => transport_events.push(event),
+            Ok(None) => {
+                if idle_sleep > Duration::ZERO {
+                    std::thread::sleep(idle_sleep);
+                }
+            }
+            Err(error) => {
+                let mut broker_records: Vec<_> =
+                    bridge.broker().audit().records().cloned().collect();
+                broker_records.extend(udp_egress.audit_records());
+                let _ = ingest_resequenced_records("alpha_runtime", &broker_records, fan_in);
+                fan_in
+                    .drain_to_sink(sink)
+                    .map_err(ReceivedTunAlphaRuntimeDrainError::Drain)?;
+                return Err(ReceivedTunAlphaRuntimeDrainError::Transport(error));
+            }
+        }
+    }
+    let broker_records: Vec<_> = bridge.broker().audit().records().cloned().collect();
+    let broker_ingest = match ingest_resequenced_records("alpha_runtime", &broker_records, fan_in) {
+        Ok(report) => report,
+        Err(error) => {
+            fan_in
+                .drain_to_sink(sink)
+                .map_err(ReceivedTunAlphaRuntimeDrainError::Drain)?;
+            return Err(ReceivedTunAlphaRuntimeDrainError::Ingest(error));
+        }
+    };
+    let egress_records = udp_egress.audit_records();
+    let egress_ingest =
+        match ingest_resequenced_records("alpha_runtime_egress", &egress_records, fan_in) {
+            Ok(report) => report,
+            Err(error) => {
+                fan_in
+                    .drain_to_sink(sink)
+                    .map_err(ReceivedTunAlphaRuntimeDrainError::Drain)?;
+                return Err(ReceivedTunAlphaRuntimeDrainError::Ingest(error));
+            }
+        };
+    let final_drain = fan_in
+        .drain_to_sink(sink)
+        .map_err(ReceivedTunAlphaRuntimeDrainError::Drain)?;
+    Ok(ReceivedTunAlphaRuntimeDrainReport {
+        setup_ingest,
+        transport_events,
+        broker_ingest,
+        egress_ingest,
         final_drain,
     })
 }

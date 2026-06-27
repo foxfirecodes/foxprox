@@ -46,6 +46,12 @@ pub fn run_args(args: &[String]) -> CliOutput {
     {
         return run_bwrap_dns_egress_args(&args[1..]);
     }
+    if args
+        .first()
+        .is_some_and(|command| command == "run-bwrap-alpha")
+    {
+        return run_bwrap_alpha_args(&args[1..]);
+    }
     match args {
         [command, path] if command == "validate-config" => validate_config_path(path),
         [command, sandbox_id] if command == "default-config" => default_config(sandbox_id),
@@ -1915,6 +1921,209 @@ fn run_bwrap_dns_egress_args(_args: &[String]) -> CliOutput {
     )
 }
 
+#[cfg(unix)]
+fn run_bwrap_alpha_args(args: &[String]) -> CliOutput {
+    let Some(separator) = args.iter().position(|arg| arg == "--") else {
+        return error_output(
+            "run_bwrap_alpha_missing_separator",
+            "expected: run-bwrap-alpha <config> -- <target...>".to_string(),
+        );
+    };
+    if separator != 1 || args.len() <= separator + 1 {
+        return error_output(
+            "run_bwrap_alpha_bad_args",
+            "expected non-empty target command after <config> --".to_string(),
+        );
+    }
+    let config_path = &args[0];
+    let target = &args[separator + 1..];
+    let text = match fs::read_to_string(config_path) {
+        Ok(text) => text,
+        Err(error) => return error_output("config_io_error", error.to_string()),
+    };
+    let mut config = match serde_json::from_str::<BrokerRuntimeConfig>(&text) {
+        Ok(config) => config,
+        Err(error) => return error_output("config_parse_error", error.to_string()),
+    };
+    let validation = config.validation_audit();
+    if validation.decision != Some(Decision::Allow) {
+        return audit_output(2, validation);
+    }
+    let stack_ip = match config.setup.gateway_ip {
+        std::net::IpAddr::V4(ip) => ip.octets(),
+        std::net::IpAddr::V6(_) => {
+            return error_output(
+                "gateway_ipv6_unsupported",
+                "alpha bwrap runtime currently requires an IPv4 gateway address".to_string(),
+            );
+        }
+    };
+    let socket_path = config
+        .setup
+        .setup_control_socket_path
+        .clone()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let unique = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_nanos())
+                .unwrap_or(0);
+            std::env::temp_dir().join(format!(
+                "foxprox-run-bwrap-alpha-{}-{unique}.sock",
+                std::process::id()
+            ))
+        });
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = match UnixListener::bind(&socket_path) {
+        Ok(listener) => listener,
+        Err(error) => return error_output("setup_control_bind_error", error.to_string()),
+    };
+    config.setup.setup_control_socket_path = Some(socket_path.to_string_lossy().to_string());
+    let plan = BwrapSetupPlan::new(config.setup.clone(), target);
+    let mut runner = CommandHostSetupProcessRunner::new();
+    if let Err(error) = runner.start_setup_process(&plan) {
+        let _ = std::fs::remove_file(&socket_path);
+        return error_output("setup_process_start_error", error);
+    }
+    let mut handoff = accept_setup_control_tun_handoff_with_timeouts(
+        &listener,
+        config.setup.clone(),
+        target,
+        Some(Duration::from_secs(5)),
+        Some(Duration::from_secs(5)),
+    );
+    let _ = std::fs::remove_file(&socket_path);
+    if handoff.status != HostSetupControlHandoffStatus::Complete {
+        let stdout = audit_records_to_json_lines(&handoff.audit_records);
+        let _ = runner.wait_setup_process_with_timeout(Duration::from_millis(100));
+        return CliOutput {
+            exit_code: 1,
+            stdout,
+            stderr: String::new(),
+        };
+    }
+    let Some(received) = handoff.received.take() else {
+        let stdout = audit_records_to_json_lines(&handoff.audit_records);
+        let _ = runner.wait_setup_process_with_timeout(Duration::from_millis(100));
+        return CliOutput {
+            exit_code: 1,
+            stdout,
+            stderr: String::new(),
+        };
+    };
+    let broker = BrokerCore::new(
+        PolicyEngine::new(config.policy.clone()),
+        config.audit_capacity.max(1),
+    );
+    let dns_broker = BrokerCore::new(
+        PolicyEngine::new(config.policy.clone()),
+        config.audit_capacity.max(1),
+    );
+    let dns_upstream = foxprox_egress::BlockingDnsUpstream::from_runtime_config(
+        &config,
+        "0.0.0.0:0".parse().expect("valid bind addr"),
+        Duration::from_secs(5),
+        64 * 1024,
+    );
+    let dns_handler = DnsBrokerHandler::new(dns_broker, dns_upstream, config.setup.broker_dns_ip);
+    let broker_dns_endpoint = NetworkEndpoint::socket(config.setup.broker_dns_ip, 53);
+    let dns_exchange = foxprox_egress::DnsUdpExchange::new(
+        config.setup.sandbox_id.clone(),
+        dns_handler,
+        broker_dns_endpoint.clone(),
+        30_000,
+    );
+    let udp_egress = foxprox_egress::BrokerDnsOrDirectUdpExchange::new(
+        broker_dns_endpoint,
+        dns_exchange,
+        foxprox_egress::BlockingUdpExchange::new(Duration::from_secs(5), 64 * 1024),
+    );
+    let tcp_egress = foxprox_egress::BlockingTcpEgress::new(
+        Duration::from_secs(5),
+        Duration::from_secs(5),
+        64 * 1024,
+    );
+    let stack = foxprox_stack::SmoltcpIpStack::new_ipv4(stack_ip, 24, config.setup.mtu as usize);
+    let mut fan_in = RuntimeAuditFanIn::new(
+        config.setup.sandbox_id.clone(),
+        config.audit_capacity.max(1),
+    );
+    let mut audit_output = Vec::new();
+    let cancellation = foxprox_egress::AsyncRuntimeCancellationToken::uncancelled();
+    let runtime = {
+        let mut sink = JsonLineAuditSink::new(&mut audit_output);
+        foxprox_egress::run_received_tun_fd_alpha_runtime_and_drain(
+            foxprox_egress::ReceivedTunAlphaRuntimeSession {
+                setup_source: "host_setup_session".to_string(),
+                setup_records: &handoff.audit_records,
+                received,
+                sandbox_id: config.setup.sandbox_id.clone(),
+                broker,
+                stack,
+                tcp_egress,
+                udp_egress,
+                now_ms: 40_000,
+                max_steps: 500,
+                max_from_sandbox_bytes: 64 * 1024,
+                idle_sleep: Duration::from_millis(10),
+            },
+            &mut fan_in,
+            &mut sink,
+            &cancellation,
+        )
+    };
+    let mut stdout = String::from_utf8(audit_output).unwrap_or_default();
+    let runtime_report = match runtime {
+        Ok(report) => report,
+        Err(error) => {
+            stdout.push_str(
+                &AuditRecord::new(AuditKind::BrokerError, config.setup.sandbox_id.clone())
+                    .with_frontend(Frontend::Tun)
+                    .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+                    .with_detail("runtime_error", format!("{error:?}"))
+                    .to_json_line()
+                    .expect("audit serializes"),
+            );
+            stdout.push('\n');
+            let _ = runner.wait_setup_process_with_timeout(Duration::from_millis(100));
+            return CliOutput {
+                exit_code: 1,
+                stdout,
+                stderr: String::new(),
+            };
+        }
+    };
+    let process_exit = runner.wait_setup_process_with_timeout(Duration::from_secs(5));
+    let saw_fail_closed = runtime_report
+        .transport_events
+        .iter()
+        .any(|event| match event {
+            foxprox_stack::TransportBridgeEvidence::Packet(packet) => packet.decision.is_deny(),
+            foxprox_stack::TransportBridgeEvidence::Udp(udp) => udp.decision.is_deny(),
+            foxprox_stack::TransportBridgeEvidence::Tcp { packet, tcp } => {
+                packet.decision.is_deny() || tcp.decision.is_deny()
+            }
+        });
+    let success = !saw_fail_closed
+        && matches!(
+            process_exit,
+            Ok(Some(HostSetupProcessExit { success: true, .. }))
+        );
+    CliOutput {
+        exit_code: if success { 0 } else { 1 },
+        stdout,
+        stderr: String::new(),
+    }
+}
+
+#[cfg(not(unix))]
+fn run_bwrap_alpha_args(_args: &[String]) -> CliOutput {
+    error_output(
+        "run_bwrap_alpha_unsupported_platform",
+        "run-bwrap-alpha requires Unix setup-control sockets".to_string(),
+    )
+}
+
 fn audit_records_to_json_lines(records: &[AuditRecord]) -> String {
     records
         .iter()
@@ -1939,7 +2148,7 @@ fn usage_output() -> CliOutput {
     CliOutput {
         exit_code: 64,
         stdout: String::new(),
-        stderr: "usage: foxprox validate-config <path> | default-config <sandbox-id> | plan-bwrap <config> -- <target...> | run-bwrap-tcp-egress <config> <stack-ip:port> <host-ip:port> -- <target...> | run-bwrap-udp-egress <config> <host-ip:port> -- <target...> | run-bwrap-dns-egress <config> -- <target...>\n".to_string(),
+        stderr: "usage: foxprox validate-config <path> | default-config <sandbox-id> | plan-bwrap <config> -- <target...> | run-bwrap-alpha <config> -- <target...> | run-bwrap-tcp-egress <config> <stack-ip:port> <host-ip:port> -- <target...> | run-bwrap-udp-egress <config> <host-ip:port> -- <target...> | run-bwrap-dns-egress <config> -- <target...>\n".to_string(),
     }
 }
 

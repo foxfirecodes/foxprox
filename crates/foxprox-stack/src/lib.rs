@@ -20,7 +20,7 @@ use smoltcp::time::Instant;
 use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::rc::Rc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -143,6 +143,8 @@ pub struct SmoltcpIpStack {
     sockets: SocketSet<'static>,
     device: InMemoryIpDevice,
     tcp_handles: Vec<SocketHandle>,
+    tcp_listen_ports: Vec<u16>,
+    local_ipv4: [u8; 4],
 }
 
 impl SmoltcpIpStack {
@@ -164,6 +166,8 @@ impl SmoltcpIpStack {
             sockets: SocketSet::new(Vec::new()),
             device,
             tcp_handles: Vec::new(),
+            tcp_listen_ports: Vec::new(),
+            local_ipv4: address,
         }
     }
 
@@ -172,12 +176,16 @@ impl SmoltcpIpStack {
     }
 
     pub fn listen_tcp(&mut self, port: u16, rx_capacity: usize, tx_capacity: usize) {
+        if self.tcp_listen_ports.contains(&port) {
+            return;
+        }
         let rx_buffer = tcp::SocketBuffer::new(vec![0; rx_capacity]);
         let tx_buffer = tcp::SocketBuffer::new(vec![0; tx_capacity]);
         let mut socket = tcp::Socket::new(rx_buffer, tx_buffer);
         socket.listen(port).expect("tcp listen port is valid");
         let handle = self.sockets.add(socket);
         self.tcp_handles.push(handle);
+        self.tcp_listen_ports.push(port);
     }
 
     pub fn drain_first_tcp_recv(&mut self, limit: usize) -> Vec<u8> {
@@ -382,10 +390,34 @@ pub struct SmoltcpTunBridgeResult {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TransportBridgeEvidence {
+    Packet(SmoltcpTunBridgeResult),
+    Udp(UdpDatagramBridgeEvidence),
+    Tcp {
+        packet: SmoltcpTunBridgeResult,
+        tcp: TcpStreamBridgeEvidence,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TransportBridgeError {
+    Device(DeviceIoError),
+    Udp(UdpExchangeError),
+    Tcp(TcpEgressError),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SmoltcpBridgeLoopReport {
     pub processed_packets: usize,
     pub error: Option<DeviceIoError>,
     pub task_outcome: RuntimeTaskOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TransparentTcpFlow {
+    sandbox: NetworkEndpoint,
+    stack_local: NetworkEndpoint,
+    original_destination: NetworkEndpoint,
 }
 
 pub struct SmoltcpTunBridge<D> {
@@ -393,6 +425,7 @@ pub struct SmoltcpTunBridge<D> {
     broker: BrokerCore,
     stack: SmoltcpIpStack,
     device: D,
+    transparent_tcp_flows: Vec<TransparentTcpFlow>,
 }
 
 impl<D: PacketDevice> SmoltcpTunBridge<D> {
@@ -407,6 +440,7 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
             broker,
             stack,
             device,
+            transparent_tcp_flows: Vec::new(),
         }
     }
 
@@ -422,6 +456,14 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                 return Err(error);
             }
         };
+        Ok(Some(self.process_inbound_packet(packet, now_ms)?))
+    }
+
+    fn process_inbound_packet(
+        &mut self,
+        packet: Vec<u8>,
+        now_ms: i64,
+    ) -> Result<SmoltcpTunBridgeResult, DeviceIoError> {
         let parsed = match ParsedIpPacket::parse(&packet) {
             Ok(parsed) => parsed,
             Err(error) => {
@@ -442,12 +484,7 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                     },
                     Err(decision) => decision,
                 };
-                return Ok(Some(bridge_result(
-                    false,
-                    StackPollEvidence::none(),
-                    0,
-                    decision,
-                )));
+                return Ok(bridge_result(false, StackPollEvidence::none(), 0, decision));
             }
         };
         let request = request_for_packet(&self.sandbox_id, &parsed);
@@ -460,34 +497,33 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         )
         .with_detail("stack", "smoltcp");
         if let Err(decision) = self.broker.append_audit_for(&request, inbound_audit) {
-            return Ok(Some(bridge_result(
-                false,
-                StackPollEvidence::none(),
-                0,
-                decision,
-            )));
+            return Ok(bridge_result(false, StackPollEvidence::none(), 0, decision));
         }
 
         let policy_decision = self.broker.evaluate(&request);
         if policy_decision.decision.is_deny() {
-            return Ok(Some(bridge_result(
+            return Ok(bridge_result(
                 true,
                 StackPollEvidence::none(),
                 0,
                 policy_decision,
-            )));
+            ));
         }
 
+        let packet = self.prepare_transparent_tcp_inbound(packet, &parsed);
         self.stack.inject_packet(packet);
         let stack_evidence = self.stack.poll(now_ms);
         let outbound = self.stack.outbound_packets();
         let mut written = 0usize;
-        for packet in outbound
+        for mut packet in outbound
             .into_iter()
             .rev()
             .take(stack_evidence.packets_emitted)
             .rev()
         {
+            if let Some(rewritten) = self.rewrite_transparent_tcp_outbound(packet.clone()) {
+                packet = rewritten;
+            }
             let parsed = match ParsedIpPacket::parse(&packet) {
                 Ok(parsed) => parsed,
                 Err(error) => {
@@ -508,7 +544,7 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                         },
                         Err(decision) => decision,
                     };
-                    return Ok(Some(bridge_result(true, stack_evidence, written, decision)));
+                    return Ok(bridge_result(true, stack_evidence, written, decision));
                 }
             };
             let request = request_for_packet(&self.sandbox_id, &parsed);
@@ -522,7 +558,7 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
             .with_detail("stack", "smoltcp")
             .with_detail("write_phase", "attempt");
             if let Err(decision) = self.broker.append_audit_for(&request, outbound_audit) {
-                return Ok(Some(bridge_result(true, stack_evidence, written, decision)));
+                return Ok(bridge_result(true, stack_evidence, written, decision));
             }
             if let Err(error) = self.device.write_packet(&packet) {
                 let error_audit = AuditRecord::new_at(
@@ -544,13 +580,13 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
             written += 1;
         }
 
-        Ok(Some(SmoltcpTunBridgeResult {
+        Ok(SmoltcpTunBridgeResult {
             inbound_observed: true,
             stack: stack_evidence,
             packets_written: written,
             decision: policy_decision.decision,
             reason: policy_decision.reason,
-        }))
+        })
     }
 
     pub fn process_packet_loop(
@@ -629,7 +665,10 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         let before = self.stack.outbound_len();
         let stack_evidence = self.stack.poll(now_ms);
         let mut written = 0usize;
-        for packet in self.stack.outbound_packets_since(before) {
+        for mut packet in self.stack.outbound_packets_since(before) {
+            if let Some(rewritten) = self.rewrite_transparent_tcp_outbound(packet.clone()) {
+                packet = rewritten;
+            }
             let parsed = match ParsedIpPacket::parse(&packet) {
                 Ok(parsed) => parsed,
                 Err(error) => {
@@ -721,6 +760,75 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         .with_detail("direction", "from_sandbox")
         .with_detail("device_io_error", "read_failed");
         let _ = self.broker.append_audit_for(&request, audit);
+    }
+
+    fn prepare_transparent_tcp_inbound(
+        &mut self,
+        packet: Vec<u8>,
+        parsed: &ParsedIpPacket,
+    ) -> Vec<u8> {
+        if parsed.protocol != foxprox_core::Protocol::Tcp || parsed.ip_version != 4 {
+            return packet;
+        }
+        let (Some(source_port), Some(destination_port), Some(source_ip), Some(destination_ip)) = (
+            parsed.source_port,
+            parsed.destination_port,
+            parsed.source_endpoint().ip,
+            parsed.destination_endpoint().ip,
+        ) else {
+            return packet;
+        };
+        if destination_ip == IpAddr::V4(Ipv4Addr::from(self.stack.local_ipv4)) {
+            return packet;
+        }
+        self.stack
+            .listen_tcp(destination_port, 64 * 1024, 64 * 1024);
+        let sandbox = NetworkEndpoint::socket(source_ip, source_port);
+        let stack_local = NetworkEndpoint::socket(
+            IpAddr::V4(Ipv4Addr::from(self.stack.local_ipv4)),
+            destination_port,
+        );
+        let original_destination = NetworkEndpoint::socket(destination_ip, destination_port);
+        if !self.transparent_tcp_flows.iter().any(|flow| {
+            flow.sandbox == sandbox
+                && flow.stack_local == stack_local
+                && flow.original_destination == original_destination
+        }) {
+            self.transparent_tcp_flows.push(TransparentTcpFlow {
+                sandbox,
+                stack_local,
+                original_destination,
+            });
+        }
+        rewrite_ipv4_tcp_destination(packet, self.stack.local_ipv4).unwrap_or_else(|packet| packet)
+    }
+
+    fn rewrite_transparent_tcp_outbound(&self, packet: Vec<u8>) -> Option<Vec<u8>> {
+        let parsed = ParsedIpPacket::parse(&packet).ok()?;
+        if parsed.protocol != foxprox_core::Protocol::Tcp || parsed.ip_version != 4 {
+            return None;
+        }
+        let source = parsed.source_endpoint();
+        let destination = parsed.destination_endpoint();
+        let flow = self
+            .transparent_tcp_flows
+            .iter()
+            .find(|flow| flow.stack_local == source && flow.sandbox == destination)?;
+        let IpAddr::V4(original_ip) = flow.original_destination.ip? else {
+            return None;
+        };
+        rewrite_ipv4_tcp_source(packet, original_ip.octets()).ok()
+    }
+
+    fn transparent_destination_for(
+        &self,
+        source: &NetworkEndpoint,
+        local_destination: &NetworkEndpoint,
+    ) -> Option<NetworkEndpoint> {
+        self.transparent_tcp_flows
+            .iter()
+            .find(|flow| &flow.sandbox == source && &flow.stack_local == local_destination)
+            .map(|flow| flow.original_destination.clone())
     }
 
     pub fn broker(&self) -> &BrokerCore {
@@ -955,6 +1063,245 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         )))
     }
 
+    fn bridge_udp_packet_to_egress<E: UdpDatagramExchange>(
+        &mut self,
+        packet: Vec<u8>,
+        parsed: ParsedIpPacket,
+        egress: &mut E,
+        now_ms: i64,
+    ) -> Result<UdpDatagramBridgeEvidence, UdpExchangeError> {
+        let request = request_for_packet(&self.sandbox_id, &parsed);
+        let inbound_audit = packet_audit(
+            &self.sandbox_id,
+            &parsed,
+            now_ms,
+            packet.len(),
+            "from_sandbox",
+        )
+        .with_detail("stack", "udp_exchange");
+        if let Err(decision) = self.broker.append_audit_for(&request, inbound_audit) {
+            return Ok(udp_datagram_evidence(
+                ByteCounts::ZERO,
+                false,
+                decision.decision,
+                decision.reason,
+            ));
+        }
+        if parsed.protocol != foxprox_core::Protocol::Udp {
+            let audit = AuditRecord::new_at(
+                AuditKind::BrokerError,
+                self.sandbox_id.clone(),
+                now_ms as u128,
+            )
+            .with_frontend(Frontend::Tun)
+            .with_protocol(parsed.protocol)
+            .with_source(parsed.source_endpoint())
+            .with_destination(parsed.destination_endpoint())
+            .with_decision(
+                Decision::FailClosed,
+                Some(DenialReason::UnsupportedProtocol),
+            )
+            .with_detail("stack", "udp_exchange")
+            .with_detail("error", "non_udp_packet_in_udp_exchange");
+            let _ = self.broker.append_audit_for(&request, audit);
+            return Ok(udp_datagram_evidence(
+                ByteCounts::ZERO,
+                false,
+                Decision::FailClosed,
+                Some(DenialReason::UnsupportedProtocol),
+            ));
+        }
+        let Some((payload, response_template)) = udp_payload_and_response_template(&packet) else {
+            let audit = AuditRecord::new_at(
+                AuditKind::BrokerError,
+                self.sandbox_id.clone(),
+                now_ms as u128,
+            )
+            .with_frontend(Frontend::Tun)
+            .with_protocol(parsed.protocol)
+            .with_source(parsed.source_endpoint())
+            .with_destination(parsed.destination_endpoint())
+            .with_decision(Decision::FailClosed, Some(DenialReason::MalformedPacket))
+            .with_detail("stack", "udp_exchange")
+            .with_detail("error", "udp_response_template_failed");
+            let _ = self.broker.append_audit_for(&request, audit);
+            return Ok(udp_datagram_evidence(
+                ByteCounts::ZERO,
+                false,
+                Decision::FailClosed,
+                Some(DenialReason::MalformedPacket),
+            ));
+        };
+        if !egress.handles_policy_for(parsed.destination_endpoint()) {
+            let policy_decision = self.broker.evaluate(&request);
+            if policy_decision.decision.is_deny() {
+                return Ok(udp_datagram_evidence(
+                    ByteCounts::ZERO,
+                    false,
+                    policy_decision.decision,
+                    policy_decision.reason,
+                ));
+            }
+        }
+        let response_payload =
+            match egress.exchange_datagram(parsed.destination_endpoint(), payload) {
+                Ok(response) => response,
+                Err(error) => {
+                    let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
+                        .with_frontend(Frontend::Tun)
+                        .with_protocol(foxprox_core::Protocol::Udp)
+                        .with_source(parsed.source_endpoint())
+                        .with_destination(parsed.destination_endpoint())
+                        .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+                        .with_detail("stack", "udp_exchange")
+                        .with_detail("error", udp_exchange_error_detail(&error));
+                    let _ = self.broker.append_audit_for(&request, audit);
+                    return Err(error);
+                }
+            };
+        let response = match response_packet(&response_template, &response_payload) {
+            Some(response) => response,
+            None => {
+                let audit = AuditRecord::new_at(
+                    AuditKind::BrokerError,
+                    self.sandbox_id.clone(),
+                    now_ms as u128,
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(foxprox_core::Protocol::Udp)
+                .with_source(parsed.destination_endpoint())
+                .with_destination(parsed.source_endpoint())
+                .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+                .with_detail("stack", "udp_exchange")
+                .with_detail("error", "udp_response_packet_synthesis_failed");
+                let _ = self.broker.append_audit_for(&request, audit);
+                return Err(UdpExchangeError::SendFailed);
+            }
+        };
+        let response_parsed = match ParsedIpPacket::parse(&response) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                let audit = AuditRecord::new_at(
+                    AuditKind::BrokerError,
+                    self.sandbox_id.clone(),
+                    now_ms as u128,
+                )
+                .with_frontend(Frontend::Tun)
+                .with_protocol(foxprox_core::Protocol::Udp)
+                .with_source(parsed.destination_endpoint())
+                .with_destination(parsed.source_endpoint())
+                .with_decision(Decision::FailClosed, Some(DenialReason::MalformedPacket))
+                .with_detail("stack", "udp_exchange")
+                .with_detail("error", "udp_response_packet_parse_failed");
+                let _ = self.broker.append_audit_for(&request, audit);
+                return Err(UdpExchangeError::SendFailed);
+            }
+        };
+        let response_request = request_for_packet(&self.sandbox_id, &response_parsed);
+        let outbound_audit = packet_audit(
+            &self.sandbox_id,
+            &response_parsed,
+            now_ms,
+            response.len(),
+            "to_sandbox",
+        )
+        .with_detail("stack", "udp_exchange")
+        .with_detail("write_phase", "attempt");
+        if let Err(decision) = self
+            .broker
+            .append_audit_for(&response_request, outbound_audit)
+        {
+            return Ok(udp_datagram_evidence(
+                ByteCounts::ZERO,
+                false,
+                decision.decision,
+                decision.reason,
+            ));
+        }
+        if self.device.write_packet(&response).is_err() {
+            let error_audit = AuditRecord::new_at(
+                AuditKind::BrokerError,
+                self.sandbox_id.clone(),
+                now_ms as u128,
+            )
+            .with_frontend(Frontend::Tun)
+            .with_protocol(foxprox_core::Protocol::Udp)
+            .with_source(response_parsed.source_endpoint())
+            .with_destination(response_parsed.destination_endpoint())
+            .with_decision(Decision::FailClosed, Some(DenialReason::SetupFailed))
+            .with_detail("stack", "udp_exchange")
+            .with_detail("direction", "to_sandbox")
+            .with_detail("device_io_error", "write_failed");
+            let _ = self.broker.append_audit_for(&response_request, error_audit);
+            return Err(UdpExchangeError::SendFailed);
+        }
+        egress.on_datagram_delivered();
+        let (decision, reason) = egress
+            .datagram_decision()
+            .unwrap_or((Decision::Allow, None));
+        Ok(udp_datagram_evidence(
+            ByteCounts {
+                from_sandbox: payload.len() as u64,
+                to_sandbox: response_payload.len() as u64,
+            },
+            true,
+            decision,
+            reason,
+        ))
+    }
+
+    pub fn bridge_next_transport_to_egress<T: TcpEgress, U: UdpDatagramExchange>(
+        &mut self,
+        tcp_egress: &mut T,
+        udp_egress: &mut U,
+        now_ms: i64,
+        max_from_sandbox: usize,
+    ) -> Result<Option<TransportBridgeEvidence>, TransportBridgeError> {
+        let packet = match self.device.read_packet() {
+            Ok(Some(packet)) => packet,
+            Ok(None) => return Ok(None),
+            Err(error) => {
+                self.record_device_read_failure(now_ms);
+                return Err(TransportBridgeError::Device(error));
+            }
+        };
+        let parsed = match ParsedIpPacket::parse(&packet) {
+            Ok(parsed) => parsed,
+            Err(_) => {
+                let packet = self
+                    .process_inbound_packet(packet, now_ms)
+                    .map_err(TransportBridgeError::Device)?;
+                return Ok(Some(TransportBridgeEvidence::Packet(packet)));
+            }
+        };
+        if parsed.protocol == foxprox_core::Protocol::Udp {
+            let udp = self
+                .bridge_udp_packet_to_egress(packet, parsed, udp_egress, now_ms)
+                .map_err(TransportBridgeError::Udp)?;
+            return Ok(Some(TransportBridgeEvidence::Udp(udp)));
+        }
+        let packet = self
+            .process_inbound_packet(packet, now_ms)
+            .map_err(TransportBridgeError::Device)?;
+        if parsed.protocol != foxprox_core::Protocol::Tcp || packet.decision.is_deny() {
+            return Ok(Some(TransportBridgeEvidence::Packet(packet)));
+        }
+        let tcp = self
+            .bridge_first_tcp_stream_to_egress(
+                tcp_egress,
+                NetworkEndpoint::socket(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                max_from_sandbox,
+                now_ms as u64,
+                now_ms as u64,
+            )
+            .map_err(TransportBridgeError::Tcp)?;
+        if tcp.opened_egress {
+            Ok(Some(TransportBridgeEvidence::Tcp { packet, tcp }))
+        } else {
+            Ok(Some(TransportBridgeEvidence::Packet(packet)))
+        }
+    }
+
     pub fn bridge_first_tcp_stream_to_egress<E: TcpEgress>(
         &mut self,
         egress: &mut E,
@@ -977,11 +1324,19 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
             .stack
             .first_tcp_endpoints()
             .ok_or(TcpEgressError::BridgeFailed)?;
+        let requested_destination = self
+            .transparent_destination_for(&source, &local_destination)
+            .unwrap_or_else(|| local_destination.clone());
+        let egress_destination = if requested_destination != local_destination {
+            requested_destination.clone()
+        } else {
+            destination.clone()
+        };
         let request = PolicyRequest::tcp_connect(
             self.sandbox_id.clone(),
             Frontend::Tun,
             source.clone(),
-            local_destination.clone(),
+            requested_destination.clone(),
         );
         let policy_decision = self.broker.evaluate(&request);
         if policy_decision.decision.is_deny() {
@@ -993,29 +1348,33 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                 policy_decision.reason,
             ));
         }
-        let to_sandbox = match egress.connect_and_exchange(destination.clone(), &from_sandbox) {
-            Ok(to_sandbox) => to_sandbox,
-            Err(error) => {
-                let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
-                    .with_frontend(Frontend::Tun)
-                    .with_protocol(foxprox_core::Protocol::Tcp)
-                    .with_source(source.clone())
-                    .with_destination(local_destination.clone())
-                    .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
-                    .with_detail("stack", "smoltcp")
-                    .with_detail("egress_destination", endpoint_detail(&destination))
-                    .with_detail("error", tcp_egress_error_detail(&error));
-                let _ = self.broker.append_audit_for(&request, audit);
-                return Err(error);
-            }
-        };
+        let to_sandbox =
+            match egress.connect_and_exchange(egress_destination.clone(), &from_sandbox) {
+                Ok(to_sandbox) => to_sandbox,
+                Err(error) => {
+                    let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
+                        .with_frontend(Frontend::Tun)
+                        .with_protocol(foxprox_core::Protocol::Tcp)
+                        .with_source(source.clone())
+                        .with_destination(requested_destination.clone())
+                        .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+                        .with_detail("stack", "smoltcp")
+                        .with_detail("egress_destination", endpoint_detail(&egress_destination))
+                        .with_detail("error", tcp_egress_error_detail(&error));
+                    let _ = self.broker.append_audit_for(&request, audit);
+                    return Err(error);
+                }
+            };
         let outbound_start = self.stack.outbound_len();
         let stack = self
             .stack
             .send_first_tcp_stream_response(&to_sandbox, closed_at_ms as i64)?;
         let emitted_packets = self.stack.outbound_packets_since(outbound_start);
         let mut packets_written = 0usize;
-        for packet in emitted_packets {
+        for mut packet in emitted_packets {
+            if let Some(rewritten) = self.rewrite_transparent_tcp_outbound(packet.clone()) {
+                packet = rewritten;
+            }
             let parsed =
                 ParsedIpPacket::parse(&packet).map_err(|_| TcpEgressError::BridgeFailed)?;
             let packet_request = request_for_packet(&self.sandbox_id, &parsed);
@@ -1075,11 +1434,11 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         .with_frontend(Frontend::Tun)
         .with_protocol(foxprox_core::Protocol::Tcp)
         .with_source(source)
-        .with_destination(local_destination.clone())
+        .with_destination(requested_destination.clone())
         .with_byte_counts(byte_counts.clone())
         .with_duration_ms(closed_at_ms.saturating_sub(opened_at_ms))
         .with_detail("stack", "smoltcp")
-        .with_detail("egress_destination", endpoint_detail(&destination));
+        .with_detail("egress_destination", endpoint_detail(&egress_destination));
         if let Err(decision) = self.broker.append_audit_for(&request, close_audit) {
             return Ok(tcp_stream_evidence(
                 byte_counts,
@@ -1128,6 +1487,67 @@ fn endpoint_detail(endpoint: &NetworkEndpoint) -> String {
         (None, Some(port)) => format!(":{port}"),
         (None, None) => "unknown".to_string(),
     }
+}
+
+fn rewrite_ipv4_tcp_destination(
+    mut packet: Vec<u8>,
+    destination: [u8; 4],
+) -> Result<Vec<u8>, Vec<u8>> {
+    match rewrite_ipv4_tcp_endpoint(&mut packet, None, Some(destination)) {
+        Ok(()) => Ok(packet),
+        Err(()) => Err(packet),
+    }
+}
+
+fn rewrite_ipv4_tcp_source(mut packet: Vec<u8>, source: [u8; 4]) -> Result<Vec<u8>, Vec<u8>> {
+    match rewrite_ipv4_tcp_endpoint(&mut packet, Some(source), None) {
+        Ok(()) => Ok(packet),
+        Err(()) => Err(packet),
+    }
+}
+
+fn rewrite_ipv4_tcp_endpoint(
+    packet: &mut [u8],
+    source: Option<[u8; 4]>,
+    destination: Option<[u8; 4]>,
+) -> Result<(), ()> {
+    if packet.len() < 40 || packet[0] >> 4 != 4 || packet[9] != 6 {
+        return Err(());
+    }
+    let ihl = ((packet[0] & 0x0f) as usize) * 4;
+    if ihl < 20 || packet.len() < ihl + 20 {
+        return Err(());
+    }
+    let total_len = u16::from_be_bytes([packet[2], packet[3]]) as usize;
+    if total_len > packet.len() || total_len < ihl + 20 {
+        return Err(());
+    }
+    if let Some(source) = source {
+        packet[12..16].copy_from_slice(&source);
+    }
+    if let Some(destination) = destination {
+        packet[16..20].copy_from_slice(&destination);
+    }
+    packet[10..12].copy_from_slice(&0u16.to_be_bytes());
+    let ip_checksum = checksum(&packet[..ihl]);
+    packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+
+    let tcp_end = total_len;
+    packet[ihl + 16..ihl + 18].copy_from_slice(&0u16.to_be_bytes());
+    let tcp_checksum = ipv4_tcp_checksum_for_packet(packet, ihl, tcp_end);
+    packet[ihl + 16..ihl + 18].copy_from_slice(&tcp_checksum.to_be_bytes());
+    Ok(())
+}
+
+fn ipv4_tcp_checksum_for_packet(packet: &[u8], ihl: usize, tcp_end: usize) -> u16 {
+    let mut bytes = Vec::with_capacity(12 + tcp_end.saturating_sub(ihl));
+    bytes.extend_from_slice(&packet[12..16]);
+    bytes.extend_from_slice(&packet[16..20]);
+    bytes.push(0);
+    bytes.push(6);
+    bytes.extend_from_slice(&((tcp_end - ihl) as u16).to_be_bytes());
+    bytes.extend_from_slice(&packet[ihl..tcp_end]);
+    checksum(&bytes)
 }
 
 fn tcp_stream_evidence(
@@ -1923,6 +2343,106 @@ mod tests {
     }
 
     #[test]
+    fn smoltcp_tun_bridge_rewrites_transparent_tcp_to_original_destination() {
+        let original_destination = [93, 184, 216, 34];
+        let stack_ip = [10, 0, 2, 2];
+        let client_seq = 0x1111_2222;
+        let syn = ipv4_tcp_packet(TcpPacketSpec {
+            source: [10, 0, 2, 15],
+            destination: original_destination,
+            source_port: 50_123,
+            destination_port: 80,
+            sequence: client_seq,
+            acknowledgment: 0,
+            flags: TCP_SYN,
+            payload: &[],
+        });
+        let device = InMemoryPacketDevice::with_inbound([syn]);
+        let config = PolicyConfig {
+            default_decision: Decision::Allow,
+            ..PolicyConfig::default()
+        };
+        let broker = BrokerCore::new(PolicyEngine::new(config), 16);
+        let stack = SmoltcpIpStack::new_ipv4(stack_ip, 24, 1500);
+        let mut bridge = SmoltcpTunBridge::new("s1", broker, stack, device);
+
+        let syn_ack = bridge.process_next_packet(4_100).unwrap().unwrap();
+        assert!(syn_ack.inbound_observed);
+        let outbound = bridge.device().outbound();
+        let syn_ack_packet = outbound.last().unwrap();
+        let parsed = ParsedIpPacket::parse(syn_ack_packet).unwrap();
+        assert_eq!(parsed.source.to_string(), "93.184.216.34");
+        assert_eq!(parsed.destination.to_string(), "10.0.2.15");
+        assert_eq!(parsed.source_port, Some(80));
+        assert_eq!(parsed.destination_port, Some(50_123));
+        let server_seq = u32::from_be_bytes([
+            syn_ack_packet[24],
+            syn_ack_packet[25],
+            syn_ack_packet[26],
+            syn_ack_packet[27],
+        ]);
+
+        bridge.device.push_inbound(ipv4_tcp_packet(TcpPacketSpec {
+            source: [10, 0, 2, 15],
+            destination: original_destination,
+            source_port: 50_123,
+            destination_port: 80,
+            sequence: client_seq + 1,
+            acknowledgment: server_seq + 1,
+            flags: TCP_ACK,
+            payload: &[],
+        }));
+        bridge.process_next_packet(4_110).unwrap().unwrap();
+        bridge.device.push_inbound(ipv4_tcp_packet(TcpPacketSpec {
+            source: [10, 0, 2, 15],
+            destination: original_destination,
+            source_port: 50_123,
+            destination_port: 80,
+            sequence: client_seq + 1,
+            acknowledgment: server_seq + 1,
+            flags: TCP_ACK | TCP_PSH,
+            payload: b"GET / HTTP/1.0\r\n\r\n",
+        }));
+        bridge.process_next_packet(4_120).unwrap().unwrap();
+        let mut egress = MockTcpEgress::new(b"HTTP/1.0 200 OK\r\n\r\n".to_vec());
+
+        let evidence = bridge
+            .bridge_first_tcp_stream_to_egress(
+                &mut egress,
+                NetworkEndpoint::socket("127.0.0.1".parse().unwrap(), 8080),
+                1024,
+                4_100,
+                4_130,
+            )
+            .unwrap();
+
+        assert_eq!(evidence.decision, Decision::Allow);
+        assert_eq!(
+            egress.destinations,
+            vec![NetworkEndpoint::socket(
+                "93.184.216.34".parse().unwrap(),
+                80
+            )]
+        );
+        assert_eq!(egress.requests, vec![b"GET / HTTP/1.0\r\n\r\n".to_vec()]);
+        let response_packet = bridge.device().outbound().last().unwrap();
+        let parsed = ParsedIpPacket::parse(response_packet).unwrap();
+        assert_eq!(parsed.source.to_string(), "93.184.216.34");
+        assert_eq!(parsed.destination.to_string(), "10.0.2.15");
+        let records: Vec<_> = bridge.broker().audit().records().collect();
+        assert!(records.iter().any(|record| {
+            record.kind == AuditKind::TcpConnectDecision
+                && record
+                    .destination
+                    .as_ref()
+                    .and_then(|endpoint| endpoint.ip)
+                    .unwrap()
+                    .to_string()
+                    == "93.184.216.34"
+        }));
+    }
+
+    #[test]
     fn smoltcp_tun_bridge_audits_tcp_egress_and_flow_close() {
         let mut stack = SmoltcpIpStack::new_ipv4([10, 0, 2, 1], 24, 1500);
         stack.listen_tcp(8080, 1024, 1024);
@@ -2079,6 +2599,7 @@ mod tests {
     struct MockTcpEgress {
         response: Vec<u8>,
         requests: Vec<Vec<u8>>,
+        destinations: Vec<NetworkEndpoint>,
     }
 
     impl MockTcpEgress {
@@ -2086,6 +2607,7 @@ mod tests {
             Self {
                 response,
                 requests: Vec::new(),
+                destinations: Vec::new(),
             }
         }
     }
@@ -2093,9 +2615,10 @@ mod tests {
     impl TcpEgress for MockTcpEgress {
         fn connect_and_exchange(
             &mut self,
-            _destination: NetworkEndpoint,
+            destination: NetworkEndpoint,
             from_sandbox: &[u8],
         ) -> Result<Vec<u8>, TcpEgressError> {
+            self.destinations.push(destination);
             self.requests.push(from_sandbox.to_vec());
             Ok(self.response.clone())
         }
