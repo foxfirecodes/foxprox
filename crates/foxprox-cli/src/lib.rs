@@ -2038,7 +2038,16 @@ fn run_bwrap_alpha_args(args: &[String]) -> CliOutput {
     let udp_egress = foxprox_egress::BrokerDnsOrDirectUdpExchange::new(
         broker_dns_endpoint,
         dns_exchange,
-        foxprox_egress::BlockingUdpExchange::new(Duration::from_secs(5), 64 * 1024),
+        foxprox_egress::PolicyDirectUdpExchange::new(
+            config.setup.sandbox_id.clone(),
+            BrokerCore::new(
+                PolicyEngine::new(config.policy.clone()),
+                config.audit_capacity.max(1),
+            ),
+            shared_dns_cache.clone(),
+            Duration::from_secs(5),
+            64 * 1024,
+        ),
     );
     let tcp_egress = foxprox_egress::AlphaRuntimeTcpProxyEgress::new(
         config.setup.sandbox_id.clone(),
@@ -2047,7 +2056,7 @@ fn run_bwrap_alpha_args(args: &[String]) -> CliOutput {
         config.setup.gateway_ip,
         config.setup.http_proxy_port,
         config.setup.socks_proxy_port,
-        shared_dns_cache,
+        shared_dns_cache.clone(),
         40_000,
         foxprox_egress::BlockingTcpEgress::new(
             Duration::from_secs(5),

@@ -188,6 +188,10 @@ impl<E: UdpEgress> UdpForwarder<E> {
         &self.egress
     }
 
+    pub fn egress_mut(&mut self) -> &mut E {
+        &mut self.egress
+    }
+
     pub fn into_parts(self) -> (BrokerCore, UdpFlowManager, E) {
         (self.broker, self.flows, self.egress)
     }

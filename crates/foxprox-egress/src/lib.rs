@@ -8,17 +8,18 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    malformed_proxy_request, parse_http_proxy_request, AuditKind, AuditRecord, AuditSinkError,
-    BrokerCore, BrokerRuntimeConfig, ByteCounts, Decision, DenialReason, DnsBrokerHandler,
-    DnsQueryMetadata, DnsUpstream, DnsUpstreamError, ExplicitProxyEgress, ExplicitProxyFrontend,
-    Frontend, HttpProxyRequestMetadata, JsonLineAuditSink, NetworkEndpoint, PolicyRequest,
-    Protocol, ProxyEgressError, ProxyParseError, RuntimeAuditDrainError, RuntimeAuditDrainReport,
-    RuntimeAuditFanIn, RuntimeAuditFanInError, RuntimeAuditIngestReport, RuntimeChildExit,
-    RuntimeCleanupAction, RuntimeCleanupReport, RuntimeComponent, RuntimeExitStatus,
-    RuntimeLifecycleError, RuntimeLifecycleHarness, RuntimeListenerConfig, RuntimeReadinessPlan,
-    RuntimeSchedulerAction, RuntimeTaskExpectation, RuntimeTaskHandle, RuntimeTaskJoinReport,
-    RuntimeTaskReadiness, RuntimeTaskStatus, RuntimeTaskSupervisor, RuntimeTaskSupervisorError,
-    SharedDnsCache, SocksConnectMetadata, TcpEgress, TcpEgressError, UdpEgress, UdpEgressError,
+    malformed_proxy_request, parse_http_proxy_request, parse_socks5_connect_request, AuditKind,
+    AuditRecord, AuditSinkError, BrokerCore, BrokerRuntimeConfig, ByteCounts, Decision,
+    DenialReason, DnsBrokerHandler, DnsQueryMetadata, DnsUpstream, DnsUpstreamError,
+    ExplicitProxyEgress, ExplicitProxyFrontend, FlowKey, Frontend, HttpProxyRequestMetadata,
+    JsonLineAuditSink, NetworkEndpoint, PolicyRequest, Protocol, ProxyEgressError, ProxyParseError,
+    RuntimeAuditDrainError, RuntimeAuditDrainReport, RuntimeAuditFanIn, RuntimeAuditFanInError,
+    RuntimeAuditIngestReport, RuntimeChildExit, RuntimeCleanupAction, RuntimeCleanupReport,
+    RuntimeComponent, RuntimeExitStatus, RuntimeLifecycleError, RuntimeLifecycleHarness,
+    RuntimeListenerConfig, RuntimeReadinessPlan, RuntimeSchedulerAction, RuntimeTaskExpectation,
+    RuntimeTaskHandle, RuntimeTaskJoinReport, RuntimeTaskReadiness, RuntimeTaskStatus,
+    RuntimeTaskSupervisor, RuntimeTaskSupervisorError, SharedDnsCache, SocksConnectMetadata,
+    TcpEgress, TcpEgressError, UdpEgress, UdpEgressError, UdpForwarder, UdpTimeoutConfig,
 };
 use std::ffi::OsStr;
 #[cfg(unix)]
@@ -189,7 +190,7 @@ impl<U: DnsUpstream> foxprox_stack::UdpDatagramExchange for DnsUdpExchange<U> {
 pub struct BrokerDnsOrDirectUdpExchange<U> {
     broker_dns_endpoint: NetworkEndpoint,
     dns: DnsUdpExchange<U>,
-    direct: BlockingUdpExchange,
+    direct: PolicyDirectUdpExchange,
     last_route_was_dns: bool,
 }
 
@@ -197,7 +198,7 @@ impl<U: DnsUpstream> BrokerDnsOrDirectUdpExchange<U> {
     pub fn new(
         broker_dns_endpoint: NetworkEndpoint,
         dns: DnsUdpExchange<U>,
-        direct: BlockingUdpExchange,
+        direct: PolicyDirectUdpExchange,
     ) -> Self {
         Self {
             broker_dns_endpoint,
@@ -218,11 +219,21 @@ impl<U: DnsUpstream> foxprox_stack::UdpDatagramExchange for BrokerDnsOrDirectUdp
         destination: NetworkEndpoint,
         payload: &[u8],
     ) -> Result<Vec<u8>, foxprox_stack::UdpExchangeError> {
+        self.exchange_datagram_for(NetworkEndpoint::default(), destination, payload)
+    }
+
+    fn exchange_datagram_for(
+        &mut self,
+        source: NetworkEndpoint,
+        destination: NetworkEndpoint,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, foxprox_stack::UdpExchangeError> {
         self.last_route_was_dns = destination == self.broker_dns_endpoint;
         if self.last_route_was_dns {
             self.dns.exchange_datagram(destination, payload)
         } else {
-            self.direct.exchange_datagram(destination, payload)
+            self.direct
+                .exchange_datagram_for(source, destination, payload)
         }
     }
 
@@ -243,7 +254,9 @@ impl<U: DnsUpstream> foxprox_stack::UdpDatagramExchange for BrokerDnsOrDirectUdp
     }
 
     fn audit_records(&self) -> Vec<AuditRecord> {
-        self.dns.audit_records()
+        let mut records = self.dns.audit_records();
+        records.extend(self.direct.audit_records());
+        records
     }
 }
 
@@ -261,6 +274,129 @@ impl foxprox_stack::UdpDatagramExchange for BlockingUdpExchange {
             self.max_response_bytes,
             payload,
         )
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ConnectedUdpExchangeEgress {
+    io_timeout: Duration,
+    max_response_bytes: usize,
+    last_response: Option<Vec<u8>>,
+}
+
+impl ConnectedUdpExchangeEgress {
+    fn new(io_timeout: Duration, max_response_bytes: usize) -> Self {
+        Self {
+            io_timeout,
+            max_response_bytes,
+            last_response: None,
+        }
+    }
+}
+
+impl UdpEgress for ConnectedUdpExchangeEgress {
+    fn send_datagram(
+        &mut self,
+        destination: NetworkEndpoint,
+        payload: &[u8],
+    ) -> Result<(), UdpEgressError> {
+        let destination = socket_addr(destination).ok_or(UdpEgressError::SendFailed)?;
+        let response = exchange_udp_with_socket(
+            destination,
+            self.io_timeout,
+            self.max_response_bytes,
+            payload,
+        )
+        .map_err(|_| UdpEgressError::SendFailed)?;
+        self.last_response = Some(response);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PolicyDirectUdpExchange {
+    forwarder: UdpForwarder<ConnectedUdpExchangeEgress>,
+    latest_decision: Option<(Decision, Option<DenialReason>)>,
+    shared_dns_cache: SharedDnsCache,
+}
+
+impl PolicyDirectUdpExchange {
+    pub fn new(
+        sandbox_id: impl Into<String>,
+        broker: BrokerCore,
+        shared_dns_cache: SharedDnsCache,
+        timeout: Duration,
+        max_response_bytes: usize,
+    ) -> Self {
+        Self {
+            forwarder: UdpForwarder::new(
+                sandbox_id,
+                broker,
+                ConnectedUdpExchangeEgress::new(timeout, max_response_bytes),
+                UdpTimeoutConfig::default(),
+            ),
+            latest_decision: None,
+            shared_dns_cache,
+        }
+    }
+}
+
+impl foxprox_stack::UdpDatagramExchange for PolicyDirectUdpExchange {
+    fn exchange_datagram(
+        &mut self,
+        destination: NetworkEndpoint,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, foxprox_stack::UdpExchangeError> {
+        self.exchange_datagram_for(NetworkEndpoint::default(), destination, payload)
+    }
+
+    fn exchange_datagram_for(
+        &mut self,
+        source: NetworkEndpoint,
+        destination: NetworkEndpoint,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, foxprox_stack::UdpExchangeError> {
+        let (Some(source_ip), Some(source_port), Some(destination_ip), Some(destination_port)) =
+            (source.ip, source.port, destination.ip, destination.port)
+        else {
+            return Err(foxprox_stack::UdpExchangeError::SendFailed);
+        };
+        self.forwarder.egress_mut().last_response = None;
+        let key = FlowKey::udp(source_ip, source_port, destination_ip, destination_port);
+        let result = self
+            .forwarder
+            .handle_outbound_datagram_with_dns_cache(
+                key.clone(),
+                payload,
+                40_000,
+                &self.shared_dns_cache.snapshot(),
+            )
+            .map_err(|_| foxprox_stack::UdpExchangeError::SendFailed)?;
+        self.latest_decision = Some((result.decision, result.reason));
+        if !result.sent {
+            return Err(foxprox_stack::UdpExchangeError::SendFailed);
+        }
+        let response = self
+            .forwarder
+            .egress_mut()
+            .last_response
+            .take()
+            .ok_or(foxprox_stack::UdpExchangeError::ReceiveFailed)?;
+        self.forwarder
+            .handle_inbound_datagram(&key, &response, 40_000);
+        Ok(response)
+    }
+
+    fn handles_policy(&self) -> bool {
+        true
+    }
+
+    fn datagram_decision(&self) -> Option<(Decision, Option<DenialReason>)> {
+        self.latest_decision
+    }
+
+    fn audit_records(&self) -> Vec<AuditRecord> {
+        self.forwarder.broker().audit().records().cloned().collect()
     }
 }
 
@@ -375,7 +511,7 @@ impl ExplicitProxyEgress for BlockingExplicitProxyEgress {
         &mut self,
         request: &HttpProxyRequestMetadata,
         bytes: &[u8],
-    ) -> Result<(), ProxyEgressError> {
+    ) -> Result<Vec<u8>, ProxyEgressError> {
         let ip = request
             .resolved_destination_ip
             .or_else(|| request.host.parse::<IpAddr>().ok())
@@ -390,7 +526,7 @@ impl ExplicitProxyEgress for BlockingExplicitProxyEgress {
         limited
             .read_to_end(&mut response)
             .map_err(|_| ProxyEgressError::SendFailed)?;
-        Ok(())
+        Ok(response)
     }
 
     fn connect_socks(
@@ -411,12 +547,35 @@ impl ExplicitProxyEgress for BlockingExplicitProxyEgress {
 }
 
 #[derive(Clone, Debug)]
+struct PolicyOnlyProxyEgress;
+
+impl ExplicitProxyEgress for PolicyOnlyProxyEgress {
+    fn forward_http(
+        &mut self,
+        _request: &HttpProxyRequestMetadata,
+        _bytes: &[u8],
+    ) -> Result<Vec<u8>, ProxyEgressError> {
+        Ok(Vec::new())
+    }
+
+    fn connect_socks(
+        &mut self,
+        _request: &SocksConnectMetadata,
+        _bytes: &[u8],
+    ) -> Result<(), ProxyEgressError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
 pub struct AlphaRuntimeTcpProxyEgress {
     direct: BlockingTcpEgress,
     http_proxy_endpoint: NetworkEndpoint,
     socks_proxy_endpoint: NetworkEndpoint,
     http_proxy_frontend: ExplicitProxyFrontend<BlockingExplicitProxyEgress>,
-    socks_proxy_frontend: ExplicitProxyFrontend<BlockingExplicitProxyEgress>,
+    socks_proxy_frontend: ExplicitProxyFrontend<PolicyOnlyProxyEgress>,
+    shared_dns_cache: SharedDnsCache,
+    socks_tunnel: Option<TcpStream>,
     now_ms: u64,
     lifecycle_audits: Vec<AuditRecord>,
 }
@@ -447,9 +606,9 @@ impl AlphaRuntimeTcpProxyEgress {
         let socks_proxy_frontend = ExplicitProxyFrontend::new(
             sandbox_id.clone(),
             BrokerCore::new(policy, audit_capacity.max(1)),
-            explicit,
+            PolicyOnlyProxyEgress,
         )
-        .with_shared_dns_cache(shared_dns_cache);
+        .with_shared_dns_cache(shared_dns_cache.clone());
         let lifecycle_audits = vec![
             proxy_listener_configured_audit(
                 &sandbox_id,
@@ -474,6 +633,8 @@ impl AlphaRuntimeTcpProxyEgress {
             socks_proxy_endpoint,
             http_proxy_frontend,
             socks_proxy_frontend,
+            shared_dns_cache,
+            socks_tunnel: None,
             now_ms,
             lifecycle_audits,
         }
@@ -487,6 +648,7 @@ impl AlphaRuntimeTcpProxyEgress {
             .http_proxy_frontend
             .handle_http_proxy_bytes_at(bytes, self.now_ms)
         {
+            Ok(result) if result.forwarded => result.response_bytes,
             Ok(result) => http_proxy_response_bytes(result.decision, false, is_connect).to_vec(),
             Err(_) => http_proxy_response_bytes(Decision::FailClosed, true, is_connect).to_vec(),
         }
@@ -496,13 +658,56 @@ impl AlphaRuntimeTcpProxyEgress {
         if socks5_greeting_supports_no_auth(bytes) {
             return vec![0x05, 0x00];
         }
+        if self.socks_tunnel.is_some() {
+            return self.exchange_socks_tunnel(bytes).unwrap_or_default();
+        }
+        let metadata = parse_socks5_connect_request(bytes).ok();
         match self
             .socks_proxy_frontend
             .handle_socks5_connect_bytes_at(bytes, self.now_ms)
         {
+            Ok(result) if result.decision.is_allow() => {
+                if let Some(metadata) = metadata {
+                    self.socks_tunnel = self.open_socks_tunnel(&metadata).ok();
+                }
+                socks5_connect_response(0x00).to_vec()
+            }
             Ok(result) => socks5_connect_response(socks5_reply_code_for(result.decision)).to_vec(),
             Err(_) => socks5_connect_response(0x01).to_vec(),
         }
+    }
+
+    fn open_socks_tunnel(
+        &self,
+        metadata: &SocksConnectMetadata,
+    ) -> Result<TcpStream, ProxyEgressError> {
+        let ip = metadata
+            .destination_ip
+            .or_else(|| {
+                metadata.destination_host.as_ref().and_then(|host| {
+                    self.shared_dns_cache
+                        .resolve_hostname(host, self.now_ms)
+                        .map(|resolution| resolution.address)
+                })
+            })
+            .ok_or(ProxyEgressError::SendFailed)?;
+        BlockingExplicitProxyEgress::new(Duration::from_secs(5), Duration::from_secs(5), 64 * 1024)
+            .connect_ip_literal(ip, metadata.destination_port)
+    }
+
+    fn exchange_socks_tunnel(&mut self, bytes: &[u8]) -> Result<Vec<u8>, ProxyEgressError> {
+        let Some(stream) = self.socks_tunnel.as_mut() else {
+            return Err(ProxyEgressError::SendFailed);
+        };
+        stream
+            .write_all(bytes)
+            .map_err(|_| ProxyEgressError::SendFailed)?;
+        let mut response = vec![0u8; 64 * 1024];
+        let len = stream
+            .read(&mut response)
+            .map_err(|_| ProxyEgressError::SendFailed)?;
+        response.truncate(len);
+        Ok(response)
     }
 }
 
@@ -519,6 +724,14 @@ impl TcpEgress for AlphaRuntimeTcpProxyEgress {
             return Ok(self.handle_socks5_proxy_exchange(from_sandbox));
         }
         self.direct.connect_and_exchange(destination, from_sandbox)
+    }
+
+    fn handles_policy_for(&self, destination: &NetworkEndpoint) -> bool {
+        destination == &self.http_proxy_endpoint || destination == &self.socks_proxy_endpoint
+    }
+
+    fn dns_cache(&self) -> Option<foxprox_core::DnsCache> {
+        Some(self.shared_dns_cache.snapshot())
     }
 }
 
@@ -4725,7 +4938,7 @@ mod tests {
             &mut self,
             _request: &HttpProxyRequestMetadata,
             _bytes: &[u8],
-        ) -> Result<(), ProxyEgressError> {
+        ) -> Result<Vec<u8>, ProxyEgressError> {
             Err(ProxyEgressError::SendFailed)
         }
 

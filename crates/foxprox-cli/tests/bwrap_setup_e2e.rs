@@ -5,8 +5,9 @@ use foxprox_cli::{
     HostSetupControlHandoffStatus, HostSetupProcessExit, HostSetupProcessRunner,
 };
 use foxprox_core::{
-    AuditKind, BrokerCore, BrokerRuntimeConfig, BwrapSetupPlan, Decision, JsonLineAuditSink,
-    NetworkEndpoint, NetworkSetupConfig, PolicyConfig, PolicyEngine, Protocol, RuntimeAuditFanIn,
+    AuditKind, BrokerCore, BrokerRuntimeConfig, BwrapSetupPlan, Cidr, Decision, Frontend,
+    JsonLineAuditSink, NetworkEndpoint, NetworkSetupConfig, PolicyConfig, PolicyEngine, PolicyRule,
+    Protocol, RuntimeAuditFanIn,
 };
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
@@ -1209,10 +1210,13 @@ fn foxprox_run_bwrap_alpha_command_exposes_http_proxy() {
     let mut config =
         BrokerRuntimeConfig::alpha_default(format!("foxprox-alpha-http-proxy-e2e-{unique}"));
     config.setup.tun_name = format!("fxp{:x}", std::process::id() % 0x00ff_ffff);
-    config.policy = PolicyConfig {
-        default_decision: Decision::Allow,
-        ..PolicyConfig::default()
-    };
+    config.policy = PolicyConfig::default();
+    config.policy.rules.push(
+        PolicyRule::allow("allow-http-proxy-e2e")
+            .frontend(Frontend::HttpProxy)
+            .protocol(Protocol::Http)
+            .origin("http", host_addr.ip().to_string(), host_addr.port()),
+    );
     let expected_proxy = config.setup.proxy_environment().http_proxy;
     std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
 
@@ -1226,7 +1230,7 @@ fn foxprox_run_bwrap_alpha_command_exposes_http_proxy() {
             "req=('GET http://{host}:{port}/alpha HTTP/1.1\\r\\nHost: {host}:{port}\\r\\nConnection: close\\r\\n\\r\\n').encode(); ",
             "s.sendall(req); ",
             "data=s.recv(128); ",
-            "assert data.startswith(b'HTTP/1.1 200'), data; ",
+            "assert data.startswith(b'HTTP/1.1 200') and data.endswith(b'ok'), data; ",
             "s.close()"
         ),
         proxy = expected_proxy,
@@ -1285,8 +1289,11 @@ fn foxprox_run_bwrap_alpha_command_exposes_socks_proxy() {
     let host_addr = host_listener.local_addr().unwrap();
     let (server_tx, server_rx) = std::sync::mpsc::channel();
     let host_server = std::thread::spawn(move || {
-        let (_stream, peer) = host_listener.accept().unwrap();
-        server_tx.send(peer).unwrap();
+        let (mut stream, peer) = host_listener.accept().unwrap();
+        let mut request = [0u8; 4];
+        stream.read_exact(&mut request).unwrap();
+        stream.write_all(b"pong").unwrap();
+        server_tx.send((peer, request)).unwrap();
     });
 
     let unique = SystemTime::now()
@@ -1298,10 +1305,14 @@ fn foxprox_run_bwrap_alpha_command_exposes_socks_proxy() {
     let mut config =
         BrokerRuntimeConfig::alpha_default(format!("foxprox-alpha-socks-proxy-e2e-{unique}"));
     config.setup.tun_name = format!("fxs{:x}", std::process::id() % 0x00ff_ffff);
-    config.policy = PolicyConfig {
-        default_decision: Decision::Allow,
-        ..PolicyConfig::default()
-    };
+    config.policy = PolicyConfig::default();
+    config.policy.rules.push(
+        PolicyRule::allow("allow-socks-proxy-e2e")
+            .frontend(Frontend::Socks5Proxy)
+            .protocol(Protocol::Socks)
+            .destination_cidr(Cidr::new(host_addr.ip(), 32))
+            .destination_port(host_addr.port()),
+    );
     let expected_proxy = config.setup.proxy_environment().all_proxy;
     std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
 
@@ -1323,6 +1334,9 @@ fn foxprox_run_bwrap_alpha_command_exposes_socks_proxy() {
             "s.sendall(req); ",
             "reply=s.recv(10); ",
             "assert reply[:2] == b'\\x05\\x00', reply; ",
+            "s.sendall(b'ping'); ",
+            "data=s.recv(4); ",
+            "assert data == b'pong', data; ",
             "s.close()"
         ),
         proxy = expected_proxy,
@@ -1353,9 +1367,10 @@ fn foxprox_run_bwrap_alpha_command_exposes_socks_proxy() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    server_rx
+    let (_peer, request) = server_rx
         .recv_timeout(Duration::from_secs(1))
-        .expect("host TCP listener receives SOCKS connect through alpha launcher");
+        .expect("host TCP listener receives SOCKS tunnel bytes through alpha launcher");
+    assert_eq!(&request, b"ping");
     host_server.join().unwrap();
 
     let stdout = String::from_utf8(output.stdout).unwrap();

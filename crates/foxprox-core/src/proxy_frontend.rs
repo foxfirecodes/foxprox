@@ -17,7 +17,7 @@ pub trait ExplicitProxyEgress {
         &mut self,
         request: &HttpProxyRequestMetadata,
         bytes: &[u8],
-    ) -> Result<(), ProxyEgressError>;
+    ) -> Result<Vec<u8>, ProxyEgressError>;
 
     fn connect_socks(
         &mut self,
@@ -36,6 +36,7 @@ pub struct ExplicitProxyResult {
     pub decision: Decision,
     pub reason: Option<DenialReason>,
     pub forwarded: bool,
+    pub response_bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug)]
@@ -110,20 +111,24 @@ impl<E: ExplicitProxyEgress> ExplicitProxyFrontend<E> {
         if decision.decision.is_deny() {
             return Ok(result_from_decision(decision, false));
         }
-        if let Err(error) = self.egress.forward_http(&metadata, bytes) {
-            let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
-                .with_frontend(Frontend::HttpProxy)
-                .with_protocol(request.protocol)
-                .with_destination(request.destination.clone())
-                .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
-                .with_detail("error", proxy_egress_error_detail(&error));
-            let _ = self.broker.append_audit_for(&request, audit);
-            return Err(error);
-        }
+        let response_bytes = match self.egress.forward_http(&metadata, bytes) {
+            Ok(response_bytes) => response_bytes,
+            Err(error) => {
+                let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
+                    .with_frontend(Frontend::HttpProxy)
+                    .with_protocol(request.protocol)
+                    .with_destination(request.destination.clone())
+                    .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+                    .with_detail("error", proxy_egress_error_detail(&error));
+                let _ = self.broker.append_audit_for(&request, audit);
+                return Err(error);
+            }
+        };
         Ok(ExplicitProxyResult {
             decision: decision.decision,
             reason: decision.reason,
             forwarded: true,
+            response_bytes,
         })
     }
 
@@ -185,6 +190,7 @@ impl<E: ExplicitProxyEgress> ExplicitProxyFrontend<E> {
             decision: decision.decision,
             reason: decision.reason,
             forwarded: true,
+            response_bytes: Vec::new(),
         })
     }
 
@@ -286,6 +292,7 @@ fn result_from_decision(decision: PolicyDecision, forwarded: bool) -> ExplicitPr
         decision: decision.decision,
         reason: decision.reason,
         forwarded,
+        response_bytes: Vec::new(),
     }
 }
 
@@ -310,9 +317,9 @@ impl ExplicitProxyEgress for InMemoryExplicitProxyEgress {
         &mut self,
         request: &HttpProxyRequestMetadata,
         bytes: &[u8],
-    ) -> Result<(), ProxyEgressError> {
+    ) -> Result<Vec<u8>, ProxyEgressError> {
         self.forwarded_http.push((request.clone(), bytes.to_vec()));
-        Ok(())
+        Ok(Vec::new())
     }
 
     fn connect_socks(
@@ -463,7 +470,7 @@ mod tests {
             &mut self,
             _request: &HttpProxyRequestMetadata,
             _bytes: &[u8],
-        ) -> Result<(), ProxyEgressError> {
+        ) -> Result<Vec<u8>, ProxyEgressError> {
             Err(ProxyEgressError::SendFailed)
         }
 

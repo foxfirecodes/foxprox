@@ -5745,3 +5745,20 @@ Commit: db9da60
 - `cargo fmt --check` — passed.
 - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
 - `bash -n scripts/foxprox-alpha-run` — passed.
+
+
+## 2026-06-27 — Address alpha launcher review findings
+
+### Fixes
+- Made explicit HTTP proxy handling relay real origin responses back through smoltcp instead of returning a canned status.
+- Made explicit SOCKS handling keep a tunnel stream and bridge post-CONNECT bytes back to the sandbox.
+- Let synthetic HTTP/SOCKS proxy endpoints own policy so default-deny configs with explicit proxy allow rules work; TUN packet policy no longer blocks proxy SYNs before proxy frontend attribution.
+- Added transparent TCP HTTP/TLS request attribution in the smoltcp launcher path so Host/path and TLS SNI/hidden-SNI/SNI-DNS mismatch policy can be enforced with the shared DNS cache.
+- Routed direct UDP through the core UDP forwarder path for QUIC classification, DNS attribution, flow lifecycle/resource-limit audit, and UDP policy evidence, while preserving DNS-over-TUN broker handling.
+- Strengthened explicit HTTP/SOCKS E2Es to use default-deny configs with targeted allow rules and verify actual response/tunnel bytes, not only handshakes/status.
+
+### Validation
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all thirteen real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.

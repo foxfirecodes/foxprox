@@ -9,8 +9,8 @@
 
 use foxprox_core::{
     checksum, AuditKind, AuditRecord, BrokerCore, ByteCounts, Decision, DenialReason,
-    DeviceIoError, Frontend, NetworkEndpoint, PacketDevice, ParsedIpPacket, PolicyDecision,
-    PolicyRequest, RuntimeComponent, RuntimeTaskExpectation, RuntimeTaskOutcome,
+    DeviceIoError, Frontend, NetworkEndpoint, Origin, PacketDevice, ParsedIpPacket, PolicyDecision,
+    PolicyRequest, Protocol, RuntimeComponent, RuntimeTaskExpectation, RuntimeTaskOutcome,
     RuntimeTaskReadiness, RuntimeTaskStatus, TcpEgress, TcpEgressError,
 };
 use smoltcp::iface::{Config, Interface, PollResult, SocketHandle, SocketSet};
@@ -367,6 +367,15 @@ pub trait UdpDatagramExchange {
         payload: &[u8],
     ) -> Result<Vec<u8>, UdpExchangeError>;
 
+    fn exchange_datagram_for(
+        &mut self,
+        _source: NetworkEndpoint,
+        destination: NetworkEndpoint,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, UdpExchangeError> {
+        self.exchange_datagram(destination, payload)
+    }
+
     fn handles_policy(&self) -> bool {
         false
     }
@@ -486,6 +495,15 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         packet: Vec<u8>,
         now_ms: i64,
     ) -> Result<SmoltcpTunBridgeResult, DeviceIoError> {
+        self.process_inbound_packet_with_policy_override(packet, now_ms, false)
+    }
+
+    fn process_inbound_packet_with_policy_override(
+        &mut self,
+        packet: Vec<u8>,
+        now_ms: i64,
+        allow_without_policy_decision: bool,
+    ) -> Result<SmoltcpTunBridgeResult, DeviceIoError> {
         let parsed = match ParsedIpPacket::parse(&packet) {
             Ok(parsed) => parsed,
             Err(error) => {
@@ -522,7 +540,16 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
             return Ok(bridge_result(false, StackPollEvidence::none(), 0, decision));
         }
 
-        let policy_decision = self.broker.evaluate(&request);
+        let policy_decision = if allow_without_policy_decision {
+            PolicyDecision {
+                decision: Decision::Allow,
+                reason: None,
+                rule_id: None,
+                audit_kind: AuditKind::PacketObserved,
+            }
+        } else {
+            self.broker.evaluate(&request)
+        };
         if policy_decision.decision.is_deny() {
             let benign_incidental = is_benign_startup_multicast(&parsed, &policy_decision);
             return Ok(SmoltcpTunBridgeResult {
@@ -983,22 +1010,25 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                 )));
             }
         }
-        let response_payload =
-            match egress.exchange_datagram(parsed.destination_endpoint(), payload) {
-                Ok(response) => response,
-                Err(error) => {
-                    let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
-                        .with_frontend(Frontend::Tun)
-                        .with_protocol(foxprox_core::Protocol::Udp)
-                        .with_source(parsed.source_endpoint())
-                        .with_destination(parsed.destination_endpoint())
-                        .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
-                        .with_detail("stack", "udp_exchange")
-                        .with_detail("error", udp_exchange_error_detail(&error));
-                    let _ = self.broker.append_audit_for(&request, audit);
-                    return Err(error);
-                }
-            };
+        let response_payload = match egress.exchange_datagram_for(
+            parsed.source_endpoint(),
+            parsed.destination_endpoint(),
+            payload,
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(foxprox_core::Protocol::Udp)
+                    .with_source(parsed.source_endpoint())
+                    .with_destination(parsed.destination_endpoint())
+                    .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+                    .with_detail("stack", "udp_exchange")
+                    .with_detail("error", udp_exchange_error_detail(&error));
+                let _ = self.broker.append_audit_for(&request, audit);
+                return Err(error);
+            }
+        };
         let response = match response_packet(&response_template, &response_payload) {
             Some(response) => response,
             None => {
@@ -1170,22 +1200,25 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                 ));
             }
         }
-        let response_payload =
-            match egress.exchange_datagram(parsed.destination_endpoint(), payload) {
-                Ok(response) => response,
-                Err(error) => {
-                    let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
-                        .with_frontend(Frontend::Tun)
-                        .with_protocol(foxprox_core::Protocol::Udp)
-                        .with_source(parsed.source_endpoint())
-                        .with_destination(parsed.destination_endpoint())
-                        .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
-                        .with_detail("stack", "udp_exchange")
-                        .with_detail("error", udp_exchange_error_detail(&error));
-                    let _ = self.broker.append_audit_for(&request, audit);
-                    return Err(error);
-                }
-            };
+        let response_payload = match egress.exchange_datagram_for(
+            parsed.source_endpoint(),
+            parsed.destination_endpoint(),
+            payload,
+        ) {
+            Ok(response) => response,
+            Err(error) => {
+                let audit = AuditRecord::new(AuditKind::BrokerError, self.sandbox_id.clone())
+                    .with_frontend(Frontend::Tun)
+                    .with_protocol(foxprox_core::Protocol::Udp)
+                    .with_source(parsed.source_endpoint())
+                    .with_destination(parsed.destination_endpoint())
+                    .with_decision(Decision::FailClosed, Some(DenialReason::ResourceLimit))
+                    .with_detail("stack", "udp_exchange")
+                    .with_detail("error", udp_exchange_error_detail(&error));
+                let _ = self.broker.append_audit_for(&request, audit);
+                return Err(error);
+            }
+        };
         let response = match response_packet(&response_template, &response_payload) {
             Some(response) => response,
             None => {
@@ -1307,8 +1340,10 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                 .map_err(TransportBridgeError::Udp)?;
             return Ok(Some(TransportBridgeEvidence::Udp(udp)));
         }
+        let proxy_policy_owner = parsed.protocol == foxprox_core::Protocol::Tcp
+            && tcp_egress.handles_policy_for(&parsed.destination_endpoint());
         let packet = self
-            .process_inbound_packet(packet, now_ms)
+            .process_inbound_packet_with_policy_override(packet, now_ms, proxy_policy_owner)
             .map_err(TransportBridgeError::Device)?;
         if parsed.protocol != foxprox_core::Protocol::Tcp || packet.decision.is_deny() {
             return Ok(Some(TransportBridgeEvidence::Packet(packet)));
@@ -1362,13 +1397,24 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         } else {
             requested_destination.clone()
         };
-        let request = PolicyRequest::tcp_connect(
-            self.sandbox_id.clone(),
-            Frontend::Tun,
+        let request = transparent_tcp_policy_request(
+            &self.sandbox_id,
             source.clone(),
             requested_destination.clone(),
+            &from_sandbox,
+            egress.dns_cache().as_ref(),
+            opened_at_ms,
         );
-        let policy_decision = self.broker.evaluate(&request);
+        let policy_decision = if egress.handles_policy_for(&requested_destination) {
+            PolicyDecision {
+                decision: Decision::Allow,
+                reason: None,
+                rule_id: None,
+                audit_kind: AuditKind::TcpConnectDecision,
+            }
+        } else {
+            self.broker.evaluate(&request)
+        };
         if policy_decision.decision.is_deny() {
             return Ok(tcp_stream_evidence(
                 ByteCounts::ZERO,
@@ -1508,6 +1554,65 @@ fn smoltcp_ip_to_std(address: IpAddress) -> IpAddr {
         .to_string()
         .parse()
         .expect("smoltcp IP formats as std IP")
+}
+
+fn transparent_tcp_policy_request(
+    sandbox_id: &str,
+    source: NetworkEndpoint,
+    destination: NetworkEndpoint,
+    from_sandbox: &[u8],
+    dns_cache: Option<&foxprox_core::DnsCache>,
+    now_ms: u64,
+) -> PolicyRequest {
+    let mut request = PolicyRequest::tcp_connect(
+        sandbox_id.to_string(),
+        Frontend::Tun,
+        source,
+        destination.clone(),
+    );
+    request.protocol = Protocol::Tcp;
+    match destination.port {
+        Some(80) => {
+            if let Ok(http) = foxprox_core::inspect::parse_plaintext_http_request(from_sandbox) {
+                request = request
+                    .with_attribution(http.attribution)
+                    .with_origin(Origin::new("http", http.host, http.port))
+                    .with_http(http.method, http.path_query);
+            }
+        }
+        Some(443) => match foxprox_core::inspect::parse_tls_client_hello_sni(from_sandbox) {
+            Ok(attribution) => {
+                let sni_hostname = attribution.hostname.clone();
+                request = request
+                    .with_attribution(attribution)
+                    .with_tls_sni(sni_hostname.clone());
+                if let Some(dns_hostname) = destination
+                    .ip
+                    .and_then(|ip| dns_cache.and_then(|cache| cache.attribution_for(ip, now_ms)))
+                    .map(|attribution| attribution.hostname)
+                {
+                    request = request.with_dns_correlated_hostname(dns_hostname.clone());
+                    request.sni_dns_mismatch = dns_hostname != sni_hostname;
+                }
+            }
+            Err(error) => {
+                request.hidden_sni = true;
+                request = request.with_detail("tls_client_hello_error", tls_error_detail(&error));
+            }
+        },
+        _ => {}
+    }
+    request
+}
+
+fn tls_error_detail(error: &foxprox_core::inspect::TlsClientHelloError) -> &'static str {
+    match error {
+        foxprox_core::inspect::TlsClientHelloError::NotTlsHandshake => "not_tls_handshake",
+        foxprox_core::inspect::TlsClientHelloError::NotClientHello => "not_client_hello",
+        foxprox_core::inspect::TlsClientHelloError::Truncated => "truncated",
+        foxprox_core::inspect::TlsClientHelloError::MissingSni => "missing_sni",
+        foxprox_core::inspect::TlsClientHelloError::Malformed => "malformed",
+    }
 }
 
 fn endpoint_detail(endpoint: &NetworkEndpoint) -> String {

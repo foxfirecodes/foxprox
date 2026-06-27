@@ -16,6 +16,14 @@ pub trait TcpEgress {
         destination: NetworkEndpoint,
         from_sandbox: &[u8],
     ) -> Result<Vec<u8>, TcpEgressError>;
+
+    fn handles_policy_for(&self, _destination: &NetworkEndpoint) -> bool {
+        false
+    }
+
+    fn dns_cache(&self) -> Option<DnsCache> {
+        None
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
