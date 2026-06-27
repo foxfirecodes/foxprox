@@ -5593,3 +5593,21 @@ Commit: 22bc850
 
 ### Remaining alpha gaps
 - The combined command is now present, but it still uses a step budget rather than child-lifecycle-driven cancellation and has not yet started explicit HTTP/SOCKS proxy listeners inside the combined launcher. Next steps are to add a real alpha E2E for `run-bwrap-alpha`, wire target-exit cancellation/lifecycle audit into the combined loop, integrate proxy listener lifecycle, and expand multi-flow coverage.
+
+
+## 2026-06-26 — Stop alpha runtime on target exit
+
+Commit: d894329
+
+### Implementation
+- Added a stop callback to `ReceivedTunAlphaRuntimeSession` so the combined TUN runtime can stop as soon as the bwrap target exits rather than waiting for the full safety step budget.
+- `run-bwrap-alpha` now polls the setup/target process while the transport loop runs, records the observed target exit, drains final audit evidence, and uses that exit status for CLI success.
+- Retained the high step budget as a fail-safe guard while making normal short-lived targets return promptly.
+
+### Validation
+- `cargo test --all-targets --all-features` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all seven existing real bwrap/TUN tests.
+
+### Remaining alpha gaps
+- Need a real `run-bwrap-alpha` E2E and proxy listener lifecycle integration in the combined command; multi-flow stress coverage and lifecycle cleanup audit should follow.
