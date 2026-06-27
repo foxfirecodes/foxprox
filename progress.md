@@ -2243,3 +2243,49 @@
 - Commit hash when committed: pending.
 - Remaining risks/deferred beyond alpha CLI: one mapping per invocation; no config file or multi-flow/multi-mapping daemon orchestration yet; explicit HTTP/SOCKS proxy listener runtimes are still not surfaced as listener flags.
 - Exact next step: commit UDP CLI mode, then provide concise usage and limits.
+
+## 2026-06-27T03:04:30Z
+- Current objective: support `curl http://example.com` through the production CLI.
+- Files changed: `crates/foxprox-launcher/src/bin/foxprox.rs`, `progress.md`.
+- Verification commands run so far:
+  - `cargo fmt --check` (reported formatting drift; fixed with `cargo fmt`)
+  - `cargo clippy -p foxprox-launcher --all-targets --all-features -- -D warnings`
+  - `cargo test -p foxprox-launcher --all-targets --all-features`
+  - `cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-launcher --bin foxprox`
+  - Live real-site CLI smoke: `target/debug/foxprox run --setup-bin target/debug/foxproxsetup --sandbox-id curl-example --tun-name fpxcurl --tcp-domain example.com:80 -- /usr/bin/curl -fsS --max-time 10 http://example.com/`; passed and returned the Example Domain HTML. This exercises broker DNS aliasing for `example.com` to the broker TUN IP, smoltcp TCP accept on port 80, host DNS resolution of `example.com:80`, host TCP connect, and bidirectional bridge back to curl.
+- Observed result: `foxprox run --tcp-domain example.com:80 -- curl http://example.com/` now works for real HTTP sites. `--tcp-domain HOST:PORT` automatically adds a broker DNS alias for HOST and maps sandbox traffic for that port to the host-resolved real endpoint.
+- Remaining risks: domain mode currently aliases DNS to the broker IP for the specified hostname and maps a single TCP port; HTTPS/SNI and multiple domains need later config-file support.
+- Exact next step: run full workspace verification and live TCP/UDP/domain smokes, then amend/commit CLI updates.
+
+## 2026-06-27T03:04:30Z
+- Current objective: support `curl http://example.com` through the production CLI.
+- Files changed: `crates/foxprox-launcher/src/bin/foxprox.rs`, `progress.md`.
+- Verification commands run so far:
+  - `cargo fmt --check` (reported formatting drift; fixed with `cargo fmt`)
+  - `cargo clippy -p foxprox-launcher --all-targets --all-features -- -D warnings`
+  - `cargo test -p foxprox-launcher --all-targets --all-features`
+  - `cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-launcher --bin foxprox`
+  - Live real-site CLI smoke: `target/debug/foxprox run --setup-bin target/debug/foxproxsetup --sandbox-id curl-example --tun-name fpxcurl --tcp-domain example.com:80 -- /usr/bin/curl -fsS --max-time 10 http://example.com/`; passed and returned the Example Domain HTML. This exercises broker DNS aliasing for `example.com` to the broker TUN IP, smoltcp TCP accept on port 80, host DNS resolution of `example.com:80`, host TCP connect, and bidirectional bridge back to curl.
+- Observed result: `foxprox run --tcp-domain example.com:80 -- curl http://example.com/` now works for real HTTP sites. `--tcp-domain HOST:PORT` automatically adds a broker DNS alias for HOST and maps sandbox traffic for that port to the host-resolved real endpoint.
+- Remaining risks: domain mode currently aliases DNS to the broker IP for the specified hostname and maps a single TCP port; HTTPS/SNI and multiple domains need later config-file support.
+- Exact next step: run full workspace verification and live TCP/UDP/domain smokes, then amend/commit CLI updates.
+
+## 2026-06-27T03:08:00Z
+- Current objective: finalize real-site curl support.
+- Files changed: `crates/foxprox-launcher/src/bin/foxprox.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - full workspace `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`: passed; 55 core tests, 9 device tests, 4 integration tests, 7 launcher library tests, 6 `foxprox` CLI tests, 95 runtime tests, 10 setup tests, and 40 smoltcp tests passed.
+  - Live real-site CLI smoke re-run unsandboxed: `target/debug/foxprox run --setup-bin target/debug/foxproxsetup --sandbox-id curl-example2 --tun-name fpxcur2 --tcp-domain example.com:80 -- /usr/bin/curl -fsS --max-time 10 http://example.com/`; passed and returned the Example Domain HTML.
+- Observed result: user can now curl a real HTTP website by using `--tcp-domain example.com:80` and running curl against `http://example.com/` inside the launched sandbox.
+- Commit hash when committed: pending.
+- Remaining risks/deferred beyond this slice: HTTPS support needs `--tcp-domain example.com:443` and policy/SNI hardening; arbitrary multiple-domain/multiple-port routing still needs config-file driven daemon mode.
+
+## 2026-06-27T03:08:00Z
+- Current objective: finalize real-site curl support.
+- Files changed: `crates/foxprox-launcher/src/bin/foxprox.rs`, `progress.md`, `learnings.md`.
+- Verification commands run:
+  - full workspace `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`: passed; 55 core tests, 9 device tests, 4 integration tests, 7 launcher library tests, 6 `foxprox` CLI tests, 95 runtime tests, 10 setup tests, and 40 smoltcp tests passed.
+  - Live real-site CLI smoke re-run unsandboxed: `target/debug/foxprox run --setup-bin target/debug/foxproxsetup --sandbox-id curl-example2 --tun-name fpxcur2 --tcp-domain example.com:80 -- /usr/bin/curl -fsS --max-time 10 http://example.com/`; passed and returned the Example Domain HTML.
+- Observed result: user can now curl a real HTTP website by using `--tcp-domain example.com:80` and running curl against `http://example.com/` inside the launched sandbox.
+- Commit hash when committed: pending.
+- Remaining risks/deferred beyond this slice: HTTPS support needs `--tcp-domain example.com:443` and policy/SNI hardening; arbitrary multiple-domain/multiple-port routing still needs config-file driven daemon mode.

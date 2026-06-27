@@ -70,3 +70,11 @@
 - Rootless bwrap TUN setup requires running the setup helper as uid/gid 0 inside the user namespace and mounting a writable `/dev` (`--dev /dev`) before binding `/dev/net/tun`; `--dev-bind /dev/net/tun` alone lets the node appear but `open`/`TUNSETIFF` can fail.
 - bwrap does not preserve arbitrary helper fds for the target command path used here, so a filesystem Unix socket handoff is a practical rootless live-test path for transferring the TUN fd back to the host broker.
 - In rootless user namespaces, dropping CAP_NET_ADMIN with `capset` can succeed while bounding/ambient `prctl` drops return EPERM; verify effective/permitted/inheritable removal as the hard invariant and treat those prctls as best-effort.
+
+## 2026-06-27T03:08:00Z
+- `foxprox run --tcp-domain HOST:PORT` is the practical alpha path for real HTTP curl smoke tests: the broker DNS responder aliases HOST to the broker TUN IP inside the sandbox, while the launcher resolves HOST:PORT on the host and bridges the accepted smoltcp TCP flow to the real host endpoint.
+- Live rootless bwrap socket-handoff checks can fail under pi-auto's review-only sandbox with `bind setup control socket path: Operation not permitted`; include a harmless `/tmp` write in the shell command when a live smoke must run unsandboxed.
+
+## 2026-06-27T03:08:00Z
+- `foxprox run --tcp-domain HOST:PORT` is the practical alpha path for real HTTP curl smoke tests: the broker DNS responder aliases HOST to the broker TUN IP inside the sandbox, while the launcher resolves HOST:PORT on the host and bridges the accepted smoltcp TCP flow to the real host endpoint.
+- Live rootless bwrap socket-handoff checks can fail under pi-auto's review-only sandbox with `bind setup control socket path: Operation not permitted`; include a harmless `/tmp` write in the shell command when a live smoke must run unsandboxed.

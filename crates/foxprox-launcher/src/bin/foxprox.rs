@@ -1,18 +1,20 @@
 use foxprox_core::{
-    parse_ip_packet, synthesize_udpv4_response, DecisionAction, Endpoint, FrontendKind,
-    NormalizedEvent, ParsedIpPacket, PolicyConfig, PolicyEngine, PolicyRule, Protocol, RuleSet,
-    SandboxId, SniStatus, VecAuditSink, VerificationKernel,
+    parse_ip_packet, synthesize_udpv4_response, DecisionAction, DnsCache, Endpoint, FrontendKind,
+    Hostname, NormalizedEvent, ParsedIpPacket, PolicyConfig, PolicyEngine, PolicyRule, Protocol,
+    RuleSet, SandboxId, SniStatus, StaticDnsResolver, VecAuditSink, VerificationKernel,
 };
 use foxprox_device::set_file_nonblocking;
 use foxprox_integrations::{SetupPlan, TunDeviceConfig};
 use foxprox_launcher::prepare_bwrap_launch_with_socket_path;
-use foxprox_runtime::{build_runtime_components, BrokerRuntimeConfig, TcpStackAdapter};
+use foxprox_runtime::{
+    build_runtime_components, handle_broker_dns_udp_packet, BrokerRuntimeConfig, TcpStackAdapter,
+};
 use foxprox_smoltcp::{
     SmoltcpIpConfig, SmoltcpTcpBridgeIoSession, SmoltcpTcpBridgeSession,
     SmoltcpTcpBridgeSessionError, TcpConnectReportMode,
 };
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -39,6 +41,7 @@ struct CliConfig {
     broker_ip: Ipv4Addr,
     mtu: u16,
     dns: Ipv4Addr,
+    dns_aliases: Vec<String>,
     mode: BrokerMode,
     target: Vec<String>,
 }
@@ -46,6 +49,7 @@ struct CliConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum BrokerMode {
     Tcp { listen: u16, host: SocketAddr },
+    TcpDomain { hostname: String, port: u16 },
     Udp { listen: u16, host: SocketAddr },
 }
 
@@ -64,10 +68,12 @@ impl CliConfig {
         let mut broker_ip = Ipv4Addr::new(10, 66, 0, 1);
         let mut mtu = 1500u16;
         let mut dns = None;
+        let mut dns_aliases = Vec::new();
         let mut tcp_listen = None;
         let mut tcp_host = None;
         let mut udp_listen = None;
         let mut udp_host = None;
+        let mut tcp_domain = None;
         let mut target = Vec::new();
 
         let mut iter = args.into_iter().map(Into::into).peekable();
@@ -90,6 +96,7 @@ impl CliConfig {
                 "--broker-ip" => broker_ip = parse_ipv4(&arg, next_value(&arg, &mut iter)?)?,
                 "--mtu" => mtu = parse_u16(&arg, next_value(&arg, &mut iter)?)?,
                 "--dns" => dns = Some(parse_ipv4(&arg, next_value(&arg, &mut iter)?)?),
+                "--dns-alias" => dns_aliases.push(next_value(&arg, &mut iter)?),
                 "--tcp-listen" => tcp_listen = Some(parse_u16(&arg, next_value(&arg, &mut iter)?)?),
                 "--tcp-host" => {
                     tcp_host = Some(
@@ -97,6 +104,9 @@ impl CliConfig {
                             .parse::<SocketAddr>()
                             .map_err(|_| "invalid --tcp-host socket address".to_string())?,
                     );
+                }
+                "--tcp-domain" => {
+                    tcp_domain = Some(parse_host_port(&arg, next_value(&arg, &mut iter)?)?)
                 }
                 "--udp-listen" => udp_listen = Some(parse_u16(&arg, next_value(&arg, &mut iter)?)?),
                 "--udp-host" => {
@@ -119,22 +129,33 @@ impl CliConfig {
         if target.is_empty() {
             return Err("missing target command after --".to_string());
         }
-        let mode = match (tcp_listen, tcp_host, udp_listen, udp_host) {
-            (Some(listen), Some(host), None, None) => BrokerMode::Tcp { listen, host },
-            (None, None, Some(listen), Some(host)) => BrokerMode::Udp { listen, host },
-            (Some(_), None, _, _) => {
+        let mode = match (tcp_listen, tcp_host, tcp_domain, udp_listen, udp_host) {
+            (Some(listen), Some(host), None, None, None) => BrokerMode::Tcp { listen, host },
+            (None, None, Some((hostname, port)), None, None) => {
+                dns_aliases.push(hostname.clone());
+                BrokerMode::TcpDomain { hostname, port }
+            }
+            (None, None, None, Some(listen), Some(host)) => BrokerMode::Udp { listen, host },
+            (Some(_), None, None, _, _) => {
                 return Err("missing required --tcp-host ADDR:PORT".to_string())
             }
-            (None, Some(_), _, _) => return Err("missing required --tcp-listen PORT".to_string()),
-            (_, _, Some(_), None) => {
+            (None, Some(_), None, _, _) => {
+                return Err("missing required --tcp-listen PORT".to_string())
+            }
+            (_, _, _, Some(_), None) => {
                 return Err("missing required --udp-host ADDR:PORT".to_string())
             }
-            (_, _, None, Some(_)) => return Err("missing required --udp-listen PORT".to_string()),
-            (None, None, None, None) => {
+            (_, _, _, None, Some(_)) => {
+                return Err("missing required --udp-listen PORT".to_string())
+            }
+            (None, None, None, None, None) => {
                 return Err("missing required TCP or UDP mapping".to_string());
             }
             _ => {
-                return Err("TCP and UDP modes are mutually exclusive in this alpha CLI".to_string())
+                return Err(
+                    "TCP, TCP-domain, and UDP modes are mutually exclusive in this alpha CLI"
+                        .to_string(),
+                )
             }
         };
 
@@ -146,6 +167,7 @@ impl CliConfig {
             broker_ip,
             mtu,
             dns: dns.unwrap_or(broker_ip),
+            dns_aliases,
             mode,
             target,
         })
@@ -189,9 +211,13 @@ fn run(config: CliConfig) -> Result<(), String> {
     };
     set_file_nonblocking(&tun, false).map_err(|error| format!("set blocking TUN fd: {error:?}"))?;
 
-    match config.mode {
+    match config.mode.clone() {
         BrokerMode::Tcp { listen, host } => {
             run_tcp_mode(tun, &mut child, &config, sandbox_id, listen, host)
+        }
+        BrokerMode::TcpDomain { hostname, port } => {
+            let host = resolve_host(&hostname, port)?;
+            run_tcp_mode(tun, &mut child, &config, sandbox_id, port, host)
         }
         BrokerMode::Udp { listen, host } => run_udp_mode(tun, &mut child, &config, listen, host),
     }
@@ -246,6 +272,15 @@ fn run_tcp_mode(
         tcp_metadata_buffer_bytes: 8192,
     })
     .map_err(|error| format!("build runtime components: {error:?}"))?;
+    let mut dns_resolver = StaticDnsResolver::new(30);
+    for alias in &config.dns_aliases {
+        dns_resolver.insert(
+            Hostname::normalize(alias)
+                .map_err(|error| format!("invalid --dns-alias hostname `{alias}`: {error:?}"))?,
+            vec![IpAddr::V4(config.broker_ip)],
+        );
+    }
+    let mut dns_cache = DnsCache::new();
     let mut buffer = vec![0; config.mtu as usize + 128];
 
     let (session, flow) = loop {
@@ -255,11 +290,14 @@ fn run_tcp_mode(
         {
             return child_result(status);
         }
-        foxprox_smoltcp::pump_one_tun_packet(
+        pump_dns_or_smoltcp_packet(
             &mut adapter,
             &mut tun_reader,
             &mut tun_writer,
             &mut buffer,
+            &dns_resolver,
+            &mut dns_cache,
+            config.broker_ip,
             1,
         )
         .map_err(|error| format!("pump initial TUN packet: {error}"))?;
@@ -367,6 +405,60 @@ fn run_udp_mode(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn pump_dns_or_smoltcp_packet<R: Read, W: Write>(
+    adapter: &mut foxprox_smoltcp::SmoltcpIpLoopback,
+    reader: &mut R,
+    writer: &mut W,
+    buffer: &mut [u8],
+    dns_resolver: &StaticDnsResolver,
+    dns_cache: &mut DnsCache,
+    broker_ip: Ipv4Addr,
+    now_millis: i64,
+) -> std::io::Result<()> {
+    let bytes_read = reader.read(buffer)?;
+    let packet = &buffer[..bytes_read];
+    if let Ok(ParsedIpPacket::Udpv4Packet(udp)) = parse_ip_packet(packet) {
+        if udp.destination == broker_ip && udp.destination_port == 53 {
+            if let Ok(response) = handle_broker_dns_udp_packet(
+                &udp,
+                dns_resolver,
+                dns_cache,
+                now_millis.max(0) as u128,
+            ) {
+                writer.write_all(&response.packet)?;
+            }
+            return Ok(());
+        }
+    }
+    adapter.ingest_ip_packet(packet.to_vec()).map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{error:?}"))
+    })?;
+    adapter.poll_once(now_millis);
+    while let Some(packet) = adapter.next_outbound_ip_packet() {
+        writer.write_all(&packet)?;
+    }
+    Ok(())
+}
+
+fn resolve_host(hostname: &str, port: u16) -> Result<SocketAddr, String> {
+    (hostname, port)
+        .to_socket_addrs()
+        .map_err(|error| format!("resolve {hostname}:{port}: {error}"))?
+        .find(|address| address.is_ipv4())
+        .ok_or_else(|| format!("no IPv4 address resolved for {hostname}:{port}"))
+}
+
+fn parse_host_port(flag: &str, value: String) -> Result<(String, u16), String> {
+    let (host, port) = value
+        .rsplit_once(':')
+        .ok_or_else(|| format!("{flag} must be HOST:PORT"))?;
+    if host.is_empty() {
+        return Err(format!("{flag} host must not be empty"));
+    }
+    Ok((host.to_string(), parse_u16(flag, port.to_string())?))
+}
+
 fn spawn_bwrap(config: &CliConfig, prepared_args: &[String]) -> std::io::Result<Child> {
     let mut args = vec![
         "--unshare-user".to_string(),
@@ -449,8 +541,9 @@ fn parse_u16(flag: &str, value: String) -> Result<u16, String> {
 fn usage() -> String {
     "usage: foxprox run [--setup-bin PATH] [--sandbox-id ID] [--tun-name NAME] \
      [--sandbox-ip 10.66.0.2] [--broker-ip 10.66.0.1] [--dns 10.66.0.1] \
-     (--tcp-listen PORT --tcp-host HOST:PORT | --udp-listen PORT --udp-host HOST:PORT) \
-     -- COMMAND [ARGS...]"
+     [--dns-alias HOST] \
+     (--tcp-listen PORT --tcp-host ADDR:PORT | --tcp-domain HOST:PORT | \
+      --udp-listen PORT --udp-host ADDR:PORT) -- COMMAND [ARGS...]"
         .to_string()
 }
 
@@ -511,6 +604,28 @@ mod tests {
     fn rejects_missing_required_mapping() {
         let error = CliConfig::parse(["run", "--", "true"]).unwrap_err();
         assert!(error.contains("TCP or UDP mapping"));
+    }
+
+    #[test]
+    fn parses_tcp_domain_mode_and_adds_dns_alias() {
+        let parsed = CliConfig::parse([
+            "run",
+            "--tcp-domain",
+            "example.com:80",
+            "--",
+            "curl",
+            "http://example.com",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            parsed.mode,
+            BrokerMode::TcpDomain {
+                hostname: "example.com".to_string(),
+                port: 80,
+            }
+        );
+        assert_eq!(parsed.dns_aliases, ["example.com".to_string()]);
     }
 
     #[test]
