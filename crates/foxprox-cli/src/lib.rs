@@ -2112,16 +2112,11 @@ fn run_bwrap_alpha_args(args: &[String]) -> CliOutput {
         .iter()
         .any(|event| match event {
             foxprox_stack::TransportBridgeEvidence::Packet(packet) => {
-                packet.decision.is_deny()
-                    && !(packet.decision == Decision::DenyDrop
-                        && packet.reason == Some(DenialReason::MulticastDenied))
+                packet.decision.is_deny() && !packet.benign_incidental
             }
             foxprox_stack::TransportBridgeEvidence::Udp(udp) => udp.decision.is_deny(),
             foxprox_stack::TransportBridgeEvidence::Tcp { packet, tcp } => {
-                (packet.decision.is_deny()
-                    && !(packet.decision == Decision::DenyDrop
-                        && packet.reason == Some(DenialReason::MulticastDenied)))
-                    || tcp.decision.is_deny()
+                (packet.decision.is_deny() && !packet.benign_incidental) || tcp.decision.is_deny()
             }
         });
     let success = !saw_blocking_denial

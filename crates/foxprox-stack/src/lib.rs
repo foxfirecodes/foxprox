@@ -387,6 +387,7 @@ pub struct SmoltcpTunBridgeResult {
     pub packets_written: usize,
     pub decision: Decision,
     pub reason: Option<DenialReason>,
+    pub benign_incidental: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -502,12 +503,15 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
 
         let policy_decision = self.broker.evaluate(&request);
         if policy_decision.decision.is_deny() {
-            return Ok(bridge_result(
-                true,
-                StackPollEvidence::none(),
-                0,
-                policy_decision,
-            ));
+            let benign_incidental = is_benign_startup_multicast(&parsed, &policy_decision);
+            return Ok(SmoltcpTunBridgeResult {
+                inbound_observed: true,
+                stack: StackPollEvidence::none(),
+                packets_written: 0,
+                decision: policy_decision.decision,
+                reason: policy_decision.reason,
+                benign_incidental,
+            });
         }
 
         let packet = self.prepare_transparent_tcp_inbound(packet, &parsed);
@@ -586,6 +590,7 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
             packets_written: written,
             decision: policy_decision.decision,
             reason: policy_decision.reason,
+            benign_incidental: false,
         })
     }
 
@@ -740,6 +745,7 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
             packets_written: written,
             decision: Decision::Allow,
             reason: None,
+            benign_incidental: false,
         }))
     }
 
@@ -1668,7 +1674,17 @@ fn bridge_result(
         packets_written,
         decision: decision.decision,
         reason: decision.reason,
+        benign_incidental: false,
     }
+}
+
+fn is_benign_startup_multicast(parsed: &ParsedIpPacket, decision: &PolicyDecision) -> bool {
+    decision.decision == Decision::DenyDrop
+        && decision.reason == Some(DenialReason::MulticastDenied)
+        && parsed.ip_version == 6
+        && parsed.protocol == foxprox_core::Protocol::Icmp
+        && parsed.icmp_type == Some(133)
+        && parsed.destination.to_string() == "ff02::2"
 }
 
 fn request_for_packet(sandbox_id: &str, parsed: &ParsedIpPacket) -> PolicyRequest {
