@@ -683,7 +683,10 @@ fn handle_http_proxy_stream_with_audit(
         return Err(error);
     }
     if !decision.is_allowed() {
-        let _ = client.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+        eprintln!(
+            "foxprox-proxy: closing denied HTTP proxy request decision={decision:?} event={event:?}"
+        );
+        let _ = client.shutdown(Shutdown::Both);
         return Ok(());
     }
     match event {
@@ -1510,6 +1513,26 @@ mod tests {
         let mut response = String::new();
         client.read_to_string(&mut response).unwrap();
         assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+        proxy_thread.join().unwrap();
+    }
+
+    #[test]
+    fn proof_http_proxy_closes_denied_requests_without_http_response() {
+        let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_addr = proxy.local_addr().unwrap();
+        let config = HttpProxyProofConfig::new(sandbox_id(), proxy_addr);
+        let proxy_thread = thread::spawn(move || {
+            let (stream, _) = proxy.accept().unwrap();
+            handle_http_proxy_stream(stream, &config).unwrap();
+        });
+
+        let mut client = TcpStream::connect(proxy_addr).unwrap();
+        client
+            .write_all(b"CONNECT github.com:443 HTTP/1.1\r\nHost: github.com\r\n\r\n")
+            .unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).unwrap();
+        assert!(response.is_empty());
         proxy_thread.join().unwrap();
     }
 

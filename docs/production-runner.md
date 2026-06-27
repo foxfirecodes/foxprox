@@ -35,7 +35,7 @@ config, `foxproxsetup` injects:
 - `ALL_PROXY=socks5h://10.255.0.1:1080`
 - `NO_PROXY=localhost,127.0.0.1`
 
-The broker emits JSON-lines audit records to stderr.
+The broker emits JSON-lines audit records to stderr. Explicit HTTP/CONNECT proxy requests denied by policy are audited and then closed without synthesizing an HTTP 403, so helper layers can treat them as sandbox-blocked network attempts rather than origin authorization failures.
 
 ## Config shape
 

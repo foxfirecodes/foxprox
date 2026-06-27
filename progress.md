@@ -2013,3 +2013,18 @@
   - `cargo tree -p foxprox-core`
 - Review note: attempted fresh subagent review twice, but both subagent runs timed out before producing artifacts; parent performed diff review and live validation instead.
 - Current git status summary: launcher/config/docs changes are uncommitted and verified; next exact action is final diff review, commit, then provide usage summary.
+
+## 2026-06-27T13:57:38Z — explicit proxy denials close connection
+
+- Current objective: align explicit HTTP/CONNECT proxy policy-denial behavior with sandbox helper expectations so blocked network attempts are surfaced as closed connections rather than origin-like HTTP 403 responses.
+- Change implemented: `foxprox-proxy` now audits denied HTTP proxy / HTTPS CONNECT requests and then shuts down the client connection without writing an HTTP response. Audit backpressure still returns explicit 503 because that is broker failure, not policy denial.
+- Added regression `proof_http_proxy_closes_denied_requests_without_http_response`.
+- Updated `docs/production-runner.md` to document that policy-denied explicit proxy requests close without synthesized 403.
+- Live validation: denied `https://github.com` with `examples/controlled-alpha.toml` now produced curl `Proxy CONNECT aborted` (exit 56) instead of curl HTTP 403 / exit 22, while audit still recorded `DefaultDeny` for `github.com:443`.
+- Verification passed:
+  - `cargo fmt --all -- --check`
+  - `cargo check --workspace`
+  - `cargo test --workspace`
+  - `cargo clippy --workspace --all-targets -- -D warnings`
+  - `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`
+- Next exact action: commit the denial-behavior change.
