@@ -96,6 +96,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "foxprox-cli"
+version = "0.1.0"
+dependencies = [
+ "foxprox-audit",
+ "foxprox-core",
+ "foxprox-device",
+ "foxprox-egress",
+ "foxprox-integrations",
+ "foxprox-net",
+ "foxprox-policy",
+ "foxprox-runtime",
+ "foxprox-smoltcp",
+ "nix",
+]
+
+[[package]]
 name = "foxprox-config"
 version = "0.1.0"
 dependencies = [

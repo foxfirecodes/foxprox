@@ -2,6 +2,7 @@
 exclude = ["fuzz"]
 members = [
     "crates/foxprox-audit",
+    "crates/foxprox-cli",
     "crates/foxprox-config",
     "crates/foxprox-core",
     "crates/foxprox-device",

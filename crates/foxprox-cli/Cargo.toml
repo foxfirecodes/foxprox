@@ -1,0 +1,30 @@
+[package]
+name = "foxprox-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "foxprox"
+path = "src/bin/foxprox.rs"
+
+[[bin]]
+name = "foxproxsetup"
+path = "src/bin/foxproxsetup.rs"
+
+[dependencies]
+foxprox-audit = { path = "../foxprox-audit" }
+foxprox-core = { path = "../foxprox-core" }
+foxprox-device = { path = "../foxprox-device" }
+foxprox-egress = { path = "../foxprox-egress" }
+foxprox-integrations = { path = "../foxprox-integrations" }
+foxprox-net = { path = "../foxprox-net" }
+foxprox-policy = { path = "../foxprox-policy" }
+foxprox-runtime = { path = "../foxprox-runtime" }
+foxprox-smoltcp = { path = "../foxprox-smoltcp" }
+nix = { version = "0.29.0", default-features = false, features = ["fs"] }

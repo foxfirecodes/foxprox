@@ -2029,3 +2029,48 @@
   - `cargo tree --manifest-path fuzz/Cargo.toml -p foxprox-fuzz` — fuzz-only dependencies remain outside production workspace crates.
 - Commit hash after commit: 1de31a9.
 - Remaining boundary risks: none for documented alpha scope; future/non-alpha work includes TAP, SOCKS UDP ASSOCIATE, proxy authentication, TLS MITM/custom CA, full HTTP/3 semantic inspection, rootful backend, and broader production hardening.
+
+## 2026-06-22 — Boundary objective: alpha production launcher wrapper
+
+- Boundary under work: runnable `foxprox`/`foxproxsetup` binaries for real bwrap network namespaces.
+- Allowed dependency direction: CLI binaries wire existing library boundaries; bwrap/Linux/fd/capability details stay in integrations/device/CLI, while runtime still consumes `PacketDevice`, `StackAdapter`, shared egress, policy, and audit contracts.
+- Dependency-risk assessment: alpha library pieces were complete but not user-runnable. A minimal launcher is required to prove setup-helper lifecycle, TUN fd handoff, privilege drop, and host broker runtime can be composed for a real sandbox command.
+- Verification commands planned: `cargo build -p foxprox-cli --bins`, wrapper smoke with `/bin/true` and `ip addr show`, `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, fuzz target check, privileged bwrap smoke, and dependency trees for CLI/runtime/integrations.
+- Observed results: added `crates/foxprox-cli` with production-facing `foxprox` and `foxproxsetup` binaries. `foxprox` spawns bwrap with user/network namespaces and temporary `CAP_NET_ADMIN`, passes an inherited handoff socket, receives the TUN fd, sets it nonblocking, and runs the host broker loop with the smoltcp adapter, shared egress, policy, and JSON audit sink. `foxproxsetup` runs inside the sandbox namespace, applies the Linux TUN setup plan, opens/sends the TUN fd, drops setup capabilities/no-new-privs, and execs the target. The wrapper uses an `/etc` tmpfs so resolver writes stay inside the sandbox and documents usage in README. Wrapper smokes with `/bin/true` and `ip addr show foxprox0` passed, along with privileged bwrap/TUN smoke and full verification.
+- Changed files:
+  - `Cargo.toml`
+  - `Cargo.lock`
+  - `.gitignore`
+  - `README.md`
+  - `crates/foxprox-cli/Cargo.toml`
+  - `crates/foxprox-cli/src/lib.rs`
+  - `crates/foxprox-cli/src/bin/foxprox.rs`
+  - `crates/foxprox-cli/src/bin/foxproxsetup.rs`
+  - `crates/foxprox-integrations/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo build -p foxprox-cli --bins` — passed.
+  - `target/debug/foxprox -- /bin/true` — passed.
+  - `target/debug/foxprox -- /bin/sh -c 'ip addr show foxprox0 >/dev/null'` — passed.
+  - `FOXPROX_RUN_PRIVILEGED_SMOKE=1 cargo test -p foxprox-integrations privileged_bwrap_tun_setup_smoke -- --ignored --nocapture` — passed.
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 167 tests plus 1 ignored privileged smoke.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo check --manifest-path fuzz/Cargo.toml --bins` — passed.
+  - `cargo tree -p foxprox-cli` — CLI wires boundary crates without moving bwrap/cap details into runtime/policy/audit.
+  - `cargo tree -p foxprox-runtime` — runtime remains boundary-oriented.
+  - `cargo tree -p foxprox-integrations` — Linux/cap/fd details remain isolated.
+- Commit hash after commit: pending.
+- Remaining boundary risks: none for alpha launcher wrapper; future hardening should add richer filesystem profile integration, signal handling, config-file policy loading, and explicit proxy reachability from the sandbox namespace.
+
+## 2026-06-22 — Boundary objective: alpha production launcher wrapper
+
+- Boundary under work: runnable `foxprox`/`foxproxsetup` binaries for real bwrap network namespaces.
+- Allowed dependency direction: CLI binaries wire existing library boundaries; bwrap/Linux/fd/capability details stay in integrations/device/CLI, while runtime still consumes `PacketDevice`, `StackAdapter`, shared egress, policy, and audit contracts.
+- Dependency-risk assessment: alpha library pieces were complete but not user-runnable. A minimal launcher is required to prove setup-helper lifecycle, TUN fd handoff, privilege drop, and host broker runtime can be composed for a real sandbox command.
+- Verification commands planned: `cargo build -p foxprox-cli --bins`, wrapper smoke with `/bin/true` and `ip addr show`, `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, fuzz target check, privileged bwrap smoke, and dependency trees for CLI/runtime/integrations.
+- Observed results: pending.
+- Changed files: pending.
+- Commit hash after commit: pending.
+- Remaining boundary risks: final docs/audit update after verification.

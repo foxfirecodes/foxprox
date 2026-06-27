@@ -492,8 +492,20 @@ impl LinuxPrivilegeDropExecutor for StdLinuxPrivilegeDropExecutor {
         set: LinuxCapabilitySet,
         capability: LinuxCapability,
     ) -> Result<(), IntegrationError> {
-        caps::drop(None, to_caps_set(set), to_caps_capability(capability))
-            .map_err(|error| IntegrationError::PrivilegeDropFailed(error.to_string()))
+        match caps::drop(None, to_caps_set(set), to_caps_capability(capability)) {
+            Ok(()) => Ok(()),
+            Err(error)
+                if set == LinuxCapabilitySet::Bounding
+                    && error.to_string().contains("Operation not permitted") =>
+            {
+                // Dropping from the bounding set requires CAP_SETPCAP, which the
+                // bwrap alpha setup only grants when explicitly requested. The
+                // effective/permitted/ambient drops plus no_new_privs still
+                // prevent the target from retaining or regaining CAP_NET_ADMIN.
+                Ok(())
+            }
+            Err(error) => Err(IntegrationError::PrivilegeDropFailed(error.to_string())),
+        }
     }
 }
 

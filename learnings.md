@@ -463,3 +463,9 @@
 
 - Keep coverage-guided fuzzing in an excluded `fuzz/` cargo-fuzz package so production workspace crates do not gain fuzz-only dependencies.
 - Fuzz targets should call only public boundary APIs (`foxprox-packet`, `foxprox-frontends`, `foxprox-inspect`) and assert no panics by relying on fail-closed normalized outputs.
+
+## 2026-06-22 — alpha launcher wrapper
+
+- A runnable alpha needs both `foxprox` and `foxproxsetup`: the host wrapper owns bwrap spawning and the broker loop; the setup helper runs inside the bwrap network namespace, configures TUN/DNS/route, sends the TUN fd, drops setup capabilities, and execs the target.
+- bwrap cannot bind a replacement `/etc/resolv.conf` over a root bind in this environment, so the alpha wrapper uses a temporary `/etc` tmpfs inside the sandbox and lets `foxproxsetup` write broker DNS there instead of touching host `/etc/resolv.conf`.
+- bwrap with only `CAP_NET_ADMIN` cannot drop the capability bounding set without `CAP_SETPCAP`; production privilege drop treats EPERM on bounding-set drop as nonfatal after clearing ambient/effective/inheritable/permitted sets and setting no-new-privs.
