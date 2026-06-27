@@ -2091,15 +2091,29 @@ fn transparent_first_payload_event(data: &StackTcpData) -> Option<NormalizedEven
             data.frontend,
             &data.bytes,
         )),
-        443 => Some(foxprox_inspect::inspect_tls_client_hello(
-            data.sandbox_id.clone(),
-            data.frontend,
-            data.destination,
-            None,
-            &data.bytes,
-        )),
+        443 if tls_record_is_complete(&data.bytes) => {
+            Some(foxprox_inspect::inspect_tls_client_hello(
+                data.sandbox_id.clone(),
+                data.frontend,
+                data.destination,
+                None,
+                &data.bytes,
+            ))
+        }
+        443 => None,
         _ => None,
     }
+}
+
+fn tls_record_is_complete(bytes: &[u8]) -> bool {
+    if bytes.len() < 5 {
+        return false;
+    }
+    if bytes[0] != 22 {
+        return true;
+    }
+    let record_len = u16::from_be_bytes([bytes[3], bytes[4]]) as usize;
+    bytes.len() >= 5 + record_len
 }
 
 fn process_stack_device_packet<D, S, E, A>(
@@ -3715,6 +3729,59 @@ mod tests {
         assert!(writes.borrow().is_empty());
         assert!(tcp_bridges.is_empty());
         assert_eq!(audit.records().len(), 2);
+    }
+
+    #[test]
+    fn incomplete_tls_first_payload_is_forwarded_without_fail_closed_inspection() {
+        let inbound = vec![0x45, 0, 0, 20];
+        let cursor = Cursor::new(inbound);
+        let mut device = PreopenedTunDevice::from_io(cursor, 1500).unwrap();
+        let mut connect = tcp_connect_event();
+        connect.destination = "203.0.113.10:443".parse().unwrap();
+        let data = foxprox_net::StackTcpData {
+            sandbox_id: SandboxId::new("s1").unwrap(),
+            frontend: FrontendKind::Tun,
+            source: "10.0.0.2:49152".parse().unwrap(),
+            destination: "203.0.113.10:443".parse().unwrap(),
+            bytes: vec![22, 3, 1, 0, 100, 1, 2, 3],
+        };
+        let mut adapter = ScriptedStackAdapter::new(vec![
+            StackEvent::PolicyEvent(NormalizedEvent::TcpConnectAttempt(connect.clone())),
+            StackEvent::TcpData(data.clone()),
+        ]);
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut tcp_rule = PolicyRule::allow(foxprox_core::RuleId::new("tcp-443").unwrap());
+        tcp_rule.protocol = ProtocolMatcher::Exact(Protocol::Tcp);
+        tcp_rule.port = PortMatcher::Exact(443);
+        config.rules.push(tcp_rule);
+        let policy = PolicyEngine::new(config);
+        let writes = Rc::new(RefCell::new(Vec::new()));
+        let mut egress = RecordingEgress::new(Rc::clone(&writes));
+        let mut audit = BoundedAuditSink::new(4);
+        let mut tcp_bridges = StackTcpBridgeTable::default();
+
+        let outcome = process_one_stack_device_packet(
+            &mut device,
+            StackDevicePacketStep {
+                adapter: &mut adapter,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                tcp_bridges: &mut tcp_bridges,
+                sequence_start: 30,
+                timestamp_millis: 4000,
+                dns_attribution: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.broker_outcomes, vec![BrokerEventOutcome::Forwarded]);
+        assert_eq!(outcome.transparent_inspection_events, 0);
+        assert_eq!(outcome.transparent_inspection_denials, 0);
+        assert_eq!(outcome.tcp_bytes_written_to_egress, data.bytes.len());
+        assert_eq!(writes.borrow().as_slice(), &[data.bytes]);
+        assert_eq!(audit.records().len(), 1);
+        assert_eq!(egress.tcp_connects, vec![connect]);
     }
 
     #[test]

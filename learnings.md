@@ -474,3 +474,8 @@
 
 - Real transparent TUN forwarding needs the sandbox namespace interface to own the sandbox IP (`10.255.0.2 peer 10.255.0.1`), while the host-side smoltcp broker owns the peer/broker IP.
 - smoltcp must enable AnyIP plus a default route via its broker IP to accept externally addressed packets arriving from the TUN route; otherwise direct `curl http://example.com/` SYN packets are ignored because they are not addressed to the stack's configured IP.
+
+## 2026-06-26 — launcher HTTPS fixes
+
+- When the wrapper uses a tmpfs `/etc`, binding `/etc/ssl` is not enough on distros where `/etc/ssl/certs/ca-certificates.crt` points to `../../ca-certificates/...`; also bind `/etc/ca-certificates` (and `/etc/pki` for common CA layouts).
+- Transparent TLS first-payload inspection must not treat an incomplete TLS record as malformed fail-closed; real ClientHello data can arrive split across TCP reads. Defer inspection/forward under the already-allowed TCP decision until a complete record is available.

@@ -2102,3 +2102,41 @@
 - Changed files: pending.
 - Commit hash after commit: 5f8655d.
 - Remaining boundary risks: none for the reported launcher smoke/curl issue.
+
+## 2026-06-26 — Boundary objective: fix launcher HTTPS trust and TLS first-payload handling
+
+- Boundary under work: real launcher HTTPS support through sandbox CA trust and transparent TLS inspection.
+- Allowed dependency direction: CLI owns bwrap filesystem exposure; runtime owns first-payload inspection decisions; TLS parser remains in `foxprox-inspect`; policy/audit still consume normalized events only.
+- Dependency-risk assessment: `curl https://example.com/` failed with CA error because the sandbox `/etc` tmpfs exposed `/etc/ssl` but not the symlink target under `/etc/ca-certificates`. After fixing trust, HTTPS still timed out because the first TLS payload can be a partial record and fail-closed malformed TLS inspection removed the bridge. Transparent forwarding should not fail closed on an incomplete first record; it should inspect once a complete record is available or forward under the already-allowed TCP decision.
+- Verification commands planned: focused runtime test, real wrapper CA-path check, real wrapper HTTPS curl, full workspace check/test/clippy, fuzz target check, and dependency trees for CLI/runtime/inspect.
+- Observed results: fixed HTTPS under the alpha launcher. The bwrap wrapper now read-only binds `/etc/ca-certificates` and `/etc/pki` alongside `/etc/ssl` so `/etc/ssl/certs/ca-certificates.crt` symlink targets resolve inside the `/etc` tmpfs. Runtime TLS first-payload inspection now defers inspection for incomplete TLS records instead of converting partial ClientHello bytes into a fail-closed unsupported event; added a regression test proving incomplete TLS bytes are forwarded under an already-allowed TCP decision. Real `target/debug/foxprox -- curl --max-time 15 -fsS https://example.com/` now succeeds. Full verification passed.
+- Changed files:
+  - `crates/foxprox-cli/src/lib.rs`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo test -p foxprox-runtime incomplete_tls_first_payload_is_forwarded_without_fail_closed_inspection -- --nocapture` — passed.
+  - `cargo build -p foxprox-cli --bins` — passed.
+  - `target/debug/foxprox -- /bin/sh -c 'test -s /etc/ssl/certs/ca-certificates.crt && readlink -f /etc/ssl/certs/ca-certificates.crt'` — passed, resolved to `/etc/ca-certificates/extracted/tls-ca-bundle.pem`.
+  - `timeout 30 target/debug/foxprox -- curl --max-time 15 -fsS https://example.com/ -o /tmp/foxprox-https.out && test -s /tmp/foxprox-https.out` — passed.
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 168 tests plus 1 ignored privileged smoke.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo check --manifest-path fuzz/Cargo.toml --bins` — passed.
+  - `cargo tree -p foxprox-cli` — CA bind fixes remain CLI/bwrap-local.
+  - `cargo tree -p foxprox-runtime` — TLS inspection deferral remains runtime-owned over inspect boundary.
+  - `cargo tree -p foxprox-inspect` — parser remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: none for reported HTTPS trust/curl issue.
+
+## 2026-06-26 — Boundary objective: fix launcher HTTPS trust and TLS first-payload handling
+
+- Boundary under work: real launcher HTTPS support through sandbox CA trust and transparent TLS inspection.
+- Allowed dependency direction: CLI owns bwrap filesystem exposure; runtime owns first-payload inspection decisions; TLS parser remains in `foxprox-inspect`; policy/audit still consume normalized events only.
+- Dependency-risk assessment: `curl https://example.com/` failed with CA error because the sandbox `/etc` tmpfs exposed `/etc/ssl` but not the symlink target under `/etc/ca-certificates`. After fixing trust, HTTPS still timed out because the first TLS payload can be a partial record and fail-closed malformed TLS inspection removed the bridge. Transparent forwarding should not fail closed on an incomplete first record; it should inspect once a complete record is available or forward under the already-allowed TCP decision.
+- Verification commands planned: focused runtime test, real wrapper CA-path check, real wrapper HTTPS curl, full workspace check/test/clippy, fuzz target check, and dependency trees for CLI/runtime/inspect.
+- Observed results: pending.
+- Changed files: pending.
+- Commit hash after commit: pending.
+- Remaining boundary risks: none for reported HTTPS trust/curl issue.
