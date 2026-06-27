@@ -1951,3 +1951,24 @@
   - `cargo tree -p foxprox-runtime` — runtime remains independent of setup-helper/capability dependencies.
 - Commit hash after commit: 5b35008.
 - Remaining boundary risks: privileged namespace smoke coverage remains.
+
+## 2026-06-22 — Boundary objective: privileged bwrap/TUN smoke harness
+
+- Boundary under work: opt-in privileged namespace smoke coverage for bwrap-compatible TUN setup.
+- Allowed dependency direction: smoke execution lives in `foxprox-integrations`; runtime/device/policy/audit stay independent of bwrap command details and privileged test assumptions.
+- Dependency-risk assessment: unit tests cover setup plans, fd handoff, device adoption, and capability-drop ordering, but alpha still needs an executable smoke hook that validates the real bwrap/user-namespace/TUN premise when the host environment opts in.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for integrations/runtime.
+- Observed results: added `run_bwrap_tun_setup_smoke` in `foxprox-integrations`, plus an ignored opt-in `privileged_bwrap_tun_setup_smoke` test. The smoke runs bwrap with user/network namespaces, temporary `CAP_NET_ADMIN`, `/dev/net/tun` visible, creates and brings up a TUN device inside the namespace, and checks effective capabilities. The opt-in privileged smoke passed in this environment with `FOXPROX_RUN_PRIVILEGED_SMOKE=1`; normal workspace tests keep it ignored. All standard verification passed.
+- Changed files:
+  - `crates/foxprox-integrations/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `FOXPROX_RUN_PRIVILEGED_SMOKE=1 cargo test -p foxprox-integrations privileged_bwrap_tun_setup_smoke -- --ignored --nocapture` — passed.
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 165 tests plus 1 ignored privileged smoke.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-integrations` — bwrap smoke remains isolated to integrations.
+  - `cargo tree -p foxprox-runtime` — runtime remains independent of bwrap/smoke details.
+- Commit hash after commit: pending.
+- Remaining boundary risks: final initial implementation gap audit remains.

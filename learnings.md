@@ -453,3 +453,8 @@
 
 - Linux capability manipulation stays isolated in `foxprox-integrations`; expose foxprox-owned capability/set enums and a mockable executor rather than leaking `caps` crate types into runtime or policy contracts.
 - The standard setup-helper lifecycle can now drop `CAP_NET_ADMIN` from ambient/effective/inheritable/permitted/bounding sets, clear keepcaps, set no-new-privs, and then `exec` the target.
+
+## 2026-06-22 — privileged bwrap/TUN smoke
+
+- Keep privileged namespace smoke tests opt-in and ignored by default; they can validate the real bwrap user/network namespace plus `/dev/net/tun` premise without making normal workspace tests require host privileges.
+- In this environment, `FOXPROX_RUN_PRIVILEGED_SMOKE=1 cargo test -p foxprox-integrations privileged_bwrap_tun_setup_smoke -- --ignored --nocapture` passed.

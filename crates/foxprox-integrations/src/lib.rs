@@ -301,6 +301,42 @@ impl IntegrationBackend for BwrapBackend {
     }
 }
 
+/// Opt-in smoke harness for validating the alpha bwrap/user-namespace/TUN
+/// premise on hosts that support unprivileged user namespaces.
+#[cfg(target_os = "linux")]
+pub fn run_bwrap_tun_setup_smoke() -> Result<String, IntegrationError> {
+    let script = "ip tuntap add dev foxsmoke0 mode tun \
+        && ip link set dev foxsmoke0 up \
+        && test -c /dev/net/tun \
+        && grep '^CapEff:' /proc/self/status";
+    let output = Command::new("bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--cap-add",
+            "CAP_NET_ADMIN",
+            "--dev-bind",
+            "/",
+            "/",
+            "sh",
+            "-c",
+            script,
+        ])
+        .output()
+        .map_err(|error| IntegrationError::CommandFailed {
+            program: "bwrap".to_string(),
+            status: error.to_string(),
+        })?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(IntegrationError::CommandFailed {
+            program: "bwrap".to_string(),
+            status: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })
+    }
+}
+
 /// Backend for callers that provide an already-created namespace/setup path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalNamespaceBackend;
@@ -856,5 +892,18 @@ mod tests {
         assert!(plan.required_capabilities.is_empty());
         assert!(plan.setup_helper.is_none());
         assert!(plan.proxy_environment.is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "requires bwrap, iproute2, /dev/net/tun, and unprivileged user namespace CAP_NET_ADMIN"]
+    fn privileged_bwrap_tun_setup_smoke() {
+        if std::env::var("FOXPROX_RUN_PRIVILEGED_SMOKE").as_deref() != Ok("1") {
+            eprintln!("set FOXPROX_RUN_PRIVILEGED_SMOKE=1 to run the privileged smoke test");
+            return;
+        }
+
+        let stdout = run_bwrap_tun_setup_smoke().unwrap();
+        assert!(stdout.contains("CapEff:"));
     }
 }
