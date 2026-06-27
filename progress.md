@@ -1321,3 +1321,27 @@
 - Changed files: `crates/foxprox-cli/src/main.rs`, `crates/foxprox-core/src/runtime.rs`, `crates/foxprox-core/src/smoltcp_gate.rs`, `progress.md`.
 - Interpretation: full HTTPS page downloads now work through the alpha HTTP CONNECT proxy path with smoltcp backpressure handled by bounded per-flow buffering in the launcher.
 - Commit hash after commit: pending.
+
+## 2026-06-22T17:45:00Z — Host/domain allow flags for sandbox launcher
+
+- User question: can the usable alpha prototype allow just specific domains/hosts rather than `--allow-all`?
+- Implementation: added `foxprox-lab sandbox --allow-host <host>` and `--allow-domain <domain>` policy flags. Without `--allow-all`, the sandbox launcher remains deny-by-default but automatically allows TCP access to the broker's HTTP/SOCKS listener addresses so explicit proxy requests can be policy-evaluated by host. Host/domain allow rules cover HTTP, HTTPS CONNECT, SOCKS, TCP, UDP, QUIC, and TLS events where hostname attribution exists. README usage was updated.
+- Commands executed:
+  - `cargo fmt --all && cargo test -p foxprox-cli && cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab sandbox --allow-host github.com --proxy-env --timeout-secs 80 -- curl -I --max-time 30 https://github.com > /tmp/foxprox-allow-host.out 2> /tmp/foxprox-allow-host.err`
+  - `target/debug/foxprox-lab sandbox --allow-host github.com --proxy-env --timeout-secs 40 -- curl -I --max-time 15 https://example.com > /tmp/foxprox-deny-host.out 2> /tmp/foxprox-deny-host.err; test $rc -ne 0`
+- Observed result: pass. The allow-host GitHub check exited 0 and returned `HTTP/2 200`; audit showed broker proxy listener allowed by `allow-broker-http-proxy-listener` and CONNECT allowed by `allow-host-HttpsConnect-github.com`. The example.com check was denied with `HTTP/1.1 403 Forbidden`; audit showed `https_connect` for `example.com` with `decision":"deny_reset"` / `reason":"default deny"` and curl exited nonzero.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: specific host/domain allow is now available for normal proxy-env prototype use. Transparent non-proxy hostname rules still depend on attribution being available; explicit proxy mode is the recommended alpha path for precise host policy.
+- Commit hash after commit: pending.
+
+## 2026-06-22T17:45:00Z — Host/domain allow flags for sandbox launcher
+
+- User question: can the usable alpha prototype allow just specific domains/hosts rather than `--allow-all`?
+- Implementation: added `foxprox-lab sandbox --allow-host <host>` and `--allow-domain <domain>` policy flags. Without `--allow-all`, the sandbox launcher remains deny-by-default but automatically allows TCP access to the broker's HTTP/SOCKS listener addresses so explicit proxy requests can be policy-evaluated by host. Host/domain allow rules cover HTTP, HTTPS CONNECT, SOCKS, TCP, UDP, QUIC, and TLS events where hostname attribution exists. README usage was updated.
+- Commands executed:
+  - `cargo fmt --all && cargo test -p foxprox-cli && cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab sandbox --allow-host github.com --proxy-env --timeout-secs 80 -- curl -I --max-time 30 https://github.com > /tmp/foxprox-allow-host.out 2> /tmp/foxprox-allow-host.err`
+  - `target/debug/foxprox-lab sandbox --allow-host github.com --proxy-env --timeout-secs 40 -- curl -I --max-time 15 https://example.com > /tmp/foxprox-deny-host.out 2> /tmp/foxprox-deny-host.err; test $rc -ne 0`
+- Observed result: pass. The allow-host GitHub check exited 0 and returned `HTTP/2 200`; audit showed broker proxy listener allowed by `allow-broker-http-proxy-listener` and CONNECT allowed by `allow-host-HttpsConnect-github.com`. The example.com check was denied with `HTTP/1.1 403 Forbidden`; audit showed `https_connect` for `example.com` with `decision":"deny_reset"` / `reason":"default deny"` and curl exited nonzero.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `README.md`, `progress.md`.
+- Interpretation: specific host/domain allow is now available for normal proxy-env prototype use. Transparent non-proxy hostname rules still depend on attribution being available; explicit proxy mode is the recommended alpha path for precise host policy.
+- Commit hash after commit: pending.

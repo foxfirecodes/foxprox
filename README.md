@@ -24,6 +24,8 @@ The alpha launcher starts `bwrap --unshare-net`, runs `foxproxsetup` with tempor
 Useful alpha options:
 
 * `--allow-all` enables an initial permissive network policy for prototype use; omit it for deny-by-default.
+* `--allow-host example.com` allows one exact hostname across explicit HTTP/HTTPS/SOCKS policy and attributed transparent traffic.
+* `--allow-domain example.com` allows a domain suffix, e.g. `example.com` and `api.example.com`.
 * `--allow-ping` enables ICMP echo without enabling all traffic.
 * `--dns-answer host=ipv4` adds a broker-local DNS answer and attribution entry.
 * `--upstream-dns ip:port` forwards broker DNS misses to an upstream resolver; by default the launcher uses the first host `/etc/resolv.conf` nameserver when available. Use `--no-upstream-dns` for deterministic local-only runs.

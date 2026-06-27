@@ -152,7 +152,7 @@ fn run_named_scenario(scenario: &str) -> Result<(), String> {
 
 fn usage() {
     eprintln!(
-        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke|tcp-bridge-smoke|tcp-bridge-deny-smoke|http-proxy-smoke|https-connect-smoke|socks5-smoke|proxy-deny-smoke> | sandbox [--allow-all] [--dns-answer host=ip] [--upstream-dns ip:port|--no-upstream-dns] [--egress-map sandbox_ip=host_ip] [--timeout-secs n] -- target args...",
+        "usage: foxprox-lab list | run [--scenario] <{}|env-smoke|tun-smoke|setup-smoke|handoff-smoke|writeback-smoke|udp-forward-smoke|udp-deny-smoke|dns-smoke|dns-attribution-smoke|tcp-syn-smoke|tcp-synack-smoke|tcp-bridge-smoke|tcp-bridge-deny-smoke|http-proxy-smoke|https-connect-smoke|socks5-smoke|proxy-deny-smoke> | sandbox [--allow-all|--allow-host host|--allow-domain domain] [--dns-answer host=ip] [--upstream-dns ip:port|--no-upstream-dns] [--egress-map sandbox_ip=host_ip] [--timeout-secs n] -- target args...",
         ScenarioName::list().join("|")
     );
 }
@@ -162,6 +162,8 @@ struct SandboxCommandOptions {
     allow_all: bool,
     allow_ping: bool,
     timeout: Duration,
+    allowed_hosts: Vec<String>,
+    allowed_domains: Vec<String>,
     dns_answers: Vec<(String, Ipv4Addr)>,
     upstream_dns: Option<SocketAddr>,
     egress_ip_map: BTreeMap<IpAddr, IpAddr>,
@@ -175,6 +177,8 @@ impl SandboxCommandOptions {
         let mut allow_all = false;
         let mut allow_ping = false;
         let mut timeout = Duration::from_secs(300);
+        let mut allowed_hosts = Vec::new();
+        let mut allowed_domains = Vec::new();
         let mut dns_answers = Vec::new();
         let mut upstream_dns = system_resolver();
         let mut egress_ip_map = BTreeMap::new();
@@ -196,6 +200,18 @@ impl SandboxCommandOptions {
                 "--allow-ping" => allow_ping = true,
                 "--proxy-env" => proxy_env = true,
                 "--audit-stdout" => audit_stdout = true,
+                "--allow-host" => {
+                    allowed_hosts.push(normalize_cli_hostname(&next_arg(
+                        &mut iter,
+                        "--allow-host",
+                    )?)?);
+                }
+                "--allow-domain" => {
+                    allowed_domains.push(normalize_cli_domain(&next_arg(
+                        &mut iter,
+                        "--allow-domain",
+                    )?)?);
+                }
                 "--no-upstream-dns" => upstream_dns = None,
                 "--upstream-dns" => {
                     upstream_dns = Some(
@@ -251,6 +267,8 @@ impl SandboxCommandOptions {
             allow_all,
             allow_ping,
             timeout,
+            allowed_hosts,
+            allowed_domains,
             dns_answers,
             upstream_dns,
             egress_ip_map,
@@ -261,18 +279,84 @@ impl SandboxCommandOptions {
     }
 
     fn policy(&self) -> PolicyConfig {
-        if self.allow_all {
+        let mut config = if self.allow_all {
             PolicyConfig::allow_by_default()
-                .allow_ping(self.allow_ping)
-                .allow_quic(true)
         } else {
-            PolicyConfig::deny_by_default().allow_ping(self.allow_ping)
+            PolicyConfig::deny_by_default()
         }
+        .allow_ping(self.allow_ping)
+        .allow_quic(
+            self.allow_all || !self.allowed_hosts.is_empty() || !self.allowed_domains.is_empty(),
+        );
+
+        if !self.allow_all {
+            let broker_ip = "10.0.2.1".parse().expect("static broker IP valid");
+            config = config
+                .with_rule(
+                    PolicyRule::new("allow-broker-http-proxy-listener", RuleAction::Allow)
+                        .protocol(Protocol::Tcp)
+                        .destination(Cidr::host(broker_ip))
+                        .port(8080),
+                )
+                .with_rule(
+                    PolicyRule::new("allow-broker-socks5-listener", RuleAction::Allow)
+                        .protocol(Protocol::Tcp)
+                        .destination(Cidr::host(broker_ip))
+                        .port(1080),
+                );
+        }
+
+        for host in &self.allowed_hosts {
+            config = add_hostname_allow_rules(config, host, false);
+        }
+        for domain in &self.allowed_domains {
+            config = add_hostname_allow_rules(config, domain, true);
+        }
+        config
     }
 }
 
+fn add_hostname_allow_rules(mut config: PolicyConfig, name: &str, suffix: bool) -> PolicyConfig {
+    for protocol in [
+        Protocol::Http,
+        Protocol::HttpsConnect,
+        Protocol::Socks,
+        Protocol::Tcp,
+        Protocol::Udp,
+        Protocol::Quic,
+        Protocol::Tls,
+    ] {
+        let id = format!(
+            "allow-{}-{protocol:?}-{name}",
+            if suffix { "domain" } else { "host" }
+        );
+        let mut rule = PolicyRule::new(id, RuleAction::Allow).protocol(protocol);
+        if suffix {
+            rule = rule.domain_suffix(name);
+        } else {
+            rule = rule.hostname(name);
+        }
+        if matches!(
+            protocol,
+            Protocol::Tcp | Protocol::Udp | Protocol::Quic | Protocol::Tls
+        ) {
+            rule = rule.require_hostname_attribution();
+        }
+        config = config.with_rule(rule);
+    }
+    config
+}
+
 fn sandbox_usage() -> String {
-    "usage: foxprox-lab sandbox [--allow-all] [--allow-ping] [--dns-answer host=ipv4] [--upstream-dns ip:port|--no-upstream-dns] [--egress-map sandbox_ip=host_ip] [--proxy-env] [--audit-stdout] [--timeout-secs n] -- target args...".to_string()
+    "usage: foxprox-lab sandbox [--allow-all|--allow-host host|--allow-domain domain] [--allow-ping] [--dns-answer host=ipv4] [--upstream-dns ip:port|--no-upstream-dns] [--egress-map sandbox_ip=host_ip] [--proxy-env] [--audit-stdout] [--timeout-secs n] -- target args...".to_string()
+}
+
+fn normalize_cli_hostname(value: &str) -> Result<String, String> {
+    foxprox_core::dns::normalize_hostname(value)
+}
+
+fn normalize_cli_domain(value: &str) -> Result<String, String> {
+    foxprox_core::dns::normalize_hostname(value.trim_start_matches('.'))
 }
 
 fn system_resolver() -> Option<SocketAddr> {
