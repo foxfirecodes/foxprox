@@ -3720,9 +3720,7 @@ where
         if cancellation.is_cancelled() {
             break;
         }
-        if should_stop.as_mut().is_some_and(|stop| stop()) {
-            break;
-        }
+        let stop_after_drain = should_stop.as_mut().is_some_and(|stop| stop());
         match bridge.bridge_next_transport_to_egress(
             &mut tcp_egress,
             &mut udp_egress,
@@ -3731,6 +3729,9 @@ where
         ) {
             Ok(Some(event)) => transport_events.push(event),
             Ok(None) => {
+                if stop_after_drain {
+                    break;
+                }
                 if idle_sleep > Duration::ZERO {
                     std::thread::sleep(idle_sleep);
                 }
@@ -3739,7 +3740,14 @@ where
                 let mut broker_records: Vec<_> =
                     bridge.broker().audit().records().cloned().collect();
                 broker_records.extend(udp_egress.audit_records());
-                let _ = ingest_resequenced_records("alpha_runtime", &broker_records, fan_in);
+                if let Err(ingest_error) =
+                    ingest_resequenced_records("alpha_runtime", &broker_records, fan_in)
+                {
+                    fan_in
+                        .drain_to_sink(sink)
+                        .map_err(ReceivedTunAlphaRuntimeDrainError::Drain)?;
+                    return Err(ReceivedTunAlphaRuntimeDrainError::Ingest(ingest_error));
+                }
                 fan_in
                     .drain_to_sink(sink)
                     .map_err(ReceivedTunAlphaRuntimeDrainError::Drain)?;
@@ -4335,6 +4343,8 @@ mod tests {
     use std::collections::VecDeque;
     use std::io::{ErrorKind, Read, Result as IoResult, Write};
     use std::net::{TcpListener, UdpSocket};
+    use std::os::fd::OwnedFd;
+    use std::os::unix::net::UnixStream;
     use std::thread;
 
     #[derive(Clone, Debug, Default)]
@@ -12017,6 +12027,115 @@ mod tests {
             .cache()
             .resolve_hostname("example.test", 12_201)
             .is_none());
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RecordingUdpExchange {
+        requests: Vec<Vec<u8>>,
+    }
+
+    impl foxprox_stack::UdpDatagramExchange for RecordingUdpExchange {
+        fn exchange_datagram(
+            &mut self,
+            _destination: NetworkEndpoint,
+            payload: &[u8],
+        ) -> Result<Vec<u8>, foxprox_stack::UdpExchangeError> {
+            self.requests.push(payload.to_vec());
+            Ok(b"pong".to_vec())
+        }
+    }
+
+    #[test]
+    fn alpha_runtime_drains_queued_packet_after_stop_callback() {
+        let (mut writer, reader) = UnixStream::pair().unwrap();
+        writer
+            .write_all(&egress_ipv4_udp_packet(
+                [10, 0, 2, 15],
+                [198, 51, 100, 1],
+                50_000,
+                5353,
+                b"ping",
+            ))
+            .unwrap();
+        let received = foxprox_device::ReceivedTunFd {
+            fd: OwnedFd::from(reader),
+            report: foxprox_device::TunFdHandoffReport::received("tun0", 1),
+        };
+        let broker = BrokerCore::new(
+            PolicyEngine::new(PolicyConfig {
+                default_decision: Decision::Allow,
+                ..PolicyConfig::default()
+            }),
+            16,
+        );
+        let stack = foxprox_stack::SmoltcpIpStack::new_ipv4([198, 51, 100, 1], 24, 1500);
+        let tcp = BlockingTcpEgress::default();
+        let udp = RecordingUdpExchange::default();
+        let setup_records = Vec::new();
+        let mut fan_in = RuntimeAuditFanIn::new("s1", 16);
+        let mut output = Vec::new();
+        let mut sink = JsonLineAuditSink::new(&mut output);
+        let cancellation = AsyncRuntimeCancellationToken::uncancelled();
+        let mut stopped = false;
+        let mut should_stop = || {
+            let already = stopped;
+            stopped = true;
+            !already
+        };
+
+        let report = run_received_tun_fd_alpha_runtime_and_drain(
+            ReceivedTunAlphaRuntimeSession {
+                setup_source: "setup".to_string(),
+                setup_records: &setup_records,
+                received,
+                sandbox_id: "s1".to_string(),
+                broker,
+                stack,
+                tcp_egress: tcp,
+                udp_egress: udp,
+                now_ms: 50_000,
+                max_steps: 4,
+                max_from_sandbox_bytes: 1024,
+                idle_sleep: Duration::ZERO,
+                should_stop: Some(&mut should_stop),
+            },
+            &mut fan_in,
+            &mut sink,
+            &cancellation,
+        )
+        .unwrap();
+
+        assert!(report.transport_events.iter().any(|event| matches!(
+            event,
+            foxprox_stack::TransportBridgeEvidence::Udp(udp) if udp.exchanged
+        )));
+        let stdout = String::from_utf8(output).unwrap();
+        assert!(stdout.contains("udp_exchange"), "{stdout}");
+    }
+
+    fn egress_ipv4_udp_packet(
+        source: [u8; 4],
+        destination: [u8; 4],
+        source_port: u16,
+        destination_port: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let udp_len = 8 + payload.len();
+        let total_len = 20 + udp_len;
+        let mut packet = vec![0u8; total_len];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = 17;
+        packet[12..16].copy_from_slice(&source);
+        packet[16..20].copy_from_slice(&destination);
+        packet[20..22].copy_from_slice(&source_port.to_be_bytes());
+        packet[22..24].copy_from_slice(&destination_port.to_be_bytes());
+        packet[24..26].copy_from_slice(&(udp_len as u16).to_be_bytes());
+        packet[28..].copy_from_slice(payload);
+        let header_checksum = foxprox_core::checksum(&packet[..20]);
+        packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
+        packet
     }
 
     fn dns_query(transaction_id: u16, hostname: &str, query_type: u16) -> Vec<u8> {

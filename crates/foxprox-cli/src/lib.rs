@@ -2107,21 +2107,24 @@ fn run_bwrap_alpha_args(args: &[String]) -> CliOutput {
         .map(Some)
         .map(Ok)
         .unwrap_or_else(|| runner.wait_setup_process_with_timeout(Duration::from_secs(5)));
-    let saw_fail_closed = runtime_report
+    let saw_blocking_denial = runtime_report
         .transport_events
         .iter()
         .any(|event| match event {
             foxprox_stack::TransportBridgeEvidence::Packet(packet) => {
-                packet.decision == Decision::FailClosed
+                packet.decision.is_deny()
+                    && !(packet.decision == Decision::DenyDrop
+                        && packet.reason == Some(DenialReason::MulticastDenied))
             }
-            foxprox_stack::TransportBridgeEvidence::Udp(udp) => {
-                udp.decision == Decision::FailClosed
-            }
+            foxprox_stack::TransportBridgeEvidence::Udp(udp) => udp.decision.is_deny(),
             foxprox_stack::TransportBridgeEvidence::Tcp { packet, tcp } => {
-                packet.decision == Decision::FailClosed || tcp.decision == Decision::FailClosed
+                (packet.decision.is_deny()
+                    && !(packet.decision == Decision::DenyDrop
+                        && packet.reason == Some(DenialReason::MulticastDenied)))
+                    || tcp.decision.is_deny()
             }
         });
-    let success = !saw_fail_closed
+    let success = !saw_blocking_denial
         && matches!(
             process_exit,
             Ok(Some(HostSetupProcessExit { success: true, .. }))

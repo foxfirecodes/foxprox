@@ -104,6 +104,13 @@ impl BrokerRuntimeConfig {
                 "DNS upstream socket address must include a non-zero port",
             ));
         }
+        if !self.policy.broker_dns.contains(&self.setup.broker_dns_ip) {
+            errors.push(RuntimeConfigError::new(
+                "broker_dns_mismatch",
+                "setup.broker_dns_ip",
+                "setup broker DNS IP must be listed in policy.broker_dns",
+            ));
+        }
         if self.proxy_listeners.http_enabled
             && self.setup.http_proxy_port == self.setup.socks_proxy_port
         {
@@ -273,6 +280,7 @@ mod tests {
         assert!(codes.contains(&"setup_control_ambiguous"));
         assert!(codes.contains(&"audit_capacity_zero"));
         assert!(codes.contains(&"dns_upstream_port_zero"));
+        assert!(codes.contains(&"broker_dns_mismatch"));
         assert!(codes.contains(&"udp_flow_limit_zero"));
         assert!(codes.contains(&"policy_broker_dns_empty"));
 
