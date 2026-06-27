@@ -5660,3 +5660,26 @@ Commit: 76b090d
 
 ### Remaining alpha gaps
 - Still need explicit HTTP/SOCKS proxy listener lifecycle in `run-bwrap-alpha`, direct transparent TCP/UDP E2Es through the combined launcher, multi-flow coverage, and stronger lifecycle/cleanup audit around combined runtime exit.
+
+
+## 2026-06-26 — Classify incidental startup multicast narrowly
+
+Commit: 1e708c6
+
+### Review follow-up
+- Addressed reviewer run `0d169826` denial-classification findings.
+
+### Fix
+- Added a `benign_incidental` flag to `SmoltcpTunBridgeResult` and set it only for the observed startup ICMPv6 router solicitation multicast denial (`ip_version=6`, ICMP type 133, destination `ff02::2`, `DenyDrop/MulticastDenied`).
+- `run-bwrap-alpha` now ignores only that explicit benign packet-level startup denial for CLI success.
+- Other policy denials, including UDP multicast, direct DNS bypass, default-deny DNS REFUSED, TCP denials, and fail-closed errors, still make `run-bwrap-alpha` exit nonzero.
+
+### Validation
+- `cargo test -p foxprox-stack --all-targets --all-features smoltcp_tun_bridge_rewrites_transparent_tcp_to_original_destination -- --nocapture` — passed.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all eight real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining alpha gaps
+- Still need explicit HTTP/SOCKS proxy listener lifecycle in `run-bwrap-alpha`, direct transparent TCP/UDP E2Es, multi-flow coverage, and stronger lifecycle/cleanup audit around combined runtime exit.
