@@ -9,8 +9,13 @@ rust-version.workspace = true
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "foxprox"
+path = "src/bin/foxprox.rs"
+
 [dependencies]
 foxprox-core = { path = "../foxprox-core" }
 foxprox-device = { path = "../foxprox-device" }
 foxprox-integrations = { path = "../foxprox-integrations" }
 foxprox-runtime = { path = "../foxprox-runtime" }
+foxprox-smoltcp = { path = "../foxprox-smoltcp" }

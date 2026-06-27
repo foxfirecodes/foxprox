@@ -2108,3 +2108,70 @@
 - Commit hash when committed: amended into `c35a10b`.
 - Remaining risks/deferred beyond alpha prototype: examples are smoke harnesses rather than a polished long-running CLI daemon; live tests use loopback host sockets and synthetic sandbox clients; additional production work should package the broker event loop and broaden live DNS/proxy scenarios.
 - Exact next step: stop and report completion, with commands and commit hash, because documented alpha prototype criteria now have deterministic tests plus rootless bwrap live proof for the critical forwarding paths.
+
+## 2026-06-27T02:36:10Z
+- Current objective: build a dedicated production CLI/daemon wrapper for alpha, not just examples.
+- Git status summary: clean worktree at start of CLI cycle.
+- User requirement: production launcher is part of alpha scope; wrapper must run rootless bwrap, setup TUN, receive fd, and run the broker loop.
+- Intended slice: add a `foxprox` CLI binary that launches a sandbox target through rootless bwrap/foxproxsetup with socket handoff and runs an alpha broker loop for transparent TCP port mapping via smoltcp to a configured host socket.
+- Verification plan: run formatting, clippy, tests, and a live bwrap CLI smoke using a sandbox Python TCP client against a localhost host TCP server.
+- Files expected to change: `crates/foxprox-launcher/Cargo.toml`, new launcher binary source, possibly launcher library helpers, `progress.md`.
+- Exact next step: implement manual-arg CLI and live TCP smoke through the binary.
+
+## 2026-06-27T02:44:30Z
+- Current objective: add a dedicated production alpha `foxprox` CLI launcher.
+- Files changed: `crates/foxprox-launcher/Cargo.toml`, `crates/foxprox-launcher/src/bin/foxprox.rs`, `Cargo.lock`, `progress.md`.
+- Verification commands run so far:
+  - `cargo fmt --check` (initially reported formatting drift; fixed with `cargo fmt`)
+  - `cargo clippy -p foxprox-launcher --all-targets --all-features -- -D warnings` (initially caught unused import and useless `format\!`; fixed)
+  - `cargo test -p foxprox-launcher --all-targets --all-features`
+  - `cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-launcher --bin foxprox`
+  - Live CLI smoke: `target/debug/foxprox run --setup-bin target/debug/foxproxsetup --sandbox-id cli-live --tun-name fpxcli0 --tcp-listen 8080 --tcp-host 127.0.0.1:<host-port> -- /usr/bin/python3 -c <sandbox tcp client>`; result exit code 0, sandbox printed `cli-reply`, host server received `cli-live`.
+- Observed result: added `foxprox run` production alpha wrapper that launches rootless bwrap with `foxproxsetup`, receives the TUN fd through launcher socket handoff, policy-gates one transparent TCP port via smoltcp, bridges sandbox TCP to a configured host `SocketAddr`, and exits with the sandbox target status.
+- Remaining risks: current production CLI supports one transparent TCP mapping per invocation and no config file yet; UDP forwarding and proxy listeners remain in runtime/proof harnesses but are not exposed by this first CLI slice.
+- Exact next step: run full workspace verification, commit the CLI slice, then extend CLI surface for UDP/proxy or document alpha usage.
+
+## 2026-06-27T02:44:30Z
+- Current objective: add a dedicated production alpha `foxprox` CLI launcher.
+- Files changed: `crates/foxprox-launcher/Cargo.toml`, `crates/foxprox-launcher/src/bin/foxprox.rs`, `Cargo.lock`, `progress.md`.
+- Verification commands run so far:
+  - `cargo fmt --check` (initially reported formatting drift; fixed with `cargo fmt`)
+  - `cargo clippy -p foxprox-launcher --all-targets --all-features -- -D warnings` (initially caught unused import and useless `format!`; fixed)
+  - `cargo test -p foxprox-launcher --all-targets --all-features`
+  - `cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-launcher --bin foxprox`
+  - Live CLI smoke: `target/debug/foxprox run --setup-bin target/debug/foxproxsetup --sandbox-id cli-live --tun-name fpxcli0 --tcp-listen 8080 --tcp-host 127.0.0.1:<host-port> -- /usr/bin/python3 -c <sandbox tcp client>`; result exit code 0, sandbox printed `cli-reply`, host server received `cli-live`.
+- Observed result: added `foxprox run` production alpha wrapper that launches rootless bwrap with `foxproxsetup`, receives the TUN fd through launcher socket handoff, policy-gates one transparent TCP port via smoltcp, bridges sandbox TCP to a configured host `SocketAddr`, and exits with the sandbox target status.
+- Remaining risks: current production CLI supports one transparent TCP mapping per invocation and no config file yet; UDP forwarding and proxy listeners remain in runtime/proof harnesses but are not exposed by this first CLI slice.
+- Exact next step: run full workspace verification, commit the CLI slice, then extend CLI surface for UDP/proxy or document alpha usage.
+
+## 2026-06-27T02:47:30Z
+- Current objective: finalize dedicated production alpha CLI launcher.
+- Files changed: `crates/foxprox-launcher/Cargo.toml`, `crates/foxprox-launcher/src/bin/foxprox.rs`, `Cargo.lock`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy -p foxprox-launcher --all-targets --all-features -- -D warnings`
+  - `cargo test -p foxprox-launcher --all-targets --all-features`
+  - `cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-launcher --bin foxprox`
+  - live CLI smoke with `target/debug/foxprox run --setup-bin target/debug/foxproxsetup --sandbox-id cli-live --tun-name fpxcli0 --tcp-listen 8080 --tcp-host 127.0.0.1:<host-port> -- /usr/bin/python3 -c <sandbox tcp client>`: passed; sandbox printed `cli-reply`, host received `cli-live`.
+  - full workspace `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`: passed; 55 core tests, 9 device tests, 4 integration tests, 7 launcher library tests, 3 `foxprox` CLI tests, 95 runtime tests, 10 setup tests, and 40 smoltcp tests passed.
+  - final live CLI smoke with `target/debug/foxprox run --setup-bin target/debug/foxproxsetup --sandbox-id cli-final --tun-name fpxclif --tcp-listen 8080 --tcp-host 127.0.0.1:<host-port> -- /usr/bin/python3 -c <sandbox tcp client>`: passed; sandbox printed `cli-final`, host received `cli-final-request`.
+- Observed result: production alpha now has a dedicated `foxprox run` binary. It launches rootless bwrap, runs `foxproxsetup`, receives the TUN fd by socket handoff, configures a smoltcp TCP listener on the broker IP, policy-gates the first accepted sandbox TCP connect, opens the configured host TCP endpoint, bridges bytes bidirectionally, and exits with the sandbox target status.
+- Commit hash when committed: pending.
+- Remaining risks/deferred beyond this CLI slice: the CLI currently exposes one transparent TCP port mapping per invocation and no config file; UDP/proxy runtime pieces exist but are not yet surfaced through `foxprox run` flags. A future daemon iteration should support multiple mappings and configuration files.
+- Exact next step: commit the CLI slice, then report usage and remaining limits.
+
+## 2026-06-27T02:47:30Z
+- Current objective: finalize dedicated production alpha CLI launcher.
+- Files changed: `crates/foxprox-launcher/Cargo.toml`, `crates/foxprox-launcher/src/bin/foxprox.rs`, `Cargo.lock`, `progress.md`.
+- Verification commands run:
+  - `cargo fmt --check`
+  - `cargo clippy -p foxprox-launcher --all-targets --all-features -- -D warnings`
+  - `cargo test -p foxprox-launcher --all-targets --all-features`
+  - `cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-launcher --bin foxprox`
+  - live CLI smoke with `target/debug/foxprox run --setup-bin target/debug/foxproxsetup --sandbox-id cli-live --tun-name fpxcli0 --tcp-listen 8080 --tcp-host 127.0.0.1:<host-port> -- /usr/bin/python3 -c <sandbox tcp client>`: passed; sandbox printed `cli-reply`, host received `cli-live`.
+  - full workspace `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, and `cargo test --all-targets --all-features`: passed; 55 core tests, 9 device tests, 4 integration tests, 7 launcher library tests, 3 `foxprox` CLI tests, 95 runtime tests, 10 setup tests, and 40 smoltcp tests passed.
+  - final live CLI smoke with `target/debug/foxprox run --setup-bin target/debug/foxproxsetup --sandbox-id cli-final --tun-name fpxclif --tcp-listen 8080 --tcp-host 127.0.0.1:<host-port> -- /usr/bin/python3 -c <sandbox tcp client>`: passed; sandbox printed `cli-final`, host received `cli-final-request`.
+- Observed result: production alpha now has a dedicated `foxprox run` binary. It launches rootless bwrap, runs `foxproxsetup`, receives the TUN fd by socket handoff, configures a smoltcp TCP listener on the broker IP, policy-gates the first accepted sandbox TCP connect, opens the configured host TCP endpoint, bridges bytes bidirectionally, and exits with the sandbox target status.
+- Commit hash when committed: pending.
+- Remaining risks/deferred beyond this CLI slice: the CLI currently exposes one transparent TCP port mapping per invocation and no config file; UDP/proxy runtime pieces exist but are not yet surfaced through `foxprox run` flags. A future daemon iteration should support multiple mappings and configuration files.
+- Exact next step: commit the CLI slice, then report usage and remaining limits.

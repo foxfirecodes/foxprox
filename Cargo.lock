@@ -87,6 +87,7 @@ dependencies = [
  "foxprox-device",
  "foxprox-integrations",
  "foxprox-runtime",
+ "foxprox-smoltcp",
 ]
 
 [[package]]
