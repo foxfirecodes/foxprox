@@ -438,3 +438,8 @@
 
 - CONNECT/SOCKS tunnel byte movement should be a runtime pump over `HostTcpStream`, not part of frontend parsing or policy/audit.
 - Keep tunnel pumps bounded per call so listener/event-loop code can compose them with readiness and fairness budgets.
+
+## 2026-06-22 — explicit proxy tunnel retention
+
+- A CONNECT/SOCKS setup step that only returns a boolean is too narrow: runtime needs the egress-owned `HostTcpStream` handle to compose the setup result with the bounded tunnel pump.
+- Keep backward-compatible summary outcomes, but add session outcomes that retain `Option<E::TcpStream>` without exposing concrete socket types outside egress/runtime.

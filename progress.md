@@ -1885,3 +1885,25 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: cde5009.
 - Remaining boundary risks: TCP listener accept loop remains.
+
+## 2026-06-22 — Boundary objective: retain explicit proxy tunnel handles
+
+- Boundary under work: explicit CONNECT/SOCKS session setup must return the egress-owned TCP stream needed by runtime tunnel pumps.
+- Allowed dependency direction: runtime may retain `HostEgress::TcpStream` handles; frontends still only parse setup bytes; policy/audit see normalized events only; egress owns concrete sockets.
+- Dependency-risk assessment: the CONNECT/SOCKS setup steps currently report `connected_tunnel` but discard the actual host stream, preventing the already-bounded tunnel pump from being composed into a production session loop.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for runtime/egress/frontends/audit.
+- Observed results: added `ExplicitHttpProxySessionOutcome<T>` and `ExplicitSocks5SessionOutcome<T>`, plus `process_one_http_proxy_request_with_tunnel` and `process_one_socks5_connect_with_tunnel`. The existing summary APIs remain, while session APIs retain allowed `E::TcpStream` handles for tunnel pumping. Added HTTP CONNECT and SOCKS tests proving retained mock tunnel handles, shared policy/audit/egress, and frontend-local parsing/replies. All verification passed.
+- Changed files:
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 161 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-runtime` — session retention stays in runtime over egress-associated stream types.
+  - `cargo tree -p foxprox-egress` — concrete socket ownership remains egress-private.
+  - `cargo tree -p foxprox-frontends` — proxy wire parsing remains frontend/core-only.
+  - `cargo tree -p foxprox-audit` — audit remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: TCP listener accept loop remains.

@@ -64,6 +64,12 @@ pub struct ExplicitHttpProxyOutcome {
     pub connected_tunnel: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExplicitHttpProxySessionOutcome<T> {
+    pub outcome: ExplicitHttpProxyOutcome,
+    pub tunnel: Option<T>,
+}
+
 pub struct ExplicitSocks5Step<'a, E, A> {
     pub sandbox_id: &'a SandboxId,
     pub policy: &'a PolicyEngine,
@@ -81,16 +87,35 @@ pub struct ExplicitSocks5Outcome {
     pub connected_tunnel: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExplicitSocks5SessionOutcome<T> {
+    pub outcome: ExplicitSocks5Outcome,
+    pub tunnel: Option<T>,
+}
+
 /// Process one bounded explicit HTTP proxy request from a client stream.
 ///
 /// This step keeps listener/session IO in runtime, parsing in frontends, policy
-/// and audit in net/policy/audit, and host networking in egress. It intentionally
-/// handles one request head; full-duplex CONNECT tunneling can reuse the returned
-/// egress TCP stream contract in a later pump.
+/// and audit in net/policy/audit, and host networking in egress.
 pub fn process_one_http_proxy_request<Io, E, A>(
     io: &mut Io,
     step: ExplicitHttpProxyStep<'_, E, A>,
 ) -> Result<ExplicitHttpProxyOutcome, RuntimeError>
+where
+    Io: Read + Write,
+    E: HostEgress,
+    E::HttpResponse: HostHttpResponse,
+    A: AuditSink,
+{
+    Ok(process_one_http_proxy_request_with_tunnel(io, step)?.outcome)
+}
+
+/// Process one bounded explicit HTTP proxy request and retain an allowed
+/// CONNECT tunnel stream for the runtime's bounded tunnel pump.
+pub fn process_one_http_proxy_request_with_tunnel<Io, E, A>(
+    io: &mut Io,
+    step: ExplicitHttpProxyStep<'_, E, A>,
+) -> Result<ExplicitHttpProxySessionOutcome<E::TcpStream>, RuntimeError>
 where
     Io: Read + Write,
     E: HostEgress,
@@ -116,7 +141,7 @@ where
     .map_err(RuntimeError::Broker)?;
 
     let mut response_bytes_written = 0;
-    let mut connected_tunnel = false;
+    let mut tunnel = None;
     match result.egress_outcome.take() {
         Some(EgressOutcome::HttpForwarded(mut response)) if result.decision.is_allowed() => {
             let bytes = response
@@ -128,11 +153,11 @@ where
                 response_bytes_written = bytes.len();
             }
         }
-        Some(EgressOutcome::TcpConnected(_stream)) if result.decision.is_allowed() => {
+        Some(EgressOutcome::TcpConnected(stream)) if result.decision.is_allowed() => {
             let established = b"HTTP/1.1 200 Connection Established\r\n\r\n";
             io.write_all(established).map_err(RuntimeError::ProxyIo)?;
             response_bytes_written = established.len();
-            connected_tunnel = true;
+            tunnel = Some(stream);
         }
         _ if !result.decision.is_allowed() => {
             let status = match result.outcome {
@@ -147,11 +172,14 @@ where
         _ => {}
     }
 
-    Ok(ExplicitHttpProxyOutcome {
-        event,
-        broker_outcome: result.outcome,
-        response_bytes_written,
-        connected_tunnel,
+    Ok(ExplicitHttpProxySessionOutcome {
+        outcome: ExplicitHttpProxyOutcome {
+            event,
+            broker_outcome: result.outcome,
+            response_bytes_written,
+            connected_tunnel: tunnel.is_some(),
+        },
+        tunnel,
     })
 }
 
@@ -187,6 +215,20 @@ where
     E: HostEgress,
     A: AuditSink,
 {
+    Ok(process_one_socks5_connect_with_tunnel(io, step)?.outcome)
+}
+
+/// Process one SOCKS5 no-auth CONNECT request and retain an allowed tunnel
+/// stream for the runtime's bounded proxy tunnel pump.
+pub fn process_one_socks5_connect_with_tunnel<Io, E, A>(
+    io: &mut Io,
+    step: ExplicitSocks5Step<'_, E, A>,
+) -> Result<ExplicitSocks5SessionOutcome<E::TcpStream>, RuntimeError>
+where
+    Io: Read + Write,
+    E: HostEgress,
+    A: AuditSink,
+{
     let greeting = read_socks5_greeting(io, step.parser_limits.max_socks5_message_bytes)
         .map_err(RuntimeError::ProxyIo)?;
     let method_reply =
@@ -210,10 +252,13 @@ where
             step.timestamp_millis,
         )
         .map_err(RuntimeError::Broker)?;
-        return Ok(ExplicitSocks5Outcome {
-            event,
-            broker_outcome: result.outcome,
-            connected_tunnel: false,
+        return Ok(ExplicitSocks5SessionOutcome {
+            outcome: ExplicitSocks5Outcome {
+                event,
+                broker_outcome: result.outcome,
+                connected_tunnel: false,
+            },
+            tunnel: None,
         });
     }
 
@@ -236,15 +281,18 @@ where
     let reply_code = foxprox_frontends::socks5_reply_for_policy_decision(&result.decision);
     let reply = foxprox_frontends::build_socks5_connect_reply(reply_code);
     io.write_all(&reply).map_err(RuntimeError::ProxyIo)?;
-    let connected_tunnel = matches!(
-        result.egress_outcome.take(),
-        Some(EgressOutcome::TcpConnected(_))
-    ) && result.decision.is_allowed();
+    let tunnel = match result.egress_outcome.take() {
+        Some(EgressOutcome::TcpConnected(stream)) if result.decision.is_allowed() => Some(stream),
+        _ => None,
+    };
 
-    Ok(ExplicitSocks5Outcome {
-        event,
-        broker_outcome: result.outcome,
-        connected_tunnel,
+    Ok(ExplicitSocks5SessionOutcome {
+        outcome: ExplicitSocks5Outcome {
+            event,
+            broker_outcome: result.outcome,
+            connected_tunnel: tunnel.is_some(),
+        },
+        tunnel,
     })
 }
 
@@ -2203,6 +2251,50 @@ mod tests {
     }
 
     #[test]
+    fn explicit_http_connect_retains_tunnel_stream_for_pump() {
+        let request = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n".to_vec();
+        let request_len = request.len();
+        let mut io = Cursor::new(request);
+        let mut config = RuntimeConfig::deny_by_default();
+        let mut rule = PolicyRule::allow(foxprox_core::RuleId::new("connect").unwrap());
+        rule.protocol = ProtocolMatcher::Exact(Protocol::HttpsConnect);
+        config.rules.push(rule);
+        let policy = PolicyEngine::new(config);
+        let mut egress = MockEgress::default();
+        let mut audit = BoundedAuditSink::new(4);
+        let sandbox_id = SandboxId::new("s1").unwrap();
+
+        let session = process_one_http_proxy_request_with_tunnel(
+            &mut io,
+            ExplicitHttpProxyStep {
+                sandbox_id: &sandbox_id,
+                policy: &policy,
+                egress: &mut egress,
+                audit: &mut audit,
+                parser_limits: ParserLimits::default(),
+                max_response_bytes: 1024,
+                sequence: 1,
+                timestamp_millis: 1000,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            session.outcome.broker_outcome,
+            BrokerEventOutcome::Forwarded
+        );
+        assert!(session.outcome.connected_tunnel);
+        assert_eq!(session.tunnel, Some(MockTcpStream));
+        assert_eq!(egress.proxy_connects.len(), 1);
+        assert_eq!(audit.records().len(), 1);
+        let bytes = io.into_inner();
+        assert_eq!(
+            &bytes[request_len..],
+            b"HTTP/1.1 200 Connection Established\r\n\r\n"
+        );
+    }
+
+    #[test]
     fn explicit_http_proxy_denial_writes_forbidden_without_egress() {
         let request = b"GET http://example.com/path HTTP/1.1\r\nHost: example.com\r\n\r\n".to_vec();
         let request_len = request.len();
@@ -2252,7 +2344,7 @@ mod tests {
         let mut audit = BoundedAuditSink::new(4);
         let sandbox_id = SandboxId::new("s1").unwrap();
 
-        let outcome = process_one_socks5_connect(
+        let session = process_one_socks5_connect_with_tunnel(
             &mut io,
             ExplicitSocks5Step {
                 sandbox_id: &sandbox_id,
@@ -2265,9 +2357,11 @@ mod tests {
             },
         )
         .unwrap();
+        let outcome = session.outcome;
 
         assert_eq!(outcome.broker_outcome, BrokerEventOutcome::Forwarded);
         assert!(outcome.connected_tunnel);
+        assert_eq!(session.tunnel, Some(MockTcpStream));
         assert_eq!(egress.socks_connects.len(), 1);
         assert_eq!(audit.records().len(), 1);
         assert_eq!(&io.writes[..2], &[0x05, 0x00]);
