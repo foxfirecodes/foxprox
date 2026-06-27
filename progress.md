@@ -1970,5 +1970,5 @@
   - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
   - `cargo tree -p foxprox-integrations` — bwrap smoke remains isolated to integrations.
   - `cargo tree -p foxprox-runtime` — runtime remains independent of bwrap/smoke details.
-- Commit hash after commit: pending.
+- Commit hash after commit: 0cfebe7.
 - Remaining boundary risks: final initial implementation gap audit remains.
