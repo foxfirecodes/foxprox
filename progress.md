@@ -1998,7 +1998,7 @@
   - `cargo tree -p foxprox-frontends` — frontend parser boundary remains core-only.
   - `cargo tree -p foxprox-packet` — packet parser boundary remains core-only.
   - `cargo tree -p foxprox-inspect` — TLS/HTTP inspection remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: fea8b9c.
 - Remaining boundary risks: final initial implementation gap audit remains.
 
 ## 2026-06-22 — Boundary objective: coverage-guided fuzz harnesses
@@ -2009,5 +2009,5 @@
 - Verification commands planned: `cargo check --manifest-path fuzz/Cargo.toml --bins`, `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for fuzz/frontends/packet/inspect.
 - Observed results: pending.
 - Changed files: pending.
-- Commit hash after commit: pending.
+- Commit hash after commit: fea8b9c.
 - Remaining boundary risks: final initial implementation gap audit remains.
