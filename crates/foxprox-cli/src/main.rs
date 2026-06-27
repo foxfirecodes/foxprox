@@ -36,7 +36,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("foxprox-lab: {err}");
-            if !err.starts_with("sandbox target exited") {
+            if !err.starts_with("sandbox") {
                 usage();
             }
             ExitCode::from(2)
@@ -54,7 +54,9 @@ fn run(args: Vec<String>) -> Result<(), String> {
             usage();
             Ok(())
         }
-        [cmd, rest @ ..] if cmd == "sandbox" => run_sandbox_command(rest.to_vec()),
+        [cmd, rest @ ..] if cmd == "sandbox" => {
+            run_sandbox_command(rest.to_vec()).map_err(|err| format!("sandbox failed: {err}"))
+        }
         [cmd] if cmd == "list" => {
             for name in ScenarioName::list() {
                 println!("{name}");
@@ -311,6 +313,7 @@ struct SandboxTcpFlow {
     host_stream: Option<TcpStream>,
     bytes_to_host: u64,
     bytes_to_sandbox: u64,
+    pending_to_sandbox: Vec<u8>,
 }
 
 #[cfg(unix)]
@@ -658,6 +661,7 @@ fn handle_sandbox_tcp_packet(
                 host_stream: None,
                 bytes_to_host: 0,
                 bytes_to_sandbox: 0,
+                pending_to_sandbox: Vec::new(),
             },
         );
     }
@@ -709,12 +713,7 @@ fn handle_tcp_flow_payload(
                     .evaluate_https_connect_request("foxprox-sandbox", bytes, destination)?
                     .is_none()
                 {
-                    for emitted in flow
-                        .bridge
-                        .send_egress_response(HTTP_FORBIDDEN_CLOSE_RESPONSE)?
-                    {
-                        device.write_packet(&emitted)?;
-                    }
+                    queue_sandbox_bytes(device, flow, HTTP_FORBIDDEN_CLOSE_RESPONSE)?;
                     drain_audit_records(&mut runtime.audit, options.audit_stdout);
                     flow.kind = SandboxTcpKind::HttpProxy {
                         runtime,
@@ -723,12 +722,7 @@ fn handle_tcp_flow_payload(
                     return Ok(());
                 }
                 connect_host_stream(flow, destination)?;
-                for emitted in flow
-                    .bridge
-                    .send_egress_response(HTTP_CONNECT_ESTABLISHED_RESPONSE)?
-                {
-                    device.write_packet(&emitted)?;
-                }
+                queue_sandbox_bytes(device, flow, HTTP_CONNECT_ESTABLISHED_RESPONSE)?;
                 request_done = true;
             } else {
                 let meta = foxprox_core::origin::parse_http_request(bytes)?;
@@ -742,12 +736,7 @@ fn handle_tcp_flow_payload(
                     .evaluate_http_request("foxprox-sandbox", bytes, destination)?
                     .is_none()
                 {
-                    for emitted in flow
-                        .bridge
-                        .send_egress_response(HTTP_FORBIDDEN_CLOSE_RESPONSE)?
-                    {
-                        device.write_packet(&emitted)?;
-                    }
+                    queue_sandbox_bytes(device, flow, HTTP_FORBIDDEN_CLOSE_RESPONSE)?;
                     drain_audit_records(&mut runtime.audit, options.audit_stdout);
                     flow.kind = SandboxTcpKind::HttpProxy {
                         runtime,
@@ -773,9 +762,7 @@ fn handle_tcp_flow_payload(
             match stage {
                 SocksStage::Greeting => {
                     parse_socks5_no_auth_greeting(bytes)?;
-                    for emitted in flow.bridge.send_egress_response(SOCKS5_NO_AUTH_RESPONSE)? {
-                        device.write_packet(&emitted)?;
-                    }
+                    queue_sandbox_bytes(device, flow, SOCKS5_NO_AUTH_RESPONSE)?;
                     stage = SocksStage::Request;
                 }
                 SocksStage::Request => {
@@ -801,9 +788,7 @@ fn handle_tcp_flow_payload(
                         .and_then(|stream| stream.local_addr().ok())
                         .unwrap_or_else(|| "0.0.0.0:0".parse().expect("static socket valid"));
                     let response = socks5_connect_success_response(bound);
-                    for emitted in flow.bridge.send_egress_response(&response)? {
-                        device.write_packet(&emitted)?;
-                    }
+                    queue_sandbox_bytes(device, flow, &response)?;
                     stage = SocksStage::Tunnel;
                     drain_audit_records(&mut runtime.audit, options.audit_stdout);
                 }
@@ -813,6 +798,37 @@ fn handle_tcp_flow_payload(
         }
     };
     flow.kind = result?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn queue_sandbox_bytes(
+    device: &fd_handoff::DeviceFd,
+    flow: &mut SandboxTcpFlow,
+    bytes: &[u8],
+) -> Result<(), String> {
+    flow.pending_to_sandbox.extend_from_slice(bytes);
+    flush_pending_sandbox_bytes(device, flow)
+}
+
+#[cfg(unix)]
+fn flush_pending_sandbox_bytes(
+    device: &fd_handoff::DeviceFd,
+    flow: &mut SandboxTcpFlow,
+) -> Result<(), String> {
+    while !flow.pending_to_sandbox.is_empty() {
+        let (sent, packets) = flow
+            .bridge
+            .try_send_egress_response(&flow.pending_to_sandbox)?;
+        for packet in packets {
+            device.write_packet(&packet)?;
+        }
+        if sent == 0 {
+            break;
+        }
+        flow.bytes_to_sandbox += sent as u64;
+        flow.pending_to_sandbox.drain(..sent);
+    }
     Ok(())
 }
 
@@ -846,6 +862,7 @@ fn poll_sandbox_tcp_flows(
         for emitted in flow.bridge.poll()? {
             device.write_packet(&emitted)?;
         }
+        flush_pending_sandbox_bytes(device, flow)?;
         let mut host_closed = false;
         if let Some(stream) = flow.host_stream.as_mut() {
             let mut buf = [0_u8; 8192];
@@ -856,10 +873,7 @@ fn poll_sandbox_tcp_flows(
                         break;
                     }
                     Ok(n) => {
-                        flow.bytes_to_sandbox += n as u64;
-                        for emitted in flow.bridge.send_egress_response(&buf[..n])? {
-                            device.write_packet(&emitted)?;
-                        }
+                        flow.pending_to_sandbox.extend_from_slice(&buf[..n]);
                     }
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(err) if err.kind() == std::io::ErrorKind::Interrupted => continue,
@@ -883,8 +897,9 @@ fn poll_sandbox_tcp_flows(
                 }
             }
         }
+        flush_pending_sandbox_bytes(device, flow)?;
         drain_audit_records(&mut flow.bridge.audit, audit_stdout);
-        if host_closed {
+        if host_closed && flow.pending_to_sandbox.is_empty() {
             let record = AuditRecord::new(
                 EventKind::TcpFlowClosed,
                 "foxprox-sandbox",

@@ -113,8 +113,8 @@ impl SmoltcpTcpServerHarness {
                 .expect("smoltcp IP address storage should have room for one IPv4 address");
         });
 
-        let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 8192]);
-        let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 8192]);
+        let tcp_rx_buffer = tcp::SocketBuffer::new(vec![0; 65_536]);
+        let tcp_tx_buffer = tcp::SocketBuffer::new(vec![0; 65_536]);
         let mut socket = tcp::Socket::new(tcp_rx_buffer, tcp_tx_buffer);
         socket
             .listen(listen_port)
@@ -160,14 +160,33 @@ impl SmoltcpTcpServerHarness {
     }
 
     pub fn send_slice(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let sent = self.send_available(bytes)?;
+        if sent != bytes.len() {
+            return Err(format!(
+                "smoltcp TCP socket accepted {sent}/{} response bytes; caller must retry later",
+                bytes.len()
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn send_available(&mut self, bytes: &[u8]) -> Result<usize, String> {
+        if bytes.is_empty() {
+            return Ok(0);
+        }
         let socket = self.sockets.get_mut::<tcp::Socket>(self.handle);
         if !socket.can_send() {
-            return Err("smoltcp TCP socket cannot send yet".to_string());
+            return Ok(0);
         }
-        socket
-            .send_slice(bytes)
+        let len = bytes.len().min(socket.send_capacity());
+        if len == 0 {
+            return Ok(0);
+        }
+        let sent = socket
+            .send_slice(&bytes[..len])
             .map_err(|err| format!("smoltcp TCP send failed: {err:?}"))?;
-        self.poll()
+        self.poll()?;
+        Ok(sent)
     }
 
     pub fn socket_active(&mut self) -> bool {

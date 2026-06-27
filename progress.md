@@ -1299,3 +1299,25 @@
 - Changed files: `crates/foxprox-cli/src/main.rs`, `crates/foxprox-core/src/runtime.rs`, `progress.md`.
 - Interpretation: HTTPS via curl works in the usable alpha sandbox when host CA bundles are available. The remaining non-IPv4 audit line is expected IPv6/noise denial in the IPv4-only alpha TUN path, now with clearer wording.
 - Commit hash after commit: pending.
+
+## 2026-06-22T17:25:00Z — Buffer smoltcp sandbox responses for full HTTPS pages
+
+- User feedback: `target/debug/foxprox-lab sandbox --allow-all --proxy-env --timeout-secs 300 -- curl 'https://github.com'` began returning HTML but cut off partway with `foxprox-lab: smoltcp TCP socket cannot send yet`, and the CLI printed generic usage after the sandbox failure.
+- Root cause: HTTPS CONNECT and host egress were working, but the sandbox bridge attempted to write each host read directly into the smoltcp socket. Large responses can temporarily fill the smoltcp transmit buffer until the sandbox ACKs data, so treating `can_send == false` as fatal was incorrect backpressure handling. Usage was printed because the top-level error path treated broker-loop errors like command syntax errors.
+- Implementation: increased the smoltcp TCP tx/rx buffers for the alpha server harness, added partial `send_available` / `try_send_egress_response` APIs, and added per-flow pending-to-sandbox response buffering in the sandbox launcher. Host response bytes are now queued and flushed as smoltcp accepts more data instead of failing the session. The CLI now suppresses usage text for sandbox runtime failures.
+- Command executed: `cargo fmt --all && cargo test -p foxprox-core -p foxprox-cli && cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab sandbox --allow-all --proxy-env --timeout-secs 120 -- curl -L --max-time 60 https://github.com > /tmp/foxprox-curl-full.out 2> /tmp/foxprox-curl-full.err`
+- Observed result: pass, exit code 0. `/tmp/foxprox-curl-full.out` contained 564569 bytes from GitHub. Audit shows CONNECT allow and sandbox exit allow; no `smoltcp TCP socket cannot send yet` error occurred.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `crates/foxprox-core/src/runtime.rs`, `crates/foxprox-core/src/smoltcp_gate.rs`, `progress.md`.
+- Interpretation: full HTTPS page downloads now work through the alpha HTTP CONNECT proxy path with smoltcp backpressure handled by bounded per-flow buffering in the launcher.
+- Commit hash after commit: pending.
+
+## 2026-06-22T17:25:00Z — Buffer smoltcp sandbox responses for full HTTPS pages
+
+- User feedback: `target/debug/foxprox-lab sandbox --allow-all --proxy-env --timeout-secs 300 -- curl 'https://github.com'` began returning HTML but cut off partway with `foxprox-lab: smoltcp TCP socket cannot send yet`, and the CLI printed generic usage after the sandbox failure.
+- Root cause: HTTPS CONNECT and host egress were working, but the sandbox bridge attempted to write each host read directly into the smoltcp socket. Large responses can temporarily fill the smoltcp transmit buffer until the sandbox ACKs data, so treating `can_send == false` as fatal was incorrect backpressure handling. Usage was printed because the top-level error path treated broker-loop errors like command syntax errors.
+- Implementation: increased the smoltcp TCP tx/rx buffers for the alpha server harness, added partial `send_available` / `try_send_egress_response` APIs, and added per-flow pending-to-sandbox response buffering in the sandbox launcher. Host response bytes are now queued and flushed as smoltcp accepts more data instead of failing the session. The CLI now suppresses usage text for sandbox runtime failures.
+- Command executed: `cargo fmt --all && cargo test -p foxprox-core -p foxprox-cli && cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab sandbox --allow-all --proxy-env --timeout-secs 120 -- curl -L --max-time 60 https://github.com > /tmp/foxprox-curl-full.out 2> /tmp/foxprox-curl-full.err`
+- Observed result: pass, exit code 0. `/tmp/foxprox-curl-full.out` contained 564569 bytes from GitHub. Audit shows CONNECT allow and sandbox exit allow; no `smoltcp TCP socket cannot send yet` error occurred.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `crates/foxprox-core/src/runtime.rs`, `crates/foxprox-core/src/smoltcp_gate.rs`, `progress.md`.
+- Interpretation: full HTTPS page downloads now work through the alpha HTTP CONNECT proxy path with smoltcp backpressure handled by bounded per-flow buffering in the launcher.
+- Commit hash after commit: pending.

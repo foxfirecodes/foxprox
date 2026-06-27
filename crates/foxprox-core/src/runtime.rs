@@ -964,6 +964,14 @@ impl TransparentTcpBridgeRuntime {
         Ok(self.stack.drain_emitted_packets())
     }
 
+    pub fn try_send_egress_response(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<(usize, Vec<Vec<u8>>), String> {
+        let sent = self.stack.send_available(bytes)?;
+        Ok((sent, self.stack.drain_emitted_packets()))
+    }
+
     pub fn poll(&mut self) -> Result<Vec<Vec<u8>>, String> {
         self.stack.poll()?;
         Ok(self.stack.drain_emitted_packets())
