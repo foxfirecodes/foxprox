@@ -2061,7 +2061,7 @@
   - `cargo tree -p foxprox-cli` — CLI wires boundary crates without moving bwrap/cap details into runtime/policy/audit.
   - `cargo tree -p foxprox-runtime` — runtime remains boundary-oriented.
   - `cargo tree -p foxprox-integrations` — Linux/cap/fd details remain isolated.
-- Commit hash after commit: pending.
+- Commit hash after commit: ee8dc28.
 - Remaining boundary risks: none for alpha launcher wrapper; future hardening should add richer filesystem profile integration, signal handling, config-file policy loading, and explicit proxy reachability from the sandbox namespace.
 
 ## 2026-06-22 — Boundary objective: alpha production launcher wrapper
