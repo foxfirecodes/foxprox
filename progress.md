@@ -5630,3 +5630,33 @@ Commit: 0528671
 
 ### Remaining alpha gaps
 - Combined alpha launcher has real DNS proof and target-exit stopping. Remaining production scope includes explicit HTTP/SOCKS proxy lifecycle in the combined command, direct transparent TCP/UDP E2Es, multi-flow coverage, and stronger lifecycle/cleanup audit around the combined runtime.
+
+
+## 2026-06-26 — Harden alpha runtime stop and denial handling
+
+Commit: 76b090d
+
+### Review follow-up
+- Addressed reviewer run `8e146cc2` findings:
+  - target-exit stop no longer skips already queued TUN packets;
+  - transport error audit ingest failures are no longer discarded;
+  - `run-bwrap-alpha` no longer treats real policy denials as CLI success;
+  - config validation now catches setup/policy broker DNS mismatches.
+
+### Fix
+- `run_received_tun_fd_alpha_runtime_and_drain` now checks the stop callback but still performs one nonblocking transport read/dispatch before stopping; it exits only after the fd is drained to `Ok(None)`.
+- Added `alpha_runtime_drains_queued_packet_after_stop_callback` using a real fd-backed stream to prove a queued UDP packet is processed and audited even when the stop callback fires immediately.
+- On transport errors, alpha runtime now propagates `RuntimeAuditFanInError` from emergency broker/egress ingestion instead of discarding it.
+- `run-bwrap-alpha` CLI success now fails on real policy denials (`DenyDrop`, `DenyReset`, `FailClosed`) while continuing to tolerate explicitly benign incidental multicast packet denials from sandbox startup traffic.
+- `BrokerRuntimeConfig::validate` now requires `setup.broker_dns_ip` to be present in `policy.broker_dns`; validation tests assert `broker_dns_mismatch`.
+
+### Validation
+- `cargo test -p foxprox-core --all-targets --all-features runtime_config_validation_reports_setup_policy_and_limit_errors -- --nocapture` — passed.
+- `cargo test -p foxprox-egress --all-targets --all-features alpha_runtime_drains_queued_packet_after_stop_callback -- --nocapture` — passed.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all eight real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining alpha gaps
+- Still need explicit HTTP/SOCKS proxy listener lifecycle in `run-bwrap-alpha`, direct transparent TCP/UDP E2Es through the combined launcher, multi-flow coverage, and stronger lifecycle/cleanup audit around combined runtime exit.
