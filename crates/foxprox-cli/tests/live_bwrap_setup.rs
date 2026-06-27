@@ -403,6 +403,7 @@ fn live_bwrap_tcp_connection_uses_smoltcp_and_host_stream() {
         max_packets: 16,
         sandbox_buffer_len: 64,
         host_buffer_len: 64,
+        target_stdout: foxprox_cli::TargetStdoutMode::Suppress,
     })
     .unwrap();
     upstream_thread.join().unwrap();
@@ -490,6 +491,7 @@ fn live_bwrap_tls_client_hello_emits_sni_audit() {
         max_packets: 32,
         sandbox_buffer_len: 512,
         host_buffer_len: 64,
+        target_stdout: foxprox_cli::TargetStdoutMode::Suppress,
     })
     .unwrap();
     upstream_thread.join().unwrap();
@@ -577,6 +579,7 @@ fn live_bwrap_curl_fetches_http_through_smoltcp_launcher() {
         max_packets: 32,
         sandbox_buffer_len: 2048,
         host_buffer_len: 512,
+        target_stdout: foxprox_cli::TargetStdoutMode::Suppress,
     })
     .unwrap();
     upstream_thread.join().unwrap();
@@ -1150,14 +1153,16 @@ fn live_cli_bwrap_run_executes_arbitrary_command_with_dns_and_tcp() {
     dns_thread.join().unwrap();
     upstream_thread.join().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout
+    assert_eq!(stdout.trim(), "ok");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr
         .lines()
-        .all(|line| line.starts_with('{') && line.ends_with('}')));
-    assert!(!stdout.contains("ok"));
-    assert!(stdout.contains("\"kind\":\"dns_query\""));
-    assert!(stdout.contains("\"kind\":\"tcp_connect\""));
-    assert!(stdout.contains("\"kind\":\"http_request\""));
-    assert!(stdout.contains("\"hostname_attribution_source\":\"dns_cache\""));
+        .filter(|line| line.starts_with('{'))
+        .all(|line| line.ends_with('}')));
+    assert!(stderr.contains("\"kind\":\"dns_query\""));
+    assert!(stderr.contains("\"kind\":\"tcp_connect\""));
+    assert!(stderr.contains("\"kind\":\"http_request\""));
+    assert!(stderr.contains("\"hostname_attribution_source\":\"dns_cache\""));
     std::fs::remove_dir_all(dir).unwrap();
 }
 

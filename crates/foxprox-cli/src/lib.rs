@@ -200,6 +200,14 @@ pub struct SetupCommandSummary {
     pub target_argv: Vec<String>,
 }
 
+/// Target stdout handling for bwrap launchers.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TargetStdoutMode {
+    Inherit,
+    Suppress,
+}
+
 /// Inputs for one production-shaped bwrap/TUN/smoltcp TCP relay run.
 #[cfg(unix)]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -227,6 +235,7 @@ pub struct BwrapTcpOnceConfig {
     pub max_packets: usize,
     pub sandbox_buffer_len: usize,
     pub host_buffer_len: usize,
+    pub target_stdout: TargetStdoutMode,
 }
 
 /// Evidence from one bwrap/TUN/smoltcp TCP relay run.
@@ -396,7 +405,9 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
     let plan = plan_bwrap_setup(&bwrap).map_err(|error| CliError::Core(error.to_string()))?;
     let mut command = Command::new(&plan.program);
     command.args(&plan.args);
-    command.stdout(Stdio::null());
+    if config.target_stdout == TargetStdoutMode::Suppress {
+        command.stdout(Stdio::null());
+    }
     let setup_child = spawn_setup_command_and_accept_fd(listener, command)
         .map_err(|error| CliError::Core(error.to_string()))?;
     let mut child = setup_child.child;
@@ -1073,10 +1084,10 @@ where
     let config = parse_bwrap_run_args(args)?;
     let summary = run_bwrap_tcp_once(&config)?;
     for line in summary.audit_json_lines {
-        io::stdout()
+        io::stderr()
             .write_all(line.as_bytes())
             .map_err(|error| CliError::Io {
-                context: "write-audit-stdout".to_owned(),
+                context: "write-audit-stderr".to_owned(),
                 error,
             })?;
     }
@@ -1239,6 +1250,7 @@ where
         max_packets,
         sandbox_buffer_len,
         host_buffer_len,
+        target_stdout: TargetStdoutMode::Inherit,
     })
 }
 
@@ -1430,6 +1442,7 @@ where
         max_packets: max_packets.ok_or_else(bwrap_tcp_once_usage)?,
         sandbox_buffer_len: sandbox_buffer_len.ok_or_else(bwrap_tcp_once_usage)?,
         host_buffer_len: host_buffer_len.ok_or_else(bwrap_tcp_once_usage)?,
+        target_stdout: TargetStdoutMode::Suppress,
     })
 }
 

@@ -1887,3 +1887,31 @@
 - What failed or surprised the agent: the first `bwrap-run` live attempt did not receive DNS because the launcher bind-mounted the resolver file over the host `/etc` tree without first making `/etc` writable/isolated. Mirroring the proven live pattern (`--tmpfs /etc` then `--bind <temp> /etc/resolv.conf`) fixed real resolver behavior while avoiding host mutation.
 - Current alpha boundary: `bwrap-run` runs arbitrary commands but brokers one TCP flow per invocation; ICMP/DNS/UDP packets are handled while the target runs. Multi-flow long-running supervision remains productionization beyond alpha.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — bwrap-run preserves target stdout
+
+- Slice attempted: fix production launcher usability after trying the documented command in a real environment.
+- Why next: user confirmed `bwrap-run` worked but reported two usability gaps: Cargo invocation needs `--bin foxprox-cli` because the package has multiple binaries, and the launcher suppressed curl output so it behaved unlike a normal command runner.
+- What changed: `bwrap-run` now inherits the target command stdout and writes foxprox audit JSON-lines to stderr. The lower-level `bwrap-tcp-once` keeps target stdout suppressed and audit stdout JSON-only for test/script compatibility. Added `TargetStdoutMode` to make the behavior explicit. Updated the alpha usage doc to use `cargo run -p foxprox-cli --bin foxprox-cli -- ...` and to document stdout/stderr behavior. Updated the live `bwrap-run` smoke to assert target stdout contains `ok` while audit JSON appears on stderr.
+- Verification:
+  - Parser check passed: `cargo test -p foxprox-cli bwrap_run_arg_parser_builds_production_defaults -- --nocapture`.
+  - Focused live production launcher passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_cli_bwrap_run_executes_arbitrary_command_with_dns_and_tcp -- --ignored --nocapture`.
+  - Full live bwrap suite passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, 13/13.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- Commit: this commit.
+
+## 2026-06-22 Slice Evidence — bwrap-run preserves target stdout
+
+- Slice attempted: fix production launcher usability after trying the documented command in a real environment.
+- Why next: user confirmed `bwrap-run` worked but reported two usability gaps: Cargo invocation needs `--bin foxprox-cli` because the package has multiple binaries, and the launcher suppressed curl output so it behaved unlike a normal command runner.
+- What changed: `bwrap-run` now inherits the target command stdout and writes foxprox audit JSON-lines to stderr. The lower-level `bwrap-tcp-once` keeps target stdout suppressed and audit stdout JSON-only for test/script compatibility. Added `TargetStdoutMode` to make the behavior explicit. Updated the alpha usage doc to use `cargo run -p foxprox-cli --bin foxprox-cli -- ...` and to document stdout/stderr behavior. Updated the live `bwrap-run` smoke to assert target stdout contains `ok` while audit JSON appears on stderr.
+- Verification:
+  - Parser check passed: `cargo test -p foxprox-cli bwrap_run_arg_parser_builds_production_defaults -- --nocapture`.
+  - Focused live production launcher passed: `cargo test -p foxprox-cli --test live_bwrap_setup live_cli_bwrap_run_executes_arbitrary_command_with_dns_and_tcp -- --ignored --nocapture`.
+  - Full live bwrap suite passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, 13/13.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- Commit: this commit.

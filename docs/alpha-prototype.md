@@ -18,13 +18,13 @@ The live smoke tests require unprivileged user namespaces, `bwrap`, and access t
 
 `foxprox-cli bwrap-run` is the alpha launcher intended for running arbitrary commands inside a real `bwrap` network namespace with foxprox mediation. It chooses temporary broker paths, runs `foxproxsetup` inside the setup phase with temporary `CAP_NET_ADMIN`, receives the TUN fd over a Unix socket, drops `CAP_NET_ADMIN` before the target command, installs broker DNS in the sandbox, and brokers ICMP, DNS, UDP, and the first TCP flow through the received TUN fd. TCP uses smoltcp with the original destination from the SYN; UDP uses original-destination host UDP egress with synthesized TUN responses; allowed ICMP echo receives a synthetic reply.
 
-Stdout is reserved for foxprox JSON-lines audit. The target command's stdout is suppressed in the current alpha launcher so audit stdout remains machine-parseable; target stderr is still visible on launcher stderr.
+`bwrap-run` preserves the target command's stdout so it behaves like a normal launcher. Foxprox audit JSON-lines are written to stderr for this command. The lower-level one-shot/proxy commands still keep stdout audit-only.
 
 Example:
 
 ```sh
 cargo build --workspace
-cargo run -p foxprox-cli -- bwrap-run \
+cargo run -p foxprox-cli --bin foxprox-cli -- bwrap-run \
   --dns-upstream 1.1.1.1:53 \
   --sandbox alpha-demo \
   -- \
@@ -55,7 +55,7 @@ deny_direct_external_dns = true
 TOML
 printf 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok' | nc -l "$HOST_IP" "$PORT" &
 
-cargo run -p foxprox-cli -- bwrap-tcp-once \
+cargo run -p foxprox-cli --bin foxprox-cli -- bwrap-tcp-once \
   --bwrap /usr/bin/bwrap \
   --setup target/debug/foxproxsetup \
   --broker-socket /tmp/foxprox-alpha.sock \
@@ -100,9 +100,9 @@ TLS ClientHello traffic is inspected before host egress and emits `tls_client_he
 The alpha also exposes explicit proxy frontends:
 
 ```sh
-cargo run -p foxprox-cli -- http-proxy-once --listen 127.0.0.1:18080 --sandbox alpha-demo [--config policy.toml]
-cargo run -p foxprox-cli -- http-connect-once --listen 127.0.0.1:18443 --sandbox alpha-demo [--config policy.toml]
-cargo run -p foxprox-cli -- socks5-once --listen 127.0.0.1:19080 --sandbox alpha-demo [--config policy.toml]
+cargo run -p foxprox-cli --bin foxprox-cli -- http-proxy-once --listen 127.0.0.1:18080 --sandbox alpha-demo [--config policy.toml]
+cargo run -p foxprox-cli --bin foxprox-cli -- http-connect-once --listen 127.0.0.1:18443 --sandbox alpha-demo [--config policy.toml]
+cargo run -p foxprox-cli --bin foxprox-cli -- socks5-once --listen 127.0.0.1:19080 --sandbox alpha-demo [--config policy.toml]
 ```
 
 Each command handles one client connection/request and emits the shared audit JSON format to stdout.
