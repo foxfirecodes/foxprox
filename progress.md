@@ -5703,3 +5703,23 @@ Commit: ea82ee0
 
 ### Remaining alpha gaps
 - Still need explicit HTTP/SOCKS proxy listener lifecycle in `run-bwrap-alpha`, direct transparent UDP E2E, multi-flow coverage, and stronger lifecycle/cleanup audit around combined runtime exit.
+
+
+## 2026-06-26 — Exercise alpha transparent UDP launcher
+
+Commit: db9da60
+
+### Implementation
+- Added a real ignored bwrap/TUN E2E for `foxprox run-bwrap-alpha` transparent UDP.
+- The test binds a host UDP socket on the host primary IPv4 address, runs a sandbox target that sends a datagram to that same address through the sandbox TUN route, and verifies `ping`/`pong` datagrams bridge through the combined alpha launcher without proof-command endpoint mapping.
+- The test asserts combined alpha audit output includes UDP exchange write-back evidence and the sandbox-requested host destination.
+
+### Validation
+- `cargo test -p foxprox-cli --test bwrap_setup_e2e --all-features foxprox_run_bwrap_alpha_command_bridges_transparent_udp -- --ignored --nocapture` — passed.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all ten real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining alpha gaps
+- Still need explicit HTTP/SOCKS proxy listener lifecycle in `run-bwrap-alpha`, multi-flow coverage, and stronger lifecycle/cleanup audit around combined runtime exit.
