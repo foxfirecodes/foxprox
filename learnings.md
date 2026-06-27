@@ -78,3 +78,11 @@
 ## 2026-06-27T03:08:00Z
 - `foxprox run --tcp-domain HOST:PORT` is the practical alpha path for real HTTP curl smoke tests: the broker DNS responder aliases HOST to the broker TUN IP inside the sandbox, while the launcher resolves HOST:PORT on the host and bridges the accepted smoltcp TCP flow to the real host endpoint.
 - Live rootless bwrap socket-handoff checks can fail under pi-auto's review-only sandbox with `bind setup control socket path: Operation not permitted`; include a harmless `/tmp` write in the shell command when a live smoke must run unsandboxed.
+
+## 2026-06-27T03:20:00Z
+- For alpha CLI observability, use `LineAuditSink<std::io::Stderr>` in launcher-owned policy kernels. This keeps the verified audit formatting and avoids inventing a separate logging format.
+- Curl waits until `--max-time` when the sandbox TCP stack does not receive a terminal packet. For accepted smoltcp flows where the host TCP connect fails, reset the smoltcp connect and drain outbound adapter packets to the TUN before returning so curl fails immediately with a reset.
+
+## 2026-06-27T03:20:00Z
+- For alpha CLI observability, use `LineAuditSink<std::io::Stderr>` in launcher-owned policy kernels. This keeps the verified audit formatting and avoids inventing a separate logging format.
+- Curl waits until `--max-time` when the sandbox TCP stack does not receive a terminal packet. For accepted smoltcp flows where the host TCP connect fails, reset the smoltcp connect and drain outbound adapter packets to the TUN before returning so curl fails immediately with a reset.

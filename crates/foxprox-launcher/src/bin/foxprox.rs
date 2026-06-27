@@ -1,7 +1,8 @@
 use foxprox_core::{
     parse_ip_packet, synthesize_udpv4_response, DecisionAction, DnsCache, Endpoint, FrontendKind,
-    Hostname, NormalizedEvent, ParsedIpPacket, PolicyConfig, PolicyEngine, PolicyRule, Protocol,
-    RuleSet, SandboxId, SniStatus, StaticDnsResolver, VecAuditSink, VerificationKernel,
+    Hostname, HostnameAttribution, LineAuditSink, NormalizedEvent, ParsedIpPacket, PolicyConfig,
+    PolicyEngine, PolicyRule, Protocol, QuicStatus, RuleSet, SandboxId, SniStatus,
+    StaticDnsResolver, VerificationKernel,
 };
 use foxprox_device::set_file_nonblocking;
 use foxprox_integrations::{SetupPlan, TunDeviceConfig};
@@ -14,7 +15,7 @@ use foxprox_smoltcp::{
     SmoltcpTcpBridgeSessionError, TcpConnectReportMode,
 };
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
@@ -219,7 +220,9 @@ fn run(config: CliConfig) -> Result<(), String> {
             let host = resolve_host(&hostname, port)?;
             run_tcp_mode(tun, &mut child, &config, sandbox_id, port, host)
         }
-        BrokerMode::Udp { listen, host } => run_udp_mode(tun, &mut child, &config, listen, host),
+        BrokerMode::Udp { listen, host } => {
+            run_udp_mode(tun, &mut child, &config, sandbox_id, listen, host)
+        }
     }
 }
 
@@ -261,7 +264,7 @@ fn run_tcp_mode(
             broker_dns: vec![IpAddr::V4(config.broker_ip)],
             ..PolicyConfig::default()
         }),
-        VecAuditSink::bounded(1024),
+        LineAuditSink::new(std::io::stderr()),
     );
     let components = build_runtime_components(BrokerRuntimeConfig {
         sandbox_id: sandbox_id.clone(),
@@ -309,23 +312,40 @@ fn run_tcp_mode(
             frontend: FrontendKind::Tun,
             source: Some(Endpoint::new(attempt.source.ip, attempt.source.port)),
             destination: Endpoint::new(attempt.destination.ip, attempt.destination.port),
-            hostname: None,
+            hostname: tcp_event_hostname(config, listen)?,
             sni_status: SniStatus::Missing,
             sni_dns_mismatch: false,
         };
         let decision = kernel.decide_and_audit(&event, 1);
         if decision.action != DecisionAction::Allow {
             adapter.reset_connect(&attempt);
+            drain_adapter_packets(&mut adapter, &mut tun_writer, 1)
+                .map_err(|error| format!("write TCP denial reset to TUN: {error}"))?;
             return Err(format!("policy denied TCP connect: {decision:?}"));
         }
+        let host_stream = match TcpStream::connect(host) {
+            Ok(stream) => stream,
+            Err(error) => {
+                adapter.reset_connect(&attempt);
+                drain_adapter_packets(&mut adapter, &mut tun_writer, 1)
+                    .map_err(|error| format!("write host-connect failure reset to TUN: {error}"))?;
+                return Err(format!("connect host TCP {host}: {error}"));
+            }
+        };
+        if let Err(error) = host_stream.set_nonblocking(true) {
+            adapter.reset_connect(&attempt);
+            drain_adapter_packets(&mut adapter, &mut tun_writer, 1)
+                .map_err(|error| format!("write host-connect failure reset to TUN: {error}"))?;
+            return Err(format!("set host TCP {host} nonblocking: {error}"));
+        }
         adapter.mark_connect_opened(&attempt);
-        break SmoltcpTcpBridgeSession::connect_allowed_host_session(
+        break SmoltcpTcpBridgeSession::from_allowed_connect(
             adapter,
             &components,
             &attempt,
-            host,
+            host_stream,
         )
-        .map_err(|error| format!("connect host TCP {host}: {error:?}"))?;
+        .map_err(|error| format!("open host TCP bridge {host}: {error:?}"))?;
     };
 
     set_file_nonblocking(&tun, true)
@@ -363,6 +383,7 @@ fn run_udp_mode(
     mut tun: std::fs::File,
     child: &mut Child,
     config: &CliConfig,
+    sandbox_id: SandboxId,
     listen: u16,
     host: SocketAddr,
 ) -> Result<(), String> {
@@ -374,6 +395,18 @@ fn run_udp_mode(
     socket
         .set_read_timeout(Some(Duration::from_secs(3)))
         .map_err(|error| format!("set host UDP read timeout: {error}"))?;
+    let mut rule = PolicyRule::allow("alpha-cli-allow-udp");
+    rule.protocol = Some(Protocol::Udp);
+    let mut rules = RuleSet::default();
+    rules.push(rule);
+    let mut kernel = VerificationKernel::new(
+        PolicyEngine::new(PolicyConfig {
+            rules,
+            broker_dns: vec![IpAddr::V4(config.broker_ip)],
+            ..PolicyConfig::default()
+        }),
+        LineAuditSink::new(std::io::stderr()),
+    );
     let mut buffer = vec![0; config.mtu as usize + 128];
     loop {
         if let Some(status) = child
@@ -392,6 +425,18 @@ fn run_udp_mode(
         if packet.destination != config.broker_ip || packet.destination_port != listen {
             continue;
         }
+        let event = NormalizedEvent::UdpFlowAttempt {
+            sandbox_id: sandbox_id.clone(),
+            frontend: FrontendKind::Tun,
+            source: Endpoint::new(IpAddr::V4(packet.source), packet.source_port),
+            destination: Endpoint::new(IpAddr::V4(packet.destination), packet.destination_port),
+            hostname: None,
+            quic_status: QuicStatus::NotQuic,
+        };
+        let decision = kernel.decide_and_audit(&event, 1);
+        if decision.action != DecisionAction::Allow {
+            continue;
+        }
         socket
             .send(packet.payload)
             .map_err(|error| format!("send host UDP payload: {error}"))?;
@@ -403,6 +448,32 @@ fn run_udp_mode(
         tun.write_all(&response)
             .map_err(|error| format!("write UDP response to TUN: {error}"))?;
     }
+}
+
+fn tcp_event_hostname(
+    config: &CliConfig,
+    listen: u16,
+) -> Result<Option<HostnameAttribution>, String> {
+    match &config.mode {
+        BrokerMode::TcpDomain { hostname, port } if *port == listen => Ok(Some(
+            HostnameAttribution::broker_dns(Hostname::normalize(hostname).map_err(|error| {
+                format!("invalid --tcp-domain hostname `{hostname}`: {error:?}")
+            })?),
+        )),
+        _ => Ok(None),
+    }
+}
+
+fn drain_adapter_packets<W: Write>(
+    adapter: &mut foxprox_smoltcp::SmoltcpIpLoopback,
+    writer: &mut W,
+    now_millis: i64,
+) -> std::io::Result<()> {
+    adapter.poll_once(now_millis);
+    while let Some(packet) = adapter.next_outbound_ip_packet() {
+        writer.write_all(&packet)?;
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

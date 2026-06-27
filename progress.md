@@ -2289,3 +2289,43 @@
 - Observed result: user can now curl a real HTTP website by using `--tcp-domain example.com:80` and running curl against `http://example.com/` inside the launched sandbox.
 - Commit hash when committed: pending.
 - Remaining risks/deferred beyond this slice: HTTPS support needs `--tcp-domain example.com:443` and policy/SNI hardening; arbitrary multiple-domain/multiple-port routing still needs config-file driven daemon mode.
+
+## 2026-06-27T03:20:00Z
+- Current objective: make alpha CLI failures observable and less timeout-prone, and expose audit events on stderr.
+- Files changed: `crates/foxprox-launcher/src/bin/foxprox.rs`, `progress.md`, `learnings.md`.
+- Implementation notes:
+  - Switched CLI TCP and UDP policy kernels from in-memory audit to `LineAuditSink::new(std::io::stderr())` so alpha runs emit structured audit lines directly to stderr.
+  - TCP domain mode now includes broker-DNS hostname attribution in the audited TCP connect event, e.g. `host=example.com host_confidence=Medium`.
+  - TCP host-connect failures now reset the accepted smoltcp connection and drain outbound packets to the TUN before returning an error, so curl receives a connection reset instead of waiting for `--max-time` in that failure path.
+  - UDP mode now audits allowed UDP flow attempts before forwarding host datagrams.
+- Verification commands run so far:
+  - `cargo fmt --check` (reported formatting drift; fixed with `cargo fmt`)
+  - `cargo clippy -p foxprox-launcher --all-targets --all-features -- -D warnings`
+  - `cargo test -p foxprox-launcher --all-targets --all-features`
+  - `cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-launcher --bin foxprox`
+  - Live real-site audit smoke: `foxprox run --tcp-domain example.com:80 -- curl http://example.com/` returned Example Domain HTML and stderr included `kind=TcpConnect`, `host=example.com`, and `decision=Allow`.
+  - Live UDP audit smoke: sandbox UDP request reached host UDP server, response returned, and stderr included `kind=UdpFlowCreated` with `decision=Allow`.
+  - Live TCP host-connect failure smoke: `--tcp-host 127.0.0.1:9` returned in ~0.12s, curl reported `Recv failure: Connection reset by peer`, and stderr included the TCP audit line plus `connect host TCP ... Connection refused`.
+- Observed result: audit events are visible on stderr for CLI TCP/UDP alpha runs, and host TCP refusal now fails promptly rather than waiting for curl max-time.
+- Remaining risk: packets to entirely unsupported/unmapped ports may still depend on smoltcp's generated response behavior; explicit fail-fast TCP RST synthesis for every unsupported transparent TCP case remains a separate hardening task.
+- Exact next step: run full workspace verification, then commit.
+
+## 2026-06-27T03:20:00Z
+- Current objective: make alpha CLI failures observable and less timeout-prone, and expose audit events on stderr.
+- Files changed: `crates/foxprox-launcher/src/bin/foxprox.rs`, `progress.md`, `learnings.md`.
+- Implementation notes:
+  - Switched CLI TCP and UDP policy kernels from in-memory audit to `LineAuditSink::new(std::io::stderr())` so alpha runs emit structured audit lines directly to stderr.
+  - TCP domain mode now includes broker-DNS hostname attribution in the audited TCP connect event, e.g. `host=example.com host_confidence=Medium`.
+  - TCP host-connect failures now reset the accepted smoltcp connection and drain outbound packets to the TUN before returning an error, so curl receives a connection reset instead of waiting for `--max-time` in that failure path.
+  - UDP mode now audits allowed UDP flow attempts before forwarding host datagrams.
+- Verification commands run so far:
+  - `cargo fmt --check` (reported formatting drift; fixed with `cargo fmt`)
+  - `cargo clippy -p foxprox-launcher --all-targets --all-features -- -D warnings`
+  - `cargo test -p foxprox-launcher --all-targets --all-features`
+  - `cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-launcher --bin foxprox`
+  - Live real-site audit smoke: `foxprox run --tcp-domain example.com:80 -- curl http://example.com/` returned Example Domain HTML and stderr included `kind=TcpConnect`, `host=example.com`, and `decision=Allow`.
+  - Live UDP audit smoke: sandbox UDP request reached host UDP server, response returned, and stderr included `kind=UdpFlowCreated` with `decision=Allow`.
+  - Live TCP host-connect failure smoke: `--tcp-host 127.0.0.1:9` returned in ~0.12s, curl reported `Recv failure: Connection reset by peer`, and stderr included the TCP audit line plus `connect host TCP ... Connection refused`.
+- Observed result: audit events are visible on stderr for CLI TCP/UDP alpha runs, and host TCP refusal now fails promptly rather than waiting for curl max-time.
+- Remaining risk: packets to entirely unsupported/unmapped ports may still depend on smoltcp's generated response behavior; explicit fail-fast TCP RST synthesis for every unsupported transparent TCP case remains a separate hardening task.
+- Exact next step: run full workspace verification, then commit.
