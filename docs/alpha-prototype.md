@@ -33,6 +33,37 @@ cargo run -p foxprox-cli --bin foxprox-cli -- bwrap-run \
 
 Optional flags include `--config policy.toml`, `--address-cidr 10.150.0.2/24`, `--broker-dns 10.150.0.1`, `--extra-bwrap-arg ARG`, and `--no-default-root-bind` for callers that want to provide their own filesystem sandbox arguments.
 
+Without `--config`, `bwrap-run` uses an alpha-friendly default-allow policy while still forcing DNS through the broker resolver. To require explicit allowlisting, pass a policy like:
+
+```toml
+default_policy = "deny"
+
+[dns]
+broker_resolvers = ["10.150.0.1:53"]
+deny_direct_external_dns = true
+
+[[rules]]
+id = "allow-github-http"
+action = "allow"
+protocol = "http"
+hostnames = ["github.com"]
+destination_ports = [80]
+
+[[rules]]
+id = "allow-github-tcp-443"
+action = "allow"
+protocol = "tcp"
+hostnames = ["github.com"]
+destination_ports = [443]
+
+[[rules]]
+id = "allow-github-tls-sni"
+action = "allow"
+protocol = "tls_client_hello"
+hostnames = ["github.com"]
+destination_ports = [443]
+```
+
 ## Low-level transparent bwrap TCP/HTTP/TLS one-shot
 
 `foxprox-cli bwrap-tcp-once` exposes the lower-level launcher contract used by the tests and by `bwrap-run`. It accepts explicit broker socket, resolver, TUN name, and setup paths while brokering the same ICMP/DNS/UDP/TCP paths.

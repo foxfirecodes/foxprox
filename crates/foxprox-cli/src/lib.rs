@@ -805,12 +805,36 @@ fn relay_host_response_to_sandbox(
         return Ok(0);
     }
     host_payload.truncate(host_to_sandbox_bytes);
-    tcp.send_payload(&host_payload)
-        .map_err(|error| CliError::Core(error.to_string()))?;
-    for outbound in tcp.poll() {
-        tun.write_packet(&outbound)?;
-    }
+    send_all_to_sandbox(tcp, tun, &host_payload)?;
     Ok(host_to_sandbox_bytes)
+}
+
+#[cfg(unix)]
+fn send_all_to_sandbox(
+    tcp: &mut foxprox_tcp::SmoltcpTcpServer,
+    tun: &mut TunPacketIo,
+    payload: &[u8],
+) -> Result<(), CliError> {
+    let mut offset = 0;
+    let mut stalled_polls = 0;
+    while offset < payload.len() {
+        let written = tcp
+            .send_payload(&payload[offset..])
+            .map_err(|error| CliError::Core(error.to_string()))?;
+        for outbound in tcp.poll() {
+            tun.write_packet(&outbound)?;
+        }
+        if written == 0 {
+            stalled_polls += 1;
+            if stalled_polls > 64 {
+                return Err(CliError::Core("tcp-smoltcp-send-stalled".to_owned()));
+            }
+        } else {
+            offset += written;
+            stalled_polls = 0;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1263,7 +1287,7 @@ where
     let mut max_packet_len = 4096_usize;
     let mut max_packets = 10_000_usize;
     let mut sandbox_buffer_len = 8192_usize;
-    let mut host_buffer_len = 8192_usize;
+    let mut host_buffer_len = 1024_usize;
     let mut extra_bwrap_args = Vec::new();
     let mut use_default_root_bind = true;
     let mut target_argv = Vec::new();

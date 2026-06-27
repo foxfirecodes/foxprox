@@ -1969,3 +1969,31 @@
   - `cargo fmt --check` passed.
 - What remains alpha-limited: this is sequential-flow support sufficient for redirects and simple HTTPS; it is not yet a fully concurrent multi-flow daemon.
 - Commit: this commit.
+
+## 2026-06-27 Slice Evidence — larger redirected HTTPS bodies and allowlist docs
+
+- Slice attempted: fix full-body `curl -L http://github.com/` through `bwrap-run`, not just redirected headers.
+- Why next: user observed GitHub HTML output died midstream with `SSL_read ... bad record mac`, which indicated the transparent TCP relay was dropping/corrupting TLS stream bytes under larger HTTPS responses.
+- What changed: host-to-sandbox relay now sends host bytes to smoltcp without dropping partial `send_slice` writes. `bwrap-run` default host read chunks were reduced to 1024 bytes so the alpha smoltcp socket buffer is not overrun by large TLS records. This fixed full GitHub body transfer in the live manual reproduction. Documentation now also states that no config means default allow, and gives a default-deny GitHub allowlist example for users who want explicit control.
+- Verification:
+  - Manual reproduction passed: `target/debug/foxprox-cli bwrap-run --dns-upstream 1.1.1.1:53 --sandbox alpha-demo -- /usr/bin/curl --ipv4 --max-time 15 -L http://github.com/`, exit 0 with ~551 KiB output.
+  - Full live bwrap suite passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, 13/13.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- Current alpha boundary: sequential redirects and large single-command HTTPS bodies now work; this is still not a concurrent multi-flow daemon.
+- Commit: this commit.
+
+## 2026-06-27 Slice Evidence — larger redirected HTTPS bodies and allowlist docs
+
+- Slice attempted: fix full-body `curl -L http://github.com/` through `bwrap-run`, not just redirected headers.
+- Why next: user observed GitHub HTML output died midstream with `SSL_read ... bad record mac`, which indicated the transparent TCP relay was dropping/corrupting TLS stream bytes under larger HTTPS responses.
+- What changed: host-to-sandbox relay now sends host bytes to smoltcp without dropping partial `send_slice` writes. `bwrap-run` default host read chunks were reduced to 1024 bytes so the alpha smoltcp socket buffer is not overrun by large TLS records. This fixed full GitHub body transfer in the live manual reproduction. Documentation now also states that no config means default allow, and gives a default-deny GitHub allowlist example for users who want explicit control.
+- Verification:
+  - Manual reproduction passed: `target/debug/foxprox-cli bwrap-run --dns-upstream 1.1.1.1:53 --sandbox alpha-demo -- /usr/bin/curl --ipv4 --max-time 15 -L http://github.com/`, exit 0 with ~551 KiB output.
+  - Full live bwrap suite passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, 13/13.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- Current alpha boundary: sequential redirects and large single-command HTTPS bodies now work; this is still not a concurrent multi-flow daemon.
+- Commit: this commit.
