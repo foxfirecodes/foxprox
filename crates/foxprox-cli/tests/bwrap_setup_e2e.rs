@@ -9,6 +9,7 @@ use foxprox_core::{
     NetworkEndpoint, NetworkSetupConfig, PolicyConfig, PolicyEngine, Protocol, RuntimeAuditFanIn,
 };
 use std::io::{ErrorKind, Read, Write};
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -898,6 +899,97 @@ fn foxprox_run_bwrap_alpha_command_answers_dns_query() {
     assert!(stdout.contains("dns_query"), "{stdout}");
     assert!(stdout.contains("returned_addresses"), "{stdout}");
     assert!(stdout.contains("to_sandbox"), "{stdout}");
+}
+
+#[test]
+#[ignore = "requires rootless bwrap, /dev/net/tun, CAP_NET_ADMIN inside bwrap, and combined foxprox alpha transparent TCP"]
+fn foxprox_run_bwrap_alpha_command_bridges_transparent_tcp() {
+    let foxprox = env!("CARGO_BIN_EXE_foxprox");
+    let setup_helper = env!("CARGO_BIN_EXE_foxproxsetup");
+    assert!(std::path::Path::new(foxprox).exists());
+    assert!(std::path::Path::new(setup_helper).exists());
+    assert!(std::path::Path::new("/dev/net/tun").exists());
+
+    let host_ip = host_primary_ipv4();
+    let host_listener = TcpListener::bind((host_ip, 0)).unwrap();
+    let host_addr = host_listener.local_addr().unwrap();
+    let (server_tx, server_rx) = std::sync::mpsc::channel();
+    let host_server = std::thread::spawn(move || {
+        let (mut stream, peer) = host_listener.accept().unwrap();
+        let mut request = [0u8; 4];
+        stream.read_exact(&mut request).unwrap();
+        stream.write_all(b"pong").unwrap();
+        server_tx.send((peer, request)).unwrap();
+    });
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_path =
+        std::env::temp_dir().join(format!("foxprox-run-bwrap-alpha-tcp-{unique}.json"));
+    let mut config = BrokerRuntimeConfig::alpha_default(format!("foxprox-alpha-tcp-e2e-{unique}"));
+    config.setup.tun_name = format!("fxt{:x}", std::process::id() % 0x00ff_ffff);
+    config.policy = PolicyConfig {
+        default_decision: Decision::Allow,
+        ..PolicyConfig::default()
+    };
+    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+
+    let script = format!(
+        concat!(
+            "import socket; ",
+            "s=socket.socket(socket.AF_INET, socket.SOCK_STREAM); ",
+            "s.settimeout(5.0); ",
+            "s.connect(({host:?}, {port})); ",
+            "s.sendall(b'ping'); ",
+            "data=s.recv(4); ",
+            "assert data == b'pong', data; ",
+            "s.close()"
+        ),
+        host = host_addr.ip().to_string(),
+        port = host_addr.port()
+    );
+    let setup_dir = std::path::Path::new(setup_helper).parent().unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!("{}:{}", setup_dir.display(), path.to_string_lossy());
+    let output = Command::new(foxprox)
+        .env("PATH", path)
+        .arg("run-bwrap-alpha")
+        .arg(&config_path)
+        .arg("--")
+        .arg("python3")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("foxprox alpha TCP launcher command runs");
+    let _ = std::fs::remove_file(&config_path);
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_peer, request) = server_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("host TCP listener receives bytes through alpha launcher");
+    assert_eq!(&request, b"ping");
+    host_server.join().unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("tcp_connect"), "{stdout}");
+    assert!(stdout.contains("tcp_flow_closed"), "{stdout}");
+    assert!(stdout.contains(&host_addr.ip().to_string()), "{stdout}");
+}
+
+fn host_primary_ipv4() -> std::net::Ipv4Addr {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    socket.connect("1.1.1.1:53").unwrap();
+    match socket.local_addr().unwrap().ip() {
+        std::net::IpAddr::V4(ip) => ip,
+        std::net::IpAddr::V6(_) => panic!("expected IPv4 primary address"),
+    }
 }
 
 fn dns_a_response(query: &[u8], ip: [u8; 4]) -> Vec<u8> {
