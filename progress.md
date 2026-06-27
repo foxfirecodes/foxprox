@@ -2165,5 +2165,5 @@
   - `cargo tree -p foxprox-runtime` — runtime still depends on normalized net/inspect contracts, not smoltcp.
   - `cargo tree -p foxprox-net` — adapter contract remains stack-neutral.
   - `cargo tree -p foxprox-smoltcp` — smoltcp remains isolated behind `foxprox-net`.
-- Commit hash after commit: pending.
+- Commit hash after commit: b3d97e4.
 - Remaining boundary risks: none for the observed `bad record mac`; future policy/config work should expose user-selectable deny rules so denied HTTPS can be exercised from the CLI without editing code.
