@@ -2050,8 +2050,17 @@ fn run_bwrap_alpha_args(args: &[String]) -> CliOutput {
     );
     let mut audit_output = Vec::new();
     let cancellation = foxprox_egress::AsyncRuntimeCancellationToken::uncancelled();
+    let mut observed_process_exit = None;
     let runtime = {
         let mut sink = JsonLineAuditSink::new(&mut audit_output);
+        let mut should_stop = || match runner.poll_setup_process() {
+            Ok(Some(exit)) => {
+                observed_process_exit = Some(exit);
+                true
+            }
+            Ok(None) => false,
+            Err(_) => true,
+        };
         foxprox_egress::run_received_tun_fd_alpha_runtime_and_drain(
             foxprox_egress::ReceivedTunAlphaRuntimeSession {
                 setup_source: "host_setup_session".to_string(),
@@ -2063,9 +2072,10 @@ fn run_bwrap_alpha_args(args: &[String]) -> CliOutput {
                 tcp_egress,
                 udp_egress,
                 now_ms: 40_000,
-                max_steps: 500,
+                max_steps: 100_000,
                 max_from_sandbox_bytes: 64 * 1024,
                 idle_sleep: Duration::from_millis(10),
+                should_stop: Some(&mut should_stop),
             },
             &mut fan_in,
             &mut sink,
@@ -2093,7 +2103,10 @@ fn run_bwrap_alpha_args(args: &[String]) -> CliOutput {
             };
         }
     };
-    let process_exit = runner.wait_setup_process_with_timeout(Duration::from_secs(5));
+    let process_exit = observed_process_exit
+        .map(Some)
+        .map(Ok)
+        .unwrap_or_else(|| runner.wait_setup_process_with_timeout(Duration::from_secs(5)));
     let saw_fail_closed = runtime_report
         .transport_events
         .iter()

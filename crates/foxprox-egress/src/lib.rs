@@ -3238,6 +3238,7 @@ pub struct ReceivedTunAlphaRuntimeSession<'a, T, U> {
     pub max_steps: usize,
     pub max_from_sandbox_bytes: usize,
     pub idle_sleep: Duration,
+    pub should_stop: Option<&'a mut dyn FnMut() -> bool>,
 }
 
 #[cfg(unix)]
@@ -3694,6 +3695,7 @@ where
         max_steps,
         max_from_sandbox_bytes,
         idle_sleep,
+        mut should_stop,
     } = session;
     let setup_ingest = match ingest_resequenced_records(setup_source, setup_records, fan_in) {
         Ok(report) => report,
@@ -3716,6 +3718,9 @@ where
     let mut transport_events = Vec::new();
     for step in 0..max_steps.max(1) {
         if cancellation.is_cancelled() {
+            break;
+        }
+        if should_stop.as_mut().is_some_and(|stop| stop()) {
             break;
         }
         match bridge.bridge_next_transport_to_egress(
