@@ -60,7 +60,13 @@ pub fn route_transparent_ipv4_packet(
     packet: &[u8],
     broker_dns: SocketAddr,
 ) -> Result<TransparentPacketRoute, String> {
-    let parsed = parse_ipv4(packet).map_err(|err| format!("malformed IPv4 packet: {err}"))?;
+    let parsed = parse_ipv4(packet).map_err(|err| {
+        if err == "not an IPv4 packet" {
+            "non-IPv4 packet denied in alpha TUN path".to_string()
+        } else {
+            format!("malformed IPv4 packet: {err}")
+        }
+    })?;
     match parsed.protocol_number {
         17 => {
             let udp =

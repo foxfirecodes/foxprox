@@ -1277,3 +1277,25 @@
 - Changed files: `crates/foxprox-setup/src/main.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
 - Interpretation: the usable prototype now behaves like a normal launcher: target stdout is not polluted by setup helper exports; audit remains on stderr unless `--audit-stdout` is requested.
 - Commit hash after commit: pending.
+
+## 2026-06-22T17:10:00Z — HTTPS curl CA bundle fix
+
+- User feedback: `target/debug/foxprox-lab sandbox --allow-all --proxy-env --timeout-secs 300 -- curl 'https://github.com'` reached the HTTP proxy and allowed CONNECT, but curl failed inside the sandbox with `curl: (77) error adding trust anchors from file: /etc/ssl/certs/ca-certificates.crt`.
+- Root cause: networking and CONNECT worked; the bwrap filesystem view created a minimal `/etc` with hosts/resolv but did not expose host CA trust stores, so curl could not validate GitHub's certificate.
+- Implementation: the sandbox launcher now read-only binds common host trust-store directories when present: `/etc/ssl`, `/etc/pki`, and `/etc/ca-certificates`. Also suppressed usage text on target-command exit errors and clarified the noisy non-IPv4/IPv6-ish TUN packet audit reason from `not an IPv4 packet` to `non-IPv4 packet denied in alpha TUN path`.
+- Command executed: `cargo fmt --all && cargo test -p foxprox-core -p foxprox-cli -p foxprox-setup && cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab sandbox --allow-all --proxy-env --timeout-secs 60 -- curl -I --max-time 20 https://github.com > /tmp/foxprox-curl-https2.out 2> /tmp/foxprox-curl-https2.err`
+- Observed result: pass, exit code 0. `/tmp/foxprox-curl-https2.out` begins with `HTTP/1.1 200 Connection Established` followed by `HTTP/2 200` from GitHub. Audit shows `https_connect` allowed for `github.com:443` and `sandbox_exited` allow.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `crates/foxprox-core/src/runtime.rs`, `progress.md`.
+- Interpretation: HTTPS via curl works in the usable alpha sandbox when host CA bundles are available. The remaining non-IPv4 audit line is expected IPv6/noise denial in the IPv4-only alpha TUN path, now with clearer wording.
+- Commit hash after commit: pending.
+
+## 2026-06-22T17:10:00Z — HTTPS curl CA bundle fix
+
+- User feedback: `target/debug/foxprox-lab sandbox --allow-all --proxy-env --timeout-secs 300 -- curl 'https://github.com'` reached the HTTP proxy and allowed CONNECT, but curl failed inside the sandbox with `curl: (77) error adding trust anchors from file: /etc/ssl/certs/ca-certificates.crt`.
+- Root cause: networking and CONNECT worked; the bwrap filesystem view created a minimal `/etc` with hosts/resolv but did not expose host CA trust stores, so curl could not validate GitHub's certificate.
+- Implementation: the sandbox launcher now read-only binds common host trust-store directories when present: `/etc/ssl`, `/etc/pki`, and `/etc/ca-certificates`. Also suppressed usage text on target-command exit errors and clarified the noisy non-IPv4/IPv6-ish TUN packet audit reason from `not an IPv4 packet` to `non-IPv4 packet denied in alpha TUN path`.
+- Command executed: `cargo fmt --all && cargo test -p foxprox-core -p foxprox-cli -p foxprox-setup && cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab sandbox --allow-all --proxy-env --timeout-secs 60 -- curl -I --max-time 20 https://github.com > /tmp/foxprox-curl-https2.out 2> /tmp/foxprox-curl-https2.err`
+- Observed result: pass, exit code 0. `/tmp/foxprox-curl-https2.out` begins with `HTTP/1.1 200 Connection Established` followed by `HTTP/2 200` from GitHub. Audit shows `https_connect` allowed for `github.com:443` and `sandbox_exited` allow.
+- Changed files: `crates/foxprox-cli/src/main.rs`, `crates/foxprox-core/src/runtime.rs`, `progress.md`.
+- Interpretation: HTTPS via curl works in the usable alpha sandbox when host CA bundles are available. The remaining non-IPv4 audit line is expected IPv6/noise denial in the IPv4-only alpha TUN path, now with clearer wording.
+- Commit hash after commit: pending.

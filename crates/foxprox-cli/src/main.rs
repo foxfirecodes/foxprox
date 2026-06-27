@@ -36,7 +36,9 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("foxprox-lab: {err}");
-            usage();
+            if !err.starts_with("sandbox target exited") {
+                usage();
+            }
             ExitCode::from(2)
         }
     }
@@ -537,6 +539,15 @@ fn spawn_sandbox_bwrap(
             "--ro-bind-try",
             "/etc/hosts",
             "/etc/hosts",
+            "--ro-bind-try",
+            "/etc/ssl",
+            "/etc/ssl",
+            "--ro-bind-try",
+            "/etc/pki",
+            "/etc/pki",
+            "--ro-bind-try",
+            "/etc/ca-certificates",
+            "/etc/ca-certificates",
             "--ro-bind",
         ])
         .arg(resolv_path)
