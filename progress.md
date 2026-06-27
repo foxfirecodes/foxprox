@@ -2027,5 +2027,5 @@
   - `cargo tree -p foxprox-runtime` — runtime owns orchestration and depends only on boundary crates.
   - `cargo tree -p foxprox-integrations` — bwrap/Linux/caps/fd handoff details remain isolated to integrations.
   - `cargo tree --manifest-path fuzz/Cargo.toml -p foxprox-fuzz` — fuzz-only dependencies remain outside production workspace crates.
-- Commit hash after commit: pending.
+- Commit hash after commit: 1de31a9.
 - Remaining boundary risks: none for documented alpha scope; future/non-alpha work includes TAP, SOCKS UDP ASSOCIATE, proxy authentication, TLS MITM/custom CA, full HTTP/3 semantic inspection, rootful backend, and broader production hardening.
