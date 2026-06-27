@@ -1905,5 +1905,5 @@
   - `cargo tree -p foxprox-egress` — concrete socket ownership remains egress-private.
   - `cargo tree -p foxprox-frontends` — proxy wire parsing remains frontend/core-only.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 34efb60.
 - Remaining boundary risks: TCP listener accept loop remains.
