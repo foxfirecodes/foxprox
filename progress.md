@@ -2136,10 +2136,14 @@
 - Allowed dependency direction: CLI owns bwrap filesystem exposure; runtime owns first-payload inspection decisions; TLS parser remains in `foxprox-inspect`; policy/audit still consume normalized events only.
 - Dependency-risk assessment: `curl https://example.com/` failed with CA error because the sandbox `/etc` tmpfs exposed `/etc/ssl` but not the symlink target under `/etc/ca-certificates`. After fixing trust, HTTPS still timed out because the first TLS payload can be a partial record and fail-closed malformed TLS inspection removed the bridge. Transparent forwarding should not fail closed on an incomplete first record; it should inspect once a complete record is available or forward under the already-allowed TCP decision.
 - Verification commands planned: focused runtime test, real wrapper CA-path check, real wrapper HTTPS curl, full workspace check/test/clippy, fuzz target check, and dependency trees for CLI/runtime/inspect.
-- Observed results: pending.
-- Changed files: pending.
-- Commit hash after commit: 9d73d0e.
-- Remaining boundary risks: none for reported HTTPS trust/curl issue.
+- Observed results: fixed HTTPS under the alpha launcher. The bwrap wrapper read-only binds `/etc/ca-certificates` and `/etc/pki` alongside `/etc/ssl` so `/etc/ssl/certs/ca-certificates.crt` symlink targets resolve inside the `/etc` tmpfs. Runtime TLS first-payload handling no longer converts partial ClientHello bytes into a fail-closed unsupported event. Real `target/debug/foxprox -- curl --max-time 15 -fsS https://example.com/` succeeded.
+- Changed files:
+  - `crates/foxprox-cli/src/lib.rs`
+  - `crates/foxprox-runtime/src/lib.rs`
+  - `progress.md`
+  - `learnings.md`
+- Commit hash after commit: b7c2aa5.
+- Remaining boundary risks: superseded by the 2026-06-27 bridge-ordering fix for larger HTTPS responses.
 
 ## 2026-06-27 — Boundary objective: make HTTPS bridge failures deterministic/closed instead of TLS corruption
 
