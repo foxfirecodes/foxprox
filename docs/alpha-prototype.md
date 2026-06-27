@@ -43,6 +43,12 @@ broker_resolvers = ["10.150.0.1:53"]
 deny_direct_external_dns = true
 
 [[rules]]
+id = "allow-github-dns"
+action = "allow"
+protocol = "dns"
+hostnames = ["github.com"]
+
+[[rules]]
 id = "allow-github-http"
 action = "allow"
 protocol = "http"

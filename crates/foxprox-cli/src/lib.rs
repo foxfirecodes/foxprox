@@ -1380,7 +1380,7 @@ where
     ]);
     bwrap_args.extend(extra_bwrap_args);
 
-    let policy = if let Some(config_path) = config_path {
+    let mut policy = if let Some(config_path) = config_path {
         let config_toml = fs::read_to_string(&config_path).map_err(|error| CliError::Io {
             context: format!("read-config {}", config_path.display()),
             error,
@@ -1396,6 +1396,7 @@ where
             ..PolicyConfig::default()
         }
     };
+    ensure_broker_dns_resolver(&mut policy, broker_dns);
 
     Ok(BwrapTcpOnceConfig {
         bwrap_program,
@@ -1430,6 +1431,14 @@ where
         host_buffer_len,
         target_stdout: TargetStdoutMode::Inherit,
     })
+}
+
+#[cfg(unix)]
+fn ensure_broker_dns_resolver(policy: &mut PolicyConfig, broker_dns: IpAddr) {
+    let resolver = Endpoint::udp(broker_dns, 53);
+    if !policy.dns.broker_resolvers.contains(&resolver) {
+        policy.dns.broker_resolvers.push(resolver);
+    }
 }
 
 #[cfg(unix)]
@@ -1583,7 +1592,7 @@ where
         return Err(bwrap_tcp_once_usage());
     }
 
-    let policy = if let Some(config_path) = config_path {
+    let mut policy = if let Some(config_path) = config_path {
         let config_toml = fs::read_to_string(&config_path).map_err(|error| CliError::Io {
             context: format!("read-config {}", config_path.display()),
             error,
@@ -1595,6 +1604,7 @@ where
             ..PolicyConfig::default()
         }
     };
+    ensure_broker_dns_resolver(&mut policy, broker_dns.ok_or_else(bwrap_tcp_once_usage)?);
 
     Ok(BwrapTcpOnceConfig {
         bwrap_program: bwrap_program.ok_or_else(bwrap_tcp_once_usage)?,
@@ -2326,6 +2336,47 @@ mod tests {
             config.policy.dns.broker_resolvers,
             vec![Endpoint::udp(config.broker_dns, 53)]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bwrap_run_arg_parser_adds_broker_resolver_to_user_policy() {
+        let dir = unique_test_dir("bwrap-run-policy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let policy_path = dir.join("policy.toml");
+        std::fs::write(
+            &policy_path,
+            r#"
+default_policy = "deny"
+
+[dns]
+broker_resolvers = ["1.1.1.1:53"]
+deny_direct_external_dns = true
+"#,
+        )
+        .unwrap();
+
+        let config = parse_bwrap_run_args(
+            [
+                "--dns-upstream",
+                "1.1.1.1:53",
+                "--config",
+                policy_path.to_str().unwrap(),
+                "--",
+                "curl",
+                "https://github.com/",
+            ]
+            .into_iter()
+            .map(PathBuf::from),
+        )
+        .unwrap();
+
+        assert!(config
+            .policy
+            .dns
+            .broker_resolvers
+            .contains(&Endpoint::udp("10.150.0.1".parse().unwrap(), 53)));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

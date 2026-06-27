@@ -1997,3 +1997,31 @@
   - `cargo fmt --check` passed.
 - Current alpha boundary: sequential redirects and large single-command HTTPS bodies now work; this is still not a concurrent multi-flow daemon.
 - Commit: this commit.
+
+## 2026-06-27 Slice Evidence — default-deny GitHub policy usability
+
+- Slice attempted: make user-supplied default-deny policy behavior understandable and less footgun-prone for `bwrap-run`.
+- Why next: user ran `bwrap-run --config policy.toml` for GitHub and it failed before connection because the policy listed the upstream resolver (`1.1.1.1:53`) as a broker resolver and did not allow DNS queries under default deny.
+- What changed: `bwrap-run`/`bwrap-tcp-once` now ensure the actual in-sandbox broker DNS endpoint (`--broker-dns`:53) is present in policy broker resolvers even when a user config is supplied. Added parser coverage for this normalization. Updated docs to include an explicit `protocol = "dns"` allow rule in the default-deny GitHub example.
+- Verification:
+  - User-shaped corrected policy passed: `target/debug/foxprox-cli bwrap-run --dns-upstream 1.1.1.1:53 --sandbox alpha-demo --config /tmp/github-policy.toml -- /usr/bin/curl --ipv4 --max-time 8 -L -I https://github.com/`, exit 0.
+  - Full live bwrap suite passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, 13/13.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- Note: with `default_policy = "deny"`, hostname resolution itself must be allowed with a DNS rule; allowing DNS does not allow the later TCP/TLS flow unless those rules also match.
+- Commit: this commit.
+
+## 2026-06-27 Slice Evidence — default-deny GitHub policy usability
+
+- Slice attempted: make user-supplied default-deny policy behavior understandable and less footgun-prone for `bwrap-run`.
+- Why next: user ran `bwrap-run --config policy.toml` for GitHub and it failed before connection because the policy listed the upstream resolver (`1.1.1.1:53`) as a broker resolver and did not allow DNS queries under default deny.
+- What changed: `bwrap-run`/`bwrap-tcp-once` now ensure the actual in-sandbox broker DNS endpoint (`--broker-dns`:53) is present in policy broker resolvers even when a user config is supplied. Added parser coverage for this normalization. Updated docs to include an explicit `protocol = "dns"` allow rule in the default-deny GitHub example.
+- Verification:
+  - User-shaped corrected policy passed: `target/debug/foxprox-cli bwrap-run --dns-upstream 1.1.1.1:53 --sandbox alpha-demo --config /tmp/github-policy.toml -- /usr/bin/curl --ipv4 --max-time 8 -L -I https://github.com/`, exit 0.
+  - Full live bwrap suite passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, 13/13.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- Note: with `default_policy = "deny"`, hostname resolution itself must be allowed with a DNS rule; allowing DNS does not allow the later TCP/TLS flow unless those rules also match.
+- Commit: this commit.
