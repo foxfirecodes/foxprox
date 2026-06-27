@@ -1929,3 +1929,25 @@
   - `cargo tree -p foxprox-audit` — audit remains core-only.
 - Commit hash after commit: bfec2a6.
 - Remaining boundary risks: OS-specific privilege drop and privileged namespace smoke coverage remain.
+
+## 2026-06-22 — Boundary objective: Linux setup-helper privilege drop implementation
+
+- Boundary under work: concrete Linux setup-helper capability drop and target exec implementation.
+- Allowed dependency direction: `foxprox-integrations` owns Linux capability APIs and Unix exec; runtime/device/net/policy/audit never import capability, bwrap, or target process details.
+- Dependency-risk assessment: lifecycle ordering existed only as a hook. Alpha bwrap-compatible setup requires the standard helper path to actually drop setup-only `CAP_NET_ADMIN`-style privileges before target exec, while keeping the operation testable without mutating test-process privileges.
+- Verification commands planned: `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency tree for integrations/runtime.
+- Observed results: added `LinuxCapability`, `LinuxCapabilitySet`, mockable `LinuxPrivilegeDropExecutor`, `drop_linux_setup_privileges_with_executor`, and a Linux std implementation using `caps` plus `nix::sys::prctl`. `StdTunSetupExecutor` now implements the setup-helper lifecycle on Linux by dropping `CAP_NET_ADMIN` from ambient/effective/inheritable/permitted/bounding sets, clearing keepcaps, setting no-new-privs, and `exec`ing the target. Added tests for privilege-drop ordering and error mapping without mutating process privileges. All verification passed.
+- Changed files:
+  - `crates/foxprox-integrations/Cargo.toml`
+  - `crates/foxprox-integrations/src/lib.rs`
+  - `Cargo.lock`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 165 tests.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree -p foxprox-integrations` — Linux capability dependencies are isolated to integrations.
+  - `cargo tree -p foxprox-runtime` — runtime remains independent of setup-helper/capability dependencies.
+- Commit hash after commit: pending.
+- Remaining boundary risks: privileged namespace smoke coverage remains.

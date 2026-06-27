@@ -448,3 +448,8 @@
 
 - Listener readiness belongs in runtime as a narrow `ProxyListener` accept contract; accepted client streams can be fed into existing HTTP/SOCKS session steps without changing frontend, policy, audit, or egress contracts.
 - Standard `TcpListener` can be adapted at the boundary by mapping `WouldBlock` to `None` and setting accepted streams nonblocking before session processing.
+
+## 2026-06-22 — setup helper capability drop
+
+- Linux capability manipulation stays isolated in `foxprox-integrations`; expose foxprox-owned capability/set enums and a mockable executor rather than leaking `caps` crate types into runtime or policy contracts.
+- The standard setup-helper lifecycle can now drop `CAP_NET_ADMIN` from ambient/effective/inheritable/permitted/bounding sets, clear keepcaps, set no-new-privs, and then `exec` the target.

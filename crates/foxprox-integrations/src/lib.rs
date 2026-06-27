@@ -17,6 +17,8 @@ use std::io::{IoSlice, IoSliceMut};
 use std::os::fd::{AsRawFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::net::UnixDatagram;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 #[cfg(unix)]
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
@@ -368,6 +370,123 @@ where
     executor.exec_target(target)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum LinuxCapability {
+    NetAdmin,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum LinuxCapabilitySet {
+    Ambient,
+    Bounding,
+    Effective,
+    Inheritable,
+    Permitted,
+}
+
+/// Safe testable boundary for Linux setup-helper privilege dropping. Production
+/// code maps this to Linux capabilities APIs; tests can prove ordering and error
+/// handling without mutating the current process privileges.
+pub trait LinuxPrivilegeDropExecutor {
+    fn set_keepcaps(&mut self, enabled: bool) -> Result<(), IntegrationError>;
+    fn set_no_new_privs(&mut self) -> Result<(), IntegrationError>;
+    fn has_capability(
+        &mut self,
+        set: LinuxCapabilitySet,
+        capability: LinuxCapability,
+    ) -> Result<bool, IntegrationError>;
+    fn drop_capability(
+        &mut self,
+        set: LinuxCapabilitySet,
+        capability: LinuxCapability,
+    ) -> Result<(), IntegrationError>;
+}
+
+pub fn drop_linux_setup_privileges_with_executor<E>(
+    executor: &mut E,
+    capabilities: &[LinuxCapability],
+) -> Result<(), IntegrationError>
+where
+    E: LinuxPrivilegeDropExecutor,
+{
+    executor.set_keepcaps(false)?;
+    for capability in capabilities {
+        for set in [
+            LinuxCapabilitySet::Ambient,
+            LinuxCapabilitySet::Effective,
+            LinuxCapabilitySet::Inheritable,
+            LinuxCapabilitySet::Permitted,
+            LinuxCapabilitySet::Bounding,
+        ] {
+            if executor.has_capability(set, *capability)? {
+                executor.drop_capability(set, *capability)?;
+            }
+        }
+    }
+    executor.set_no_new_privs()
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Default)]
+pub struct StdLinuxPrivilegeDropExecutor;
+
+#[cfg(target_os = "linux")]
+impl LinuxPrivilegeDropExecutor for StdLinuxPrivilegeDropExecutor {
+    fn set_keepcaps(&mut self, enabled: bool) -> Result<(), IntegrationError> {
+        nix::sys::prctl::set_keepcaps(enabled)
+            .map_err(|error| IntegrationError::PrivilegeDropFailed(error.to_string()))
+    }
+
+    fn set_no_new_privs(&mut self) -> Result<(), IntegrationError> {
+        nix::sys::prctl::set_no_new_privs()
+            .map_err(|error| IntegrationError::PrivilegeDropFailed(error.to_string()))
+    }
+
+    fn has_capability(
+        &mut self,
+        set: LinuxCapabilitySet,
+        capability: LinuxCapability,
+    ) -> Result<bool, IntegrationError> {
+        caps::has_cap(None, to_caps_set(set), to_caps_capability(capability))
+            .map_err(|error| IntegrationError::PrivilegeDropFailed(error.to_string()))
+    }
+
+    fn drop_capability(
+        &mut self,
+        set: LinuxCapabilitySet,
+        capability: LinuxCapability,
+    ) -> Result<(), IntegrationError> {
+        caps::drop(None, to_caps_set(set), to_caps_capability(capability))
+            .map_err(|error| IntegrationError::PrivilegeDropFailed(error.to_string()))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn to_caps_set(set: LinuxCapabilitySet) -> caps::CapSet {
+    match set {
+        LinuxCapabilitySet::Ambient => caps::CapSet::Ambient,
+        LinuxCapabilitySet::Bounding => caps::CapSet::Bounding,
+        LinuxCapabilitySet::Effective => caps::CapSet::Effective,
+        LinuxCapabilitySet::Inheritable => caps::CapSet::Inheritable,
+        LinuxCapabilitySet::Permitted => caps::CapSet::Permitted,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn to_caps_capability(capability: LinuxCapability) -> caps::Capability {
+    match capability {
+        LinuxCapability::NetAdmin => caps::Capability::CAP_NET_ADMIN,
+    }
+}
+
+#[cfg(target_os = "linux")]
+pub fn drop_linux_setup_privileges(
+    capabilities: &[LinuxCapability],
+) -> Result<(), IntegrationError> {
+    let mut executor = StdLinuxPrivilegeDropExecutor;
+    drop_linux_setup_privileges_with_executor(&mut executor, capabilities)
+}
+
 /// Standard setup-helper executor. It is intentionally in integrations, not in
 /// runtime or broker core.
 #[derive(Clone, Debug, Default)]
@@ -398,6 +517,21 @@ impl TunSetupExecutor for StdTunSetupExecutor {
                 path: file.path.clone(),
                 reason: error.to_string(),
             }
+        })
+    }
+}
+
+#[cfg(all(unix, target_os = "linux"))]
+impl SetupHelperLifecycleExecutor for StdTunSetupExecutor {
+    fn drop_setup_privileges(&mut self) -> Result<(), IntegrationError> {
+        drop_linux_setup_privileges(&[LinuxCapability::NetAdmin])
+    }
+
+    fn exec_target(&mut self, target: &TargetCommand) -> Result<(), IntegrationError> {
+        let error = Command::new(&target.program).args(&target.args).exec();
+        Err(IntegrationError::ExecFailed {
+            program: target.program.clone(),
+            reason: error.to_string(),
         })
     }
 }
@@ -496,6 +630,47 @@ mod tests {
             self.operations
                 .push(format!("exec:{} {}", target.program, target.args.join(" ")));
             Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingPrivilegeDropper {
+        operations: Vec<String>,
+        present: bool,
+        fail_drop: bool,
+    }
+
+    impl LinuxPrivilegeDropExecutor for RecordingPrivilegeDropper {
+        fn set_keepcaps(&mut self, enabled: bool) -> Result<(), IntegrationError> {
+            self.operations.push(format!("keepcaps:{enabled}"));
+            Ok(())
+        }
+
+        fn set_no_new_privs(&mut self) -> Result<(), IntegrationError> {
+            self.operations.push("no-new-privs".to_string());
+            Ok(())
+        }
+
+        fn has_capability(
+            &mut self,
+            set: LinuxCapabilitySet,
+            capability: LinuxCapability,
+        ) -> Result<bool, IntegrationError> {
+            self.operations.push(format!("has:{set:?}:{capability:?}"));
+            Ok(self.present)
+        }
+
+        fn drop_capability(
+            &mut self,
+            set: LinuxCapabilitySet,
+            capability: LinuxCapability,
+        ) -> Result<(), IntegrationError> {
+            self.operations.push(format!("drop:{set:?}:{capability:?}"));
+            if self.fail_drop {
+                Err(IntegrationError::PrivilegeDropFailed("mock drop".into()))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -609,6 +784,43 @@ mod tests {
             .iter()
             .any(|operation| operation.starts_with("cmd:ip link set")));
         assert!(drop_index < exec_index);
+    }
+
+    #[test]
+    fn linux_privilege_drop_clears_setup_capabilities_before_no_new_privs() {
+        let mut dropper = RecordingPrivilegeDropper {
+            present: true,
+            ..RecordingPrivilegeDropper::default()
+        };
+
+        drop_linux_setup_privileges_with_executor(&mut dropper, &[LinuxCapability::NetAdmin])
+            .unwrap();
+
+        assert_eq!(dropper.operations.first().unwrap(), "keepcaps:false");
+        assert!(dropper
+            .operations
+            .iter()
+            .any(|operation| operation == "drop:Effective:NetAdmin"));
+        assert!(dropper
+            .operations
+            .iter()
+            .any(|operation| operation == "drop:Bounding:NetAdmin"));
+        assert_eq!(dropper.operations.last().unwrap(), "no-new-privs");
+    }
+
+    #[test]
+    fn linux_privilege_drop_maps_capability_errors() {
+        let mut dropper = RecordingPrivilegeDropper {
+            present: true,
+            fail_drop: true,
+            ..RecordingPrivilegeDropper::default()
+        };
+
+        let error =
+            drop_linux_setup_privileges_with_executor(&mut dropper, &[LinuxCapability::NetAdmin])
+                .unwrap_err();
+
+        assert!(matches!(error, IntegrationError::PrivilegeDropFailed(_)));
     }
 
     #[cfg(unix)]
