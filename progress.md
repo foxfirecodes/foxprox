@@ -1972,3 +1972,42 @@
   - `cargo tree -p foxprox-runtime` — runtime remains independent of bwrap/smoke details.
 - Commit hash after commit: 0cfebe7.
 - Remaining boundary risks: final initial implementation gap audit remains.
+
+## 2026-06-22 — Boundary objective: coverage-guided fuzz harnesses
+
+- Boundary under work: fuzz entrypoints for packet/proxy/TLS parser boundaries.
+- Allowed dependency direction: fuzz harnesses depend on public boundary APIs in packet/frontends/inspect/core; production crates do not depend on fuzz-only `libfuzzer-sys` or fuzz target code.
+- Dependency-risk assessment: malformed corpus tests exist, but Milestone 7 explicitly calls for fuzzing. Coverage-guided harnesses should exercise the same fail-closed parser boundaries without widening production dependencies.
+- Verification commands planned: `cargo check --manifest-path fuzz/Cargo.toml --bins`, `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for fuzz/frontends/packet/inspect.
+- Observed results: added an excluded cargo-fuzz package with `packet_ipv4`, `proxy_parsers`, and `tls_client_hello` fuzz targets. The targets exercise public fail-closed packet, HTTP/SOCKS proxy, and TLS ClientHello parser boundaries without adding fuzz dependencies to production crates. Fuzz targets compile successfully and all standard workspace verification passed.
+- Changed files:
+  - `Cargo.toml`
+  - `fuzz/Cargo.toml`
+  - `fuzz/Cargo.lock`
+  - `fuzz/fuzz_targets/packet_ipv4.rs`
+  - `fuzz/fuzz_targets/proxy_parsers.rs`
+  - `fuzz/fuzz_targets/tls_client_hello.rs`
+  - `progress.md`
+  - `learnings.md`
+- Verification commands run:
+  - `cargo check --manifest-path fuzz/Cargo.toml --bins` — passed.
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 165 tests plus 1 ignored privileged smoke.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo tree --manifest-path fuzz/Cargo.toml -p foxprox-fuzz` — fuzz-only `libfuzzer-sys` remains outside production crates.
+  - `cargo tree -p foxprox-frontends` — frontend parser boundary remains core-only.
+  - `cargo tree -p foxprox-packet` — packet parser boundary remains core-only.
+  - `cargo tree -p foxprox-inspect` — TLS/HTTP inspection remains core-only.
+- Commit hash after commit: pending.
+- Remaining boundary risks: final initial implementation gap audit remains.
+
+## 2026-06-22 — Boundary objective: coverage-guided fuzz harnesses
+
+- Boundary under work: fuzz entrypoints for packet/proxy/TLS parser boundaries.
+- Allowed dependency direction: fuzz harnesses depend on public boundary APIs in packet/frontends/inspect/core; production crates do not depend on fuzz-only `libfuzzer-sys` or fuzz target code.
+- Dependency-risk assessment: malformed corpus tests exist, but Milestone 7 explicitly calls for fuzzing. Coverage-guided harnesses should exercise the same fail-closed parser boundaries without widening production dependencies.
+- Verification commands planned: `cargo check --manifest-path fuzz/Cargo.toml --bins`, `cargo check --workspace`, `cargo test --workspace`, `cargo clippy --all-targets --all-features -- -D warnings`, and dependency trees for fuzz/frontends/packet/inspect.
+- Observed results: pending.
+- Changed files: pending.
+- Commit hash after commit: pending.
+- Remaining boundary risks: final initial implementation gap audit remains.

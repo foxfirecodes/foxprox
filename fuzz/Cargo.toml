@@ -1,0 +1,38 @@
+[package]
+name = "foxprox-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+foxprox-core = { path = "../crates/foxprox-core" }
+foxprox-frontends = { path = "../crates/foxprox-frontends" }
+foxprox-inspect = { path = "../crates/foxprox-inspect" }
+foxprox-packet = { path = "../crates/foxprox-packet" }
+libfuzzer-sys = "0.4"
+
+[[bin]]
+name = "packet_ipv4"
+path = "fuzz_targets/packet_ipv4.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proxy_parsers"
+path = "fuzz_targets/proxy_parsers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tls_client_hello"
+path = "fuzz_targets/tls_client_hello.rs"
+test = false
+doc = false
+bench = false

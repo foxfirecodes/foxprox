@@ -458,3 +458,8 @@
 
 - Keep privileged namespace smoke tests opt-in and ignored by default; they can validate the real bwrap user/network namespace plus `/dev/net/tun` premise without making normal workspace tests require host privileges.
 - In this environment, `FOXPROX_RUN_PRIVILEGED_SMOKE=1 cargo test -p foxprox-integrations privileged_bwrap_tun_setup_smoke -- --ignored --nocapture` passed.
+
+## 2026-06-22 — parser fuzz harnesses
+
+- Keep coverage-guided fuzzing in an excluded `fuzz/` cargo-fuzz package so production workspace crates do not gain fuzz-only dependencies.
+- Fuzz targets should call only public boundary APIs (`foxprox-packet`, `foxprox-frontends`, `foxprox-inspect`) and assert no panics by relying on fail-closed normalized outputs.
