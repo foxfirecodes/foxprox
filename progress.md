@@ -1257,3 +1257,23 @@
 - Interpretation: The stop criterion is now met: there is a usable alpha sandboxing prototype for real bwrap environments, with arbitrary target launch, TUN fd handoff, long-lived broker lifecycle, transparent networking, broker DNS, host egress, proxy env/listeners, shared policy/audit, fail-closed smokes, and local deterministic verification.
 - Remaining non-alpha/productization work: rename/split the user CLI out of `foxprox-lab`, richer policy/config files, fuller async performance/runtime hardening, broader fuzz/property coverage, and full non-network sandbox profile management in the caller/runtime.
 - Commit hash after commit: pending.
+
+## 2026-06-22T16:55:00Z — Silence setup env export in sandbox launcher
+
+- User feedback: running `target/debug/foxprox-lab sandbox --allow-all --proxy-env --timeout-secs 300 -- /usr/bin/python3 -c 'import socket; print(socket.gethostbyname("example.com"))'` resolved DNS but printed setup `export ...` lines on target stdout, making the prototype look broken/noisy for normal command use.
+- Implementation: added `foxproxsetup --quiet-env` / `--no-env-output` to suppress setup-helper environment export printing when the host launcher owns proxy env injection. `foxprox-lab sandbox` now passes `--quiet-env` while still supporting `foxproxsetup --print-plan` and direct setup usage.
+- Command executed: `cargo fmt --all && cargo test -p foxprox-setup -p foxprox-cli && cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab sandbox --allow-all --proxy-env --timeout-secs 30 -- /usr/bin/python3 -c 'import socket; print(socket.gethostbyname("example.com"))' > /tmp/foxprox-user-repro.out 2> /tmp/foxprox-user-repro.err`
+- Observed result: pass, exit code 0. `/tmp/foxprox-user-repro.out` contained only the target output IP (`172.66.147.243` in this run). `/tmp/foxprox-user-repro.err` contained broker audit JSON including upstream DNS allow and sandbox exit allow.
+- Changed files: `crates/foxprox-setup/src/main.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: the usable prototype now behaves like a normal launcher: target stdout is not polluted by setup helper exports; audit remains on stderr unless `--audit-stdout` is requested.
+- Commit hash after commit: pending.
+
+## 2026-06-22T16:55:00Z — Silence setup env export in sandbox launcher
+
+- User feedback: running `target/debug/foxprox-lab sandbox --allow-all --proxy-env --timeout-secs 300 -- /usr/bin/python3 -c 'import socket; print(socket.gethostbyname("example.com"))'` resolved DNS but printed setup `export ...` lines on target stdout, making the prototype look broken/noisy for normal command use.
+- Implementation: added `foxproxsetup --quiet-env` / `--no-env-output` to suppress setup-helper environment export printing when the host launcher owns proxy env injection. `foxprox-lab sandbox` now passes `--quiet-env` while still supporting `foxproxsetup --print-plan` and direct setup usage.
+- Command executed: `cargo fmt --all && cargo test -p foxprox-setup -p foxprox-cli && cargo build -p foxprox-setup --bin foxproxsetup -p foxprox-cli --bin foxprox-lab && target/debug/foxprox-lab sandbox --allow-all --proxy-env --timeout-secs 30 -- /usr/bin/python3 -c 'import socket; print(socket.gethostbyname("example.com"))' > /tmp/foxprox-user-repro.out 2> /tmp/foxprox-user-repro.err`
+- Observed result: pass, exit code 0. `/tmp/foxprox-user-repro.out` contained only the target output IP (`172.66.147.243` in this run). `/tmp/foxprox-user-repro.err` contained broker audit JSON including upstream DNS allow and sandbox exit allow.
+- Changed files: `crates/foxprox-setup/src/main.rs`, `crates/foxprox-cli/src/main.rs`, `progress.md`.
+- Interpretation: the usable prototype now behaves like a normal launcher: target stdout is not polluted by setup helper exports; audit remains on stderr unless `--audit-stdout` is requested.
+- Commit hash after commit: pending.

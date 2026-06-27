@@ -572,6 +572,7 @@ fn spawn_sandbox_bwrap(
         &setup.socks_proxy_listener.to_string(),
         "--handoff-env",
         "FOXPROX_SETUP_SOCKET",
+        "--quiet-env",
         "--",
     ]);
     command.args(&options.target_argv);

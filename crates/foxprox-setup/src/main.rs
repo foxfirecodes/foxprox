@@ -24,6 +24,7 @@ struct SetupArgs {
     print_plan: bool,
     configure_only: bool,
     no_default_route: bool,
+    emit_environment: bool,
     handoff_env: String,
 }
 
@@ -33,6 +34,7 @@ impl SetupArgs {
         let mut print_plan = false;
         let mut configure_only = false;
         let mut no_default_route = false;
+        let mut emit_environment = true;
         let mut handoff_env = "FOXPROX_SETUP_SOCKET".to_string();
         let mut target_argv = Vec::new();
         let mut iter = args.into_iter().peekable();
@@ -49,6 +51,7 @@ impl SetupArgs {
                 "--print-plan" => print_plan = true,
                 "--configure-only" => configure_only = true,
                 "--no-default-route" => no_default_route = true,
+                "--quiet-env" | "--no-env-output" => emit_environment = false,
                 "--tun-name" => setup.tun_name = next_value(&mut iter, "--tun-name")?,
                 "--sandbox-ip" => {
                     let value = next_value(&mut iter, "--sandbox-ip")?;
@@ -105,6 +108,7 @@ impl SetupArgs {
             print_plan,
             configure_only,
             no_default_route,
+            emit_environment,
             handoff_env,
         })
     }
@@ -118,7 +122,9 @@ fn run(raw_args: Vec<String>) -> Result<(), String> {
     }
 
     let tun = configure_tun(&args)?;
-    emit_setup_environment(&args.setup);
+    if args.emit_environment {
+        emit_setup_environment(&args.setup);
+    }
 
     if args.configure_only {
         return Ok(());
@@ -207,7 +213,7 @@ fn plan_json(args: &SetupArgs) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"tun_name\":\"{}\",\"sandbox_ip\":\"{}/{}\",\"broker_ip\":\"{}\",\"mtu\":{},\"dns_listener\":\"{}\",\"configure_only\":{},\"no_default_route\":{},\"handoff_env\":\"{}\",\"proxy_environment\":{{{}}},\"target_argv\":[{}]}}",
+        "{{\"tun_name\":\"{}\",\"sandbox_ip\":\"{}/{}\",\"broker_ip\":\"{}\",\"mtu\":{},\"dns_listener\":\"{}\",\"configure_only\":{},\"no_default_route\":{},\"emit_environment\":{},\"handoff_env\":\"{}\",\"proxy_environment\":{{{}}},\"target_argv\":[{}]}}",
         json_escape(&args.setup.tun_name),
         args.setup.sandbox_ip,
         args.setup.prefix_len,
@@ -216,6 +222,7 @@ fn plan_json(args: &SetupArgs) -> String {
         args.setup.dns_listener,
         args.configure_only,
         args.no_default_route,
+        args.emit_environment,
         json_escape(&args.handoff_env),
         env,
         args.target_argv.iter().map(|arg| format!("\"{}\"", json_escape(arg))).collect::<Vec<_>>().join(",")
@@ -233,7 +240,7 @@ fn next_value(iter: &mut impl Iterator<Item = String>, flag: &str) -> Result<Str
 
 fn print_usage() {
     eprintln!(
-        "usage: foxproxsetup [setup options] [--configure-only|--print-plan] -- target args..."
+        "usage: foxproxsetup [setup options] [--configure-only|--print-plan] [--quiet-env] -- target args..."
     );
 }
 
