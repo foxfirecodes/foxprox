@@ -1927,5 +1927,5 @@
   - `cargo tree -p foxprox-frontends` — frontend parser boundary remains core-only.
   - `cargo tree -p foxprox-egress` — concrete host sockets remain egress-owned.
   - `cargo tree -p foxprox-audit` — audit remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: bfec2a6.
 - Remaining boundary risks: OS-specific privilege drop and privileged namespace smoke coverage remain.
