@@ -5565,3 +5565,31 @@ Commit: fad08e7
 
 ### Remaining alpha gaps
 - Still outstanding: one combined long-running runtime/launcher, transparent destination mapping/config, multi-flow TCP/UDP/DNS loops, explicit HTTP/SOCKS proxy lifecycle in the same launcher, smoltcp transparent HTTP/TLS attribution, and cleanup/lifecycle audit hardening.
+
+
+## 2026-06-26 — Add combined alpha TUN runtime command
+
+Commit: 22bc850
+
+### Implementation
+- Added `foxprox run-bwrap-alpha <config> -- <target...>` as the first combined bwrap/TUN launcher path.
+- The command now performs one setup-control handoff, owns the received TUN fd, and runs one combined transport loop instead of selecting separate proof-only TCP/UDP/DNS commands.
+- Added `foxprox_stack::TransportBridgeEvidence` / `TransportBridgeError` and `SmoltcpTunBridge::bridge_next_transport_to_egress(...)` to dispatch TUN packets by protocol:
+  - UDP packets go through a UDP exchange path;
+  - TCP packets go through smoltcp and transparent host egress when stream bytes are available;
+  - malformed/unsupported packets retain structured fail-closed packet evidence.
+- Added transparent IPv4 TCP destination rewriting in the smoltcp bridge:
+  - inbound TCP packets addressed to arbitrary destinations are rewritten to the smoltcp gateway address for local socket acceptance;
+  - outbound packets are rewritten back to the original requested destination before returning to the sandbox;
+  - TCP policy and egress now use the sandbox-requested original destination when a transparent mapping exists.
+- Added `BrokerDnsOrDirectUdpExchange` so one UDP exchange can route broker-DNS packets through `DnsUdpExchange` while preserving direct UDP egress for non-DNS destinations.
+- Added focused stack test coverage proving transparent TCP rewrite preserves the original destination for host egress, response packets, and audit records.
+
+### Validation
+- `cargo test -p foxprox-stack --all-targets --all-features -- --nocapture` — passed 22 stack tests.
+- `cargo test --all-targets --all-features` — passed full workspace test suite.
+- `cargo fmt` / `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all seven existing real bwrap/TUN tests.
+
+### Remaining alpha gaps
+- The combined command is now present, but it still uses a step budget rather than child-lifecycle-driven cancellation and has not yet started explicit HTTP/SOCKS proxy listeners inside the combined launcher. Next steps are to add a real alpha E2E for `run-bwrap-alpha`, wire target-exit cancellation/lifecycle audit into the combined loop, integrate proxy listener lifecycle, and expand multi-flow coverage.
