@@ -2000,3 +2000,32 @@
   - `cargo tree -p foxprox-inspect` — TLS/HTTP inspection remains core-only.
 - Commit hash after commit: fea8b9c.
 - Remaining boundary risks: final initial implementation gap audit remains.
+
+## 2026-06-22 — Boundary objective: final initial implementation gap audit
+
+- Boundary under work: final alpha-scope audit against `docs/initial-impl.md` and contract-boundary rules.
+- Allowed dependency direction: audit is ledger-only verification of implemented crates; no new dependency edges allowed.
+- Dependency-risk assessment: previous ledgers listed many historical boundary risks. Before declaring alpha complete, the current code and verification evidence must be mapped back to milestones and success criteria.
+- Verification commands planned: privileged smoke, workspace check/test/clippy, fuzz target check, and dependency trees for runtime/integrations/fuzz.
+- Observed results: final audit found no remaining alpha blockers. Milestone coverage:
+  - Milestone 0 TUN setup proof: Linux TUN open/ioctl in `foxprox-device`, bwrap-compatible setup plans/execution/fd handoff/privilege drop in `foxprox-integrations`, plus opt-in privileged bwrap/TUN smoke passed.
+  - Milestone 1 packet write-back proof: IPv4/IPv6 packet inspection and ICMP/ICMPv6/UDP/TCP-reset synthesis tests cover write-back bytes/checksums.
+  - Milestone 2 smoltcp TCP forwarding gate: smoltcp is private to `foxprox-smoltcp`; runtime stack loop, TCP bridge retention, host writes/reads, flow-close audit, and adapter tests cover stack forwarding without smoltcp leakage.
+  - Milestone 3 minimal broker core: normalized core events, config validation, policy engine, audit schema/sinks, egress traits, frontend abstractions, and boundary dependency trees are in place.
+  - Milestone 4 UDP/DNS foundation: UDP bridges, DNS service interception/forwarding decisions, DNS attribution cache, direct DNS denial, and UDP timeouts/limits are covered.
+  - Milestone 5 transparent policy/attribution: DNS correlation, transparent HTTP Host/method/path inspection, TLS SNI/ECH/mismatch handling, QUIC candidate classification, ICMP basics, and audit distinctions are implemented through normalized events.
+  - Milestone 6 explicit proxy networking: HTTP proxy, HTTPS CONNECT, SOCKS5 CONNECT, listener accept contract, tunnel retention, tunnel pump, shared egress, policy, and audit are implemented.
+  - Milestone 7 robustness: bounded parser/session/bridge resource limits, malformed corpus tests, fuzz harnesses, audit backpressure, fail-closed unsupported paths, flow expiry, and cleanup maintenance are implemented.
+- Changed files:
+  - `progress.md`
+- Verification commands run:
+  - `FOXPROX_RUN_PRIVILEGED_SMOKE=1 cargo test -p foxprox-integrations privileged_bwrap_tun_setup_smoke -- --ignored --nocapture` — passed.
+  - `cargo check --workspace` — passed.
+  - `cargo test --workspace` — passed, 165 tests plus 1 ignored privileged smoke.
+  - `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+  - `cargo check --manifest-path fuzz/Cargo.toml --bins` — passed.
+  - `cargo tree -p foxprox-runtime` — runtime owns orchestration and depends only on boundary crates.
+  - `cargo tree -p foxprox-integrations` — bwrap/Linux/caps/fd handoff details remain isolated to integrations.
+  - `cargo tree --manifest-path fuzz/Cargo.toml -p foxprox-fuzz` — fuzz-only dependencies remain outside production workspace crates.
+- Commit hash after commit: pending.
+- Remaining boundary risks: none for documented alpha scope; future/non-alpha work includes TAP, SOCKS UDP ASSOCIATE, proxy authentication, TLS MITM/custom CA, full HTTP/3 semantic inspection, rootful backend, and broader production hardening.
