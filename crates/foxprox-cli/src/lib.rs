@@ -27,8 +27,8 @@ use foxprox_audit::{audit_record_to_json_line, AuditSinkError};
 use foxprox_broker::IpPacketBroker;
 use foxprox_config::{policy_config_from_toml, ConfigError};
 use foxprox_core::{
-    AuditRecord, DefaultPolicy, DnsPolicy, Endpoint, FrontendKind, NormalizedEvent, PolicyConfig,
-    PolicyEngine, SandboxId,
+    AuditRecord, DefaultPolicy, DnsPolicy, Endpoint, FrontendKind, HostnameAttribution,
+    NormalizedEvent, PolicyConfig, PolicyEngine, SandboxId,
 };
 use foxprox_device::{TunIoError, TunPacketIo};
 #[cfg(unix)]
@@ -438,12 +438,16 @@ fn run_bwrap_tcp_once_inner(
         .transpose()?;
     let dns_egress = HostUdpEgress::new(Duration::from_secs(3))?;
     let packet_broker = IpPacketBroker::new(PolicyEngine::new(config.policy.clone()));
-    let flow_started_at = SystemTime::now();
+    let mut flow_started_at = SystemTime::now();
     let mut audit_json_lines = Vec::new();
     let mut tcp_source = None;
     let mut tcp_destination = None;
     let mut tcp_attribution = None;
     let mut open_audited = false;
+    let mut application_audited = false;
+    let mut flow_closed_audited = false;
+    let mut sandbox_to_host_total = 0_usize;
+    let mut host_to_sandbox_total = 0_usize;
     let mut tun = TunPacketIo::from_owned_fd(setup_child.received.fd, config.max_packet_len)?;
     let mut tcp = config.listen_port.map(|listen_port| {
         foxprox_tcp::SmoltcpTcpServer::new(
@@ -453,17 +457,40 @@ fn run_bwrap_tcp_once_inner(
             config.max_packet_len,
         )
     });
+    let mut host_stream: Option<TcpStream> = None;
 
     for packets_read in 1..=config.max_packets {
         if !tun.wait_readable(Duration::from_millis(50))? {
+            if let (Some(tcp), Some(host)) = (tcp.as_mut(), host_stream.as_mut()) {
+                host_to_sandbox_total +=
+                    relay_host_response_to_sandbox(tcp, host, &mut tun, config.host_buffer_len)?;
+            }
             if let Some(status) = child.try_wait().map_err(|error| CliError::Io {
                 context: "poll-bwrap-target".to_owned(),
                 error,
             })? {
+                if open_audited && !flow_closed_audited {
+                    push_tcp_close_audit(
+                        &mut audit_json_lines,
+                        &sandbox_id,
+                        tcp_source,
+                        tcp_destination,
+                        tcp_attribution.clone(),
+                        flow_started_at,
+                        sandbox_to_host_total as u64,
+                        host_to_sandbox_total as u64,
+                        if status.success() {
+                            "target-exited-success".to_owned()
+                        } else {
+                            format!("target-exited: status={:?}", status.code())
+                        },
+                        emit_audit_live_to_stderr,
+                    )?;
+                }
                 return Ok(BwrapTcpOnceSummary {
                     packets_read: packets_read - 1,
-                    sandbox_to_host_bytes: 0,
-                    host_to_sandbox_bytes: 0,
+                    sandbox_to_host_bytes: sandbox_to_host_total,
+                    host_to_sandbox_bytes: host_to_sandbox_total,
                     audit_json_lines,
                     target_status_code: status.code(),
                     target_status_success: status.success(),
@@ -541,35 +568,63 @@ fn run_bwrap_tcp_once_inner(
                 }
             }
         }
-        if !open_audited {
-            if let Ok(NormalizedEvent::TcpConnectAttempt(event)) =
-                parse_ipv4_packet(&packet_context, &packet)
+
+        if let Ok(NormalizedEvent::TcpConnectAttempt(event)) =
+            parse_ipv4_packet(&packet_context, &packet)
+        {
+            let event = match dns_cache
+                .enrich_event(NormalizedEvent::TcpConnectAttempt(event), SystemTime::now())
             {
-                let event = match dns_cache
-                    .enrich_event(NormalizedEvent::TcpConnectAttempt(event), SystemTime::now())
-                {
-                    NormalizedEvent::TcpConnectAttempt(event) => event,
-                    _ => unreachable!("dns cache preserves TCP event variant"),
-                };
+                NormalizedEvent::TcpConnectAttempt(event) => event,
+                _ => unreachable!("dns cache preserves TCP event variant"),
+            };
+            let same_flow =
+                tcp_source == Some(event.source) && tcp_destination == Some(event.destination);
+            if open_audited && !same_flow {
+                if !flow_closed_audited {
+                    push_tcp_close_audit(
+                        &mut audit_json_lines,
+                        &sandbox_id,
+                        tcp_source,
+                        tcp_destination,
+                        tcp_attribution.clone(),
+                        flow_started_at,
+                        sandbox_to_host_total as u64,
+                        host_to_sandbox_total as u64,
+                        "next-tcp-flow-started".to_owned(),
+                        emit_audit_live_to_stderr,
+                    )?;
+                }
+                tcp = None;
+                host_stream = None;
+                tcp_source = None;
+                tcp_destination = None;
+                tcp_attribution = None;
+                open_audited = false;
+                application_audited = false;
+                flow_closed_audited = false;
+                sandbox_to_host_total = 0;
+                host_to_sandbox_total = 0;
+            }
+            if !open_audited {
                 tcp_source = Some(event.source);
                 tcp_destination = Some(event.destination);
-                if tcp.is_none() {
-                    let listen_port = event.destination.port.ok_or_else(|| {
-                        CliError::Core("bwrap-tcp-run-missing-destination-port".to_owned())
-                    })?;
-                    tcp = Some(foxprox_tcp::SmoltcpTcpServer::new(
-                        config.smoltcp_ip,
-                        config.smoltcp_prefix_len,
-                        listen_port,
-                        config.max_packet_len,
-                    ));
-                }
+                tcp_attribution = event.attribution.clone();
+                flow_started_at = SystemTime::now();
+                let listen_port = event.destination.port.ok_or_else(|| {
+                    CliError::Core("bwrap-tcp-run-missing-destination-port".to_owned())
+                })?;
+                tcp = Some(foxprox_tcp::SmoltcpTcpServer::new(
+                    config.smoltcp_ip,
+                    config.smoltcp_prefix_len,
+                    listen_port,
+                    config.max_packet_len,
+                ));
                 if let (Some(tcp), IpAddr::V4(destination_ip)) =
                     (tcp.as_mut(), event.destination.ip)
                 {
                     let _ = tcp.add_ip_address(destination_ip, config.smoltcp_prefix_len);
                 }
-                tcp_attribution = event.attribution.clone();
                 let evaluation = policy.evaluate(&NormalizedEvent::TcpConnectAttempt(event));
                 let allowed = evaluation.decision.is_allowed();
                 push_audit_json_line(
@@ -595,17 +650,22 @@ fn run_bwrap_tcp_once_inner(
                 }
             }
         }
+
         let Some(tcp) = tcp.as_mut() else {
             continue;
         };
         for outbound in tcp.accept_packet(packet) {
             tun.write_packet(&outbound)?;
         }
+        if let Some(host) = host_stream.as_mut() {
+            host_to_sandbox_total +=
+                relay_host_response_to_sandbox(tcp, host, &mut tun, config.host_buffer_len)?;
+        }
         if tcp.can_recv() {
             let sandbox_payload = tcp
                 .recv_payload(config.sandbox_buffer_len)
                 .map_err(|error| CliError::Core(error.to_string()))?;
-            if looks_like_http_request(&sandbox_payload) {
+            if !application_audited && looks_like_http_request(&sandbox_payload) {
                 if let (Some(source), Some(destination)) = (tcp_source, tcp_destination) {
                     let http = parse_plaintext_http_request(
                         sandbox_id.clone(),
@@ -624,6 +684,7 @@ fn run_bwrap_tcp_once_inner(
                         &evaluation.audit,
                         emit_audit_live_to_stderr,
                     )?;
+                    application_audited = true;
                     if !allowed {
                         let _ = child.kill();
                         let status = child.wait().map_err(|error| CliError::Io {
@@ -632,112 +693,79 @@ fn run_bwrap_tcp_once_inner(
                         })?;
                         return Ok(BwrapTcpOnceSummary {
                             packets_read,
-                            sandbox_to_host_bytes: 0,
-                            host_to_sandbox_bytes: 0,
+                            sandbox_to_host_bytes: sandbox_to_host_total,
+                            host_to_sandbox_bytes: host_to_sandbox_total,
                             audit_json_lines,
                             target_status_code: status.code(),
                             target_status_success: status.success(),
                         });
                     }
                 }
-            } else if looks_like_tls_client_hello(&sandbox_payload) {
+            } else if !application_audited && looks_like_tls_client_hello(&sandbox_payload) {
                 if let (Some(source), Some(destination)) = (tcp_source, tcp_destination) {
-                    let tls = parse_tls_client_hello(
+                    if let Ok(tls) = parse_tls_client_hello(
                         sandbox_id.clone(),
                         FrontendKind::Tun,
                         Some(source),
                         destination,
                         tcp_attribution.clone(),
                         &sandbox_payload,
-                    )
-                    .map_err(|error| {
-                        CliError::Core(format!("transparent-tls-inspect-error: {error}"))
-                    })?;
-                    let evaluation = policy.evaluate(&tls);
-                    let allowed = evaluation.decision.is_allowed();
-                    push_audit_json_line(
-                        &mut audit_json_lines,
-                        &evaluation.audit,
-                        emit_audit_live_to_stderr,
-                    )?;
-                    if !allowed {
-                        let _ = child.kill();
-                        let status = child.wait().map_err(|error| CliError::Io {
-                            context: "wait-bwrap-target-after-tls-policy-deny".to_owned(),
-                            error,
-                        })?;
-                        return Ok(BwrapTcpOnceSummary {
-                            packets_read,
-                            sandbox_to_host_bytes: 0,
-                            host_to_sandbox_bytes: 0,
-                            audit_json_lines,
-                            target_status_code: status.code(),
-                            target_status_success: status.success(),
-                        });
+                    ) {
+                        let evaluation = policy.evaluate(&tls);
+                        let allowed = evaluation.decision.is_allowed();
+                        push_audit_json_line(
+                            &mut audit_json_lines,
+                            &evaluation.audit,
+                            emit_audit_live_to_stderr,
+                        )?;
+                        application_audited = true;
+                        if !allowed {
+                            let _ = child.kill();
+                            let status = child.wait().map_err(|error| CliError::Io {
+                                context: "wait-bwrap-target-after-tls-policy-deny".to_owned(),
+                                error,
+                            })?;
+                            return Ok(BwrapTcpOnceSummary {
+                                packets_read,
+                                sandbox_to_host_bytes: sandbox_to_host_total,
+                                host_to_sandbox_bytes: host_to_sandbox_total,
+                                audit_json_lines,
+                                target_status_code: status.code(),
+                                target_status_success: status.success(),
+                            });
+                        }
+                    } else {
+                        application_audited = true;
                     }
                 }
             }
-            let egress_addr = config
-                .upstream_addr
-                .or_else(|| tcp_destination.and_then(endpoint_to_socket_addr))
-                .ok_or_else(|| CliError::Core("bwrap-tcp-once-missing-upstream".to_owned()))?;
-            let mut host = TcpStream::connect(egress_addr).map_err(|error| CliError::Io {
-                context: format!("connect-tcp-upstream {egress_addr}"),
-                error,
-            })?;
+            if host_stream.is_none() {
+                let egress_addr = config
+                    .upstream_addr
+                    .or_else(|| tcp_destination.and_then(endpoint_to_socket_addr))
+                    .ok_or_else(|| CliError::Core("bwrap-tcp-once-missing-upstream".to_owned()))?;
+                let host = TcpStream::connect(egress_addr).map_err(|error| CliError::Io {
+                    context: format!("connect-tcp-upstream {egress_addr}"),
+                    error,
+                })?;
+                host.set_read_timeout(Some(Duration::from_millis(1)))
+                    .map_err(|error| CliError::Io {
+                        context: format!("configure-tcp-upstream-timeout {egress_addr}"),
+                        error,
+                    })?;
+                host_stream = Some(host);
+            }
+            let host = host_stream
+                .as_mut()
+                .expect("host stream is created before relaying payload");
             host.write_all(&sandbox_payload)
                 .map_err(|error| CliError::Io {
-                    context: format!("write-tcp-upstream {egress_addr}"),
+                    context: "write-tcp-upstream".to_owned(),
                     error,
                 })?;
-            let mut host_payload = vec![0_u8; config.host_buffer_len];
-            let host_to_sandbox_bytes =
-                host.read(&mut host_payload).map_err(|error| CliError::Io {
-                    context: format!("read-tcp-upstream {egress_addr}"),
-                    error,
-                })?;
-            host_payload.truncate(host_to_sandbox_bytes);
-            tcp.send_payload(&host_payload)
-                .map_err(|error| CliError::Core(error.to_string()))?;
-            for outbound in tcp.poll() {
-                tun.write_packet(&outbound)?;
-            }
-            let status = child.wait().map_err(|error| CliError::Io {
-                context: "wait-bwrap-target".to_owned(),
-                error,
-            })?;
-            let close = ClosedTcpFlow {
-                sandbox_id: sandbox_id.clone(),
-                frontend: FrontendKind::Tun,
-                source: tcp_source,
-                destination: tcp_destination,
-                attribution: tcp_attribution,
-                closed_at: SystemTime::now(),
-                duration_ms: SystemTime::now()
-                    .duration_since(flow_started_at)
-                    .ok()
-                    .map(|duration| duration.as_millis()),
-                client_to_target_bytes: sandbox_payload.len() as u64,
-                target_to_client_bytes: host_to_sandbox_bytes as u64,
-                reason: if status.success() {
-                    "target-exited-success".to_owned()
-                } else {
-                    format!("target-exited: status={:?}", status.code())
-                },
-            };
-            push_audit_json_line(
-                &mut audit_json_lines,
-                &close.audit_record(),
-                emit_audit_live_to_stderr,
-            )?;
-            return Ok(BwrapTcpOnceSummary {
-                packets_read,
-                sandbox_to_host_bytes: sandbox_payload.len(),
-                host_to_sandbox_bytes,
-                audit_json_lines,
-                target_status_code: status.code(),
-                target_status_success: status.success(),
-            });
+            sandbox_to_host_total += sandbox_payload.len();
+            host_to_sandbox_total +=
+                relay_host_response_to_sandbox(tcp, host, &mut tun, config.host_buffer_len)?;
         }
     }
 
@@ -746,6 +774,75 @@ fn run_bwrap_tcp_once_inner(
     Err(CliError::Core(
         "bwrap-tcp-once-no-sandbox-payload-before-packet-limit".to_owned(),
     ))
+}
+
+#[cfg(unix)]
+fn relay_host_response_to_sandbox(
+    tcp: &mut foxprox_tcp::SmoltcpTcpServer,
+    host: &mut TcpStream,
+    tun: &mut TunPacketIo,
+    host_buffer_len: usize,
+) -> Result<usize, CliError> {
+    let mut host_payload = vec![0_u8; host_buffer_len];
+    let host_to_sandbox_bytes = match host.read(&mut host_payload) {
+        Ok(length) => length,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            return Ok(0);
+        }
+        Err(error) => {
+            return Err(CliError::Io {
+                context: "read-tcp-upstream".to_owned(),
+                error,
+            });
+        }
+    };
+    if host_to_sandbox_bytes == 0 {
+        return Ok(0);
+    }
+    host_payload.truncate(host_to_sandbox_bytes);
+    tcp.send_payload(&host_payload)
+        .map_err(|error| CliError::Core(error.to_string()))?;
+    for outbound in tcp.poll() {
+        tun.write_packet(&outbound)?;
+    }
+    Ok(host_to_sandbox_bytes)
+}
+
+#[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
+fn push_tcp_close_audit(
+    audit_json_lines: &mut Vec<String>,
+    sandbox_id: &SandboxId,
+    source: Option<Endpoint>,
+    destination: Option<Endpoint>,
+    attribution: Option<HostnameAttribution>,
+    flow_started_at: SystemTime,
+    client_to_target_bytes: u64,
+    target_to_client_bytes: u64,
+    reason: String,
+    emit_live_to_stderr: bool,
+) -> Result<(), CliError> {
+    let close = ClosedTcpFlow {
+        sandbox_id: sandbox_id.clone(),
+        frontend: FrontendKind::Tun,
+        source,
+        destination,
+        attribution,
+        closed_at: SystemTime::now(),
+        duration_ms: SystemTime::now()
+            .duration_since(flow_started_at)
+            .ok()
+            .map(|duration| duration.as_millis()),
+        client_to_target_bytes,
+        target_to_client_bytes,
+        reason,
+    };
+    push_audit_json_line(audit_json_lines, &close.audit_record(), emit_live_to_stderr)
 }
 
 #[cfg(unix)]
@@ -1242,9 +1339,17 @@ where
     if use_default_root_bind {
         bwrap_args.extend(["--dev-bind".to_owned(), "/".to_owned(), "/".to_owned()]);
     }
+    bwrap_args.extend(["--tmpfs".to_owned(), "/etc".to_owned()]);
+    for etc_path in ["/etc/ssl", "/etc/pki", "/etc/ca-certificates"] {
+        if Path::new(etc_path).exists() {
+            bwrap_args.extend([
+                "--ro-bind".to_owned(),
+                etc_path.to_owned(),
+                etc_path.to_owned(),
+            ]);
+        }
+    }
     bwrap_args.extend([
-        "--tmpfs".to_owned(),
-        "/etc".to_owned(),
         "--bind".to_owned(),
         resolv_source.display().to_string(),
         "/etc/resolv.conf".to_owned(),

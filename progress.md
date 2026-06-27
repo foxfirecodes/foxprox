@@ -1941,3 +1941,31 @@
   - `cargo fmt --check` passed.
 - Note: terminal interleaving between stdout and stderr is ultimately terminal/pipe dependent, but foxprox now emits audit records at event time instead of after process completion.
 - Commit: this commit.
+
+## 2026-06-27 Slice Evidence — redirected HTTPS curl works through bwrap-run
+
+- Slice attempted: fix `curl -L http://github.com/` through the production launcher.
+- Why next: user observed the redirected request hung/finally failed resolving instead of proceeding to the HTTPS redirect or producing a clearer failure.
+- What changed: `bwrap-run` now supports sequential TCP flows in one invocation instead of waiting after the first HTTP response. The launcher emits a close audit for the first flow when a new TCP SYN starts, recreates the smoltcp listener for the new destination port, and keeps relaying the next flow. Host TCP streams are kept open across multiple sandbox payloads and polled for host-to-sandbox bytes so TLS handshakes and HTTPS responses can complete. The launcher also preserves host CA trust roots when it overlays `/etc` for resolver control by read-only binding common certificate directories back into the sandbox. Truncated TLS ClientHello inspection no longer aborts the flow; it skips SNI audit and continues forwarding rather than turning parser incompleteness into a launcher failure.
+- Verification:
+  - Manual reproduction passed: `target/debug/foxprox-cli bwrap-run --dns-upstream 1.1.1.1:53 --sandbox alpha-demo -- /usr/bin/curl --ipv4 --max-time 10 -L -I http://github.com/`, with HTTP 301 followed by HTTP/2 200.
+  - Full live bwrap suite passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, 13/13.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- What remains alpha-limited: this is sequential-flow support sufficient for redirects and simple HTTPS; it is not yet a fully concurrent multi-flow daemon.
+- Commit: this commit.
+
+## 2026-06-27 Slice Evidence — redirected HTTPS curl works through bwrap-run
+
+- Slice attempted: fix `curl -L http://github.com/` through the production launcher.
+- Why next: user observed the redirected request hung/finally failed resolving instead of proceeding to the HTTPS redirect or producing a clearer failure.
+- What changed: `bwrap-run` now supports sequential TCP flows in one invocation instead of waiting after the first HTTP response. The launcher emits a close audit for the first flow when a new TCP SYN starts, recreates the smoltcp listener for the new destination port, and keeps relaying the next flow. Host TCP streams are kept open across multiple sandbox payloads and polled for host-to-sandbox bytes so TLS handshakes and HTTPS responses can complete. The launcher also preserves host CA trust roots when it overlays `/etc` for resolver control by read-only binding common certificate directories back into the sandbox. Truncated TLS ClientHello inspection no longer aborts the flow; it skips SNI audit and continues forwarding rather than turning parser incompleteness into a launcher failure.
+- Verification:
+  - Manual reproduction passed: `target/debug/foxprox-cli bwrap-run --dns-upstream 1.1.1.1:53 --sandbox alpha-demo -- /usr/bin/curl --ipv4 --max-time 10 -L -I http://github.com/`, with HTTP 301 followed by HTTP/2 200.
+  - Full live bwrap suite passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, 13/13.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- What remains alpha-limited: this is sequential-flow support sufficient for redirects and simple HTTPS; it is not yet a fully concurrent multi-flow daemon.
+- Commit: this commit.
