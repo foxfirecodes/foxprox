@@ -5611,3 +5611,22 @@ Commit: d894329
 
 ### Remaining alpha gaps
 - Need a real `run-bwrap-alpha` E2E and proxy listener lifecycle integration in the combined command; multi-flow stress coverage and lifecycle cleanup audit should follow.
+
+
+## 2026-06-26 — Exercise combined alpha DNS launcher
+
+Commit: 0528671
+
+### Implementation
+- Added a real ignored bwrap/TUN E2E for `foxprox run-bwrap-alpha <config> -- <target...>` using a sandbox DNS query to broker DNS (`10.0.2.3:53`) and a host UDP upstream.
+- The integration script now runs eight real bwrap/TUN tests, including the combined alpha launcher.
+- Adjusted `run-bwrap-alpha` CLI success so incidental sandbox denials (for example IPv6 router solicitation multicast) do not fail a successful target run; actual `Decision::FailClosed` evidence still fails the command.
+
+### Validation
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all eight real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+
+### Remaining alpha gaps
+- Combined alpha launcher has real DNS proof and target-exit stopping. Remaining production scope includes explicit HTTP/SOCKS proxy lifecycle in the combined command, direct transparent TCP/UDP E2Es, multi-flow coverage, and stronger lifecycle/cleanup audit around the combined runtime.
