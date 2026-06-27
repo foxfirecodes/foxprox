@@ -94,8 +94,8 @@ If `args` is omitted, the launcher uses a controlled default profile:
 - new user and network namespaces
 - uid/gid 0 inside the user namespace
 - temporary `CAP_NET_ADMIN`
-- read-only `/usr`, `/lib`, `/lib64`, `/etc/ssl`, `/etc/pki`, `/etc/hosts`, and
-  `/etc/nsswitch.conf` when present
+- read-only `/usr`, `/lib`, `/lib64`, `/etc/ssl`, `/etc/pki`,
+  `/etc/ca-certificates`, `/etc/hosts`, and `/etc/nsswitch.conf` when present
 - writable sandbox `/etc`, `/tmp`, and `/dev`
 - `/dev/net/tun`
 - `/proc`

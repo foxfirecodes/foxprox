@@ -1,6 +1,6 @@
 # Live bwrap/TUN smoke test
 
-The alpha live smoke test runs the proof broker on the host, starts `foxproxsetup` inside a new bubblewrap user/network namespace, creates a TUN device, and exercises real traffic through the TUN path.
+The alpha live smoke test runs the proof broker on the host, starts `foxproxsetup` inside a new bubblewrap user/network namespace, creates a TUN device, and exercises real traffic through the TUN path. The smoke bwrap profile bind-mounts common host CA bundle locations, including `/etc/ssl`, `/etc/pki`, and `/etc/ca-certificates` when present.
 
 ## Requirements
 

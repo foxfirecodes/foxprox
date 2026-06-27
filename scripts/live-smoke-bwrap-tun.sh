@@ -161,6 +161,7 @@ run_in_bwrap() {
     --dir /etc \
     --ro-bind-try /etc/ssl /etc/ssl \
     --ro-bind-try /etc/pki /etc/pki \
+    --ro-bind-try /etc/ca-certificates /etc/ca-certificates \
     --ro-bind-try /etc/hosts /etc/hosts \
     --ro-bind-try /etc/nsswitch.conf /etc/nsswitch.conf \
     --bind-data 3 /etc/resolv.conf \
