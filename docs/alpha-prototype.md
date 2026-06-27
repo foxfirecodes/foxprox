@@ -18,7 +18,7 @@ The live smoke tests require unprivileged user namespaces, `bwrap`, and access t
 
 `foxprox-cli bwrap-run` is the alpha launcher intended for running arbitrary commands inside a real `bwrap` network namespace with foxprox mediation. It chooses temporary broker paths, runs `foxproxsetup` inside the setup phase with temporary `CAP_NET_ADMIN`, receives the TUN fd over a Unix socket, drops `CAP_NET_ADMIN` before the target command, installs broker DNS in the sandbox, and brokers ICMP, DNS, UDP, and the first TCP flow through the received TUN fd. TCP uses smoltcp with the original destination from the SYN; UDP uses original-destination host UDP egress with synthesized TUN responses; allowed ICMP echo receives a synthetic reply.
 
-`bwrap-run` preserves the target command's stdout so it behaves like a normal launcher. Foxprox audit JSON-lines are written to stderr for this command. The lower-level one-shot/proxy commands still keep stdout audit-only.
+`bwrap-run` preserves the target command's stdout so it behaves like a normal launcher. Foxprox audit JSON-lines are written live to stderr for this command, so policy/audit events appear as they happen around the target output. The lower-level one-shot/proxy commands still keep stdout audit-only.
 
 Example:
 

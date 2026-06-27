@@ -1915,3 +1915,29 @@
   - `cargo test --workspace` passed.
   - `cargo fmt --check` passed.
 - Commit: this commit.
+
+## 2026-06-22 Slice Evidence — live audit emission for bwrap-run
+
+- Slice attempted: make `bwrap-run` audit timing match launcher behavior instead of dumping all audit lines after the target exits.
+- Why next: user observed curl output appeared before all audit logs. That was not intentional for production launcher usability; it happened because the launcher collected audit lines in memory and emitted them only after `run_bwrap_tcp_once` returned.
+- What changed: split the bwrap runner into an inner helper that can emit audit records live as they are generated. `bwrap-run` now writes each audit JSON-line to stderr immediately and flushes stderr, while preserving target stdout. Low-level `bwrap-tcp-once` still collects and writes audit JSON to stdout after completion for existing script/test compatibility. Documentation now states that `bwrap-run` writes live audit to stderr.
+- Verification:
+  - Full live bwrap suite passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, 13/13.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- Note: terminal interleaving between stdout and stderr is ultimately terminal/pipe dependent, but foxprox now emits audit records at event time instead of after process completion.
+- Commit: this commit.
+
+## 2026-06-22 Slice Evidence — live audit emission for bwrap-run
+
+- Slice attempted: make `bwrap-run` audit timing match launcher behavior instead of dumping all audit lines after the target exits.
+- Why next: user observed curl output appeared before all audit logs. That was not intentional for production launcher usability; it happened because the launcher collected audit lines in memory and emitted them only after `run_bwrap_tcp_once` returned.
+- What changed: split the bwrap runner into an inner helper that can emit audit records live as they are generated. `bwrap-run` now writes each audit JSON-line to stderr immediately and flushes stderr, while preserving target stdout. Low-level `bwrap-tcp-once` still collects and writes audit JSON to stdout after completion for existing script/test compatibility. Documentation now states that `bwrap-run` writes live audit to stderr.
+- Verification:
+  - Full live bwrap suite passed: `cargo test -p foxprox-cli --test live_bwrap_setup -- --ignored --nocapture`, 13/13.
+  - `cargo clippy --workspace --all-targets -- -D warnings` passed.
+  - `cargo test --workspace` passed.
+  - `cargo fmt --check` passed.
+- Note: terminal interleaving between stdout and stderr is ultimately terminal/pipe dependent, but foxprox now emits audit records at event time instead of after process completion.
+- Commit: this commit.

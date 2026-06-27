@@ -27,8 +27,8 @@ use foxprox_audit::{audit_record_to_json_line, AuditSinkError};
 use foxprox_broker::IpPacketBroker;
 use foxprox_config::{policy_config_from_toml, ConfigError};
 use foxprox_core::{
-    DefaultPolicy, DnsPolicy, Endpoint, FrontendKind, NormalizedEvent, PolicyConfig, PolicyEngine,
-    SandboxId,
+    AuditRecord, DefaultPolicy, DnsPolicy, Endpoint, FrontendKind, NormalizedEvent, PolicyConfig,
+    PolicyEngine, SandboxId,
 };
 use foxprox_device::{TunIoError, TunPacketIo};
 #[cfg(unix)]
@@ -371,6 +371,14 @@ pub fn forward_tun_udp_packet_once<E: UdpEgress>(
 /// the target process.
 #[cfg(unix)]
 pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSummary, CliError> {
+    run_bwrap_tcp_once_inner(config, false)
+}
+
+#[cfg(unix)]
+fn run_bwrap_tcp_once_inner(
+    config: &BwrapTcpOnceConfig,
+    emit_audit_live_to_stderr: bool,
+) -> Result<BwrapTcpOnceSummary, CliError> {
     if config.max_packet_len == 0 {
         return Err(CliError::Usage(
             "bwrap-tcp-once max_packet_len must be > 0".to_owned(),
@@ -478,9 +486,11 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                         SystemTime::now(),
                     )
                     .map_err(|error| CliError::Core(error.to_string()))?;
-                    audit_json_lines.push(audit_record_to_json_line(
+                    push_audit_json_line(
+                        &mut audit_json_lines,
                         &result.datagram.evaluation.audit,
-                    )?);
+                        emit_audit_live_to_stderr,
+                    )?;
                     if let Some(response_packet) = result.response_packet {
                         tun.write_packet(&response_packet)?;
                     }
@@ -493,7 +503,11 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
             Ok(NormalizedEvent::IcmpMessage(_))
         ) {
             let result = packet_broker.process_packet(&packet_context, &packet);
-            audit_json_lines.push(audit_record_to_json_line(&result.evaluation.audit)?);
+            push_audit_json_line(
+                &mut audit_json_lines,
+                &result.evaluation.audit,
+                emit_audit_live_to_stderr,
+            )?;
             for outbound in result.outbound_packets {
                 tun.write_packet(&outbound)?;
             }
@@ -505,7 +519,11 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                 if matches!(event, NormalizedEvent::UdpFlowAttempt(_)) {
                     let evaluation = policy.evaluate(&event);
                     let allowed = evaluation.decision.is_allowed();
-                    audit_json_lines.push(audit_record_to_json_line(&evaluation.audit)?);
+                    push_audit_json_line(
+                        &mut audit_json_lines,
+                        &evaluation.audit,
+                        emit_audit_live_to_stderr,
+                    )?;
                     if allowed {
                         let target = UdpTarget::new_ip(
                             IpAddr::V4(datagram.destination),
@@ -554,7 +572,11 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                 tcp_attribution = event.attribution.clone();
                 let evaluation = policy.evaluate(&NormalizedEvent::TcpConnectAttempt(event));
                 let allowed = evaluation.decision.is_allowed();
-                audit_json_lines.push(audit_record_to_json_line(&evaluation.audit)?);
+                push_audit_json_line(
+                    &mut audit_json_lines,
+                    &evaluation.audit,
+                    emit_audit_live_to_stderr,
+                )?;
                 open_audited = true;
                 if !allowed {
                     let _ = child.kill();
@@ -597,7 +619,11 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                     })?;
                     let evaluation = policy.evaluate(&http);
                     let allowed = evaluation.decision.is_allowed();
-                    audit_json_lines.push(audit_record_to_json_line(&evaluation.audit)?);
+                    push_audit_json_line(
+                        &mut audit_json_lines,
+                        &evaluation.audit,
+                        emit_audit_live_to_stderr,
+                    )?;
                     if !allowed {
                         let _ = child.kill();
                         let status = child.wait().map_err(|error| CliError::Io {
@@ -629,7 +655,11 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                     })?;
                     let evaluation = policy.evaluate(&tls);
                     let allowed = evaluation.decision.is_allowed();
-                    audit_json_lines.push(audit_record_to_json_line(&evaluation.audit)?);
+                    push_audit_json_line(
+                        &mut audit_json_lines,
+                        &evaluation.audit,
+                        emit_audit_live_to_stderr,
+                    )?;
                     if !allowed {
                         let _ = child.kill();
                         let status = child.wait().map_err(|error| CliError::Io {
@@ -695,7 +725,11 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
                     format!("target-exited: status={:?}", status.code())
                 },
             };
-            audit_json_lines.push(audit_record_to_json_line(&close.audit_record())?);
+            push_audit_json_line(
+                &mut audit_json_lines,
+                &close.audit_record(),
+                emit_audit_live_to_stderr,
+            )?;
             return Ok(BwrapTcpOnceSummary {
                 packets_read,
                 sandbox_to_host_bytes: sandbox_payload.len(),
@@ -712,6 +746,29 @@ pub fn run_bwrap_tcp_once(config: &BwrapTcpOnceConfig) -> Result<BwrapTcpOnceSum
     Err(CliError::Core(
         "bwrap-tcp-once-no-sandbox-payload-before-packet-limit".to_owned(),
     ))
+}
+
+#[cfg(unix)]
+fn push_audit_json_line(
+    audit_json_lines: &mut Vec<String>,
+    audit: &AuditRecord,
+    emit_live_to_stderr: bool,
+) -> Result<(), CliError> {
+    let line = audit_record_to_json_line(audit)?;
+    if emit_live_to_stderr {
+        io::stderr()
+            .write_all(line.as_bytes())
+            .map_err(|error| CliError::Io {
+                context: "write-live-audit-stderr".to_owned(),
+                error,
+            })?;
+        io::stderr().flush().map_err(|error| CliError::Io {
+            context: "flush-live-audit-stderr".to_owned(),
+            error,
+        })?;
+    }
+    audit_json_lines.push(line);
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1082,15 +1139,7 @@ where
     I: Iterator<Item = PathBuf>,
 {
     let config = parse_bwrap_run_args(args)?;
-    let summary = run_bwrap_tcp_once(&config)?;
-    for line in summary.audit_json_lines {
-        io::stderr()
-            .write_all(line.as_bytes())
-            .map_err(|error| CliError::Io {
-                context: "write-audit-stderr".to_owned(),
-                error,
-            })?;
-    }
+    let summary = run_bwrap_tcp_once_inner(&config, true)?;
     if !summary.target_status_success {
         return Err(CliError::Core(format!(
             "bwrap-run-target-failed: status={:?}",
