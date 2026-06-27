@@ -8,11 +8,11 @@
 #![forbid(unsafe_code)]
 
 use foxprox_core::{
-    malformed_proxy_request, AuditKind, AuditRecord, AuditSinkError, BrokerCore,
-    BrokerRuntimeConfig, ByteCounts, Decision, DenialReason, DnsBrokerHandler, DnsQueryMetadata,
-    DnsUpstream, DnsUpstreamError, ExplicitProxyEgress, ExplicitProxyFrontend, Frontend,
-    HttpProxyRequestMetadata, JsonLineAuditSink, NetworkEndpoint, PolicyRequest, Protocol,
-    ProxyEgressError, ProxyParseError, RuntimeAuditDrainError, RuntimeAuditDrainReport,
+    malformed_proxy_request, parse_http_proxy_request, AuditKind, AuditRecord, AuditSinkError,
+    BrokerCore, BrokerRuntimeConfig, ByteCounts, Decision, DenialReason, DnsBrokerHandler,
+    DnsQueryMetadata, DnsUpstream, DnsUpstreamError, ExplicitProxyEgress, ExplicitProxyFrontend,
+    Frontend, HttpProxyRequestMetadata, JsonLineAuditSink, NetworkEndpoint, PolicyRequest,
+    Protocol, ProxyEgressError, ProxyParseError, RuntimeAuditDrainError, RuntimeAuditDrainReport,
     RuntimeAuditFanIn, RuntimeAuditFanInError, RuntimeAuditIngestReport, RuntimeChildExit,
     RuntimeCleanupAction, RuntimeCleanupReport, RuntimeComponent, RuntimeExitStatus,
     RuntimeLifecycleError, RuntimeLifecycleHarness, RuntimeListenerConfig, RuntimeReadinessPlan,
@@ -324,6 +324,16 @@ impl TcpEgress for BlockingTcpEgress {
     }
 }
 
+pub trait AlphaRuntimeTcpEgress: TcpEgress {
+    fn audit_records(&self) -> Vec<AuditRecord>;
+}
+
+impl AlphaRuntimeTcpEgress for BlockingTcpEgress {
+    fn audit_records(&self) -> Vec<AuditRecord> {
+        Vec::new()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BlockingExplicitProxyEgress {
     connect_timeout: Duration,
@@ -397,6 +407,176 @@ impl ExplicitProxyEgress for BlockingExplicitProxyEgress {
             .set_write_timeout(Some(self.io_timeout))
             .map_err(|_| ProxyEgressError::SendFailed)?;
         Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct AlphaRuntimeTcpProxyEgress {
+    direct: BlockingTcpEgress,
+    http_proxy_endpoint: NetworkEndpoint,
+    socks_proxy_endpoint: NetworkEndpoint,
+    http_proxy_frontend: ExplicitProxyFrontend<BlockingExplicitProxyEgress>,
+    socks_proxy_frontend: ExplicitProxyFrontend<BlockingExplicitProxyEgress>,
+    now_ms: u64,
+    lifecycle_audits: Vec<AuditRecord>,
+}
+
+impl AlphaRuntimeTcpProxyEgress {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        sandbox_id: impl Into<String>,
+        policy: foxprox_core::PolicyEngine,
+        audit_capacity: usize,
+        gateway_ip: IpAddr,
+        http_proxy_port: u16,
+        socks_proxy_port: u16,
+        shared_dns_cache: SharedDnsCache,
+        now_ms: u64,
+        direct: BlockingTcpEgress,
+        explicit: BlockingExplicitProxyEgress,
+    ) -> Self {
+        let sandbox_id = sandbox_id.into();
+        let http_proxy_endpoint = NetworkEndpoint::socket(gateway_ip, http_proxy_port);
+        let socks_proxy_endpoint = NetworkEndpoint::socket(gateway_ip, socks_proxy_port);
+        let http_proxy_frontend = ExplicitProxyFrontend::new(
+            sandbox_id.clone(),
+            BrokerCore::new(policy.clone(), audit_capacity.max(1)),
+            explicit.clone(),
+        )
+        .with_shared_dns_cache(shared_dns_cache.clone());
+        let socks_proxy_frontend = ExplicitProxyFrontend::new(
+            sandbox_id.clone(),
+            BrokerCore::new(policy, audit_capacity.max(1)),
+            explicit,
+        )
+        .with_shared_dns_cache(shared_dns_cache);
+        let lifecycle_audits = vec![
+            proxy_listener_configured_audit(
+                &sandbox_id,
+                Frontend::HttpProxy,
+                Protocol::Http,
+                &http_proxy_endpoint,
+                "smoltcp_synthetic_http_proxy_listener",
+                now_ms,
+            ),
+            proxy_listener_configured_audit(
+                &sandbox_id,
+                Frontend::Socks5Proxy,
+                Protocol::Socks,
+                &socks_proxy_endpoint,
+                "smoltcp_synthetic_socks5_proxy_listener",
+                now_ms,
+            ),
+        ];
+        Self {
+            direct,
+            http_proxy_endpoint,
+            socks_proxy_endpoint,
+            http_proxy_frontend,
+            socks_proxy_frontend,
+            now_ms,
+            lifecycle_audits,
+        }
+    }
+
+    fn handle_http_proxy_exchange(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let is_connect = parse_http_proxy_request(bytes)
+            .map(|request| request.is_connect)
+            .unwrap_or(false);
+        match self
+            .http_proxy_frontend
+            .handle_http_proxy_bytes_at(bytes, self.now_ms)
+        {
+            Ok(result) => http_proxy_response_bytes(result.decision, false, is_connect).to_vec(),
+            Err(_) => http_proxy_response_bytes(Decision::FailClosed, true, is_connect).to_vec(),
+        }
+    }
+
+    fn handle_socks5_proxy_exchange(&mut self, bytes: &[u8]) -> Vec<u8> {
+        if socks5_greeting_supports_no_auth(bytes) {
+            return vec![0x05, 0x00];
+        }
+        match self
+            .socks_proxy_frontend
+            .handle_socks5_connect_bytes_at(bytes, self.now_ms)
+        {
+            Ok(result) => socks5_connect_response(socks5_reply_code_for(result.decision)).to_vec(),
+            Err(_) => socks5_connect_response(0x01).to_vec(),
+        }
+    }
+}
+
+impl TcpEgress for AlphaRuntimeTcpProxyEgress {
+    fn connect_and_exchange(
+        &mut self,
+        destination: NetworkEndpoint,
+        from_sandbox: &[u8],
+    ) -> Result<Vec<u8>, TcpEgressError> {
+        if destination == self.http_proxy_endpoint {
+            return Ok(self.handle_http_proxy_exchange(from_sandbox));
+        }
+        if destination == self.socks_proxy_endpoint {
+            return Ok(self.handle_socks5_proxy_exchange(from_sandbox));
+        }
+        self.direct.connect_and_exchange(destination, from_sandbox)
+    }
+}
+
+impl AlphaRuntimeTcpEgress for AlphaRuntimeTcpProxyEgress {
+    fn audit_records(&self) -> Vec<AuditRecord> {
+        let mut records = self.lifecycle_audits.clone();
+        records.extend(self.http_proxy_frontend.broker().audit().records().cloned());
+        records.extend(
+            self.socks_proxy_frontend
+                .broker()
+                .audit()
+                .records()
+                .cloned(),
+        );
+        records
+    }
+}
+
+fn proxy_listener_configured_audit(
+    sandbox_id: &str,
+    frontend: Frontend,
+    protocol: Protocol,
+    endpoint: &NetworkEndpoint,
+    task_name: &'static str,
+    now_ms: u64,
+) -> AuditRecord {
+    AuditRecord::new_at(
+        AuditKind::ProxyListenerConfigured,
+        sandbox_id.to_string(),
+        now_ms as u128,
+    )
+    .with_frontend(frontend)
+    .with_protocol(protocol)
+    .with_destination(endpoint.clone())
+    .with_decision(Decision::Allow, None)
+    .with_detail("listener_component", "smoltcp_synthetic_proxy")
+    .with_detail("listener_task", task_name)
+    .with_detail("listener_addr", endpoint_detail(endpoint))
+}
+
+fn http_proxy_response_bytes(
+    decision: Decision,
+    egress_failed: bool,
+    is_connect: bool,
+) -> &'static [u8] {
+    if egress_failed {
+        return b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n";
+    }
+    if decision.is_allow() {
+        if is_connect {
+            b"HTTP/1.1 200 Connection Established\r\n\r\n"
+        } else {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"
+        }
+    } else if matches!(decision, Decision::FailClosed) {
+        b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n"
+    } else {
+        b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"
     }
 }
 
@@ -1429,7 +1609,10 @@ fn read_socks5_greeting(
 }
 
 fn socks5_greeting_supports_no_auth(greeting: &[u8]) -> bool {
-    greeting.len() >= 2 && greeting[0] == 0x05 && greeting[2..].contains(&0x00)
+    greeting.len() >= 2
+        && greeting[0] == 0x05
+        && greeting.len() == 2 + greeting[1] as usize
+        && greeting[2..].contains(&0x00)
 }
 
 fn read_socks5_connect_request(
@@ -3245,9 +3428,13 @@ pub struct ReceivedTunAlphaRuntimeSession<'a, T, U> {
 #[derive(Debug)]
 pub struct ReceivedTunAlphaRuntimeDrainReport {
     pub setup_ingest: RuntimeAuditIngestReport,
+    pub lifecycle_start_ingest: RuntimeAuditIngestReport,
     pub transport_events: Vec<foxprox_stack::TransportBridgeEvidence>,
     pub broker_ingest: RuntimeAuditIngestReport,
+    pub tcp_egress_records: Vec<AuditRecord>,
+    pub tcp_egress_ingest: RuntimeAuditIngestReport,
     pub egress_ingest: RuntimeAuditIngestReport,
+    pub lifecycle_exit_ingest: RuntimeAuditIngestReport,
     pub final_drain: RuntimeAuditDrainReport,
 }
 
@@ -3678,7 +3865,7 @@ pub fn run_received_tun_fd_alpha_runtime_and_drain<T, U, W>(
     cancellation: &AsyncRuntimeCancellationToken,
 ) -> Result<ReceivedTunAlphaRuntimeDrainReport, ReceivedTunAlphaRuntimeDrainError>
 where
-    T: TcpEgress,
+    T: AlphaRuntimeTcpEgress,
     U: foxprox_stack::UdpDatagramExchange,
     W: Write,
 {
@@ -3712,9 +3899,24 @@ where
             .map_err(ReceivedTunAlphaRuntimeDrainError::Drain)?;
         return Err(ReceivedTunAlphaRuntimeDrainError::Fd(error));
     }
+    let lifecycle_start_records = alpha_lifecycle_start_records(&sandbox_id, now_ms.max(0) as u64);
+    let lifecycle_start_ingest = match ingest_resequenced_records(
+        "alpha_runtime_lifecycle_start",
+        &lifecycle_start_records,
+        fan_in,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            fan_in
+                .drain_to_sink(sink)
+                .map_err(ReceivedTunAlphaRuntimeDrainError::Drain)?;
+            return Err(ReceivedTunAlphaRuntimeDrainError::Ingest(error));
+        }
+    };
     let mtu = stack.mtu();
     let (device, _handoff) = received.into_file_device(mtu);
-    let mut bridge = foxprox_stack::SmoltcpTunBridge::new(sandbox_id, broker, stack, device);
+    let mut bridge =
+        foxprox_stack::SmoltcpTunBridge::new(sandbox_id.clone(), broker, stack, device);
     let mut transport_events = Vec::new();
     for step in 0..max_steps.max(1) {
         if cancellation.is_cancelled() {
@@ -3739,6 +3941,7 @@ where
             Err(error) => {
                 let mut broker_records: Vec<_> =
                     bridge.broker().audit().records().cloned().collect();
+                broker_records.extend(tcp_egress.audit_records());
                 broker_records.extend(udp_egress.audit_records());
                 if let Err(ingest_error) =
                     ingest_resequenced_records("alpha_runtime", &broker_records, fan_in)
@@ -3765,6 +3968,17 @@ where
             return Err(ReceivedTunAlphaRuntimeDrainError::Ingest(error));
         }
     };
+    let tcp_egress_records = tcp_egress.audit_records();
+    let tcp_egress_ingest =
+        match ingest_resequenced_records("alpha_runtime_tcp_egress", &tcp_egress_records, fan_in) {
+            Ok(report) => report,
+            Err(error) => {
+                fan_in
+                    .drain_to_sink(sink)
+                    .map_err(ReceivedTunAlphaRuntimeDrainError::Drain)?;
+                return Err(ReceivedTunAlphaRuntimeDrainError::Ingest(error));
+            }
+        };
     let egress_records = udp_egress.audit_records();
     let egress_ingest =
         match ingest_resequenced_records("alpha_runtime_egress", &egress_records, fan_in) {
@@ -3776,16 +3990,80 @@ where
                 return Err(ReceivedTunAlphaRuntimeDrainError::Ingest(error));
             }
         };
+    let lifecycle_exit_records =
+        alpha_lifecycle_exit_records(&sandbox_id, now_ms.max(0) as u64, transport_events.len());
+    let lifecycle_exit_ingest = match ingest_resequenced_records(
+        "alpha_runtime_lifecycle_exit",
+        &lifecycle_exit_records,
+        fan_in,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            fan_in
+                .drain_to_sink(sink)
+                .map_err(ReceivedTunAlphaRuntimeDrainError::Drain)?;
+            return Err(ReceivedTunAlphaRuntimeDrainError::Ingest(error));
+        }
+    };
     let final_drain = fan_in
         .drain_to_sink(sink)
         .map_err(ReceivedTunAlphaRuntimeDrainError::Drain)?;
     Ok(ReceivedTunAlphaRuntimeDrainReport {
         setup_ingest,
+        lifecycle_start_ingest,
         transport_events,
         broker_ingest,
+        tcp_egress_records,
+        tcp_egress_ingest,
         egress_ingest,
+        lifecycle_exit_ingest,
         final_drain,
     })
+}
+
+#[cfg(unix)]
+fn alpha_lifecycle_start_records(sandbox_id: &str, now_ms: u64) -> Vec<AuditRecord> {
+    vec![
+        AuditRecord::new_at(
+            AuditKind::NetworkSessionStart,
+            sandbox_id.to_string(),
+            now_ms as u128,
+        )
+        .with_frontend(Frontend::Core)
+        .with_decision(Decision::Allow, None)
+        .with_detail("runtime_mode", "bwrap_alpha")
+        .with_detail(
+            "runtime_components",
+            "tun_device,smoltcp_stack,dns_over_tun,http_proxy_listener,socks5_proxy_listener",
+        ),
+        AuditRecord::new_at(
+            AuditKind::BrokerStarted,
+            sandbox_id.to_string(),
+            now_ms as u128,
+        )
+        .with_frontend(Frontend::Core)
+        .with_decision(Decision::Allow, None)
+        .with_detail("runtime_mode", "bwrap_alpha")
+        .with_detail("fail_closed", "true"),
+    ]
+}
+
+#[cfg(unix)]
+fn alpha_lifecycle_exit_records(
+    sandbox_id: &str,
+    now_ms: u64,
+    transport_event_count: usize,
+) -> Vec<AuditRecord> {
+    vec![AuditRecord::new_at(
+        AuditKind::NetworkSessionExit,
+        sandbox_id.to_string(),
+        now_ms as u128,
+    )
+    .with_frontend(Frontend::Core)
+    .with_decision(Decision::Allow, None)
+    .with_detail("runtime_mode", "bwrap_alpha")
+    .with_detail("cleanup_status", "complete")
+    .with_detail("transport_event_count", transport_event_count.to_string())]
 }
 
 #[cfg(unix)]
@@ -4328,6 +4606,15 @@ impl UdpEgress for BlockingUdpEgress {
 
 fn socket_addr(endpoint: NetworkEndpoint) -> Option<SocketAddr> {
     Some(SocketAddr::new(endpoint.ip?, endpoint.port?))
+}
+
+fn endpoint_detail(endpoint: &NetworkEndpoint) -> String {
+    match (endpoint.ip, endpoint.port) {
+        (Some(ip), Some(port)) => format!("{ip}:{port}"),
+        (Some(ip), None) => ip.to_string(),
+        (None, Some(port)) => format!(":{port}"),
+        (None, None) => "unknown".to_string(),
+    }
 }
 
 #[cfg(test)]

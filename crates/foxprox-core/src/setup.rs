@@ -307,6 +307,19 @@ impl BwrapSetupPlan {
             "--proc".to_string(),
             "/proc".to_string(),
         ];
+        let proxy_environment = config.proxy_environment();
+        for (name, value) in [
+            ("HTTP_PROXY", proxy_environment.http_proxy.clone()),
+            ("HTTPS_PROXY", proxy_environment.https_proxy.clone()),
+            ("ALL_PROXY", proxy_environment.all_proxy.clone()),
+            ("NO_PROXY", proxy_environment.no_proxy.clone()),
+            ("http_proxy", proxy_environment.http_proxy.clone()),
+            ("https_proxy", proxy_environment.https_proxy.clone()),
+            ("all_proxy", proxy_environment.all_proxy.clone()),
+            ("no_proxy", proxy_environment.no_proxy.clone()),
+        ] {
+            bwrap_args.extend(["--setenv".to_string(), name.to_string(), value]);
+        }
         if let Some(fd) = config.setup_control_fd {
             bwrap_args.extend(["--sync-fd".to_string(), fd.to_string()]);
         }
@@ -346,7 +359,6 @@ impl BwrapSetupPlan {
         ]);
         setup_command.extend(target_command.iter().cloned());
 
-        let proxy_environment = config.proxy_environment();
         Self {
             config,
             bwrap_args,

@@ -5723,3 +5723,25 @@ Commit: db9da60
 
 ### Remaining alpha gaps
 - Still need explicit HTTP/SOCKS proxy listener lifecycle in `run-bwrap-alpha`, multi-flow coverage, and stronger lifecycle/cleanup audit around combined runtime exit.
+
+
+## 2026-06-27 — Complete alpha production launcher scope
+
+### Implementation
+- Extended `run-bwrap-alpha` into the real alpha launcher for sandbox commands: bwrap now injects `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`/`NO_PROXY` (upper and lower case) into the sandboxed target environment.
+- Added synthetic smoltcp HTTP and SOCKS proxy endpoints on the sandbox gateway address, sharing policy and DNS cache with TUN DNS and transparent egress.
+- Added proxy listener lifecycle audit (`proxy_listener_configured`) plus alpha `network_session_start`, `broker_started`, and `network_session_exit` records.
+- Kept direct transparent TCP working with multiple TCP listeners by selecting the active smoltcp socket for receive and response writes.
+- Added `scripts/foxprox-alpha-run` as a repo wrapper for running real sandbox commands through `foxprox run-bwrap-alpha`.
+
+### Real bwrap/TUN coverage
+- Added explicit HTTP proxy bwrap E2E through `run-bwrap-alpha`, including proxy environment assertion, host HTTP egress proof, and HTTP proxy audit evidence.
+- Added explicit SOCKS proxy bwrap E2E through `run-bwrap-alpha`, including proxy environment assertion, host TCP connect proof, and SOCKS audit evidence.
+- Added combined multi-flow bwrap E2E proving DNS, transparent UDP, and transparent TCP all work in one `run-bwrap-alpha` session and emit `network_session_exit`.
+
+### Validation
+- `scripts/integration/bwrap-setup-e2e.sh` — passed all thirteen real bwrap/TUN tests.
+- `cargo test --all-targets --all-features` — passed.
+- `cargo fmt --check` — passed.
+- `cargo clippy --all-targets --all-features -- -D warnings` — passed.
+- `bash -n scripts/foxprox-alpha-run` — passed.

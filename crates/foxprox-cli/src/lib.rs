@@ -3,7 +3,7 @@ use foxprox_core::{
     DenialReason, DnsBrokerHandler, Frontend, JsonLineAuditSink, NetworkEndpoint,
     NetworkSetupConfig, PolicyEngine, RuntimeAuditDrainError, RuntimeAuditDrainReport,
     RuntimeAuditFanIn, RuntimeAuditFanInError, RuntimeAuditIngestReport, SetupHelperPlan,
-    SetupHelperStep,
+    SetupHelperStep, SharedDnsCache,
 };
 use serde_json::json;
 use std::fs;
@@ -2025,7 +2025,9 @@ fn run_bwrap_alpha_args(args: &[String]) -> CliOutput {
         Duration::from_secs(5),
         64 * 1024,
     );
-    let dns_handler = DnsBrokerHandler::new(dns_broker, dns_upstream, config.setup.broker_dns_ip);
+    let shared_dns_cache = SharedDnsCache::default();
+    let dns_handler = DnsBrokerHandler::new(dns_broker, dns_upstream, config.setup.broker_dns_ip)
+        .with_shared_cache(shared_dns_cache.clone());
     let broker_dns_endpoint = NetworkEndpoint::socket(config.setup.broker_dns_ip, 53);
     let dns_exchange = foxprox_egress::DnsUdpExchange::new(
         config.setup.sandbox_id.clone(),
@@ -2038,12 +2040,30 @@ fn run_bwrap_alpha_args(args: &[String]) -> CliOutput {
         dns_exchange,
         foxprox_egress::BlockingUdpExchange::new(Duration::from_secs(5), 64 * 1024),
     );
-    let tcp_egress = foxprox_egress::BlockingTcpEgress::new(
-        Duration::from_secs(5),
-        Duration::from_secs(5),
-        64 * 1024,
+    let tcp_egress = foxprox_egress::AlphaRuntimeTcpProxyEgress::new(
+        config.setup.sandbox_id.clone(),
+        PolicyEngine::new(config.policy.clone()),
+        config.audit_capacity.max(1),
+        config.setup.gateway_ip,
+        config.setup.http_proxy_port,
+        config.setup.socks_proxy_port,
+        shared_dns_cache,
+        40_000,
+        foxprox_egress::BlockingTcpEgress::new(
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            64 * 1024,
+        ),
+        foxprox_egress::BlockingExplicitProxyEgress::new(
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            64 * 1024,
+        ),
     );
-    let stack = foxprox_stack::SmoltcpIpStack::new_ipv4(stack_ip, 24, config.setup.mtu as usize);
+    let mut stack =
+        foxprox_stack::SmoltcpIpStack::new_ipv4(stack_ip, 24, config.setup.mtu as usize);
+    stack.listen_tcp(config.setup.http_proxy_port, 64 * 1024, 64 * 1024);
+    stack.listen_tcp(config.setup.socks_proxy_port, 64 * 1024, 64 * 1024);
     let mut fan_in = RuntimeAuditFanIn::new(
         config.setup.sandbox_id.clone(),
         config.audit_capacity.max(1),
@@ -2118,7 +2138,11 @@ fn run_bwrap_alpha_args(args: &[String]) -> CliOutput {
             foxprox_stack::TransportBridgeEvidence::Tcp { packet, tcp } => {
                 (packet.decision.is_deny() && !packet.benign_incidental) || tcp.decision.is_deny()
             }
-        });
+        })
+        || runtime_report
+            .tcp_egress_records
+            .iter()
+            .any(|record| record.decision.is_some_and(|decision| decision.is_deny()));
     let success = !saw_blocking_denial
         && matches!(
             process_exit,

@@ -189,21 +189,33 @@ impl SmoltcpIpStack {
     }
 
     pub fn drain_first_tcp_recv(&mut self, limit: usize) -> Vec<u8> {
-        let Some(handle) = self.tcp_handles.first().copied() else {
-            return Vec::new();
-        };
-        let socket = self.sockets.get_mut::<tcp::Socket>(handle);
-        if !socket.may_recv() {
-            return Vec::new();
-        }
-        let mut buffer = vec![0; limit];
-        match socket.recv_slice(&mut buffer) {
-            Ok(len) => {
-                buffer.truncate(len);
-                buffer
+        self.drain_first_tcp_recv_with_endpoints(limit)
+            .map(|(bytes, _, _, _)| bytes)
+            .unwrap_or_default()
+    }
+
+    fn drain_first_tcp_recv_with_endpoints(
+        &mut self,
+        limit: usize,
+    ) -> Option<(Vec<u8>, NetworkEndpoint, NetworkEndpoint, SocketHandle)> {
+        for handle in self.tcp_handles.clone() {
+            let socket = self.sockets.get_mut::<tcp::Socket>(handle);
+            if !socket.may_recv() {
+                continue;
             }
-            Err(_) => Vec::new(),
+            let remote = socket.remote_endpoint().map(network_endpoint)?;
+            let local = socket.local_endpoint().map(network_endpoint)?;
+            let mut buffer = vec![0; limit];
+            let Ok(len) = socket.recv_slice(&mut buffer) else {
+                continue;
+            };
+            if len == 0 {
+                continue;
+            }
+            buffer.truncate(len);
+            return Some((buffer, remote, local, handle));
         }
+        None
     }
 
     pub fn runtime_timer_readiness(&mut self, now_ms: i64) -> RuntimeTaskReadiness {
@@ -319,6 +331,15 @@ impl SmoltcpIpStack {
         let Some(handle) = self.tcp_handles.first().copied() else {
             return Err(TcpEgressError::BridgeFailed);
         };
+        self.send_tcp_stream_response(handle, to_sandbox, now_ms)
+    }
+
+    fn send_tcp_stream_response(
+        &mut self,
+        handle: SocketHandle,
+        to_sandbox: &[u8],
+        now_ms: i64,
+    ) -> Result<StackPollEvidence, TcpEgressError> {
         let socket = self.sockets.get_mut::<tcp::Socket>(handle);
         let sent = socket
             .send_slice(to_sandbox)
@@ -1295,7 +1316,10 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         let tcp = self
             .bridge_first_tcp_stream_to_egress(
                 tcp_egress,
-                NetworkEndpoint::socket(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                NetworkEndpoint {
+                    ip: None,
+                    port: None,
+                },
                 max_from_sandbox,
                 now_ms as u64,
                 now_ms as u64,
@@ -1316,8 +1340,10 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
         opened_at_ms: u64,
         closed_at_ms: u64,
     ) -> Result<TcpStreamBridgeEvidence, TcpEgressError> {
-        let from_sandbox = self.stack.drain_first_tcp_recv(max_from_sandbox);
-        if from_sandbox.is_empty() {
+        let Some((from_sandbox, source, local_destination, socket_handle)) = self
+            .stack
+            .drain_first_tcp_recv_with_endpoints(max_from_sandbox)
+        else {
             return Ok(tcp_stream_evidence(
                 ByteCounts::ZERO,
                 StackPollEvidence::none(),
@@ -1325,18 +1351,16 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                 Decision::Allow,
                 None,
             ));
-        }
-        let (source, local_destination) = self
-            .stack
-            .first_tcp_endpoints()
-            .ok_or(TcpEgressError::BridgeFailed)?;
+        };
         let requested_destination = self
             .transparent_destination_for(&source, &local_destination)
             .unwrap_or_else(|| local_destination.clone());
         let egress_destination = if requested_destination != local_destination {
             requested_destination.clone()
-        } else {
+        } else if destination.ip.is_some() || destination.port.is_some() {
             destination.clone()
+        } else {
+            requested_destination.clone()
         };
         let request = PolicyRequest::tcp_connect(
             self.sandbox_id.clone(),
@@ -1372,9 +1396,9 @@ impl<D: PacketDevice> SmoltcpTunBridge<D> {
                 }
             };
         let outbound_start = self.stack.outbound_len();
-        let stack = self
-            .stack
-            .send_first_tcp_stream_response(&to_sandbox, closed_at_ms as i64)?;
+        let stack =
+            self.stack
+                .send_tcp_stream_response(socket_handle, &to_sandbox, closed_at_ms as i64)?;
         let emitted_packets = self.stack.outbound_packets_since(outbound_start);
         let mut packets_written = 0usize;
         for mut packet in emitted_packets {

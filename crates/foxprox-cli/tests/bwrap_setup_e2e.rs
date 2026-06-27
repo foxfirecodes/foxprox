@@ -1063,6 +1063,310 @@ fn foxprox_run_bwrap_alpha_command_bridges_transparent_udp() {
     assert!(stdout.contains(&host_addr.ip().to_string()), "{stdout}");
 }
 
+#[test]
+#[ignore = "requires rootless bwrap, /dev/net/tun, CAP_NET_ADMIN inside bwrap, and combined foxprox alpha multi-flow runtime"]
+fn foxprox_run_bwrap_alpha_command_bridges_dns_udp_and_tcp_in_one_session() {
+    let foxprox = env!("CARGO_BIN_EXE_foxprox");
+    let setup_helper = env!("CARGO_BIN_EXE_foxproxsetup");
+    assert!(std::path::Path::new(foxprox).exists());
+    assert!(std::path::Path::new(setup_helper).exists());
+    assert!(std::path::Path::new("/dev/net/tun").exists());
+
+    let upstream = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let upstream_addr = upstream.local_addr().unwrap();
+    let dns_server = std::thread::spawn(move || {
+        let mut query = [0u8; 512];
+        let (len, peer) = upstream.recv_from(&mut query).unwrap();
+        let response = dns_a_response(&query[..len], [203, 0, 113, 9]);
+        upstream.send_to(&response, peer).unwrap();
+    });
+
+    let host_ip = host_primary_ipv4();
+    let udp_socket = std::net::UdpSocket::bind((host_ip, 0)).unwrap();
+    let udp_addr = udp_socket.local_addr().unwrap();
+    let (udp_tx, udp_rx) = std::sync::mpsc::channel();
+    let udp_server = std::thread::spawn(move || {
+        let mut request = [0u8; 64];
+        let (len, peer) = udp_socket.recv_from(&mut request).unwrap();
+        udp_socket.send_to(b"udp-pong", peer).unwrap();
+        udp_tx.send(request[..len].to_vec()).unwrap();
+    });
+
+    let tcp_listener = TcpListener::bind((host_ip, 0)).unwrap();
+    let tcp_addr = tcp_listener.local_addr().unwrap();
+    let (tcp_tx, tcp_rx) = std::sync::mpsc::channel();
+    let tcp_server = std::thread::spawn(move || {
+        let (mut stream, _peer) = tcp_listener.accept().unwrap();
+        let mut request = [0u8; 4];
+        stream.read_exact(&mut request).unwrap();
+        stream.write_all(b"pong").unwrap();
+        tcp_tx.send(request).unwrap();
+    });
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_path =
+        std::env::temp_dir().join(format!("foxprox-run-bwrap-alpha-multiflow-{unique}.json"));
+    let mut config =
+        BrokerRuntimeConfig::alpha_default(format!("foxprox-alpha-multiflow-e2e-{unique}"));
+    config.setup.tun_name = format!("fxm{:x}", std::process::id() % 0x00ff_ffff);
+    config.dns_upstream = upstream_addr;
+    config.policy = PolicyConfig {
+        default_decision: Decision::Allow,
+        ..PolicyConfig::default()
+    };
+    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+
+    let script = format!(
+        concat!(
+            "import socket; ",
+            "q=b'\\x12\\x34\\x01\\x00\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00'+b'\\x05multi\\x04test\\x00'+b'\\x00\\x01\\x00\\x01'; ",
+            "d=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); d.settimeout(5.0); ",
+            "d.sendto(q, ('10.0.2.3', 53)); data,_=d.recvfrom(512); assert b'\\xcb\\x00\\x71\\x09' in data, data.hex(); d.close(); ",
+            "u=socket.socket(socket.AF_INET, socket.SOCK_DGRAM); u.settimeout(5.0); ",
+            "u.sendto(b'udp-ping', ({udp_host:?}, {udp_port})); data,_=u.recvfrom(64); assert data == b'udp-pong', data; u.close(); ",
+            "t=socket.socket(socket.AF_INET, socket.SOCK_STREAM); t.settimeout(5.0); ",
+            "t.connect(({tcp_host:?}, {tcp_port})); t.sendall(b'ping'); data=t.recv(4); assert data == b'pong', data; t.close()"
+        ),
+        udp_host = udp_addr.ip().to_string(),
+        udp_port = udp_addr.port(),
+        tcp_host = tcp_addr.ip().to_string(),
+        tcp_port = tcp_addr.port()
+    );
+    let setup_dir = std::path::Path::new(setup_helper).parent().unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!("{}:{}", setup_dir.display(), path.to_string_lossy());
+    let output = Command::new(foxprox)
+        .env("PATH", path)
+        .arg("run-bwrap-alpha")
+        .arg(&config_path)
+        .arg("--")
+        .arg("python3")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("foxprox alpha multi-flow launcher command runs");
+    let _ = std::fs::remove_file(&config_path);
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        udp_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        b"udp-ping"
+    );
+    assert_eq!(
+        &tcp_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+        b"ping"
+    );
+    dns_server.join().unwrap();
+    udp_server.join().unwrap();
+    tcp_server.join().unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("dns_query"), "{stdout}");
+    assert!(stdout.contains("udp_exchange"), "{stdout}");
+    assert!(stdout.contains("tcp_flow_closed"), "{stdout}");
+    assert!(stdout.contains("network_session_exit"), "{stdout}");
+}
+
+#[test]
+#[ignore = "requires rootless bwrap, /dev/net/tun, CAP_NET_ADMIN inside bwrap, and combined foxprox alpha explicit HTTP proxy"]
+fn foxprox_run_bwrap_alpha_command_exposes_http_proxy() {
+    let foxprox = env!("CARGO_BIN_EXE_foxprox");
+    let setup_helper = env!("CARGO_BIN_EXE_foxproxsetup");
+    assert!(std::path::Path::new(foxprox).exists());
+    assert!(std::path::Path::new(setup_helper).exists());
+    assert!(std::path::Path::new("/dev/net/tun").exists());
+
+    let host_ip = host_primary_ipv4();
+    let host_listener = TcpListener::bind((host_ip, 0)).unwrap();
+    let host_addr = host_listener.local_addr().unwrap();
+    let (server_tx, server_rx) = std::sync::mpsc::channel();
+    let host_server = std::thread::spawn(move || {
+        let (mut stream, peer) = host_listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut buf = [0u8; 256];
+        let len = stream.read(&mut buf).unwrap();
+        request.extend_from_slice(&buf[..len]);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+            .unwrap();
+        server_tx.send((peer, request)).unwrap();
+    });
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_path =
+        std::env::temp_dir().join(format!("foxprox-run-bwrap-alpha-http-proxy-{unique}.json"));
+    let mut config =
+        BrokerRuntimeConfig::alpha_default(format!("foxprox-alpha-http-proxy-e2e-{unique}"));
+    config.setup.tun_name = format!("fxp{:x}", std::process::id() % 0x00ff_ffff);
+    config.policy = PolicyConfig {
+        default_decision: Decision::Allow,
+        ..PolicyConfig::default()
+    };
+    let expected_proxy = config.setup.proxy_environment().http_proxy;
+    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+
+    let script = format!(
+        concat!(
+            "import os, socket; ",
+            "assert os.environ.get('HTTP_PROXY') == {proxy:?}, os.environ.get('HTTP_PROXY'); ",
+            "s=socket.socket(socket.AF_INET, socket.SOCK_STREAM); ",
+            "s.settimeout(5.0); ",
+            "s.connect(('10.0.2.2', 3128)); ",
+            "req=('GET http://{host}:{port}/alpha HTTP/1.1\\r\\nHost: {host}:{port}\\r\\nConnection: close\\r\\n\\r\\n').encode(); ",
+            "s.sendall(req); ",
+            "data=s.recv(128); ",
+            "assert data.startswith(b'HTTP/1.1 200'), data; ",
+            "s.close()"
+        ),
+        proxy = expected_proxy,
+        host = host_addr.ip(),
+        port = host_addr.port()
+    );
+    let setup_dir = std::path::Path::new(setup_helper).parent().unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!("{}:{}", setup_dir.display(), path.to_string_lossy());
+    let output = Command::new(foxprox)
+        .env("PATH", path)
+        .arg("run-bwrap-alpha")
+        .arg(&config_path)
+        .arg("--")
+        .arg("python3")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("foxprox alpha explicit HTTP proxy launcher command runs");
+    let _ = std::fs::remove_file(&config_path);
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (_peer, request) = server_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("host HTTP server receives proxied request through alpha launcher");
+    let request = String::from_utf8(request).unwrap();
+    assert!(request.starts_with("GET http://"), "{request}");
+    assert!(request.contains("/alpha"), "{request}");
+    host_server.join().unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("proxy_listener_configured"), "{stdout}");
+    assert!(stdout.contains("http_request_decision"), "{stdout}");
+    assert!(
+        stdout.contains("smoltcp_synthetic_http_proxy_listener"),
+        "{stdout}"
+    );
+}
+
+#[test]
+#[ignore = "requires rootless bwrap, /dev/net/tun, CAP_NET_ADMIN inside bwrap, and combined foxprox alpha explicit SOCKS proxy"]
+fn foxprox_run_bwrap_alpha_command_exposes_socks_proxy() {
+    let foxprox = env!("CARGO_BIN_EXE_foxprox");
+    let setup_helper = env!("CARGO_BIN_EXE_foxproxsetup");
+    assert!(std::path::Path::new(foxprox).exists());
+    assert!(std::path::Path::new(setup_helper).exists());
+    assert!(std::path::Path::new("/dev/net/tun").exists());
+
+    let host_ip = host_primary_ipv4();
+    let host_listener = TcpListener::bind((host_ip, 0)).unwrap();
+    let host_addr = host_listener.local_addr().unwrap();
+    let (server_tx, server_rx) = std::sync::mpsc::channel();
+    let host_server = std::thread::spawn(move || {
+        let (_stream, peer) = host_listener.accept().unwrap();
+        server_tx.send(peer).unwrap();
+    });
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let config_path =
+        std::env::temp_dir().join(format!("foxprox-run-bwrap-alpha-socks-proxy-{unique}.json"));
+    let mut config =
+        BrokerRuntimeConfig::alpha_default(format!("foxprox-alpha-socks-proxy-e2e-{unique}"));
+    config.setup.tun_name = format!("fxs{:x}", std::process::id() % 0x00ff_ffff);
+    config.policy = PolicyConfig {
+        default_decision: Decision::Allow,
+        ..PolicyConfig::default()
+    };
+    let expected_proxy = config.setup.proxy_environment().all_proxy;
+    std::fs::write(&config_path, serde_json::to_string(&config).unwrap()).unwrap();
+
+    let octets = match host_addr.ip() {
+        std::net::IpAddr::V4(ip) => ip.octets(),
+        std::net::IpAddr::V6(_) => panic!("expected IPv4 host address"),
+    };
+    let script = format!(
+        concat!(
+            "import os, socket, struct; ",
+            "assert os.environ.get('ALL_PROXY') == {proxy:?}, os.environ.get('ALL_PROXY'); ",
+            "s=socket.socket(socket.AF_INET, socket.SOCK_STREAM); ",
+            "s.settimeout(5.0); ",
+            "s.connect(('10.0.2.2', 1080)); ",
+            "s.sendall(b'\\x05\\x01\\x00'); ",
+            "method=s.recv(2); ",
+            "assert method == b'\\x05\\x00', method; ",
+            "req=bytes([5,1,0,1,{a},{b},{c},{d}])+struct.pack('!H',{port}); ",
+            "s.sendall(req); ",
+            "reply=s.recv(10); ",
+            "assert reply[:2] == b'\\x05\\x00', reply; ",
+            "s.close()"
+        ),
+        proxy = expected_proxy,
+        a = octets[0],
+        b = octets[1],
+        c = octets[2],
+        d = octets[3],
+        port = host_addr.port()
+    );
+    let setup_dir = std::path::Path::new(setup_helper).parent().unwrap();
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!("{}:{}", setup_dir.display(), path.to_string_lossy());
+    let output = Command::new(foxprox)
+        .env("PATH", path)
+        .arg("run-bwrap-alpha")
+        .arg(&config_path)
+        .arg("--")
+        .arg("python3")
+        .arg("-c")
+        .arg(script)
+        .output()
+        .expect("foxprox alpha explicit SOCKS proxy launcher command runs");
+    let _ = std::fs::remove_file(&config_path);
+
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("host TCP listener receives SOCKS connect through alpha launcher");
+    host_server.join().unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("proxy_listener_configured"), "{stdout}");
+    assert!(stdout.contains("socks_connect_decision"), "{stdout}");
+    assert!(
+        stdout.contains("smoltcp_synthetic_socks5_proxy_listener"),
+        "{stdout}"
+    );
+}
+
 fn host_primary_ipv4() -> std::net::Ipv4Addr {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
     socket.connect("1.1.1.1:53").unwrap();
