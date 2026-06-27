@@ -2127,7 +2127,7 @@
   - `cargo tree -p foxprox-cli` — CA bind fixes remain CLI/bwrap-local.
   - `cargo tree -p foxprox-runtime` — TLS inspection deferral remains runtime-owned over inspect boundary.
   - `cargo tree -p foxprox-inspect` — parser remains core-only.
-- Commit hash after commit: pending.
+- Commit hash after commit: 9d73d0e.
 - Remaining boundary risks: none for reported HTTPS trust/curl issue.
 
 ## 2026-06-26 — Boundary objective: fix launcher HTTPS trust and TLS first-payload handling
@@ -2138,5 +2138,5 @@
 - Verification commands planned: focused runtime test, real wrapper CA-path check, real wrapper HTTPS curl, full workspace check/test/clippy, fuzz target check, and dependency trees for CLI/runtime/inspect.
 - Observed results: pending.
 - Changed files: pending.
-- Commit hash after commit: pending.
+- Commit hash after commit: 9d73d0e.
 - Remaining boundary risks: none for reported HTTPS trust/curl issue.
