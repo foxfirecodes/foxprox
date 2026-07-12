@@ -293,6 +293,8 @@ Defaults:
 * no custom CA
 * longer idle timeout than generic UDP
 
+Current alpha limitation: QUIC support stops at UDP/443 candidate classification, policy, audit, and DNS-cache attribution. The broker does not parse QUIC TLS ClientHello, decrypt HTTP/3, install custom CAs, or expose HTTP/3 request URL/path metadata.
+
 ## Interaction With bwrap
 
 Alpha bwrap integration uses a setup helper as the initial bwrap command.

@@ -1,0 +1,692 @@
+//! Combined transparent TCP, UDP, and broker-DNS proof runtime.
+
+use crate::udp::{
+    expire_udp_flows_with_audit, handle_dns_datagram, handle_udp_forward_datagram,
+    handle_worker_results, udp_socket, validate_max_udp_flows, UdpForwardDatagram,
+    UdpForwardSocket, WorkerLimiter,
+};
+use crate::{
+    audit_buffer, emit_raw_audit, set_nonblocking, smoltcp_ipv4, TcpProofConfig,
+    TransparentTcpState,
+};
+use foxprox_core::{
+    AuditBuffer, AuditEvent, AuditEventKind, DnsCache, Frontend, PolicyRuleSet, Protocol,
+    SandboxId, TransportEndpoint, UdpFlowTable,
+};
+use smoltcp::iface::{Config, SocketSet};
+use smoltcp::phy::{Medium, TunTapInterface};
+use smoltcp::socket::{tcp, udp};
+use smoltcp::time::Instant;
+use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr};
+use std::io;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd};
+use std::sync::mpsc;
+use std::time::{Duration, SystemTime};
+
+/// TUN-reachable explicit proxy bridge configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ExplicitProxyBridgeConfig {
+    /// Sandbox-reachable TCP port on the broker IP.
+    pub sandbox_port: u16,
+    /// Host-loopback backend address of the existing proxy proof listener.
+    pub backend_addr: SocketAddr,
+}
+
+/// Backward-compatible name for the HTTP proxy bridge configuration.
+pub type ExplicitHttpProxyBridgeConfig = ExplicitProxyBridgeConfig;
+
+/// Configuration for the combined transparent TCP/UDP/DNS proof runtime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CombinedTransparentProofConfig {
+    /// Sandbox/session identifier used in normalized events.
+    pub sandbox_id: SandboxId,
+    /// Broker/gateway IPv4 address configured on the smoltcp interface.
+    pub broker_ip: Ipv4Addr,
+    /// Network prefix length for the broker interface address.
+    pub prefix_len: u8,
+    /// TUN MTU.
+    pub mtu: usize,
+    /// Primary destination TCP port to listen for transparently.
+    pub tcp_port: u16,
+    /// Additional destination TCP ports to listen for transparently.
+    pub additional_tcp_ports: Vec<u16>,
+    /// Host TCP connect timeout.
+    pub connect_timeout: Duration,
+    /// Maximum buffered bytes in either TCP bridge direction.
+    pub pending_buffer_limit: usize,
+    /// Idle timeout for a proof TCP flow.
+    pub idle_timeout: Duration,
+    /// Broker DNS port reachable from the sandbox.
+    pub dns_port: u16,
+    /// Upstream DNS resolver used by the proof.
+    pub upstream_dns: SocketAddr,
+    /// Maximum queued UDP packets in each smoltcp UDP direction.
+    pub udp_packet_capacity: usize,
+    /// Maximum queued UDP payload bytes in each smoltcp UDP direction.
+    pub udp_payload_capacity: usize,
+    /// Timeout for one upstream DNS query.
+    pub upstream_timeout: Duration,
+    /// Destination UDP ports to forward through policy for this proof.
+    pub udp_forward_ports: Vec<u16>,
+    /// Timeout for one generic UDP response read.
+    pub udp_forward_timeout: Duration,
+    /// Shared policy used before host egress.
+    pub policy: PolicyRuleSet,
+    /// Maximum queued audit events before proof paths fail closed.
+    pub audit_queue_capacity: usize,
+    /// Maximum simultaneous DNS/UDP host worker threads.
+    pub max_worker_threads: usize,
+    /// Maximum simultaneous tracked UDP pseudo-flows.
+    pub max_udp_flows: usize,
+    /// Optional TUN-to-loopback bridge for explicit HTTP proxy proof reachability.
+    pub http_proxy_bridge: Option<ExplicitProxyBridgeConfig>,
+    /// Optional TUN-to-loopback bridge for explicit SOCKS5 proxy proof reachability.
+    pub socks5_proxy_bridge: Option<ExplicitProxyBridgeConfig>,
+}
+
+impl CombinedTransparentProofConfig {
+    /// Creates a combined proof config using the repository's default TUN addresses.
+    pub fn new(sandbox_id: SandboxId) -> Self {
+        let tcp = TcpProofConfig::new(sandbox_id.clone());
+        let udp = crate::UdpDnsProofConfig::new(sandbox_id.clone());
+        Self {
+            sandbox_id,
+            broker_ip: tcp.broker_ip,
+            prefix_len: tcp.prefix_len,
+            mtu: tcp.mtu,
+            tcp_port: tcp.tcp_port,
+            additional_tcp_ports: Vec::new(),
+            connect_timeout: tcp.connect_timeout,
+            pending_buffer_limit: tcp.pending_buffer_limit,
+            idle_timeout: tcp.idle_timeout,
+            dns_port: udp.dns_port,
+            upstream_dns: udp.upstream_dns,
+            udp_packet_capacity: udp.udp_packet_capacity,
+            udp_payload_capacity: udp.udp_payload_capacity,
+            upstream_timeout: udp.upstream_timeout,
+            udp_forward_ports: udp.udp_forward_ports,
+            udp_forward_timeout: udp.udp_forward_timeout,
+            policy: PolicyRuleSet::default(),
+            audit_queue_capacity: udp.audit_queue_capacity,
+            max_worker_threads: udp.max_worker_threads,
+            max_udp_flows: udp.max_udp_flows,
+            http_proxy_bridge: None,
+            socks5_proxy_bridge: None,
+        }
+    }
+
+    fn tcp_ports(&self) -> Vec<u16> {
+        let mut ports = Vec::with_capacity(1 + self.additional_tcp_ports.len());
+        ports.push(self.tcp_port);
+        for port in &self.additional_tcp_ports {
+            if !ports.contains(port) {
+                ports.push(*port);
+            }
+        }
+        ports
+    }
+
+    fn tcp_config(&self) -> TcpProofConfig {
+        self.tcp_config_for_port(self.tcp_port)
+    }
+
+    fn tcp_config_for_port(&self, tcp_port: u16) -> TcpProofConfig {
+        TcpProofConfig {
+            sandbox_id: self.sandbox_id.clone(),
+            broker_ip: self.broker_ip,
+            prefix_len: self.prefix_len,
+            mtu: self.mtu,
+            tcp_port,
+            connect_timeout: self.connect_timeout,
+            pending_buffer_limit: self.pending_buffer_limit,
+            idle_timeout: self.idle_timeout,
+            policy: self.policy.clone(),
+            audit_queue_capacity: self.audit_queue_capacity,
+            tcp_egress_override: None,
+        }
+    }
+
+    fn udp_config(&self) -> crate::UdpDnsProofConfig {
+        crate::UdpDnsProofConfig {
+            sandbox_id: self.sandbox_id.clone(),
+            broker_ip: self.broker_ip,
+            prefix_len: self.prefix_len,
+            mtu: self.mtu,
+            dns_port: self.dns_port,
+            upstream_dns: self.upstream_dns,
+            udp_packet_capacity: self.udp_packet_capacity,
+            udp_payload_capacity: self.udp_payload_capacity,
+            upstream_timeout: self.upstream_timeout,
+            udp_forward_ports: self.udp_forward_ports.clone(),
+            udp_forward_timeout: self.udp_forward_timeout,
+            policy: self.policy.clone(),
+            audit_queue_capacity: self.audit_queue_capacity,
+            max_worker_threads: self.max_worker_threads,
+            max_udp_flows: self.max_udp_flows,
+        }
+    }
+
+    fn proxy_bridge_tcp_config(&self, bridge: ExplicitProxyBridgeConfig) -> TcpProofConfig {
+        let mut config = self.tcp_config();
+        config.tcp_port = bridge.sandbox_port;
+        config.tcp_egress_override = Some(bridge.backend_addr);
+        config
+    }
+}
+
+/// Runs the combined transparent proof until the TUN fd errors or the process is interrupted.
+pub fn run_combined_transparent_proof(
+    tun_fd: OwnedFd,
+    config: CombinedTransparentProofConfig,
+) -> io::Result<()> {
+    run_combined_transparent_proof_with_ready(tun_fd, config, || Ok(()))
+}
+
+/// Runs the combined transparent proof and calls `ready` after sockets are installed.
+pub fn run_combined_transparent_proof_with_ready<F>(
+    tun_fd: OwnedFd,
+    config: CombinedTransparentProofConfig,
+    ready: F,
+) -> io::Result<()>
+where
+    F: FnOnce() -> io::Result<()>,
+{
+    let mut audit = audit_buffer(config.audit_queue_capacity)?;
+    let worker_limiter = WorkerLimiter::new(config.max_worker_threads)?;
+    validate_max_udp_flows(config.max_udp_flows)?;
+    validate_http_proxy_bridge(&config)?;
+    set_nonblocking(tun_fd.as_raw_fd())?;
+    let raw_fd = tun_fd.into_raw_fd();
+    let mut device = TunTapInterface::from_fd(raw_fd, Medium::Ip, config.mtu).map_err(|error| {
+        io::Error::other(format!("failed to create smoltcp TUN device: {error}"))
+    })?;
+
+    let mut iface_config = Config::new(HardwareAddress::Ip);
+    iface_config.random_seed = 0x0f0f_636f_u64;
+    let mut iface = smoltcp::iface::Interface::new(iface_config, &mut device, Instant::now());
+    iface.update_ip_addrs(|addrs| {
+        let _ = addrs.push(IpCidr::new(
+            IpAddress::Ipv4(smoltcp_ipv4(config.broker_ip)),
+            config.prefix_len,
+        ));
+    });
+    iface.set_any_ip(true);
+    iface
+        .routes_mut()
+        .add_default_ipv4_route(smoltcp_ipv4(config.broker_ip))
+        .map_err(|error| io::Error::other(format!("failed to add smoltcp route: {error}")))?;
+
+    let tcp_ports = config.tcp_ports();
+    let proxy_tcp_socket = config.http_proxy_bridge.map(|_| {
+        let rx = tcp::SocketBuffer::new(vec![0; 65_535]);
+        let tx = tcp::SocketBuffer::new(vec![0; 65_535]);
+        tcp::Socket::new(rx, tx)
+    });
+    let socks_tcp_socket = config.socks5_proxy_bridge.map(|_| {
+        let rx = tcp::SocketBuffer::new(vec![0; 65_535]);
+        let tx = tcp::SocketBuffer::new(vec![0; 65_535]);
+        tcp::Socket::new(rx, tx)
+    });
+    let mut dns_socket = udp_socket(&config.udp_config())?;
+    dns_socket
+        .bind(config.dns_port)
+        .map_err(|error| io::Error::other(format!("udp dns bind failed: {error}")))?;
+
+    let mut sockets = SocketSet::new(vec![]);
+    let tcp_handles: Vec<_> = tcp_ports
+        .iter()
+        .map(|_| sockets.add(tcp_socket()))
+        .collect();
+    let proxy_tcp_handle = proxy_tcp_socket.map(|socket| sockets.add(socket));
+    let socks_tcp_handle = socks_tcp_socket.map(|socket| sockets.add(socket));
+    let dns_handle = sockets.add(dns_socket);
+    let udp_config = config.udp_config();
+    let mut forward_sockets = Vec::new();
+    for port in &config.udp_forward_ports {
+        if *port == config.dns_port {
+            continue;
+        }
+        let mut socket = udp_socket(&udp_config)?;
+        socket
+            .bind(*port)
+            .map_err(|error| io::Error::other(format!("udp forward bind failed: {error}")))?;
+        forward_sockets.push(UdpForwardSocket {
+            port: *port,
+            handle: sockets.add(socket),
+        });
+    }
+
+    for (port, handle) in tcp_ports.iter().copied().zip(tcp_handles.iter().copied()) {
+        install_tcp_listener(sockets.get_mut::<tcp::Socket>(handle), port)?;
+    }
+    if let (Some(bridge), Some(handle)) = (config.http_proxy_bridge, proxy_tcp_handle) {
+        install_tcp_listener(sockets.get_mut::<tcp::Socket>(handle), bridge.sandbox_port)?;
+    }
+    if let (Some(bridge), Some(handle)) = (config.socks5_proxy_bridge, socks_tcp_handle) {
+        install_tcp_listener(sockets.get_mut::<tcp::Socket>(handle), bridge.sandbox_port)?;
+    }
+    emit_combined_lifecycle_audit(&mut audit, &config, AuditEventKind::SessionStarted, None)?;
+    emit_combined_lifecycle_audit(&mut audit, &config, AuditEventKind::BrokerStarted, None)?;
+    emit_combined_lifecycle_audit(&mut audit, &config, AuditEventKind::TunConfigured, None)?;
+    if let Some(bridge) = config.http_proxy_bridge {
+        emit_combined_lifecycle_audit(
+            &mut audit,
+            &config,
+            AuditEventKind::ProxyListenerConfigured,
+            Some(("http", bridge)),
+        )?;
+    }
+    if let Some(bridge) = config.socks5_proxy_bridge {
+        emit_combined_lifecycle_audit(
+            &mut audit,
+            &config,
+            AuditEventKind::ProxyListenerConfigured,
+            Some(("socks5", bridge)),
+        )?;
+    }
+    eprintln!(
+        "foxprox-net: combined transparent proof listening tcp_ports={:?} dns={}:{} upstream={} udp_forward_ports={:?} http_proxy_bridge={:?} socks5_proxy_bridge={:?}",
+        tcp_ports,
+        config.broker_ip,
+        config.dns_port,
+        config.upstream_dns,
+        config.udp_forward_ports,
+        config.http_proxy_bridge,
+        config.socks5_proxy_bridge
+    );
+    ready()?;
+
+    let tcp_configs: Vec<_> = tcp_ports
+        .iter()
+        .map(|port| config.tcp_config_for_port(*port))
+        .collect();
+    let proxy_tcp_config = config
+        .http_proxy_bridge
+        .map(|bridge| config.proxy_bridge_tcp_config(bridge));
+    let socks_tcp_config = config
+        .socks5_proxy_bridge
+        .map(|bridge| config.proxy_bridge_tcp_config(bridge));
+    let (worker_tx, worker_rx) = mpsc::channel();
+    let mut tcp_states: Vec<_> = tcp_ports
+        .iter()
+        .map(|_| TransparentTcpState::new())
+        .collect();
+    let mut proxy_tcp_state = config.http_proxy_bridge.map(|_| TransparentTcpState::new());
+    let mut socks_tcp_state = config
+        .socks5_proxy_bridge
+        .map(|_| TransparentTcpState::new());
+    let mut cache = DnsCache::default();
+    let mut udp_flows = UdpFlowTable::default();
+    loop {
+        iface.poll(Instant::now(), &mut device, &mut sockets);
+        handle_worker_results(
+            &udp_config,
+            &mut cache,
+            &mut udp_flows,
+            &mut audit,
+            &mut sockets,
+            dns_handle,
+            &worker_rx,
+        );
+
+        for ((state, handle), tcp_config) in tcp_states
+            .iter_mut()
+            .zip(tcp_handles.iter().copied())
+            .zip(tcp_configs.iter())
+        {
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            state.poll(socket, tcp_config, &mut audit, Some(&cache))?;
+        }
+        if let (Some(state), Some(handle), Some(proxy_config)) = (
+            proxy_tcp_state.as_mut(),
+            proxy_tcp_handle,
+            proxy_tcp_config.as_ref(),
+        ) {
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            state.poll(socket, proxy_config, &mut audit, Some(&cache))?;
+        }
+        if let (Some(state), Some(handle), Some(proxy_config)) = (
+            socks_tcp_state.as_mut(),
+            socks_tcp_handle,
+            socks_tcp_config.as_ref(),
+        ) {
+            let socket = sockets.get_mut::<tcp::Socket>(handle);
+            state.poll(socket, proxy_config, &mut audit, Some(&cache))?;
+        }
+
+        let mut dns_received = Vec::new();
+        {
+            let socket = sockets.get_mut::<udp::Socket>(dns_handle);
+            while socket.can_recv() {
+                match socket.recv() {
+                    Ok((payload, metadata)) => dns_received.push((payload.to_vec(), metadata)),
+                    Err(error) => {
+                        eprintln!("foxprox-net: combined dns recv failed: {error}");
+                        break;
+                    }
+                }
+            }
+        }
+        for (payload, metadata) in dns_received {
+            if let Err(error) = handle_dns_datagram(
+                &udp_config,
+                &mut audit,
+                &worker_limiter,
+                worker_tx.clone(),
+                payload,
+                metadata,
+            ) {
+                eprintln!("foxprox-net: combined DNS datagram handling failed: {error}");
+            }
+        }
+
+        let mut forward_received = Vec::new();
+        for forward_socket in &forward_sockets {
+            let socket = sockets.get_mut::<udp::Socket>(forward_socket.handle);
+            while socket.can_recv() {
+                match socket.recv() {
+                    Ok((payload, metadata)) => {
+                        forward_received.push((*forward_socket, payload.to_vec(), metadata));
+                    }
+                    Err(error) => {
+                        eprintln!("foxprox-net: combined udp forward recv failed: {error}");
+                        break;
+                    }
+                }
+            }
+        }
+        for (forward_socket, payload, metadata) in forward_received {
+            if let Err(error) = handle_udp_forward_datagram(
+                &udp_config,
+                &cache,
+                &mut udp_flows,
+                &mut audit,
+                &worker_limiter,
+                worker_tx.clone(),
+                UdpForwardDatagram {
+                    socket: forward_socket,
+                    payload,
+                    metadata,
+                },
+            ) {
+                eprintln!("foxprox-net: combined UDP datagram handling failed: {error}");
+            }
+        }
+
+        handle_worker_results(
+            &udp_config,
+            &mut cache,
+            &mut udp_flows,
+            &mut audit,
+            &mut sockets,
+            dns_handle,
+            &worker_rx,
+        );
+        let now = SystemTime::now();
+        let expired_cache_entries = cache.expire(now);
+        if expired_cache_entries > 0 {
+            eprintln!("foxprox-net: expired {expired_cache_entries} DNS cache entries");
+        }
+        if let Err(error) =
+            expire_udp_flows_with_audit(&mut audit, &config.sandbox_id, &mut udp_flows, now)
+        {
+            eprintln!("foxprox-net: combined udp expiry audit failed: {error}");
+        }
+
+        std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+fn emit_combined_lifecycle_audit(
+    audit: &mut AuditBuffer,
+    config: &CombinedTransparentProofConfig,
+    kind: AuditEventKind,
+    proxy: Option<(&str, ExplicitProxyBridgeConfig)>,
+) -> io::Result<()> {
+    let mut event = AuditEvent::new(Frontend::Tun, kind).with_sandbox_id(config.sandbox_id.clone());
+    event.protocol = Some(Protocol::Tcp);
+    event.destination = Some(TransportEndpoint::new(
+        std::net::IpAddr::V4(config.broker_ip),
+        config.tcp_port,
+    ));
+    event.detail = Some(format!(
+        "tcp_ports={:?} dns={}:{} mtu={} prefix_len={}",
+        config.tcp_ports(),
+        config.broker_ip,
+        config.dns_port,
+        config.mtu,
+        config.prefix_len
+    ));
+    if let Some((kind, bridge)) = proxy {
+        event.destination = Some(TransportEndpoint::from(SocketAddr::new(
+            std::net::IpAddr::V4(config.broker_ip),
+            bridge.sandbox_port,
+        )));
+        event.detail = Some(format!(
+            "{kind} proxy listener {}:{} backend={}",
+            config.broker_ip, bridge.sandbox_port, bridge.backend_addr
+        ));
+    }
+    emit_raw_audit(audit, event)
+}
+
+fn tcp_socket() -> tcp::Socket<'static> {
+    let rx = tcp::SocketBuffer::new(vec![0; 65_535]);
+    let tx = tcp::SocketBuffer::new(vec![0; 65_535]);
+    tcp::Socket::new(rx, tx)
+}
+
+fn install_tcp_listener(socket: &mut tcp::Socket<'_>, tcp_port: u16) -> io::Result<()> {
+    socket
+        .listen(tcp_port)
+        .map_err(|error| io::Error::other(format!("listen failed: {error}")))
+}
+
+pub(crate) fn validate_http_proxy_bridge(
+    config: &CombinedTransparentProofConfig,
+) -> io::Result<()> {
+    let tcp_ports = config.tcp_ports();
+    for port in &tcp_ports {
+        if *port == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "transparent TCP ports must be non-zero",
+            ));
+        }
+    }
+    let bridges = [config.http_proxy_bridge, config.socks5_proxy_bridge];
+    if let (Some(http), Some(socks)) = (config.http_proxy_bridge, config.socks5_proxy_bridge) {
+        if http.sandbox_port == socks.sandbox_port {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "explicit proxy bridge ports must be unique",
+            ));
+        }
+    }
+    for bridge in bridges.into_iter().flatten() {
+        validate_one_proxy_bridge(&tcp_ports, bridge)?;
+    }
+    Ok(())
+}
+
+fn validate_one_proxy_bridge(
+    transparent_tcp_ports: &[u16],
+    bridge: ExplicitProxyBridgeConfig,
+) -> io::Result<()> {
+    if bridge.sandbox_port == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "HTTP proxy bridge port must be non-zero",
+        ));
+    }
+    if transparent_tcp_ports.contains(&bridge.sandbox_port) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "explicit proxy bridge port must differ from transparent TCP ports",
+        ));
+    }
+    if bridge.backend_addr.port() == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "HTTP proxy bridge backend port must be non-zero",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_tcp_socket() -> tcp::Socket<'static> {
+        let rx = tcp::SocketBuffer::new(vec![0; 1024]);
+        let tx = tcp::SocketBuffer::new(vec![0; 1024]);
+        tcp::Socket::new(rx, tx)
+    }
+
+    #[test]
+    fn default_combined_transparent_config_is_bounded() {
+        let config = CombinedTransparentProofConfig::new(SandboxId::new("test").unwrap());
+
+        assert_eq!(config.tcp_port, 80);
+        assert!(config.additional_tcp_ports.is_empty());
+        assert_eq!(config.tcp_ports(), vec![80]);
+        assert_eq!(config.dns_port, 53);
+        assert_eq!(config.broker_ip, Ipv4Addr::new(10, 255, 0, 1));
+        assert!(config.connect_timeout <= Duration::from_secs(5));
+        assert!(config.idle_timeout <= Duration::from_secs(30));
+        assert_eq!(config.pending_buffer_limit, 256 * 1024);
+        assert!(config.udp_packet_capacity >= 4);
+        assert!(config.udp_payload_capacity >= 1500);
+        assert!(config.audit_queue_capacity > 0);
+        assert!(config.max_worker_threads > 0);
+        assert!(config.max_udp_flows > 0);
+        assert!(config.http_proxy_bridge.is_none());
+        assert!(config.socks5_proxy_bridge.is_none());
+    }
+
+    #[test]
+    fn combined_rejects_zero_audit_capacity_before_tun_setup() {
+        let mut config = CombinedTransparentProofConfig::new(SandboxId::new("test").unwrap());
+        config.audit_queue_capacity = 0;
+        assert_eq!(
+            audit_buffer(config.audit_queue_capacity)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn combined_rejects_zero_worker_capacity_before_tun_setup() {
+        let error = match WorkerLimiter::new(0) {
+            Ok(_) => panic!("zero-capacity worker limiter unexpectedly succeeded"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn combined_rejects_zero_udp_flow_capacity_before_tun_setup() {
+        assert_eq!(
+            validate_max_udp_flows(0).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn combined_deduplicates_additional_transparent_tcp_ports() {
+        let mut config = CombinedTransparentProofConfig::new(SandboxId::new("test").unwrap());
+        config.additional_tcp_ports = vec![443, 80, 8080, 443];
+        assert_eq!(config.tcp_ports(), vec![80, 443, 8080]);
+    }
+
+    #[test]
+    fn combined_rejects_invalid_http_proxy_bridge_config() {
+        let mut config = CombinedTransparentProofConfig::new(SandboxId::new("test").unwrap());
+        config.http_proxy_bridge = Some(ExplicitHttpProxyBridgeConfig {
+            sandbox_port: config.tcp_port,
+            backend_addr: SocketAddr::from(([127, 0, 0, 1], 18080)),
+        });
+        assert_eq!(
+            validate_http_proxy_bridge(&config).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        config.http_proxy_bridge = Some(ExplicitHttpProxyBridgeConfig {
+            sandbox_port: 8080,
+            backend_addr: SocketAddr::from(([127, 0, 0, 1], 0)),
+        });
+        assert_eq!(
+            validate_http_proxy_bridge(&config).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        config.additional_tcp_ports = vec![8080];
+        config.http_proxy_bridge = Some(ExplicitHttpProxyBridgeConfig {
+            sandbox_port: 8080,
+            backend_addr: SocketAddr::from(([127, 0, 0, 1], 18080)),
+        });
+        assert_eq!(
+            validate_http_proxy_bridge(&config).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+        config.additional_tcp_ports.clear();
+
+        config.http_proxy_bridge = Some(ExplicitHttpProxyBridgeConfig {
+            sandbox_port: 8080,
+            backend_addr: SocketAddr::from(([127, 0, 0, 1], 18080)),
+        });
+        config.socks5_proxy_bridge = Some(ExplicitProxyBridgeConfig {
+            sandbox_port: 8080,
+            backend_addr: SocketAddr::from(([127, 0, 0, 1], 11080)),
+        });
+        assert_eq!(
+            validate_http_proxy_bridge(&config).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+
+    #[test]
+    fn combined_lifecycle_audit_records_tun_and_proxy_metadata() {
+        let mut config = CombinedTransparentProofConfig::new(SandboxId::new("test").unwrap());
+        config.http_proxy_bridge = Some(ExplicitProxyBridgeConfig {
+            sandbox_port: 8080,
+            backend_addr: SocketAddr::from(([127, 0, 0, 1], 18080)),
+        });
+        let mut audit = AuditBuffer::new(4);
+
+        emit_combined_lifecycle_audit(&mut audit, &config, AuditEventKind::TunConfigured, None)
+            .unwrap();
+        emit_combined_lifecycle_audit(
+            &mut audit,
+            &config,
+            AuditEventKind::ProxyListenerConfigured,
+            Some(("http", config.http_proxy_bridge.unwrap())),
+        )
+        .unwrap();
+
+        let tun = audit.pop_front().unwrap();
+        assert_eq!(tun.kind, AuditEventKind::TunConfigured);
+        assert_eq!(tun.sandbox_id.as_ref().unwrap().as_str(), "test");
+        assert!(tun.detail.unwrap().contains("tcp_ports"));
+        let proxy = audit.pop_front().unwrap();
+        assert_eq!(proxy.kind, AuditEventKind::ProxyListenerConfigured);
+        assert_eq!(proxy.destination.unwrap().port, 8080);
+    }
+
+    #[test]
+    fn combined_installs_tcp_listener_before_ready_point() {
+        let mut socket = empty_tcp_socket();
+        install_tcp_listener(&mut socket, 80).unwrap();
+        assert!(socket.is_open());
+    }
+
+    #[test]
+    fn combined_installs_proxy_bridge_listener_before_ready_point() {
+        let mut socket = empty_tcp_socket();
+        install_tcp_listener(&mut socket, 8080).unwrap();
+        assert!(socket.is_open());
+    }
+}

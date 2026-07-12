@@ -1,0 +1,97 @@
+# Controlled alpha example for `foxprox run --config examples/controlled-alpha.toml -- ...`.
+# Default behavior is deny-by-default. The rules below allow example.com over
+# transparent HTTP/TLS and through the HTTP/SOCKS explicit proxy bridges.
+
+[sandbox]
+id = "controlled-alpha"
+# setup_socket_host defaults to /tmp/foxprox-<pid>/setup.sock and is auto-bound
+# into bwrap at the same path. Override both paths only for custom bwrap mounts.
+# setup_socket_host = ".tmp/foxprox-run/setup.sock"
+# setup_socket_sandbox = "/tmp/foxprox-run/setup.sock"
+
+[network]
+broker_ip = "10.255.0.1"
+sandbox_ip = "10.255.0.2"
+prefix_len = 24
+mtu = 1500
+upstream_dns = "1.1.1.1:53"
+transparent_tcp_ports = [80, 443]
+udp_forward_ports = [443]
+
+[proxy]
+http_port = 8080
+socks5_port = 1080
+inject_env = true
+no_proxy = "localhost,127.0.0.1"
+
+# Omit [bwrap].args to use the built-in controlled-alpha bwrap profile. It
+# creates a writable /etc/resolv.conf path, binds the setup socket directory,
+# and read-only binds the foxproxsetup helper to /.foxprox-setup/foxproxsetup.
+
+[policy]
+default_action = "deny-drop"
+deny_direct_dns = true
+deny_multicast_broadcast = true
+deny_sni_dns_mismatch = true
+deny_hidden_sni = true
+
+[[policy.rules]]
+id = "deny-private-tcp"
+effect = "deny"
+protocol = "tcp"
+destination_cidr = "10.0.0.0/8"
+destination_ports = "1-65535"
+
+[[policy.rules]]
+id = "allow-example-http"
+effect = "allow"
+protocol = "http"
+domain_suffix = "example.com"
+destination_ports = "80"
+origin_scheme = "http"
+http_methods = ["GET", "HEAD"]
+http_path_prefix = "/"
+min_attribution = "high"
+
+[[policy.rules]]
+id = "allow-example-tls"
+effect = "allow"
+protocol = "tls"
+domain_suffix = "example.com"
+destination_ports = "443"
+min_attribution = "high"
+
+[[policy.rules]]
+id = "allow-example-connect-proxy"
+effect = "allow"
+protocol = "https-connect"
+domain_suffix = "example.com"
+destination_ports = "443"
+min_attribution = "high"
+
+[[policy.rules]]
+id = "allow-example-http-proxy"
+effect = "allow"
+protocol = "http"
+domain_suffix = "example.com"
+destination_ports = "80"
+origin_scheme = "http"
+http_methods = ["GET", "HEAD"]
+http_path_prefix = "/"
+min_attribution = "high"
+
+[[policy.rules]]
+id = "allow-example-socks"
+effect = "allow"
+protocol = "socks"
+domain_suffix = "example.com"
+destination_ports = "80"
+min_attribution = "high"
+
+[[policy.rules]]
+id = "allow-cloudflare-quic-candidate"
+effect = "allow"
+protocol = "quic"
+domain_suffix = "one.one.one.one"
+destination_ports = "443"
+min_attribution = "medium"
